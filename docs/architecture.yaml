@@ -1,0 +1,304 @@
+# Shoggoth Service Architecture
+# Generate with: hiearch architecture.yaml -o diagrams/ -f SVG
+
+nodes:
+  # ============================================
+  # Client Host Boundary
+  # ============================================
+  - id: ["Client", client_host]
+    graphviz:
+      fillcolor: "#f0f0f0"
+      style: "filled,dashed"
+      shape: folder
+      label: "Developer Workstation"
+
+  # Client applications
+  - id: ["apt", client_apt]
+    scope: client_host
+    graphviz:
+      fillcolor: lightyellow
+      style: filled
+      shape: box
+
+  - id: ["docker", client_docker]
+    scope: client_host
+    graphviz:
+      fillcolor: lightyellow
+      style: filled
+      shape: box
+
+  - id: ["ccache/sccache", client_ccache]
+    scope: client_host
+    graphviz:
+      fillcolor: lightyellow
+      style: filled
+      shape: box
+
+  - id: ["git", client_git]
+    scope: client_host
+    graphviz:
+      fillcolor: lightyellow
+      style: filled
+      shape: box
+
+  - id: ["AI Coding Agent", ai_agent]
+    scope: client_host
+    graphviz:
+      fillcolor: lightyellow
+      style: filled
+      shape: box
+
+  # ============================================
+  # Shoggoth Host Boundary
+  # ============================================
+  - id: ["Shoggoth", shoggoth_host]
+    graphviz:
+      fillcolor: "#e8f4f8"
+      style: "filled,dashed"
+      shape: folder
+      label: "Shoggoth Host\n(Dedicated Server)"
+
+  # Infrastructure group (nameless scope for layout)
+  - id: ["", direct_access_group]
+    scope: shoggoth_host
+    graphviz:
+      style: invis
+
+  # Services group (invisible scope for layout)
+  - id: ["", behind_proxy_group]
+    scope: shoggoth_host
+    graphviz:
+      style: invis
+
+  # Infrastructure layer
+  - id: ["DNS\n(Unbound)", dns_service]
+    scope: direct_access_group
+    graphviz:
+      fillcolor: lightgreen
+      style: filled
+      shape: ellipse
+
+  # Proxy layer (Angie reverse proxy + build cache storage)
+  - id: ["web (Angie)", service_proxy]
+    scope: direct_access_group
+    graphviz:
+      fillcolor: "#e0f0e0"
+      style: "filled,dashed"
+      shape: folder
+      label: "web\n(Angie Proxy)"
+
+  # Proxy services scope
+  - id: ["Proxies", proxy_services]
+    scope: service_proxy
+    graphviz:
+      fillcolor: "#f0f8ff"
+      style: "filled,dashed"
+      shape: folder
+
+  - id: ["apt", proxy_apt]
+    scope: proxy_services
+    graphviz:
+      fillcolor: lightgreen
+      style: filled
+      shape: ellipse
+
+  - id: ["git", proxy_git]
+    scope: proxy_services
+    graphviz:
+      fillcolor: lightgreen
+      style: filled
+      shape: ellipse
+
+  - id: ["mcp", proxy_mcp]
+    scope: proxy_services
+    graphviz:
+      fillcolor: lightgreen
+      style: filled
+      shape: ellipse
+
+  - id: ["ollama", proxy_ollama]
+    scope: proxy_services
+    graphviz:
+      fillcolor: lightgreen
+      style: filled
+      shape: ellipse
+
+  - id: ["build-cache", build_cache]
+    scope: service_proxy
+    graphviz:
+      fillcolor: lightblue
+      style: filled
+      shape: cylinder
+
+  # Caching layer
+  - id: ["apt-cache\n(apt-cacher-ng)", apt_cache]
+    scope: behind_proxy_group
+    graphviz:
+      fillcolor: lightblue
+      style: filled
+      shape: cylinder
+
+  - id: ["docker-cache\n(registry proxy)", docker_cache]
+    scope: direct_access_group
+    graphviz:
+      fillcolor: lightblue
+      style: filled
+      shape: cylinder
+
+  # Development layer - Gitea services
+  - id: ["Gitea", gitea_group]
+    scope: behind_proxy_group
+    graphviz:
+      style: filled
+      shape: box
+
+  - id: ["Gitea", git_service]
+    scope: gitea_group
+    graphviz:
+      fillcolor: lightcoral
+      style: filled
+      shape: component
+
+  - id: ["Actions runner", gitea_runner]
+    scope: gitea_group
+    graphviz:
+      fillcolor: lightcoral
+      style: filled
+      shape: component
+
+  - id: ["mcp", gitea_mcp]
+    scope: gitea_group
+    graphviz:
+      fillcolor: lightcoral
+      style: filled
+      shape: component
+
+  - id: ["CI Job", ci_job]
+    scope: gitea_group
+    graphviz:
+      fillcolor: lightcoral
+      style: filled
+      shape: component
+
+
+  # AI layer
+  - id: ["LLM Server\n(ollama)", ollama_service]
+    scope: behind_proxy_group
+    graphviz:
+      fillcolor: plum
+      style: filled
+      shape: hexagon
+
+  # ============================================
+  # External Services Group
+  # ============================================
+  - id: ["External Services", external_services]
+    graphviz:
+      fillcolor: "#fff8dc"
+      style: "filled,dashed"
+      shape: folder
+      label: "External Services\n(Upstream)"
+
+  - id: ["APT Repositories\n(Ubuntu/Debian)", apt_repos]
+    scope: external_services
+    graphviz:
+      fillcolor: honeydew
+      style: filled
+      shape: cylinder
+
+  - id: ["Docker Registries\n(Docker Hub, GHCR, etc.)", docker_registries]
+    scope: external_services
+    graphviz:
+      fillcolor: honeydew
+      style: filled
+      shape: cylinder
+
+  - id: ["External DNS\n(Public/Corporate)", external_dns]
+    scope: external_services
+    graphviz:
+      fillcolor: honeydew
+      style: filled
+      shape: ellipse
+
+edges:
+  # ============================================
+  # Client -> Shoggoth Services
+  # ============================================
+
+  # APT client flow (via proxy)
+  - link: [client_apt, proxy_apt]
+  - link: [proxy_apt, apt_cache]
+
+  # Docker client flow (direct to docker-cache)
+  - link: [client_docker, docker_cache]
+
+  # Build cache flow (via proxy)
+  - link: [client_ccache, build_cache]
+
+  # Git client flow (via proxy)
+  - link: [client_git, proxy_git]
+  - link: [proxy_git, git_service]
+
+  # AI agent flow (via proxy)
+  - link: [ai_agent, proxy_mcp]
+  - link: [proxy_mcp, gitea_mcp]
+  - link: [ai_agent, proxy_ollama]
+  - link: [proxy_ollama, ollama_service]
+
+  # ============================================
+  # Internal Shoggoth Service Interactions
+  # ============================================
+
+  # Gitea ecosystem
+  - link: [git_service, gitea_runner]
+  - link: [gitea_runner, docker_cache]
+  - link: [gitea_mcp, git_service]
+  - link: [ci_job, dns_service]
+  - link: [ci_job, apt_cache]
+  - link: [ci_job, build_cache]
+  - link: [gitea_runner, ci_job]
+
+  # ============================================
+  # Shoggoth -> External Services
+  # ============================================
+  - link: [apt_cache, apt_repos]
+  - link: [docker_cache, docker_registries]
+  - link: [dns_service, external_dns]
+
+  # Invisible edges for layout (direct_access_group -> behind_proxy_group)
+  - link: [build_cache, ci_job]
+    graphviz:
+      style: invis
+  - link: [build_cache, apt_cache]
+    graphviz:
+      style: invis
+  - link: [build_cache, git_service]
+    graphviz:
+      style: invis
+  - link: [build_cache, gitea_runner]
+    graphviz:
+      style: invis
+  - link: [build_cache, gitea_mcp]
+    graphviz:
+      style: invis
+  - link: [build_cache, ollama_service]
+    graphviz:
+      style: invis
+
+views:
+  # ============================================
+  # Single Unified Architecture View
+  # ============================================
+  - id: architecture
+    graphviz:
+      graph:
+        rankdir: LR
+        label: "Shoggoth Service Architecture"
+        fontsize: "20"
+        compound: "true"
+      node:
+        fontsize: "11"
+        margin: "0.1"
+      edge:
+        fontsize: "9"
+
