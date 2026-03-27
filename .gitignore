@@ -1,5 +1,5 @@
 .ccws
 mountpoint
-auth.mk
+private
 docs/*.gv
 README.md.back

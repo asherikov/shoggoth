@@ -1,3 +1,4 @@
+JOBS?=4
 USER?=aleks
 SHOGGOTH_NAME?=shoggoth.local
 SHOGGOTH_HOST?=${SHOGGOTH_NAME}
@@ -18,6 +19,7 @@ help:
 	@grep -v "^	" Makefile make/*.mk | grep -v "^ " | grep -v "^$$" | grep -v "^\." | grep -v ".mk:$$"
 
 -include make/*.mk
+-include private/*.mk
 
 sync:
 	rsync -r shoggoth ${USER}@${SHOGGOTH_HOST}:${REMOTE_PATH} || true

@@ -1,4 +1,6 @@
-export GITEA_API?=https://tvoygit.ru/api/v1/repos/migrate
+export GITEA_URL?=git.shoggoth.local
+
+export GITEA_API=http://${GITEA_URL}/api/v1
 #export GITEA_TOKEN?=<token> # use auth.mk
 # issues not copied if true, see https://github.com/go-gitea/gitea/pull/20311 and https://forum.gitea.com/t/mirror-a-github-site-does-not-mirror-issues/8141
 export GITEA_MIRROR?=true
@@ -9,6 +11,9 @@ export GITHUB_REPO?=ccws
 
 export REPO_DESCRIPTION?=
 
+SOURCES_DIR?=
+GITEA_PROJECT?=
+
 
 gitea_runner_token:
 	@openssl rand -hex 24 > shoggoth/gitea-runner/runner-token.txt
@@ -16,7 +21,7 @@ gitea_runner_token:
 github_to_gitea_repo:
 	echo "Copying ${GITHUB_USER}/${GITHUB_REPO}"
 	curl \
-		"${GITEA_API}" \
+		"${GITEA_API}/repos/migrate" \
 		-H "accept: application/json" \
 		-H "Authorization: token ${GITEA_TOKEN}" \
 		-H "Content-Type: application/json" \
@@ -41,3 +46,53 @@ github_to_gitea_user:
 	curl "https://api.github.com/users/${GITHUB_USER}/repos" \
 		| jq -r '.[] | "${MAKE} github_to_gitea_repo GITHUB_REPO=\"\(.name )\" REPO_DESCRIPTION=\"\(.description)\""' | sed 's/null//' \
 		| sh
+
+gitea_create_project:
+	@echo "Creating Gitea project: ${GITEA_PROJECT}"
+	curl -s -o /dev/null -w "%{http_code}" \
+		"${GITEA_API}/orgs" \
+		-H "accept: application/json" \
+		-H "Authorization: token ${GITEA_TOKEN}" \
+		-H "Content-Type: application/json" \
+		-d "{ \
+			\"username\": \"${GITEA_PROJECT}\", \
+			\"full_name\": \"${GITEA_PROJECT}\" \
+			}" \
+		| grep -q "201\|422" && echo "Project ${GITEA_PROJECT} created or already exists" || \
+		(echo "Failed to create project ${GITEA_PROJECT}" && exit 1)
+
+gitea_push_repos:
+	@echo "Pushing repositories from ${SOURCES_DIR} to Gitea project ${GITEA_PROJECT}"
+	find ${SOURCES_DIR} -mindepth 2 -maxdepth 2 -type d -name ".git" \
+		| sed 's|/\.git$$||' \
+		| xargs -I {} basename {} \
+		| xargs -P ${JOBS} -I {} ${MAKE} gitea_push_repo REPO_NAME={} SOURCES_DIR=${SOURCES_DIR} GITEA_PROJECT=${GITEA_PROJECT}
+
+gitea_push_repo:
+	@echo "Processing repository: ${REPO_NAME}"
+	@echo "Checking if Gitea repository ${REPO_NAME} already exists"
+	curl -s -o /dev/null \
+		"${GITEA_API}/repos/${GITEA_PROJECT}/${REPO_NAME}" \
+		-H "accept: application/json" \
+		-H "Authorization: token ${GITEA_TOKEN}"
+	@echo "Creating Gitea repository: ${REPO_NAME}"
+	curl -s -X POST \
+		"${GITEA_API}/orgs/${GITEA_PROJECT}/repos" \
+		-H "accept: application/json" \
+		-H "Authorization: token ${GITEA_TOKEN}" \
+		-H "Content-Type: application/json" \
+		-d "{ \
+			\"name\": \"${REPO_NAME}\", \
+			\"private\": false \
+			}"
+	# \"default_branch\": \"main\",
+	@echo "Adding shoggoth remote to ${REPO_NAME}"
+	cd "${SOURCES_DIR}/${REPO_NAME}" \
+		&& (git remote remove shoggoth 2>/dev/null || true) \
+		&& git remote add shoggoth "git@${GITEA_URL}:${GITEA_PROJECT}/${REPO_NAME}.git" \
+		&& git push --mirror shoggoth
+
+gitea_import:
+	@echo "Importing repositories from ${SOURCES_DIR} to Gitea project ${GITEA_PROJECT}"
+	${MAKE} gitea_create_project
+	${MAKE} gitea_push_repos
