@@ -73,8 +73,8 @@ update_hosts:
 ping:
 	ping "${SHOGGOTH_NAME}"
 
-apt_stats:
-	firefox http://apt-cache.${SHOGGOTH_NAME}/acng-report.html
+home:
+	firefox http://${SHOGGOTH_NAME}
 
 test:
 	@echo "======================================================="
@@ -97,7 +97,3 @@ ollama_query:
 		-H "Authorization: ollama" \
 		-d '{"model": "qwen3-coder:30b", "prompt": "What is the capital of UAE?"}'
 
-
-graph:
-	hiearch -o docs docs/*.yaml
-#docker exec apt-cacher-ng /usr/sbin/apt-cacher-ng -e

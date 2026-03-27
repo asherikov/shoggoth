@@ -182,6 +182,8 @@ services:
     # note that gitea actions anre not fully compatible with github actions,
     # you would need to install nodejs to all images that execute jobs
     # https://forum.gitea.com/t/use-actions-checkout-v3-in-a-container-without-node-installed/8406
+    #
+    # possible alternative https://forgejo.org/compare-to-gitea/
     <<: *default_service
     image: gitea/act_runner:latest
     container_name: gitea-runner
