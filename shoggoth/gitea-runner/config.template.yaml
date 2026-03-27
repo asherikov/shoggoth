@@ -16,6 +16,7 @@ runner:
   envs:
     CCACHE_REMOTE_STORAGE: "http://build-cache.shoggoth.local"
     CCACHE_REMOTE_ONLY: "true"
+    CCWS_CACHE: /shoggoth/cache/ccws/
   # Extra environment variables to run jobs from a file.
   # It will be ignored if it's empty or the file doesn't exist.
   #env_file: .env
@@ -73,7 +74,7 @@ container:
   # Whether to use privileged mode or not when launching task containers (privileged mode is required for Docker-in-Docker).
   privileged: false
   # Any other options to be used when the container is started (e.g., --add-host=my.gitea.url:host-gateway).
-  options: "--volume ${SHOGGOTH_ROOT}/shared/apt-proxy.conf:/etc/apt/apt.conf.d/01-shoggoth-apt-proxy --dns 172.20.0.53"
+  options: "--volume ${SHOGGOTH_ROOT}/shared/apt-proxy.conf:/etc/apt/apt.conf.d/01-shoggoth-apt-proxy --dns 172.20.0.53 --volume cache:/shoggoth/cache"
   # The parent directory of a job's working directory.
   # NOTE: There is no need to add the first '/' of the path as act_runner will add it automatically.
   # If the path starts with '/', the '/' will be trimmed.

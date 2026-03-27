@@ -6,6 +6,10 @@ networks:
       config:
         - subnet: 172.20.0.0/24
 
+volumes:
+  cache:
+    name: "shoggoth_ci_cache"
+
 secrets:
   gitea_runner_token:
     file: ./gitea-runner/runner-token.txt

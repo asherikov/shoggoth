@@ -1,3 +1,4 @@
 .ccws
 mountpoint
 auth.mk
+docs/*.gv
