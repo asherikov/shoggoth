@@ -1,21 +1,33 @@
-# Shoggoth
+- [Introduction](#introduction)
+  - [Features](#features)
+  - [Architecture](#architecture)
+  - [Services](#services)
+  - [Domain Name Resolution](#domain-name-resolution)
+- [Client Configuration](#client-configuration)
+  - [Service Usage Examples](#service-usage-examples)
+  - [Server Management](#server-management)
+- [References](#references)
 
-A self-hosted development service multitool intended for personal use.
+Introduction
+============
 
+`shoggoth` is a self-hosted development service multitool intended for personal
+use.
 
-## Features
+Features
+--------
 
 - Caching:
-    - Debian/Ubuntu package caching proxy (`apt-cacher-ng`).
-    - Docker registry caching proxy.
-    - Build cache server, to be used with ccache or sccache.
+  - Debian/Ubuntu package caching proxy (`apt-cacher-ng`).
+  - Docker registry caching proxy.
+  - Build cache server, to be used with ccache or sccache.
 - Development:
-    - Local AI model server (`ollama`).
-    - Git server (`gitea`) with CI/CD actions support.
-    - Gitea MCP server for AI coding agent integration.
+  - Local AI model server (`ollama`).
+  - Git server (`gitea`) with CI/CD actions support.
+  - Gitea MCP server for AI coding agent integration.
 
-
-## Architecture
+Architecture
+------------
 
 The system consists of three parts:
 
@@ -28,38 +40,36 @@ The system consists of three parts:
 The main use-case is to run the services on a dedicated headless server and use
 or control them from multiple client computers.
 
-
-## Services
+Services
+--------
 
 The following services are available:
 
-| Service | Hostname | Description |
-|---------|----------|-------------|
-| `apt-cache` | `apt-cache.<host>` | APT package caching proxy |
-| `docker-cache` | `<host>` | Docker registry caching proxy |
-| `dns` | `<host>` | Unbound DNS resolver |
-| `web` | `<host>` | Welcome home page and angie reverse proxy |
-| `web` | `build-cache.<host>` | Build cache storage |
-| `ollama` | `ollama.<host>` | Local AI model server |
-| `git` | `git.<host>` | Gitea Git server with web UI |
-| `gitea-runner` | - | Gitea Actions runner |
-| `gitea-mcp` | `gitea-mcp.<host>` | Gitea MCP server for AI agents |
-
+| Service        | Hostname             | Description                               |
+|----------------|----------------------|-------------------------------------------|
+| `apt-cache`    | `apt-cache.<host>`   | APT package caching proxy                 |
+| `docker-cache` | `<host>`             | Docker registry caching proxy             |
+| `dns`          | `<host>`             | Unbound DNS resolver                      |
+| `web`          | `<host>`             | Welcome home page and angie reverse proxy |
+| `web`          | `build-cache.<host>` | Build cache storage                       |
+| `ollama`       | `ollama.<host>`      | Local AI model server                     |
+| `git`          | `git.<host>`         | Gitea Git server with web UI              |
+| `gitea-runner` | \-                   | Gitea Actions runner                      |
+| `gitea-mcp`    | `gitea-mcp.<host>`   | Gitea MCP server for AI agents            |
 
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture" />
 
+Domain Name Resolution
+----------------------
 
-
-## Domain Name Resolution
-
-Domain names are used to access services via the angie reverse proxy server.
-Two resolution methods are supported:
+Domain names are used to access services via the angie reverse proxy server. Two
+resolution methods are supported:
 
 ### Hosts File Resolution
 
 Add service hostnames to `/etc/hosts` on each client machine:
 
-```bash
+``` bash
 # Using the setup script
 ./shoggoth/setup-client.sh --update-hosts --host shoggoth.local --host-ip 192.168.1.100
 
@@ -70,16 +80,16 @@ Add service hostnames to `/etc/hosts` on each client machine:
 
 ### DNS Resolution
 
-The `dns` service (Unbound) can be configured as the DNS server on client machines.
-It resolves all service hostnames automatically. Configure your network settings
-to use the shoggoth server IP as the DNS server.
+The `dns` service (Unbound) can be configured as the DNS server on client
+machines. It resolves all service hostnames automatically. Configure your
+network settings to use the shoggoth server IP as the DNS server.
 
-
-# Client Configuration
+Client Configuration
+====================
 
 Run the setup script on each client machine:
 
-```bash
+``` bash
 # Configure apt proxy
 ./shoggoth/setup-client.sh --configure-apt --host shoggoth.local --host-ip 192.168.1.100
 
@@ -96,21 +106,22 @@ Run the setup script on each client machine:
 HOST=shoggoth.local HOST_IP=192.168.1.100 CONFIGURE_APT=true ./shoggoth/setup-client.sh
 ```
 
-The script generates `${HOME}/.shoggothrc` file with environment variables for all services.
-Source this file in your `~/.bashrc` or `~/.zshrc`:
+The script generates `${HOME}/.shoggothrc` file with environment variables for
+all services. Source this file in your `~/.bashrc` or `~/.zshrc`:
 
-```bash
+``` bash
 echo "source ~/.shoggothrc" >> ~/.bashrc
 source ~/.bashrc
 ```
 
-## Service Usage Examples
+Service Usage Examples
+----------------------
 
 ### APT Proxy
 
 After configuration, APT requests are automatically cached:
 
-```bash
+``` bash
 sudo apt update
 sudo apt install <package>
 
@@ -122,7 +133,7 @@ firefox http://apt-cache.shoggoth.local/acng-report.html
 
 Docker pulls are cached after initial configuration:
 
-```bash
+``` bash
 docker pull nginx:latest
 docker pull ubuntu:24.04
 ```
@@ -131,7 +142,7 @@ docker pull ubuntu:24.04
 
 Source the `.shoggothrc` file and build with ccache:
 
-```bash
+``` bash
 source ~/.shoggothrc
 export CCACHE_REMOTE_STORAGE="http://build-cache.shoggoth.local"
 export CCACHE_REMOTE_ONLY=true
@@ -141,7 +152,7 @@ export CCACHE_REMOTE_ONLY=true
 
 Query the local AI model:
 
-```bash
+``` bash
 source ~/.shoggothrc
 curl http://ollama.shoggoth.local/api/tags
 curl http://ollama.shoggoth.local/v1/completions \
@@ -155,7 +166,7 @@ curl http://ollama.shoggoth.local/v1/completions \
 Clone repositories via SSH or HTTP, note that port 3022 is used to avoid
 conflicts with ssh server running on the host machine:
 
-```bash
+``` bash
 # SSH (configure SSH key in Gitea first)
 git clone ssh://git@git.shoggoth.local:3022/admin/repo.git
 
@@ -167,16 +178,17 @@ git clone http://git.shoggoth.local/admin/repo.git
 
 Configure your AI coding agent (e.g., Qwen Code) with the MCP server:
 
-```bash
+``` bash
 # Generate MCP configuration
 ./shoggoth/setup-client.sh --mcp --host shoggoth.local --mcp-token your-api-token
 ```
 
-## Server Management
+Server Management
+-----------------
 
 Use the Makefile targets for server management:
 
-```bash
+``` bash
 # Start all services
 make up
 
@@ -193,3 +205,10 @@ make ssh
 make sync_restart
 ```
 
+References
+==========
+
+- <https://www.reddit.com/r/selfhosted/>
+- <https://github.com/awesome-selfhosted/awesome-selfhosted>
+- <https://github.com/awesome-foss/awesome-sysadmin>
+- <https://leviwheatcroft.github.io/selfhosted-awesome-unlist/> (not maintained)
