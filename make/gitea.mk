@@ -1,5 +1,4 @@
 export GITEA_URL?=git.shoggoth.local
-
 export GITEA_API=http://${GITEA_URL}/api/v1
 #export GITEA_TOKEN?=<token> # use auth.mk
 # issues not copied if true, see https://github.com/go-gitea/gitea/pull/20311 and https://forum.gitea.com/t/mirror-a-github-site-does-not-mirror-issues/8141
@@ -89,10 +88,42 @@ gitea_push_repo:
 	@echo "Adding shoggoth remote to ${REPO_NAME}"
 	cd "${SOURCES_DIR}/${REPO_NAME}" \
 		&& (git remote remove shoggoth 2>/dev/null || true) \
-		&& git remote add shoggoth "git@${GITEA_URL}:${GITEA_PROJECT}/${REPO_NAME}.git" \
+		&& git remote add shoggoth "ssh://git@${GITEA_URL}:3022/${GITEA_PROJECT}/${REPO_NAME}.git" \
 		&& git push --mirror shoggoth
 
 gitea_import:
 	@echo "Importing repositories from ${SOURCES_DIR} to Gitea project ${GITEA_PROJECT}"
 	${MAKE} gitea_create_project
 	${MAKE} gitea_push_repos
+
+gitea_delete_repos:
+	@echo "Deleting all repositories in Gitea project: ${GITEA_PROJECT}"
+	@while true; do \
+		repos=$$(curl -s \
+			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=1&limit=50" \
+			-H "accept: application/json" \
+			-H "Authorization: token ${GITEA_TOKEN}" \
+			| grep -o '"name":"[^"]*"' \
+			| sed 's/"name":"//;s/"$$//'); \
+		if [ -z "$${repos}" ]; then break; fi; \
+		echo "$${repos}" | xargs -P ${JOBS} -I {} ${MAKE} gitea_delete_repo REPO_NAME={} GITEA_PROJECT=${GITEA_PROJECT}; \
+	done
+
+gitea_delete_repo:
+	@echo "Deleting repository: ${GITEA_PROJECT}/${REPO_NAME}"
+	@curl -s -X DELETE \
+		"${GITEA_API}/repos/${GITEA_PROJECT}/${REPO_NAME}" \
+		-H "accept: application/json" \
+		-H "Authorization: token ${GITEA_TOKEN}"
+
+gitea_delete_org:
+	@echo "Deleting Gitea organization: ${GITEA_PROJECT}"
+	@curl -s -X DELETE \
+		"${GITEA_API}/orgs/${GITEA_PROJECT}" \
+		-H "accept: application/json" \
+		-H "Authorization: token ${GITEA_TOKEN}"
+
+gitea_remove_project:
+	@echo "Removing Gitea project ${GITEA_PROJECT} with all repositories"
+	${MAKE} gitea_delete_repos
+	${MAKE} gitea_delete_org
