@@ -212,3 +212,4 @@ References
 - <https://github.com/awesome-selfhosted/awesome-selfhosted>
 - <https://github.com/awesome-foss/awesome-sysadmin>
 - <https://leviwheatcroft.github.io/selfhosted-awesome-unlist/> (not maintained)
+- <https://gitea.com/gitea/awesome-gitea>
