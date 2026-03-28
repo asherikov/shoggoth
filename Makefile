@@ -4,7 +4,7 @@ SHOGGOTH_NAME?=shoggoth.local
 SHOGGOTH_HOST?=${SHOGGOTH_NAME}
 SHOGGOTH_IP?=$(shell getent hosts ${SHOGGOTH_NAME} | cut -f 1 -d ' ')
 REMOTE_PATH?=~/
-SERVICE?=docker-cache
+SERVICE?=
 
 COMPOSE_CMD=env \
 			UID=`id -u` \
@@ -45,20 +45,17 @@ sshkey:
 ssh_exec:
 	ssh ${SSH_COMMON_ARGS} -t ${USER}@${SHOGGOTH_HOST} 'cd ${REMOTE_PATH}/shoggoth && ${CMD}'
 
-up_srv:
-	${MAKE} ssh_exec CMD='${COMPOSE_CMD} up -d ${SERVICE}'
-
-down_srv:
-	${MAKE} ssh_exec CMD='${COMPOSE_CMD} down ${SERVICE}'
 
 exec:
 	${MAKE} ssh_exec CMD='${COMPOSE_CMD} exec ${SERVICE} sh'
 
 up:
-	${MAKE} ssh_exec CMD='${COMPOSE_CMD} up -d'
+	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} up -d ${SERVICE}'
+	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} up -d'
 
 down:
-	${MAKE} ssh_exec CMD='${COMPOSE_CMD} down'
+	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} down ${SERVICE}'
+	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} down'
 
 pull:
 	${MAKE} ssh_exec CMD='${COMPOSE_CMD} pull'

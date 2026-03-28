@@ -127,6 +127,10 @@ nodes:
     scope: proxy_services
     style_notag: proxy_style
 
+  - id: ["git-pages.", proxy_git_pages]
+    scope: proxy_services
+    style_notag: proxy_style
+
   - id: ["ollama.", proxy_ollama]
     scope: proxy_services
     style_notag: proxy_style
@@ -188,6 +192,11 @@ nodes:
     scope: behind_proxy_group
     style_notag: docker_service_style
 
+  # Git-pages layer
+  - id: ["git-pages", git_pages_service]
+    scope: behind_proxy_group
+    style_notag: docker_service_style
+
   # ============================================
   # External Services Group
   # ============================================
@@ -243,6 +252,10 @@ edges:
   - link: [ai_agent, proxy_ollama]
   - link: [proxy_ollama, ollama_service]
 
+  # Git-pages flow (via proxy)
+  - link: [client_browser, proxy_git_pages]
+  - link: [proxy_git_pages, git_pages_service]
+
   # Browser flow (via HTTP proxy)
   - link: [client_browser, proxy_git_http]
   - link: [proxy_git_http, git_service]
@@ -260,6 +273,7 @@ edges:
   - link: [ci_job, apt_cache]
   - link: [ci_job, build_cache]
   - link: [ci_job, cache_volume]
+  - link: [ci_job, git_pages_service]
   - link: [gitea_runner, ci_job]
 
   # ============================================
