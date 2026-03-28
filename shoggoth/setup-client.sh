@@ -246,7 +246,7 @@ EOF"
 }
 
 update_hosts() {
-    local services=("apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp")
+    local services=("apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp" "git-pages")
     local hosts_entries="${HOST_IP} ${HOST}"$'\n'
 
     for service in "${services[@]}"; do

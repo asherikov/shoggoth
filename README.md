@@ -54,6 +54,7 @@ The following services are available:
 | `web`          | `build-cache.<host>` | Build cache storage                       |
 | `ollama`       | `ollama.<host>`      | Local AI model server                     |
 | `git`          | `git.<host>`         | Gitea Git server with web UI              |
+| `git-pages`    | `git-pages.<host>`   | Git Pages static site hosting             |
 | `gitea-runner` | \-                   | Gitea Actions runner                      |
 | `gitea-mcp`    | `gitea-mcp.<host>`   | Gitea MCP server for AI agents            |
 
@@ -182,6 +183,12 @@ Configure your AI coding agent (e.g., Qwen Code) with the MCP server:
 # Generate MCP configuration
 ./shoggoth/setup-client.sh --mcp --host shoggoth.local --mcp-token your-api-token
 ```
+
+### Git Pages (Static Site Hosting)
+
+Push static sites using Gitea Actions, refer to `./examples/git-pages.yml` for
+an example.
+
 
 Server Management
 -----------------

@@ -1,0 +1,47 @@
+# Log format: text, json, or none
+log-format = "text"
+
+[server]
+pages = "tcp/:3000"
+caddy = "-"
+metrics = "-"
+
+#[[wildcard]]
+## Domain pattern for user sites (e.g., user.git-pages.shoggoth.local)
+#domain = "git-pages.shoggoth.local"
+## Git repository URL template (double slash is intentional - inserts user/repo)
+#clone-url = "http://git//.git"
+## Repository branch to deploy
+#index-repo = "gh-pages"
+## Branch name to deploy
+#index-repo-branch = "main"
+## Authorization method: forgejo, gitea, dns, or none
+#authorization = "gitea"
+
+[storage]
+# Storage backend: fs (filesystem) or s3 (object storage)
+type = "fs"
+
+[storage.fs]
+# Root directory for storing site content
+root = "/app/data"
+
+[limits]
+# Maximum size of a deployed site
+max-site-size = "128M"
+# Maximum size of manifest.json file
+max-manifest-size = "1M"
+# Maximum size for inline files (smaller files inlined in manifest)
+max-inline-file-size = "256B"
+# Threshold for large git objects (stored separately)
+git-large-object-threshold = "1M"
+# Maximum symlink depth to prevent loops
+max-symlink-depth = 16
+# Timeout for site update operations
+update-timeout = "60s"
+# Maximum heap size as ratio of available RAM
+max-heap-size-ratio = 0.1
+# List of forbidden domains (blocked for site hosting)
+forbidden-domains = []
+# Allowed git repository URL prefixes (empty = allow all)
+allowed-repository-url-prefixes = []

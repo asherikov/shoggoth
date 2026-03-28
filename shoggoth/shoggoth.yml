@@ -21,6 +21,9 @@ x-service: &default_service
   restart: unless-stopped
   dns:
     - 172.20.0.53
+  depends_on:
+    dns:
+      condition: service_started
 
 x-environment: &default_environment
   # docker cache is set as a proxy for the docker daemon, containers inherit this setting which we dont want
@@ -59,7 +62,7 @@ services:
     environment:
       <<: *default_environment
       # Common registries to cache
-      REGISTRIES: registry.k8s.io gcr.io quay.io ghcr.io mcr.microsoft.com docker.gitea.com docker.angie.software
+      REGISTRIES: registry.k8s.io gcr.io quay.io ghcr.io mcr.microsoft.com docker.gitea.com docker.angie.software codeberg.org
       # Enable manifest caching to avoid rate-limiting
       ENABLE_MANIFEST_CACHE: true
       # Cache configuration
@@ -79,7 +82,7 @@ services:
       - ./docker-registry-proxy/certs:/ca
 
   dns:
-    <<: *default_service
+    #<<: *default_service
     # https://hub.docker.com/r/mvance/unbound/
     image: mvance/unbound:latest
     container_name: dns
@@ -96,6 +99,7 @@ services:
     networks:
       shoggoth:
         ipv4_address: 172.20.0.53
+    restart: unless-stopped
 
   web:
     <<: *default_service
@@ -147,6 +151,7 @@ services:
 
   git:
     <<: *default_service
+    # possible alternative https://forgejo.org/compare-to-gitea/
     image: gitea/gitea:latest
     container_name: git
     environment:
@@ -177,14 +182,12 @@ services:
       - gitea_runner_token
 
   gitea-runner:
+    <<: *default_service
     # https://docs.gitea.com/next/usage/actions/act-runner
     #
     # note that gitea actions anre not fully compatible with github actions,
     # you would need to install nodejs to all images that execute jobs
     # https://forum.gitea.com/t/use-actions-checkout-v3-in-a-container-without-node-installed/8406
-    #
-    # possible alternative https://forgejo.org/compare-to-gitea/
-    <<: *default_service
     image: gitea/act_runner:latest
     container_name: gitea-runner
     volumes:
@@ -204,9 +207,9 @@ services:
       - gitea_runner_token
 
   gitea-mcp:
+    <<: *default_service
     # https://gitea.com/gitea/gitea-mcp
     # https://hub.docker.com/r/gitea/gitea-mcp-server
-    <<: *default_service
     image: docker.gitea.com/gitea-mcp-server:latest
     container_name: gitea-mcp
     environment:
@@ -214,3 +217,16 @@ services:
       MCP_MODE: http
       GITEA_HOST: http://git:3000
       GITEA_INSECURE: true
+
+  git-pages:
+    <<: *default_service
+    # https://codeberg.org/git-pages/git-pages
+    # https://git-pages.org/
+    image: codeberg.org/git-pages/git-pages:latest
+    container_name: git-pages
+    volumes:
+      - ./git-pages/data:/app/data
+      - ./git-pages/config.toml:/app/config.toml:ro
+    environment:
+      <<: *default_environment
+      PAGES_INSECURE: 1

@@ -1,0 +1,23 @@
+on: [push, pull_request]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          cd /shoggoth/cache
+          wget --progress=dot:giga --timestamping "https://codeberg.org/git-pages/git-pages-cli/releases/download/latest/git-pages-cli.linux-amd64" || true
+          chmod +x git-pages-cli.linux-amd64
+      - run: /shoggoth/cache/git-pages-cli.linux-amd64 http://git-pages.shoggoth.local/ --server="git-pages:3000" --upload-dir="_site" --path=`echo '${{ github.repository }}' | sed 's=/=-='`
+
+      # alternative with an action
+#      - run: |
+#          GIT_PAGES_DIR=$(echo '${{ github.repository }}' | sed 's=/=-=')
+#          echo "GIT_PAGES_DIR=$GIT_PAGES_DIR" >> $GITHUB_ENV
+#      - uses: https://codeberg.org/asherikov/action@v2
+#        with:
+#          site: http://git-pages.shoggoth.local/
+#          server: git-pages:3000
+#          path: ${{ env.GIT_PAGES_DIR }}
+#          source: _site
