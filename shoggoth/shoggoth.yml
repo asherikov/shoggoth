@@ -7,7 +7,7 @@ networks:
         - subnet: 172.20.0.0/24
 
 volumes:
-  cache:
+  shoggoth_ci_cache:
     name: "shoggoth_ci_cache"
 
 secrets:
@@ -194,6 +194,7 @@ services:
       - ./gitea-runner/data:/data
       - ./gitea-runner/config.template.yaml:/config.template.yaml:ro
       - ./gitea-runner/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
+      - shoggoth_ci_cache:/shoggoth/cache
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       <<: *default_environment
