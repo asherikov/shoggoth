@@ -139,6 +139,14 @@ nodes:
     scope: proxy_services
     style_notag: proxy_style
 
+  - id: ["redmine.", proxy_redmine]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["redmine-mcp.", proxy_redmine_mcp]
+    scope: proxy_services
+    style_notag: proxy_style
+
   - id: ["build-cache.", build_cache]
     scope: service_proxy
     graphviz:
@@ -195,6 +203,28 @@ nodes:
   # Git-pages layer
   - id: ["git-pages", git_pages_service]
     scope: behind_proxy_group
+    style_notag: docker_service_style
+
+  # Redmine layer
+  - id: ["redmine", redmine_group]
+    scope: behind_proxy_group
+    graphviz:
+      style: filled
+      shape: box
+
+  - id: ["redmine", redmine_service]
+    scope: redmine_group
+    style_notag: docker_service_style
+
+  - id: ["postgres\ndb", redmine_db]
+    scope: redmine_group
+    graphviz:
+      fillcolor: lightblue
+      style: filled
+      shape: cylinder
+
+  - id: ["redmine-mcp", redmine_mcp]
+    scope: redmine_group
     style_notag: docker_service_style
 
   # ============================================
@@ -261,6 +291,12 @@ edges:
   - link: [proxy_git_http, git_service]
   - link: [client_browser, home_page]
 
+  # Redmine flow (via proxy)
+  - link: [client_browser, proxy_redmine]
+  - link: [proxy_redmine, redmine_service]
+  - link: [ai_agent, proxy_redmine_mcp]
+  - link: [proxy_redmine_mcp, redmine_mcp]
+
   # ============================================
   # Internal Shoggoth Service Interactions
   # ============================================
@@ -275,6 +311,10 @@ edges:
   - link: [ci_job, cache_volume]
   - link: [ci_job, git_pages_service]
   - link: [gitea_runner, ci_job]
+
+  # Redmine ecosystem
+  - link: [redmine_service, redmine_db]
+  - link: [redmine_mcp, redmine_service]
 
   # ============================================
   # Shoggoth -> External Services

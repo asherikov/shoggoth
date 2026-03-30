@@ -2,6 +2,7 @@ networks:
   shoggoth:
     name: shoggoth
     external: false
+    enable_ipv6: false
     ipam:
       config:
         - subnet: 172.20.0.0/24
@@ -12,7 +13,9 @@ volumes:
 
 secrets:
   gitea_runner_token:
-    file: ./gitea-runner/runner-token.txt
+    file: ./gitea/runner/runner-token.txt
+  redmine_db_password:
+    file: ./redmine/db-password.txt
 
 # https://docs.docker.com/compose/compose-file/11-extension/
 x-service: &default_service
@@ -26,11 +29,7 @@ x-service: &default_service
       condition: service_started
 
 x-environment: &default_environment
-  # docker cache is set as a proxy for the docker daemon, containers inherit this setting which we dont want
-  HTTP_PROXY:
-  HTTPS_PROXY:
-  http_proxy:
-  https_proxy:
+  SHOGGOTH_IP: ${SHOGGOTH_IP}
 
 services:
   apt-cache:
@@ -73,8 +72,9 @@ services:
       MANIFEST_CACHE_SECONDARY_REGEX: "(.*)(\\d|\\.)+(\\d|\\.)+(.*)(\\d|\\.)+"
       MANIFEST_CACHE_SECONDARY_TIME: 60d
       MANIFEST_CACHE_DEFAULT_TIME: 1h
+      DISABLE_IPV6: true
     ports:
-      - "3128:3128"
+      - "${SHOGGOTH_IP}:3128:3128"
     volumes:
       # Cache storage directory (relative to this compose file location)
       - ./docker-registry-proxy/cache:/docker_mirror_cache
@@ -91,7 +91,6 @@ services:
       - ./unbound/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
     environment:
       <<: *default_environment
-      SHOGGOTH_IP: ${SHOGGOTH_IP}
     command: "/shoggoth_bringup.sh"
     ports:
       - "${SHOGGOTH_IP}:53:53/tcp"
@@ -175,7 +174,7 @@ services:
       GITEA__actions__DEFAULT_ACTIONS_URL: 'github'
       GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
     volumes:
-      - ./gitea/:/data
+      - ./gitea/data:/data
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
     secrets:
@@ -191,9 +190,9 @@ services:
     image: gitea/act_runner:latest
     container_name: gitea-runner
     volumes:
-      - ./gitea-runner/data:/data
-      - ./gitea-runner/config.template.yaml:/config.template.yaml:ro
-      - ./gitea-runner/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
+      - ./gitea/runner/data:/data
+      - ./gitea/runner/config.template.yaml:/config.template.yaml:ro
+      - ./gitea/runner/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
       - shoggoth_ci_cache:/shoggoth/cache
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
@@ -231,3 +230,61 @@ services:
     environment:
       <<: *default_environment
       PAGES_INSECURE: 1
+
+  redmine-db:
+    <<: *default_service
+    # https://hub.docker.com/_/postgres
+    image: postgres:18-alpine
+    container_name: redmine-db
+    user: "${UID}:${GID}"
+    environment:
+      <<: *default_environment
+      POSTGRES_DB: redmine
+      POSTGRES_USER: redmine
+      POSTGRES_PASSWORD_FILE: /run/secrets/redmine_db_password
+    volumes:
+      - ./redmine/database:/var/lib/postgresql
+      # a hack for custom uid
+      - /etc/passwd:/etc/passwd:ro
+    secrets:
+      - redmine_db_password
+
+  redmine:
+    <<: *default_service
+    # https://hub.docker.com/_/redmine
+    # https://www.redmine.org/
+    # https://github.com/topics/redmine-plugin
+    image: redmine:6.1.2-alpine
+    container_name: redmine
+    user: "${UID}:${GID}"
+    environment:
+      <<: *default_environment
+      REDMINE_DB_POSTGRES: redmine-db
+      REDMINE_DB_DATABASE: redmine
+      REDMINE_DB_USERNAME: redmine
+      REDMINE_DB_PASSWORD_FILE: /run/secrets/redmine_db_password
+      REDMINE_SECRET_KEY_BASE: supersecretkey
+    volumes:
+      - ./redmine/files:/usr/src/redmine/files
+      - ./redmine/plugins:/usr/src/redmine/plugins
+    depends_on:
+      - redmine-db
+      - dns
+    secrets:
+      - redmine_db_password
+
+  redmine-mcp:
+    <<: *default_service
+    # alternatives
+    # - only local
+    #   - https://github.com/onozaty/redmine-mcp-server
+    #   - https://github.com/runekaagaard/mcp-redmine
+    # - remote service
+    #   - https://github.com/jztan/redmine-mcp-server oauth too much trouble
+    #   - https://github.com/yenpu/redmine-mcp no docker
+    #   - https://github.com/redmine-tx/redmine_tx_mcp plugin
+    #   - https://github.com/daiji-sshr/redmine-mcp-stateless
+    image: redmine-mcp-stateless-redmine-mcp-stateless
+    container_name: redmine-mcp
+    environment:
+      <<: *default_environment
