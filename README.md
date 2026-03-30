@@ -25,6 +25,9 @@ Features
   - Local AI model server (`ollama`).
   - Git server (`gitea`) with CI/CD actions support.
   - Gitea MCP server for AI coding agent integration.
+- Project management
+  - Redmine project management server.
+  - Redmine MCP server for AI agent integration.
 
 Architecture
 ------------
@@ -57,6 +60,8 @@ The following services are available:
 | `git-pages`    | `git-pages.<host>`   | Git Pages static site hosting             |
 | `gitea-runner` | \-                   | Gitea Actions runner                      |
 | `gitea-mcp`    | `gitea-mcp.<host>`   | Gitea MCP server for AI agents            |
+| `redmine`      | `redmine.<host>`     | Redmine project management server         |
+| `redmine-mcp`  | `redmine-mcp.<host>` | Redmine MCP server for AI agents          |
 
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture" />
 
@@ -182,6 +187,35 @@ Configure your AI coding agent (e.g., Qwen Code) with the MCP server:
 ``` bash
 # Generate MCP configuration
 ./shoggoth/setup-client.sh --mcp --host shoggoth.local --mcp-token your-api-token
+```
+
+### Redmine Project Management Server
+
+Access the Redmine web interface:
+
+``` bash
+# Open Redmine in browser
+firefox http://redmine.shoggoth.local
+
+# Default credentials (change after first login)
+# Username: admin
+# Password: admin
+```
+
+Install plugins by cloning them into the `shoggoth/redmine/plugins` directory
+and restarting the service.
+
+### Redmine MCP Server (AI Agent Integration)
+
+Configure your AI agent with the Redmine MCP server for project management:
+
+1. Log in to Redmine with administrator privileges
+2. Go to "Administration" → "Settings" → "API" tab
+3. Check "Enable REST web service"
+4. Generate "API access key" in personal settings.
+
+``` bash
+./shoggoth/setup-client.sh --host shoggoth.local --redmine-mcp your-token
 ```
 
 ### Git Pages (Static Site Hosting)

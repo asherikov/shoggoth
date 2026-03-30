@@ -9,8 +9,8 @@ CONFIGURE_BUILD_CACHE="${CONFIGURE_BUILD_CACHE:-}"
 CONFIGURE_ALL="${CONFIGURE_ALL:-}"
 CONFIGURE_APT="${CONFIGURE_APT:-}"
 CONFIGURE_OLLAMA="${CONFIGURE_OLLAMA:-}"
-CONFIGURE_MCP="${CONFIGURE_MCP:-}"
-MCP_TOKEN="${MCP_TOKEN:-}"
+CONFIGURE_GITEA_MCP="${CONFIGURE_GITEA_MCP:-}"
+CONFIGURE_REDMINE_MCP="${CONFIGURE_REDMINE_MCP:-}"
 HOST="${HOST:-shoggoth.local}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
 
@@ -53,8 +53,8 @@ Options:
     --build-cache           Print build cache with nginx proxy setup instructions
     --apt-proxy             Configure apt proxy for package caching
     --ollama                Configure ollama client environment
-    --mcp                   Generate qwen-code MCP server configuration example
-    --mcp-token TOKEN       Authorization token for MCP server (used with --mcp)
+    --gitea-mcp TOKEN       Generate qwen-code MCP server configuration example with given token
+    --redmine-mcp TOKEN     Generate Redmine MCP server configuration example with given token
     --all                   Configure and print all setup instructions
     --help                  Show this help message
 
@@ -72,8 +72,8 @@ Environment variables:
     CONFIGURE_ALL           Set to "true" to configure all options
     CONFIGURE_APT           Set to "true" to configure apt proxy
     CONFIGURE_OLLAMA        Set to "true" to configure ollama client
-    CONFIGURE_MCP           Set to "true" to generate qwen-code MCP configuration
-    MCP_TOKEN               Authorization token for MCP server
+    CONFIGURE_GITEA_MCP     Set to authorization token to generate qwen-code MCP configuration
+    CONFIGURE_REDMINE_MCP   Set to authorization token to generate qwen-code MCP configuration
 
 Examples:
     ./setup-client.sh --docker-proxy --host shoggoth.local --host-ip 192.168.1.100
@@ -81,8 +81,8 @@ Examples:
     ./setup-client.sh --docker-proxy --update-hosts --host shoggoth.local --host-ip 192.168.1.100
     ./setup-client.sh --apt-proxy --host shoggoth.local --host-ip 192.168.1.100
     ./setup-client.sh --ollama --host shoggoth.local --host-ip 192.168.1.100
-    ./setup-client.sh --mcp --host shoggoth.local
-    ./setup-client.sh --mcp --host shoggoth.local --mcp-token your-api-token
+    ./setup-client.sh --host shoggoth.local --gitea-mcp your-mcp-token
+    ./setup-client.sh --host shoggoth.local --redmine-mcp your-mcp-token
     ./setup-client.sh --build-cache
     ./setup-client.sh --all
 EOF
@@ -123,12 +123,12 @@ parse_args() {
                 CONFIGURE_OLLAMA="true"
                 shift
                 ;;
-            --mcp)
-                CONFIGURE_MCP="true"
-                shift
+            --gitea-mcp)
+                CONFIGURE_GITEA_MCP="$2"
+                shift 2
                 ;;
-            --mcp-token)
-                MCP_TOKEN="$2"
+            --redmine-mcp)
+                CONFIGURE_REDMINE_MCP="$2"
                 shift 2
                 ;;
             --all)
@@ -246,7 +246,7 @@ EOF"
 }
 
 update_hosts() {
-    local services=("apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp" "git-pages")
+    local services=("apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp" "git-pages" "redmine" "redmine-mcp")
     local hosts_entries="${HOST_IP} ${HOST}"$'\n'
 
     for service in "${services[@]}"; do
@@ -303,35 +303,40 @@ EOF
     echo "  source ~/.shoggothrc"
 }
 
-generate_mcp_config() {
+generate_gitea_mcp_config() {
     local mcp_server_url="http://gitea-mcp.${HOST}/mcp"
 
-    if [ -n "${MCP_TOKEN}" ]; then
-        cat <<EOF
+    cat <<EOF
 {
   "mcpServers": {
     "shoggoth-gitea-mcp": {
       "httpUrl": "${mcp_server_url}",
       "headers": {
-        "Authorization": "Bearer ${MCP_TOKEN}"
+        "Authorization": "Bearer ${CONFIGURE_GITEA_MCP}"
       },
       "timeout": 5000
     }
   }
 }
 EOF
-    else
-        cat <<EOF
+}
+
+generate_redmine_mcp_config() {
+    local redmine_mcp_server_url="http://redmine-mcp.${HOST}/sse"
+
+    cat <<EOF
 {
   "mcpServers": {
-    "shoggoth-gitea-mcp": {
-      "httpUrl": "${mcp_server_url}",
+    "shoggoth-redmine-mcp": {
+      "url": "${redmine_mcp_server_url}",
+      "headers": {
+        "X-Redmine-API-Key": "${CONFIGURE_REDMINE_MCP}"
+      },
       "timeout": 5000
     }
   }
 }
 EOF
-    fi
 }
 
 main() {
@@ -351,6 +356,7 @@ main() {
         CONFIGURE_APT="true"
         CONFIGURE_OLLAMA="true"
         CONFIGURE_MCP="true"
+        CONFIGURE_REDMINE_MCP="true"
     fi
 
     get_priv_cmd
@@ -384,9 +390,14 @@ main() {
         generate_shoggothrc
     fi
 
-    if [ "${CONFIGURE_MCP}" = "true" ]; then
+    if [ -n "${CONFIGURE_GITEA_MCP}" ]; then
         echo ""
-        generate_mcp_config
+        generate_gitea_mcp_config
+    fi
+
+    if [ -n "${CONFIGURE_REDMINE_MCP}" ]; then
+        echo ""
+        generate_redmine_mcp_config
     fi
 }
 

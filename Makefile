@@ -66,7 +66,7 @@ log:
 shutdown:
 	${MAKE} ssh_exec CMD='exec su -l -c "shutdown -P now"'
 
-update_hosts:
+hosts:
 	./shoggoth/setup-client.sh --update-hosts --host "${SHOGGOTH_NAME}" --host-ip "${SHOGGOTH_IP}"
 
 ping:
