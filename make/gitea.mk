@@ -19,7 +19,7 @@ gitea_runner_token:
 
 github_to_gitea_repo:
 	echo "Copying ${GITHUB_USER}/${GITHUB_REPO}"
-	curl \
+	curl -s \
 		"${GITEA_API}/repos/migrate" \
 		-H "accept: application/json" \
 		-H "Authorization: token ${GITEA_TOKEN}" \
@@ -36,15 +36,30 @@ github_to_gitea_repo:
 			\"pull_requests\": true, \
 			\"releases\": true, \
 			\"repo_name\": \"${GITHUB_REPO}\", \
+			\"repo_owner\": \"${GITHUB_USER}\", \
 			\"service\": \"git\", \
 			\"wiki\": true \
 			}" \
 		-i
 
 github_to_gitea_user:
-	curl "https://api.github.com/users/${GITHUB_USER}/repos" \
-		| jq -r '.[] | "${MAKE} github_to_gitea_repo GITHUB_REPO=\"\(.name )\" REPO_DESCRIPTION=\"\(.description)\""' | sed 's/null//' \
-		| sh
+	${MAKE} gitea_create_project GITEA_PROJECT=${GITHUB_USER}
+	@page=1; \
+	while true; do \
+		headerfile=$$(mktemp); \
+		curl -s --dump-header "$$headerfile" "https://api.github.com/users/${GITHUB_USER}/repos?page=$${page}&per_page=100" \
+			| jq -r '.[] | "\(.name)\t\(.description // empty)"' | while IFS=$$'\t' read -r name desc; do \
+			if [ -f private/github_to_gitea.blacklist ] && grep -qx "$$name" private/github_to_gitea.blacklist; then \
+				echo "Skipping blacklisted repository: $$name"; \
+			else \
+				${MAKE} github_to_gitea_repo GITHUB_REPO="$$name" REPO_DESCRIPTION="$$desc"; \
+			fi; \
+		done; \
+		link_header=$$(grep -i '^Link:' "$$headerfile"); \
+		if ! echo "$$link_header" | grep -q 'rel="next"'; then rm -f "$$headerfile" && break; fi; \
+		page=$$((page + 1)); \
+		rm -f "$$headerfile"; \
+	done
 
 gitea_create_project:
 	@echo "Creating Gitea project: ${GITEA_PROJECT}"
