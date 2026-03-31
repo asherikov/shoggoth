@@ -111,6 +111,7 @@ services:
       - "${SHOGGOTH_IP}:${SHOGGOTH_GIT_SSH_PORT}:22"
     volumes:
       - ./angie/angie.conf:/etc/angie/angie.conf:ro
+      - ./angie/proxy-params.conf:/etc/angie/proxy-params.conf:ro
       - ./angie/html:/data/html:ro
       - ./angie/build_cache:/data/build_cache
       - ./setup-client.sh:/data/setup-client.sh:ro
@@ -164,6 +165,8 @@ services:
       #GITEA__repository__DISABLE_HTTP_GIT: 'true'
       GITEA__repository__DEFAULT_BRANCH: 'main'
       GITEA__repository__DEFAULT_PRIVATE: 'private'
+      # disabled: ,repo.packages,repo.actions
+      GITEA__repository__DEFAULT_REPO_UNITS: 'repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects'
       # avoid conflict with ssh running on the host system, see web service config as well
       GITEA__server__SSH_PORT: "${SHOGGOTH_GIT_SSH_PORT}"
       GITEA__server__ROOT_URL: 'http://git.shoggoth.local'
