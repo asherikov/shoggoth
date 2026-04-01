@@ -16,6 +16,8 @@ runner:
   envs:
     CCACHE_REMOTE_STORAGE: "http://build-cache.shoggoth.local"
     CCACHE_REMOTE_ONLY: "true"
+    PIP_INDEX_URL: "http://proxpi.shoggoth.local/index/"
+    PIP_TRUSTED_HOST: "proxpi.shoggoth.local"
     CCWS_CACHE: /shoggoth/cache/ccws/
     # https://about.gitea.com/resources/tutorials/enable-gitea-actions-cache-to-accelerate-cicd
     RUNNER_TOOL_CACHE: /toolcache
