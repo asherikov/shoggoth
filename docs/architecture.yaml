@@ -329,6 +329,7 @@ edges:
   - link: [ci_job, build_cache]
   - link: [ci_job, cache_volume]
   - link: [ci_job, git_pages_service]
+  - link: [ci_job, proxpi_service]
   - link: [gitea_runner, ci_job]
 
   # Redmine ecosystem
