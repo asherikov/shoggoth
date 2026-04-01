@@ -20,6 +20,7 @@ Features
 - Caching:
   - Debian/Ubuntu package caching proxy (`apt-cacher-ng`).
   - Docker registry caching proxy.
+  - Python package caching proxy (`proxpi`).
   - Build cache server, to be used with ccache or sccache.
 - Development:
   - Local AI model server (`ollama`).
@@ -60,6 +61,7 @@ The following services are available:
 | `git-pages`    | `git-pages.<host>`   | Git Pages static site hosting             |
 | `gitea-runner` | \-                   | Gitea Actions runner                      |
 | `gitea-mcp`    | `gitea-mcp.<host>`   | Gitea MCP server for AI agents            |
+| `proxpi`       | `proxpi.<host>`      | Python package caching proxy              |
 | `redmine`      | `redmine.<host>`     | Redmine project management server         |
 | `redmine-mcp`  | `redmine-mcp.<host>` | Redmine MCP server for AI agents          |
 
