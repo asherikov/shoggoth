@@ -11,6 +11,7 @@ CONFIGURE_APT="${CONFIGURE_APT:-}"
 CONFIGURE_OLLAMA="${CONFIGURE_OLLAMA:-}"
 CONFIGURE_GITEA_MCP="${CONFIGURE_GITEA_MCP:-}"
 CONFIGURE_REDMINE_MCP="${CONFIGURE_REDMINE_MCP:-}"
+CONFIGURE_PROXPI="${CONFIGURE_PROXPI:-}"
 HOST="${HOST:-shoggoth.local}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
 
@@ -53,6 +54,7 @@ Options:
     --build-cache           Print build cache with nginx proxy setup instructions
     --apt-proxy             Configure apt proxy for package caching
     --ollama                Configure ollama client environment
+    --proxpi                Configure proxpi (PyPI caching proxy) client environment
     --gitea-mcp TOKEN       Generate qwen-code MCP server configuration example with given token
     --redmine-mcp TOKEN     Generate Redmine MCP server configuration example with given token
     --all                   Configure and print all setup instructions
@@ -74,6 +76,7 @@ Environment variables:
     CONFIGURE_OLLAMA        Set to "true" to configure ollama client
     CONFIGURE_GITEA_MCP     Set to authorization token to generate qwen-code MCP configuration
     CONFIGURE_REDMINE_MCP   Set to authorization token to generate qwen-code MCP configuration
+    CONFIGURE_PROXPI        Set to "true" to configure proxpi client
 
 Examples:
     ./setup-client.sh --docker-proxy --host shoggoth.local --host-ip 192.168.1.100
@@ -121,6 +124,10 @@ parse_args() {
                 ;;
             --ollama)
                 CONFIGURE_OLLAMA="true"
+                shift
+                ;;
+            --proxpi)
+                CONFIGURE_PROXPI="true"
                 shift
                 ;;
             --gitea-mcp)
@@ -246,7 +253,7 @@ EOF"
 }
 
 update_hosts() {
-    local services=("apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp" "git-pages" "redmine" "redmine-mcp")
+    local services=("apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp" "git-pages" "redmine" "redmine-mcp" "proxpi")
     local hosts_entries="${HOST_IP} ${HOST}"$'\n'
 
     for service in "${services[@]}"; do
@@ -281,6 +288,7 @@ generate_shoggothrc() {
     local shoggothrc_file="${HOME}/.shoggothrc"
     local ollama_url="http://ollama.${HOST}"
     local build_cache_url="http://build-cache.${HOST}"
+    local proxpi_url="http://proxpi.${HOST}"
 
     cat > "${shoggothrc_file}" <<EOF
 # Shoggoth environment variables
@@ -296,6 +304,10 @@ export OPENAI_MODEL="qwen3-coder:30b"
 # Build cache (ccache)
 export CCACHE_REMOTE_STORAGE="${build_cache_url}"
 export CCACHE_REMOTE_ONLY="true"
+
+# Proxpi (PyPI caching proxy)
+export PIP_INDEX_URL="${proxpi_url}/index/"
+export PIP_TRUSTED_HOST="proxpi.${HOST}"
 EOF
 
     echo "Generated ${shoggothrc_file}"
@@ -355,8 +367,7 @@ main() {
         CONFIGURE_BUILD_CACHE="true"
         CONFIGURE_APT="true"
         CONFIGURE_OLLAMA="true"
-        CONFIGURE_MCP="true"
-        CONFIGURE_REDMINE_MCP="true"
+        CONFIGURE_PROXPI="true"
     fi
 
     get_priv_cmd
@@ -385,7 +396,7 @@ main() {
         echo "Apt proxy setup complete."
     fi
 
-    if [ "${CONFIGURE_OLLAMA}" = "true" ] || [ "${CONFIGURE_BUILD_CACHE}" = "true" ]; then
+    if [ "${CONFIGURE_OLLAMA}" = "true" ] || [ "${CONFIGURE_BUILD_CACHE}" = "true" ] || [ "${CONFIGURE_PROXPI}" = "true" ]; then
         echo ""
         generate_shoggothrc
     fi

@@ -2,7 +2,6 @@ networks:
   shoggoth:
     name: shoggoth
     external: false
-    enable_ipv6: false
     ipam:
       config:
         - subnet: 172.20.0.0/24
@@ -74,7 +73,7 @@ services:
       MANIFEST_CACHE_DEFAULT_TIME: 1h
       DISABLE_IPV6: true
     ports:
-      - "${SHOGGOTH_IP}:3128:3128"
+      - "3128:3128"
     volumes:
       # Cache storage directory (relative to this compose file location)
       - ./docker-registry-proxy/cache:/docker_mirror_cache
@@ -291,3 +290,15 @@ services:
     container_name: redmine-mcp
     environment:
       <<: *default_environment
+
+  proxpi:
+    <<: *default_service
+    # https://github.com/EpicWink/proxpi
+    # https://hub.docker.com/r/epicwink/proxpi
+    image: epicwink/proxpi:latest
+    container_name: proxpi
+    volumes:
+      - ./proxpi/cache:/var/cache/proxpi
+    environment:
+      <<: *default_environment
+      PROXPI_CACHE_DIR: /var/cache/proxpi

@@ -147,6 +147,10 @@ nodes:
     scope: proxy_services
     style_notag: proxy_style
 
+  - id: ["proxpi.", proxy_proxpi]
+    scope: proxy_services
+    style_notag: proxy_style
+
   - id: ["build-cache.", build_cache]
     scope: service_proxy
     graphviz:
@@ -161,6 +165,10 @@ nodes:
 
   - id: [":3128\n(docker registry proxy)", docker_cache]
     scope: direct_access_group
+    style_notag: docker_service_style
+
+  - id: ["proxpi", proxpi_service]
+    scope: behind_proxy_group
     style_notag: docker_service_style
 
   # Development layer - Gitea services
@@ -250,6 +258,13 @@ nodes:
       style: filled
       shape: cylinder
 
+  - id: ["PyPI\n(Python Package Index)", pypi_index]
+    scope: external_services
+    graphviz:
+      fillcolor: honeydew
+      style: filled
+      shape: cylinder
+
   - id: ["External DNS", external_dns]
     scope: external_services
     graphviz:
@@ -297,6 +312,10 @@ edges:
   - link: [ai_agent, proxy_redmine_mcp]
   - link: [proxy_redmine_mcp, redmine_mcp]
 
+  # Proxpi flow (via proxy)
+  - link: [client_ccache, proxy_proxpi]
+  - link: [proxy_proxpi, proxpi_service]
+
   # ============================================
   # Internal Shoggoth Service Interactions
   # ============================================
@@ -321,6 +340,7 @@ edges:
   # ============================================
   - link: [apt_cache, apt_repos]
   - link: [docker_cache, docker_registries]
+  - link: [proxpi_service, pypi_index]
   - link: [dns_service, external_dns]
 
   # Invisible edges for layout (direct_access_group -> behind_proxy_group)
@@ -340,6 +360,9 @@ edges:
     graphviz:
       style: invis
   - link: [build_cache, ollama_service]
+    graphviz:
+      style: invis
+  - link: [build_cache, proxpi_service]
     graphviz:
       style: invis
 
