@@ -211,10 +211,10 @@ and restarting the service.
 
 Configure your AI agent with the Redmine MCP server for project management:
 
-1. Log in to Redmine with administrator privileges
-2. Go to "Administration" → "Settings" → "API" tab
-3. Check "Enable REST web service"
-4. Generate "API access key" in personal settings.
+1.  Log in to Redmine with administrator privileges
+2.  Go to “Administration” → “Settings” → “API” tab
+3.  Check “Enable REST web service”
+4.  Generate “API access key” in personal settings.
 
 ``` bash
 ./shoggoth/setup-client.sh --host shoggoth.local --redmine-mcp your-token
@@ -224,7 +224,6 @@ Configure your AI agent with the Redmine MCP server for project management:
 
 Push static sites using Gitea Actions, refer to `./examples/git-pages.yml` for
 an example.
-
 
 Server Management
 -----------------

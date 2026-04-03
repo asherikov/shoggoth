@@ -80,7 +80,7 @@ gitea_push_repos:
 	find ${SOURCES_DIR} -mindepth 2 -maxdepth 2 -type d -name ".git" \
 		| sed 's|/\.git$$||' \
 		| xargs -I {} basename {} \
-		| xargs -P ${JOBS} -I {} ${MAKE} gitea_push_repo REPO_NAME={} SOURCES_DIR=${SOURCES_DIR} GITEA_PROJECT=${GITEA_PROJECT}
+		| xargs -P ${JOBS} -I {} ${MAKE} gitea_push_repo REPO_NAME={} REPO_PATH=${SOURCES_DIR}/{} GITEA_PROJECT=${GITEA_PROJECT}
 
 gitea_push_repo:
 	@echo "Processing repository: ${REPO_NAME}"
@@ -101,7 +101,7 @@ gitea_push_repo:
 			}"
 	# \"default_branch\": \"main\",
 	@echo "Adding shoggoth remote to ${REPO_NAME}"
-	cd "${SOURCES_DIR}/${REPO_NAME}" \
+	cd "${REPO_PATH}" \
 		&& (git remote remove shoggoth 2>/dev/null || true) \
 		&& git remote add shoggoth "ssh://git@${GITEA_URL}:3022/${GITEA_PROJECT}/${REPO_NAME}.git" \
 		&& git push --mirror shoggoth

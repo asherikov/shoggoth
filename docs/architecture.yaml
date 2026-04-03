@@ -1,20 +1,20 @@
 nodes:
-  # ============================================
-  # Style Templates (invisible)
-  # ============================================
-  - id: ["", docker_service_style]
-    tags: []
-    graphviz:
-      fillcolor: lightsteelblue
-      style: filled
-      shape: component
-
   - id: ["", proxy_style]
     tags: []
     graphviz:
       fillcolor: lightgreen
       style: filled
       shape: box
+      fixedsize: true
+      width: 3.3
+      height: 1
+
+  - id: ["", docker_service_style]
+    tags: []
+    graphviz:
+      fillcolor: lightsteelblue
+      style: filled
+      shape: component
 
   # ============================================
   # Client Host Boundary
@@ -23,50 +23,31 @@ nodes:
     graphviz:
       fillcolor: "#f0f0f0"
       style: "filled,dashed"
-      shape: folder
 
   # Client applications
   - id: ["apt", client_apt]
     scope: client_host
-    graphviz:
-      fillcolor: lightyellow
-      style: filled
-      shape: box
+    style_notag: hh_diagrams_generic_os_ubuntu
 
   - id: ["docker", client_docker]
     scope: client_host
-    graphviz:
-      fillcolor: lightyellow
-      style: filled
-      shape: box
+    style_notag: hh_diagrams_onprem_container_docker
 
   - id: ["ccache/sccache", client_ccache]
     scope: client_host
-    graphviz:
-      fillcolor: lightyellow
-      style: filled
-      shape: box
+    style_notag: hh_diagrams_aws_devtools_codebuild
 
   - id: ["git", client_git]
     scope: client_host
-    graphviz:
-      fillcolor: lightyellow
-      style: filled
-      shape: box
+    style_notag: hh_diagrams_onprem_vcs_git
 
   - id: ["AI coding agent", ai_agent]
     scope: client_host
-    graphviz:
-      fillcolor: lightyellow
-      style: filled
-      shape: box
+    style_notag: hh_diagrams_aws_management_chatbot
 
   - id: ["Browser", client_browser]
     scope: client_host
-    graphviz:
-      fillcolor: lightyellow
-      style: filled
-      shape: box
+    style_notag: hh_diagrams_azure_general_browser
 
   # ============================================
   # Shoggoth Host Boundary
@@ -75,7 +56,6 @@ nodes:
     graphviz:
       fillcolor: "#e8f4f8"
       style: "filled,dashed"
-      shape: folder
 
   # Infrastructure group (nameless scope for layout)
   - id: ["", direct_access_group]
@@ -92,7 +72,7 @@ nodes:
   # Infrastructure layer
   - id: [":53 DNS", dns_service]
     scope: direct_access_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_alibabacloud_web_dns
 
   # Proxy layer (Angie reverse proxy + build cache storage)
   - id: ["web (angie)", service_proxy]
@@ -102,18 +82,12 @@ nodes:
   # Home page within web service
   - id: [":80\nhome page", home_page]
     scope: service_proxy
-    graphviz:
-      fillcolor: "#f0f8ff"
-      style: filled
-      shape: note
+    style_notag: hh_diagrams_azure_web_static_apps
 
   # Proxy services scope
   - id: ["proxies", proxy_services]
     scope: service_proxy
-    graphviz:
-      fillcolor: "#f0f8ff"
-      style: "filled,dashed"
-      shape: folder
+    style_notag: hh_diagrams_scope
 
   - id: ["apt-cache.", proxy_apt]
     scope: proxy_services
@@ -153,124 +127,98 @@ nodes:
 
   - id: ["build-cache.", build_cache]
     scope: service_proxy
-    graphviz:
-      fillcolor: lightblue
-      style: filled
-      shape: cylinder
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
   # Caching layer
   - id: ["apt-cacher-ng", apt_cache]
     scope: behind_proxy_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
-  - id: [":3128\n(docker registry proxy)", docker_cache]
+  - id: [":3128\n(docker registry\ncaching proxy)", docker_cache]
     scope: direct_access_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
   - id: ["proxpi", proxpi_service]
     scope: behind_proxy_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
   # Development layer - Gitea services
   - id: ["gitea", gitea_group]
     scope: behind_proxy_group
-    graphviz:
-      style: filled
-      shape: box
+    style_notag: docker_service_style
 
   - id: ["gitea", git_service]
     scope: gitea_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_onprem_vcs_gitea
 
   - id: ["actions runner", gitea_runner]
     scope: gitea_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_onprem_ci_github_actions
 
   - id: ["mcp", gitea_mcp]
     scope: gitea_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_azure_identity_api_proxy
 
   - id: ["CI job", ci_job]
     scope: gitea_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_onprem_ci_github_actions
 
   # Cache volume mounted to CI jobs
-  - id: ["data cache\nvolume", cache_volume]
+  - id: ["data cache\nvolume", ci_cache_volume]
     scope: gitea_group
-    graphviz:
-      fillcolor: lightblue
-      style: filled
-      shape: cylinder
-
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
   # AI layer
   - id: ["LLM server\n(ollama)", ollama_service]
     scope: behind_proxy_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
 
   # Git-pages layer
   - id: ["git-pages", git_pages_service]
     scope: behind_proxy_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_azure_web_static_apps
 
   # Redmine layer
   - id: ["redmine", redmine_group]
     scope: behind_proxy_group
-    graphviz:
-      style: filled
-      shape: box
+    style_notag: docker_service_style
 
   - id: ["redmine", redmine_service]
     scope: redmine_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_azure_devops_boards
 
   - id: ["postgres\ndb", redmine_db]
     scope: redmine_group
-    graphviz:
-      fillcolor: lightblue
-      style: filled
-      shape: cylinder
+    style_notag: hh_diagrams_onprem_database_postgresql
 
   - id: ["redmine-mcp", redmine_mcp]
     scope: redmine_group
-    style_notag: docker_service_style
+    style_notag: hh_diagrams_azure_identity_api_proxy
 
   # ============================================
   # External Services Group
   # ============================================
   - id: ["External Services", external_services]
     graphviz:
-      fillcolor: "#fff8dc"
-      style: "filled,dashed"
-      shape: folder
+      fillcolor: honeydew
+      style: filled
+      shape: cylinder
 
   - id: ["APT Repositories\n(Ubuntu/Debian)", apt_repos]
     scope: external_services
-    graphviz:
-      fillcolor: honeydew
-      style: filled
-      shape: cylinder
+    style_notag: hh_diagrams_generic_os_ubuntu
 
-  - id: ["Docker Registries\n(Docker Hub, GHCR, etc.)", docker_registries]
+  - id: ["Docker Registries", docker_registries]
     scope: external_services
-    graphviz:
-      fillcolor: honeydew
-      style: filled
-      shape: cylinder
+    style_notag: hh_diagrams_alibabacloud_compute_container_service
 
-  - id: ["PyPI\n(Python Package Index)", pypi_index]
+  - id: ["PyPI\n(python packages)", pypi_index]
     scope: external_services
-    graphviz:
-      fillcolor: honeydew
-      style: filled
-      shape: cylinder
+    style_notag: hh_diagrams_programming_language_python
 
   - id: ["External DNS", external_dns]
     scope: external_services
-    graphviz:
-      fillcolor: honeydew
-      style: filled
-      shape: ellipse
+    style_notag: hh_diagrams_alibabacloud_web_dns
 
 edges:
   # ============================================
@@ -279,42 +227,105 @@ edges:
 
   # APT client flow (via proxy)
   - link: [client_apt, proxy_apt]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [proxy_apt, apt_cache]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # Docker client flow (direct to docker-cache)
   - link: [client_docker, docker_cache]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # Build cache flow (via proxy)
   - link: [client_ccache, build_cache]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # Git client flow (via proxy)
   - link: [client_git, proxy_git]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [proxy_git, git_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # AI agent flow (via proxy)
   - link: [ai_agent, proxy_mcp]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [proxy_mcp, gitea_mcp]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [ai_agent, proxy_ollama]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [proxy_ollama, ollama_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # Git-pages flow (via proxy)
   - link: [client_browser, proxy_git_pages]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [proxy_git_pages, git_pages_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # Browser flow (via HTTP proxy)
   - link: [client_browser, proxy_git_http]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [proxy_git_http, git_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [client_browser, home_page]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # Redmine flow (via proxy)
   - link: [client_browser, proxy_redmine]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [proxy_redmine, redmine_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [ai_agent, proxy_redmine_mcp]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [proxy_redmine_mcp, redmine_mcp]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # Proxpi flow (via proxy)
   - link: [client_ccache, proxy_proxpi]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [proxy_proxpi, proxpi_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # ============================================
   # Internal Shoggoth Service Interactions
@@ -322,48 +333,103 @@ edges:
 
   # Gitea ecosystem
   - link: [git_service, gitea_runner]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [gitea_runner, docker_cache]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [gitea_mcp, git_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [ci_job, dns_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [ci_job, apt_cache]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [ci_job, build_cache]
-  - link: [ci_job, cache_volume]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [ci_job, ci_cache_volume]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [ci_job, git_pages_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [ci_job, proxpi_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [gitea_runner, ci_job]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # Redmine ecosystem
   - link: [redmine_service, redmine_db]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [redmine_mcp, redmine_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # ============================================
   # Shoggoth -> External Services
   # ============================================
   - link: [apt_cache, apt_repos]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [docker_cache, docker_registries]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [proxpi_service, pypi_index]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
   - link: [dns_service, external_dns]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # Invisible edges for layout (direct_access_group -> behind_proxy_group)
   - link: [build_cache, ci_job]
+    style: hh_diagrams_link
     graphviz:
       style: invis
   - link: [build_cache, apt_cache]
+    style: hh_diagrams_link
     graphviz:
       style: invis
   - link: [build_cache, git_service]
+    style: hh_diagrams_link
     graphviz:
       style: invis
   - link: [build_cache, gitea_runner]
+    style: hh_diagrams_link
     graphviz:
       style: invis
   - link: [build_cache, gitea_mcp]
+    style: hh_diagrams_link
     graphviz:
       style: invis
   - link: [build_cache, ollama_service]
+    style: hh_diagrams_link
     graphviz:
       style: invis
   - link: [build_cache, proxpi_service]
+    style: hh_diagrams_link
     graphviz:
       style: invis
 
@@ -372,13 +438,11 @@ views:
   # Single Unified Architecture View
   # ============================================
   - id: architecture
+    style: hh_diagrams_view
+    tags: ["default"]
     graphviz:
       graph:
         rankdir: LR
-        compound: "true"
+        fontsize: 32
       node:
-        fontsize: "11"
-        margin: "0.1"
-      edge:
-        fontsize: "9"
-
+        fontsize: 32

@@ -1,5 +1,8 @@
+DIAGRAMS_RESOURCES=$(shell find ${HOME} ${PIPX_HOME} ${PIPX_GLOBAL_HOME} -ipath "*/resources/alibabacloud" | head -1 | xargs -I {} dirname {})
+
 graph:
-	hiearch -o docs docs/*.yaml
+	rm -f docs/*.svg docs/*.gv docs/*.png
+	hiearch -f svg:cairo -r ${DIAGRAMS_RESOURCES} -t private/docs -o docs docs/*.yaml
 
 fmt:
 	cp README.md README.md.back
