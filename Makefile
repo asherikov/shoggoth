@@ -1,17 +1,10 @@
 JOBS?=4
 USER?=aleks
-SHOGGOTH_NAME?=shoggoth.local
-SHOGGOTH_HOST?=${SHOGGOTH_NAME}
-SHOGGOTH_IP?=$(shell getent hosts ${SHOGGOTH_NAME} | cut -f 1 -d ' ')
+SHOGGOTH_DOMAIN?=shoggoth.local
+SHOGGOTH_HOST?=${SHOGGOTH_DOMAIN}
+SHOGGOTH_IP?=$(shell getent hosts ${SHOGGOTH_DOMAIN} | cut -f 1 -d ' ')
 REMOTE_PATH?=~/
-SERVICE?=
 
-COMPOSE_CMD=env \
-			UID=`id -u` \
-			GID=`id -g` \
-			SHOGGOTH_IP=${SHOGGOTH_IP} \
-			SHOGGOTH_ROOT=`pwd` \
-			docker compose -f shoggoth.yml
 SSH_COMMON_ARGS=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 
 
@@ -21,7 +14,7 @@ help:
 -include make/*.mk
 -include private/*.mk
 
-sync:
+sync: client_conf
 	rsync -r shoggoth ${USER}@${SHOGGOTH_HOST}:${REMOTE_PATH} || true
 
 sync_restart:
@@ -46,53 +39,43 @@ ssh_exec:
 	ssh ${SSH_COMMON_ARGS} -t ${USER}@${SHOGGOTH_HOST} 'cd ${REMOTE_PATH}/shoggoth && ${CMD}'
 
 
-exec:
-	${MAKE} ssh_exec CMD='${COMPOSE_CMD} exec ${SERVICE} sh'
-
-up:
-	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} up -d ${SERVICE}'
-	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} up -d'
-
-down:
-	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} down ${SERVICE}'
-	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} down'
-
-pull:
-	${MAKE} ssh_exec CMD='${COMPOSE_CMD} pull'
-
-log:
-	${MAKE} ssh_exec CMD='${COMPOSE_CMD} logs ${SERVICE} --follow'
-
 shutdown:
 	${MAKE} ssh_exec CMD='exec su -l -c "shutdown -P now"'
 
 hosts:
-	./shoggoth/setup-client.sh --update-hosts --host "${SHOGGOTH_NAME}" --host-ip "${SHOGGOTH_IP}"
+	./shoggoth/setup-client.sh --update-hosts --host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}"
 
 ping:
-	ping "${SHOGGOTH_NAME}"
+	ping "${SHOGGOTH_DOMAIN}"
 
 home:
-	firefox http://${SHOGGOTH_NAME}
+	firefox http://${SHOGGOTH_DOMAIN}
 
 test:
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> docker cache"
-	curl -s --connect-timeout 5 "docker-cache.${SHOGGOTH_NAME}/ca.crt" --output /dev/null
+	curl -s --connect-timeout 5 "docker-cache.${SHOGGOTH_DOMAIN}/ca.crt" --output /dev/null
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> DNS"
-	host ${SHOGGOTH_NAME} ${SHOGGOTH_NAME}
+	host ${SHOGGOTH_DOMAIN} dns.${SHOGGOTH_DOMAIN}
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> ollama"
-	curl http://ollama.${SHOGGOTH_NAME}/api/tags
+	curl http://ollama.${SHOGGOTH_DOMAIN}/api/tags
 	@echo ""
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> apt-proxy"
-	curl http://apt-cache.${SHOGGOTH_NAME}/acng-report.html --output /dev/null
+	curl http://apt-cache.${SHOGGOTH_DOMAIN}/acng-report.html --output /dev/null
 
 ollama_query:
-	time curl http://ollama.${SHOGGOTH_NAME}/v1/completions \
+	time curl http://ollama.${SHOGGOTH_DOMAIN}/v1/completions \
 		-H "Content-Type: application/json" \
 		-H "Authorization: ollama" \
 		-d '{"model": "qwen3-coder:30b", "prompt": "What is the capital of UAE?"}'
 
+client_conf:
+	# apt proxy
+	echo "Acquire::http::Proxy \"http://apt-cache.${SHOGGOTH_DOMAIN}:3142\";" > shoggoth/client/apt-cache.conf
+	echo "Acquire::https::Proxy \"false\";"                                  >> shoggoth/client/apt-cache.conf
+	# dns
+	echo "nameserver `getent hosts dns.${SHOGGOTH_DOMAIN} | cut -f 1 -d ' '`" > shoggoth/client/resolv.conf
+	echo "search ${SHOGGOTH_DOMAIN}"                                         >> shoggoth/client/resolv.conf

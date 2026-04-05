@@ -201,11 +201,13 @@ configure_docker_proxy() {
     os_id=$(detect_os)
 
     if [ "$os_id" = "nixos" ]; then
-        echo "For NixOS, add the following to your configuration.nix:"
+        echo "For NixOS, add the following to your configuration.nix (TODO this wont work):"
         echo "  virtualisation.docker.daemon.settings = {"
+        echo "    \"insecure-registries\" = [\"docker-registry.${HOST}\"];"
         echo "    proxies = {"
         echo "      \"http-proxy\" = \"${PROXY_URL}\";"
         echo "      \"https-proxy\" = \"${PROXY_URL}\";"
+        echo "      \"no-proxy\" = \"*.${HOST}\";"
         echo "    };"
         echo "  };"
         echo "Then run: nixos-rebuild switch"
@@ -217,30 +219,16 @@ configure_docker_proxy() {
 
     run_priv_cmd "mkdir -p ${docker_daemon_dir}"
 
-    if [ -f "${docker_daemon_file}" ]; then
-        if command -v jq >/dev/null 2>&1; then
-            run_priv_cmd "jq --arg proxy '${PROXY_URL}' '.proxies[\"http-proxy\"] = \$proxy | .proxies[\"https-proxy\"] = \$proxy' ${docker_daemon_file} > ${docker_daemon_file}.tmp"
-            run_priv_cmd "mv ${docker_daemon_file}.tmp ${docker_daemon_file}"
-        else
-            run_priv_cmd "cat > ${docker_daemon_file} <<EOF
+    run_priv_cmd "cat > ${docker_daemon_file} <<EOF
 {
+  \"insecure-registries\": [\"docker-registry.${HOST}\"],
   \"proxies\": {
     \"http-proxy\": \"${PROXY_URL}\",
-    \"https-proxy\": \"${PROXY_URL}\"
+    \"https-proxy\": \"${PROXY_URL}\",
+    \"no-proxy\": \"*.${HOST}\"
   }
 }
 EOF"
-        fi
-    else
-        run_priv_cmd "cat > ${docker_daemon_file} <<EOF
-{
-  \"proxies\": {
-    \"http-proxy\": \"${PROXY_URL}\",
-    \"https-proxy\": \"${PROXY_URL}\"
-  }
-}
-EOF"
-    fi
 
     echo "Restarting Docker daemon..."
     if command -v systemctl >/dev/null 2>&1; then
@@ -253,7 +241,7 @@ EOF"
 }
 
 update_hosts() {
-    local services=("apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp" "git-pages" "redmine" "redmine-mcp" "proxpi")
+    local services=("dns" "apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp" "git-pages" "redmine" "redmine-mcp" "proxpi" "docker-registry")
     local hosts_entries="${HOST_IP} ${HOST}"$'\n'
 
     for service in "${services[@]}"; do
@@ -268,12 +256,12 @@ ${hosts_entries}EOF"
 }
 
 configure_apt_proxy() {
-    local apt_proxy_url="http://apt-cache.${HOST}/"
+    local apt_proxy_url="http://apt-cache.${HOST}:3142/"
     local apt_config_file="/etc/apt/apt.conf.d/01-shoggoth-apt-proxy"
 
     run_priv_cmd "cat > ${apt_config_file} <<EOF
 Acquire::http::Proxy \"${apt_proxy_url}\";
-Acquire::https::Proxy \"${apt_proxy_url}\";
+Acquire::https::Proxy \"false\";
 EOF"
 
     echo "Created ${apt_config_file} with proxy ${apt_proxy_url}"

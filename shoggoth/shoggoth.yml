@@ -1,304 +1,328 @@
 networks:
-  shoggoth:
-    name: shoggoth
-    external: false
-    ipam:
-      config:
-        - subnet: 172.20.0.0/24
+    shoggoth:
+        name: shoggoth
+        external: false
+        ipam:
+            config:
+                - subnet: 172.20.0.0/24
 
 volumes:
-  shoggoth_ci_cache:
-    name: "shoggoth_ci_cache"
-
+    shoggoth_ci_cache:
+        name: "shoggoth_ci_cache"
 secrets:
-  gitea_runner_token:
-    file: ./gitea/runner/runner-token.txt
-  redmine_db_password:
-    file: ./redmine/db-password.txt
+    gitea_runner_token:
+        file: ./gitea/runner/runner-token.txt
+    redmine_db_password:
+        file: ./redmine/db-password.txt
 
 # https://docs.docker.com/compose/compose-file/11-extension/
 x-service: &default_service
-  networks:
-    - shoggoth
-  restart: unless-stopped
-  dns:
-    - 172.20.0.53
-  depends_on:
-    dns:
-      condition: service_started
+    networks:
+        - shoggoth
+    restart: unless-stopped
+    dns_search: ${SHOGGOTH_DOMAIN}
+    # resolves names to the external host IP, not useful in internal network
+    #dns:
+    #    - 172.20.0.53
+    depends_on:
+        dns:
+            condition: service_started
 
 x-environment: &default_environment
-  SHOGGOTH_IP: ${SHOGGOTH_IP}
+    SHOGGOTH_IP: ${SHOGGOTH_IP}
+
 
 services:
-  apt-cache:
-    <<: *default_service
-    # https://hub.docker.com/r/sameersbn/apt-cacher-ng
-    # https://www.dotlinux.net/blog/quick-debian-ubuntu-package-caching-proxy-setup-with-apt-cacher-ng/
-    image: sameersbn/apt-cacher-ng:latest
-    container_name: apt-cache
-    volumes:
-      # Cache storage directory (relative to this compose file location)
-      - ./apt-cacher-ng/cache:/var/cache/apt-cacher-ng
-      # Log storage directory
-      - ./apt-cacher-ng/logs:/var/log/apt-cacher-ng
-    environment:
-      <<: *default_environment
-    post_start:
-      # needs to be writable
-      - command: chown -R apt-cacher-ng:apt-cacher-ng /var/cache/apt-cacher-ng /var/log/apt-cacher-ng
-        user: root
+    apt-cache:
+        !!merge <<: *default_service
+        # https://hub.docker.com/r/sameersbn/apt-cacher-ng
+        # https://github.com/sameersbn/docker-apt-cacher-ng
+        # https://github.com/gnzsnz/apt-cacher-ng
+        # https://www.dotlinux.net/blog/quick-debian-ubuntu-package-caching-proxy-setup-with-apt-cacher-ng/
+        image: sameersbn/apt-cacher-ng:latest
+        container_name: apt-cache.${SHOGGOTH_DOMAIN}
+        volumes:
+            # Cache storage directory (relative to this compose file location)
+            - ./apt-cacher-ng/cache:/var/cache/apt-cacher-ng
+            # Log storage directory
+            - ./apt-cacher-ng/logs:/var/log/apt-cacher-ng
+        environment:
+            !!merge <<: *default_environment
+        ports:
+            # has to be exposed: apt uses ip and cannot be redirected by proxy
+            - "3142:3142"
+        post_start:
+            # needs to be writable
+            - command: chown -R apt-cacher-ng:apt-cacher-ng /var/cache/apt-cacher-ng /var/log/apt-cacher-ng
+              user: root
 
-  docker-cache:
-    <<: *default_service
-    # https://github.com/rpardini/docker-registry-proxy
-    # alternatives
-    #   - https://docs.docker.com/docker-hub/image-library/mirror/#run-a-registry-as-a-pull-through-cache
-    #     "Only the central Hub can be mirrored."
-    image: rpardini/docker-registry-proxy:0.6.5
-    container_name: docker-cache
-    environment:
-      <<: *default_environment
-      # Common registries to cache
-      REGISTRIES: registry.k8s.io gcr.io quay.io ghcr.io mcr.microsoft.com docker.gitea.com docker.angie.software codeberg.org
-      # Enable manifest caching to avoid rate-limiting
-      ENABLE_MANIFEST_CACHE: true
-      # Cache configuration
-      CACHE_MAX_SIZE: 64g
-      # Manifest cache tiers
-      MANIFEST_CACHE_PRIMARY_REGEX: "(stable|nightly|production|test)"
-      MANIFEST_CACHE_PRIMARY_TIME: 10m
-      MANIFEST_CACHE_SECONDARY_REGEX: "(.*)(\\d|\\.)+(\\d|\\.)+(.*)(\\d|\\.)+"
-      MANIFEST_CACHE_SECONDARY_TIME: 60d
-      MANIFEST_CACHE_DEFAULT_TIME: 1h
-      DISABLE_IPV6: true
-    ports:
-      - "3128:3128"
-    volumes:
-      # Cache storage directory (relative to this compose file location)
-      - ./docker-registry-proxy/cache:/docker_mirror_cache
-      # CA certificate storage
-      - ./docker-registry-proxy/certs:/ca
+    docker-cache:
+        !!merge <<: *default_service
+        # https://github.com/rpardini/docker-registry-proxy
+        # alternatives
+        #   - https://docs.docker.com/docker-hub/image-library/mirror/#run-a-registry-as-a-pull-through-cache
+        #     "Only the central Hub can be mirrored."
+        image: rpardini/docker-registry-proxy:0.6.5
+        container_name: docker-cache.${SHOGGOTH_DOMAIN}
+        environment:
+            !!merge <<: *default_environment
+            # Common registries to cache
+            REGISTRIES: registry.k8s.io gcr.io quay.io ghcr.io mcr.microsoft.com docker.gitea.com docker.angie.software codeberg.org
+            # Enable manifest caching to avoid rate-limiting
+            ENABLE_MANIFEST_CACHE: true
+            # Cache configuration
+            CACHE_MAX_SIZE: 64g
+            # Manifest cache tiers
+            MANIFEST_CACHE_PRIMARY_REGEX: "(stable|nightly|production|test)"
+            MANIFEST_CACHE_PRIMARY_TIME: 10m
+            MANIFEST_CACHE_SECONDARY_REGEX: "(.*)(\\d|\\.)+(\\d|\\.)+(.*)(\\d|\\.)+"
+            MANIFEST_CACHE_SECONDARY_TIME: 60d
+            MANIFEST_CACHE_DEFAULT_TIME: 1h
+            DISABLE_IPV6: true
+            ALLOW_PUSH: true
+        ports:
+            - "3128:3128"
+        volumes:
+            # Cache storage directory (relative to this compose file location)
+            - ./docker/cache/cache:/docker_mirror_cache
+            # CA certificate storage
+            - ./docker/cache/certs:/ca
 
-  dns:
-    #<<: *default_service
-    # https://hub.docker.com/r/mvance/unbound/
-    image: mvance/unbound:latest
-    container_name: dns
-    volumes:
-      - ./unbound/unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
-      - ./unbound/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
-    environment:
-      <<: *default_environment
-    command: "/shoggoth_bringup.sh"
-    ports:
-      - "${SHOGGOTH_IP}:53:53/tcp"
-      - "${SHOGGOTH_IP}:53:53/udp"
-    networks:
-      shoggoth:
-        ipv4_address: 172.20.0.53
-    restart: unless-stopped
+    dns:
+        #<<: *default_service
+        # https://hub.docker.com/r/mvance/unbound/
+        image: mvance/unbound:latest
+        container_name: dns.${SHOGGOTH_DOMAIN}
+        volumes:
+            - ./unbound/unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
+            - ./unbound/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
+        environment:
+            !!merge <<: *default_environment
+        command: "/shoggoth_bringup.sh"
+        ports:
+            - "${SHOGGOTH_IP}:53:53/tcp"
+            - "${SHOGGOTH_IP}:53:53/udp"
+        networks:
+            shoggoth:
+                ipv4_address: 172.20.0.53
+        restart: unless-stopped
 
-  web:
-    <<: *default_service
-    # https://github.com/ccache/ccache/wiki/HTTP-storage
-    image: docker.angie.software/angie:minimal
-    container_name: web
-    ports:
-      - "${SHOGGOTH_IP}:80:80"
-      # gitea ssh
-      - "${SHOGGOTH_IP}:${SHOGGOTH_GIT_SSH_PORT}:22"
-    volumes:
-      - ./angie/angie.conf:/etc/angie/angie.conf:ro
-      - ./angie/proxy-params.conf:/etc/angie/proxy-params.conf:ro
-      - ./angie/html:/data/html:ro
-      - ./angie/build_cache:/data/build_cache
-      - ./setup-client.sh:/data/setup-client.sh:ro
-    post_start:
-      # needs to be writable
-      - command: chown -R angie:angie /data/build_cache
-        user: root
+    web:
+        !!merge <<: *default_service
+        # https://github.com/ccache/ccache/wiki/HTTP-storage
+        image: docker.angie.software/angie:minimal
+        container_name: web.${SHOGGOTH_DOMAIN}
+        ports:
+            - "${SHOGGOTH_IP}:80:80"
+            # gitea ssh
+            - "${SHOGGOTH_IP}:${SHOGGOTH_GIT_SSH_PORT}:22"
+        volumes:
+            - ./angie/angie.conf:/etc/angie/angie.conf:ro
+            - ./angie/proxy-params.conf:/etc/angie/proxy-params.conf:ro
+            - ./angie/html:/data/html:ro
+            - ./angie/build_cache:/data/build_cache
+            - ./setup-client.sh:/data/setup-client.sh:ro
+        post_start:
+            # needs to be writable
+            - command: chown -R angie:angie /data/build_cache
+              user: root
 
-  ollama:
-    <<: *default_service
-    # https://hub.docker.com/r/ollama/ollama
-    # https://github.com/jameschrisa/Ollama_Tuning_Guide
-    # https://deepwiki.com/ollama/ollama/4.6-quantization
-    image: ollama/ollama:latest
-    container_name: ollama
-    volumes:
-      - ./ollama/:/root/.ollama
-    devices:
-      - /dev/dri:/dev/dri
-      - /dev/kfd:/dev/kfd
-    environment:
-      <<: *default_environment
-      # 2 to log prompts
-      OLLAMA_DEBUG: 1
-      # https://docs.ollama.com/context-length
-      OLLAMA_CONTEXT_LENGTH: 256000
-      # may help?
-      OLLAMA_FLASH_ATTENTION: 1
-      #OLLAMA_LLM_LIBRARY: "cpu_avx2"
-      OLLAMA_MAX_LOADED_MODELS: 1
-      OLLAMA_NUM_PARALLEL: 1
-      OLLAMA_NO_CLOUD: 1
-      OLLAMA_KEEP_ALIVE: 30m
-      # amd igpu
-      OLLAMA_VULKAN: 1
-      OLLAMA_GPU_OVERHEAD: 25769803776 # limit vram
+    ollama:
+        !!merge <<: *default_service
+        # https://hub.docker.com/r/ollama/ollama
+        # https://github.com/jameschrisa/Ollama_Tuning_Guide
+        # https://deepwiki.com/ollama/ollama/4.6-quantization
+        image: ollama/ollama:latest
+        container_name: ollama.${SHOGGOTH_DOMAIN}
+        volumes:
+            - ./ollama/:/root/.ollama
+        devices:
+            - /dev/dri:/dev/dri
+            - /dev/kfd:/dev/kfd
+        environment:
+            !!merge <<: *default_environment
+            # 2 to log prompts
+            OLLAMA_DEBUG: 1
+            # https://docs.ollama.com/context-length
+            OLLAMA_CONTEXT_LENGTH: 256000
+            # may help?
+            OLLAMA_FLASH_ATTENTION: 1
+            #OLLAMA_LLM_LIBRARY: "cpu_avx2"
+            OLLAMA_MAX_LOADED_MODELS: 1
+            OLLAMA_NUM_PARALLEL: 1
+            OLLAMA_NO_CLOUD: 1
+            OLLAMA_KEEP_ALIVE: 30m
+            # amd igpu
+            OLLAMA_VULKAN: 1
+            OLLAMA_GPU_OVERHEAD: 25769803776 # limit vram
 
-  git:
-    <<: *default_service
-    # possible alternative https://forgejo.org/compare-to-gitea/
-    image: gitea/gitea:latest
-    container_name: git
-    environment:
-      <<: *default_environment
-      # https://docs.gitea.com/next/administration/config-cheat-sheet
-      USER_UID: ${UID}
-      USER_GID: ${GID}
-      GITEA__overall__APP_NAME: 'git.shoggoth.local'
-      GITEA__repository__FORCE_PRIVATE: 'true'
-      GITEA__repository__USE_COMPAT_SSH_URI: 'false'
-      #GITEA__repository__DISABLE_HTTP_GIT: 'true'
-      GITEA__repository__DEFAULT_BRANCH: 'main'
-      GITEA__repository__DEFAULT_PRIVATE: 'private'
-      # disabled: ,repo.packages,repo.actions
-      GITEA__repository__DEFAULT_REPO_UNITS: 'repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects'
-      # avoid conflict with ssh running on the host system, see web service config as well
-      GITEA__server__SSH_PORT: "${SHOGGOTH_GIT_SSH_PORT}"
-      GITEA__server__ROOT_URL: 'http://git.shoggoth.local'
-      GITEA__webhook__ALLOWED_HOST_LIST: 'private'
-      # https://forum.gitea.com/t/unattended-gitea-installation-from-the-cli/3373/23
-      #GITEA__security__INSTALL_LOCK: 'true' # skip installation page
-      GITEA__admin__USER_DISABLED_FEATURES: 'deletion'
-      GITEA__actions__DEFAULT_ACTIONS_URL: 'github'
-      GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
-    volumes:
-      - ./gitea/data:/data
-      - /etc/timezone:/etc/timezone:ro
-      - /etc/localtime:/etc/localtime:ro
-    secrets:
-      - gitea_runner_token
+    git:
+        !!merge <<: *default_service
+        # possible alternative https://forgejo.org/compare-to-gitea/
+        image: gitea/gitea:latest
+        container_name: git.${SHOGGOTH_DOMAIN}
+        environment:
+            !!merge <<: *default_environment
+            # https://docs.gitea.com/next/administration/config-cheat-sheet
+            USER_UID: ${UID}
+            USER_GID: ${GID}
+            GITEA__overall__APP_NAME: 'git.${SHOGGOTH_DOMAIN}'
+            GITEA__repository__FORCE_PRIVATE: 'true'
+            GITEA__repository__USE_COMPAT_SSH_URI: 'false'
+            #GITEA__repository__DISABLE_HTTP_GIT: 'true'
+            GITEA__repository__DEFAULT_BRANCH: 'main'
+            GITEA__repository__DEFAULT_PRIVATE: 'private'
+            # disabled: ,repo.packages,repo.actions
+            GITEA__repository__DEFAULT_REPO_UNITS: 'repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects'
+            # avoid conflict with ssh running on the host system, see web service config as well
+            GITEA__server__SSH_PORT: "${SHOGGOTH_GIT_SSH_PORT}"
+            GITEA__server__ROOT_URL: 'http://git.${SHOGGOTH_DOMAIN}'
+            GITEA__webhook__ALLOWED_HOST_LIST: 'private'
+            # https://forum.gitea.com/t/unattended-gitea-installation-from-the-cli/3373/23
+            #GITEA__security__INSTALL_LOCK: 'true' # skip installation page
+            GITEA__admin__USER_DISABLED_FEATURES: 'deletion'
+            GITEA__actions__DEFAULT_ACTIONS_URL: 'github'
+            GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
+        volumes:
+            - ./gitea/data:/data
+            - /etc/timezone:/etc/timezone:ro
+            - /etc/localtime:/etc/localtime:ro
+        secrets:
+            - gitea_runner_token
 
-  gitea-runner:
-    <<: *default_service
-    # https://docs.gitea.com/next/usage/actions/act-runner
-    #
-    # note that gitea actions anre not fully compatible with github actions,
-    # you would need to install nodejs to all images that execute jobs
-    # https://forum.gitea.com/t/use-actions-checkout-v3-in-a-container-without-node-installed/8406
-    image: gitea/act_runner:latest
-    container_name: gitea-runner
-    volumes:
-      - ./gitea/runner/data:/data
-      - ./gitea/runner/config.template.yaml:/config.template.yaml:ro
-      - ./gitea/runner/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
-      - shoggoth_ci_cache:/shoggoth/cache
-      - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      <<: *default_environment
-      SHOGGOTH_ROOT: ${SHOGGOTH_ROOT}
-      GITEA_INSTANCE_URL: http://git:3000
-      GITEA_RUNNER_NAME: shoggoth-runner
-      GITEA_RUNNER_LABELS: ubuntu-latest,ubuntu-24.04
-      GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
-    entrypoint: /shoggoth_bringup.sh
-    secrets:
-      - gitea_runner_token
+    gitea-runner:
+        !!merge <<: *default_service
+        # https://docs.gitea.com/next/usage/actions/act-runner
+        #
+        # note that gitea actions anre not fully compatible with github actions,
+        # you would need to install nodejs to all images that execute jobs
+        # https://forum.gitea.com/t/use-actions-checkout-v3-in-a-container-without-node-installed/8406
+        image: gitea/act_runner:latest
+        container_name: gitea-runner.${SHOGGOTH_DOMAIN}
+        volumes:
+            - ./gitea/runner/data:/data
+            - ./gitea/runner/config.template.yaml:/config.template.yaml:ro
+            - ./gitea/runner/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
+            - shoggoth_ci_cache:/shoggoth/cache
+            - /var/run/docker.sock:/var/run/docker.sock
+        environment:
+            !!merge <<: *default_environment
+            SHOGGOTH_ROOT: ${SHOGGOTH_ROOT}
+            GITEA_INSTANCE_URL: http://git:3000
+            GITEA_RUNNER_NAME: shoggoth-runner
+            GITEA_RUNNER_LABELS: ubuntu-latest,ubuntu-24.04
+            GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
+        entrypoint: /shoggoth_bringup.sh
+        secrets:
+            - gitea_runner_token
 
-  gitea-mcp:
-    <<: *default_service
-    # https://gitea.com/gitea/gitea-mcp
-    # https://hub.docker.com/r/gitea/gitea-mcp-server
-    image: docker.gitea.com/gitea-mcp-server:latest
-    container_name: gitea-mcp
-    environment:
-      <<: *default_environment
-      MCP_MODE: http
-      GITEA_HOST: http://git:3000
-      GITEA_INSECURE: true
+    gitea-mcp:
+        !!merge <<: *default_service
+        # https://gitea.com/gitea/gitea-mcp
+        # https://hub.docker.com/r/gitea/gitea-mcp-server
+        image: docker.gitea.com/gitea-mcp-server:latest
+        container_name: gitea-mcp.${SHOGGOTH_DOMAIN}
+        environment:
+            !!merge <<: *default_environment
+            MCP_MODE: http
+            GITEA_HOST: http://git:3000
+            GITEA_INSECURE: true
 
-  git-pages:
-    <<: *default_service
-    # https://codeberg.org/git-pages/git-pages
-    # https://git-pages.org/
-    image: codeberg.org/git-pages/git-pages:latest
-    container_name: git-pages
-    volumes:
-      - ./git-pages/data:/app/data
-      - ./git-pages/config.toml:/app/config.toml:ro
-    environment:
-      <<: *default_environment
-      PAGES_INSECURE: 1
+    git-pages:
+        !!merge <<: *default_service
+        # https://codeberg.org/git-pages/git-pages
+        # https://git-pages.org/
+        image: codeberg.org/git-pages/git-pages:latest
+        container_name: git-pages.${SHOGGOTH_DOMAIN}
+        volumes:
+            - ./git-pages/data:/app/data
+            - ./git-pages/config.toml:/app/config.toml:ro
+        environment:
+            !!merge <<: *default_environment
+            PAGES_INSECURE: 1
 
-  redmine-db:
-    <<: *default_service
-    # https://hub.docker.com/_/postgres
-    image: postgres:18-alpine
-    container_name: redmine-db
-    user: "${UID}:${GID}"
-    environment:
-      <<: *default_environment
-      POSTGRES_DB: redmine
-      POSTGRES_USER: redmine
-      POSTGRES_PASSWORD_FILE: /run/secrets/redmine_db_password
-    volumes:
-      - ./redmine/database:/var/lib/postgresql
-      # a hack for custom uid
-      - /etc/passwd:/etc/passwd:ro
-    secrets:
-      - redmine_db_password
+    redmine-db:
+        !!merge <<: *default_service
+        # https://hub.docker.com/_/postgres
+        image: postgres:18-alpine
+        container_name: redmine-db.${SHOGGOTH_DOMAIN}
+        user: "${UID}:${GID}"
+        environment:
+            !!merge <<: *default_environment
+            POSTGRES_DB: redmine
+            POSTGRES_USER: redmine
+            POSTGRES_PASSWORD_FILE: /run/secrets/redmine_db_password
+        volumes:
+            - ./redmine/database:/var/lib/postgresql
+            # a hack for custom uid
+            - /etc/passwd:/etc/passwd:ro
+        secrets:
+            - redmine_db_password
 
-  redmine:
-    <<: *default_service
-    # https://hub.docker.com/_/redmine
-    # https://www.redmine.org/
-    # https://github.com/topics/redmine-plugin
-    image: redmine:6.1.2-alpine
-    container_name: redmine
-    user: "${UID}:${GID}"
-    environment:
-      <<: *default_environment
-      REDMINE_DB_POSTGRES: redmine-db
-      REDMINE_DB_DATABASE: redmine
-      REDMINE_DB_USERNAME: redmine
-      REDMINE_DB_PASSWORD_FILE: /run/secrets/redmine_db_password
-      REDMINE_SECRET_KEY_BASE: supersecretkey
-    volumes:
-      - ./redmine/files:/usr/src/redmine/files
-      - ./redmine/plugins:/usr/src/redmine/plugins
-    depends_on:
-      - redmine-db
-      - dns
-    secrets:
-      - redmine_db_password
+    redmine:
+        !!merge <<: *default_service
+        # https://hub.docker.com/_/redmine
+        # https://www.redmine.org/
+        # https://github.com/topics/redmine-plugin
+        image: redmine:6.1.2-alpine
+        container_name: redmine.${SHOGGOTH_DOMAIN}
+        user: "${UID}:${GID}"
+        environment:
+            !!merge <<: *default_environment
+            REDMINE_DB_POSTGRES: redmine-db
+            REDMINE_DB_DATABASE: redmine
+            REDMINE_DB_USERNAME: redmine
+            REDMINE_DB_PASSWORD_FILE: /run/secrets/redmine_db_password
+            REDMINE_SECRET_KEY_BASE: supersecretkey
+        volumes:
+            - ./redmine/files:/usr/src/redmine/files
+            - ./redmine/plugins:/usr/src/redmine/plugins
+        depends_on:
+            - redmine-db
+            - dns
+        secrets:
+            - redmine_db_password
 
-  redmine-mcp:
-    <<: *default_service
-    # alternatives
-    # - only local
-    #   - https://github.com/onozaty/redmine-mcp-server
-    #   - https://github.com/runekaagaard/mcp-redmine
-    # - remote service
-    #   - https://github.com/jztan/redmine-mcp-server oauth too much trouble
-    #   - https://github.com/yenpu/redmine-mcp no docker
-    #   - https://github.com/redmine-tx/redmine_tx_mcp plugin
-    #   - https://github.com/daiji-sshr/redmine-mcp-stateless
-    image: redmine-mcp-stateless-redmine-mcp-stateless
-    container_name: redmine-mcp
-    environment:
-      <<: *default_environment
+    redmine-mcp:
+        !!merge <<: *default_service
+        # alternatives
+        # - only local
+        #   - https://github.com/onozaty/redmine-mcp-server
+        #   - https://github.com/runekaagaard/mcp-redmine
+        # - remote service
+        #   - https://github.com/jztan/redmine-mcp-server oauth too much trouble
+        #   - https://github.com/yenpu/redmine-mcp no docker
+        #   - https://github.com/redmine-tx/redmine_tx_mcp plugin not compatible with the latest redmine
+        #   - https://github.com/daiji-sshr/redmine-mcp-stateless
+        image: redmine-mcp-stateless-redmine-mcp-stateless
+        container_name: redmine-mcp.${SHOGGOTH_DOMAIN}
+        environment:
+            !!merge <<: *default_environment
 
-  proxpi:
-    <<: *default_service
-    # https://github.com/EpicWink/proxpi
-    # https://hub.docker.com/r/epicwink/proxpi
-    image: epicwink/proxpi:latest
-    container_name: proxpi
-    volumes:
-      - ./proxpi/cache:/var/cache/proxpi
-    environment:
-      <<: *default_environment
-      PROXPI_CACHE_DIR: /var/cache/proxpi
+    proxpi:
+        !!merge <<: *default_service
+        # https://github.com/EpicWink/proxpi
+        # https://hub.docker.com/r/epicwink/proxpi
+        image: epicwink/proxpi:latest
+        container_name: proxpi.${SHOGGOTH_DOMAIN}
+        volumes:
+            - ./proxpi/cache:/var/cache/proxpi
+        environment:
+            !!merge <<: *default_environment
+            PROXPI_CACHE_DIR: /var/cache/proxpi
+
+    docker-registry:
+        # gitea has registry too, but there are naming contraints
+        # https://github.com/distribution/distribution
+        # https://distribution.github.io/distribution/
+        !!merge <<: *default_service
+        image: registry:latest
+        container_name: docker-registry.${SHOGGOTH_DOMAIN}
+        volumes:
+            - ./docker/registry/:/var/lib/registry
+        environment:
+            !!merge <<: *default_environment
+            REGISTRY_LOG_LEVEL: info
+            REGISTRY_HTTP_ADDR: ":80"
+            REGISTRY_HTTP_DEBUG_ADDR: ""
+            OTEL_TRACES_EXPORTER: none

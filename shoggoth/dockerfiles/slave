@@ -1,0 +1,44 @@
+ARG BASE_IMAGE=asherikov/ccws_qwen_noble:latest
+FROM ${BASE_IMAGE}
+
+ARG CCWS_BIN_DIR=/ccws/ccws/tools/bin/
+ARG QWEN_SKILL_DIR=/home/ccws/.qwen/skills/
+
+USER root
+
+COPY client/apt-cache.conf /etc/apt/apt.conf.d/00-apt-cache
+
+RUN \
+--mount=type=bind,source=client/resolv.conf,target=/etc/resolv.conf \
+--mount=type=cache,target=/var/cache/apt,sharing=locked \
+--mount=type=cache,target=/var/lib/apt/lists/,sharing=locked \
+--mount=type=cache,target=/cache/pip,sharing=locked \
+    curl -fsSL http://download.docker.com/linux/ubuntu/gpg -o /etc/apt/trusted.gpg.d/docker.asc \
+    && echo "deb [arch=$(dpkg --print-architecture)] http://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+    | sudo tee /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && ${APT_INSTALL} \
+        docker-ce \
+        docker-ce-cli \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-compose-plugin \
+    && usermod -aG docker ccws
+
+USER ccws
+
+RUN curl -fsSL https://dl.gitea.io/tea/main/tea-main-linux-`dpkg --print-architecture` -o ${CCWS_BIN_DIR}/tea \
+    && chmod +x ${CCWS_BIN_DIR}/tea
+
+RUN curl -fsSL \
+        "https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg --print-architecture`.tar.gz" \
+    | tar -xz -C ${CCWS_BIN_DIR}/
+
+RUN mkdir -p ${QWEN_SKILL_DIR}/gitea-tea \
+    && curl -fsSL \
+        https://raw.githubusercontent.com/beshkenadze/claude-skills-marketplace/main/skills/development/gitea-tea/SKILL.md \
+        -o ${QWEN_SKILL_DIR}/gitea-tea/SKILL.md
+
+RUN mkdir -p ${QWEN_SKILL_DIR}/redmine-cli \
+    && curl -fsSL https://raw.githubusercontent.com/aarondpn/redmine-cli/main/skills/redmine-cli/SKILL.md \
+        -o ${QWEN_SKILL_DIR}/redmine-cli/SKILL.md
