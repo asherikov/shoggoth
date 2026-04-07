@@ -6,6 +6,7 @@
 - [Client Configuration](#client-configuration)
   - [Service Usage Examples](#service-usage-examples)
   - [Server Management](#server-management)
+- [Troubleshooting](#troubleshooting)
 - [References](#references)
 
 Introduction
@@ -24,6 +25,7 @@ Features
   - Build cache server, to be used with ccache or sccache.
 - Development:
   - Local AI model server (`ollama`).
+  - Docker registry.
   - Git server (`gitea`) with CI/CD actions support.
   - Gitea MCP server for AI coding agent integration.
 - Project management
@@ -49,21 +51,22 @@ Services
 
 The following services are available:
 
-| Service        | Hostname             | Description                               |
-|----------------|----------------------|-------------------------------------------|
-| `apt-cache`    | `apt-cache.<host>`   | APT package caching proxy                 |
-| `docker-cache` | `<host>`             | Docker registry caching proxy             |
-| `dns`          | `<host>`             | Unbound DNS resolver                      |
-| `web`          | `<host>`             | Welcome home page and angie reverse proxy |
-| `web`          | `build-cache.<host>` | Build cache storage                       |
-| `ollama`       | `ollama.<host>`      | Local AI model server                     |
-| `git`          | `git.<host>`         | Gitea Git server with web UI              |
-| `git-pages`    | `git-pages.<host>`   | Git Pages static site hosting             |
-| `gitea-runner` | \-                   | Gitea Actions runner                      |
-| `gitea-mcp`    | `gitea-mcp.<host>`   | Gitea MCP server for AI agents            |
-| `proxpi`       | `proxpi.<host>`      | Python package caching proxy              |
-| `redmine`      | `redmine.<host>`     | Redmine project management server         |
-| `redmine-mcp`  | `redmine-mcp.<host>` | Redmine MCP server for AI agents          |
+| Service | Hostname | Description |
+|----|----|----|
+| `apt-cache` | `apt-cache.<host>` | APT package caching proxy |
+| `docker-cache` | `<host>` | Docker registry caching proxy |
+| `docker-registry` | `docker-registry.<host>` | Private Docker registry |
+| `dns` | `<host>` | Unbound DNS resolver |
+| `web` | `<host>` | Welcome home page and angie reverse proxy |
+| `web` | `build-cache.<host>` | Build cache storage |
+| `ollama` | `ollama.<host>` | Local AI model server |
+| `git` | `git.<host>` | Gitea Git server with web UI |
+| `git-pages` | `git-pages.<host>` | Git Pages static site hosting |
+| `gitea-runner` | \- | Gitea Actions runner |
+| `gitea-mcp` | `gitea-mcp.<host>` | Gitea MCP server for AI agents |
+| `proxpi` | `proxpi.<host>` | Python package caching proxy |
+| `redmine` | `redmine.<host>` | Redmine project management server |
+| `redmine-mcp` | `redmine-mcp.<host>` | Redmine MCP server for AI agents |
 
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture" />
 
@@ -246,6 +249,13 @@ make ssh
 # Sync changes and restart
 make sync_restart
 ```
+
+Troubleshooting
+===============
+
+- cmake builds fail to find packages in Ubuntu due to missing system
+  information, e.g., `CMAKE_LIBRARY_ARCHITECTURE`: check that build cache is
+  operational.
 
 References
 ==========

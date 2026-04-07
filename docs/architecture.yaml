@@ -6,7 +6,7 @@ nodes:
       style: filled
       shape: box
       fixedsize: true
-      width: 3.3
+      width: 3.5
       height: 1
 
   - id: ["", docker_service_style]
@@ -125,6 +125,10 @@ nodes:
     scope: proxy_services
     style_notag: proxy_style
 
+  - id: ["docker-registry.", proxy_docker_registry]
+    scope: proxy_services
+    style_notag: proxy_style
+
   - id: ["build-cache.", build_cache]
     scope: service_proxy
     style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
@@ -137,6 +141,10 @@ nodes:
   - id: [":3128\n(docker registry\ncaching proxy)", docker_cache]
     scope: direct_access_group
     style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
+
+  - id: ["local container\nregistry", docker_registry]
+    scope: behind_proxy_group
+    style_notag: hh_diagrams_alibabacloud_compute_container_service
 
   - id: ["proxpi", proxpi_service]
     scope: behind_proxy_group
@@ -298,6 +306,10 @@ edges:
     style: hh_diagrams_link
     graphviz:
       color: auto
+  - link: [client_browser, dns_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
 
   # Redmine flow (via proxy)
   - link: [client_browser, proxy_redmine]
@@ -318,11 +330,17 @@ edges:
       color: auto
 
   # Proxpi flow (via proxy)
-  - link: [client_ccache, proxy_proxpi]
+  - link: [proxy_proxpi, proxpi_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [proxy_proxpi, proxpi_service]
+
+  # Docker registry flow (via proxy)
+  - link: [client_docker, proxy_docker_registry]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [proxy_docker_registry, docker_registry]
     style: hh_diagrams_link
     graphviz:
       color: auto
@@ -341,10 +359,6 @@ edges:
     graphviz:
       color: auto
   - link: [gitea_mcp, git_service]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
-  - link: [ci_job, dns_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
