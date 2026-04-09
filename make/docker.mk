@@ -1,3 +1,5 @@
+DOCKER_DISTRO?=noble
+
 COMPOSE_CMD=env \
 		UID=`id -u` \
 			GID=`id -g` \
@@ -31,4 +33,9 @@ log:
 
 build: client_conf
 	cd shoggoth \
-		&& docker build -f dockerfiles/slave -t docker-registry.${SHOGGOTH_DOMAIN}/slave --progress plain ./
+		&& docker build \
+			--build-arg BASE_IMAGE=asherikov/ccws_qwen_${DOCKER_DISTRO}:latest \
+			-f dockerfiles/slave \
+			-t docker-registry.${SHOGGOTH_DOMAIN}/slave_${DOCKER_DISTRO}:latest \
+			--progress plain \
+			./

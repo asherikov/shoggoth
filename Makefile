@@ -73,9 +73,12 @@ ollama_query:
 		-d '{"model": "qwen3-coder:30b", "prompt": "What is the capital of UAE?"}'
 
 client_conf:
-	# apt proxy
-	echo "Acquire::http::Proxy \"http://apt-cache.${SHOGGOTH_DOMAIN}:3142\";" > shoggoth/client/apt-cache.conf
-	echo "Acquire::https::Proxy \"false\";"                                  >> shoggoth/client/apt-cache.conf
-	# dns
-	echo "nameserver `getent hosts dns.${SHOGGOTH_DOMAIN} | cut -f 1 -d ' '`" > shoggoth/client/resolv.conf
-	echo "search ${SHOGGOTH_DOMAIN}"                                         >> shoggoth/client/resolv.conf
+	./shoggoth/setup-client.sh \
+		--client-conf shoggoth/client \
+		--host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}"
+
+personal_conf:
+	./shoggoth/setup-client.sh \
+		--client-conf \
+		--host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}" \
+		--gitea-token ${GITEA_TOKEN} --redmine-token ${REDMINE_TOKEN}
