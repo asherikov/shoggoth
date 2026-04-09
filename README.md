@@ -4,6 +4,7 @@
   - [Services](#services)
   - [Domain Name Resolution](#domain-name-resolution)
 - [Client Configuration](#client-configuration)
+  - [Caveats](#caveats)
   - [Service Usage Examples](#service-usage-examples)
   - [Server Management](#server-management)
 - [Troubleshooting](#troubleshooting)
@@ -126,7 +127,7 @@ Run the setup script on each client machine.
 The script generates the following files when `--client-conf` is used:
 
 | File | Description |
-|------|-------------|
+|----|----|
 | `env` | Environment variables for all services (ollama, ccache, proxpi, gitea, redmine) |
 | `apt-cache.conf` | APT cache configuration |
 | `resolv.conf` | DNS resolver configuration |
@@ -138,6 +139,13 @@ Source the `env` file in your `~/.bashrc` or `~/.zshrc`:
 echo 'set -a; source ~/.config/shoggoth/env; set +a' >> ~/.bashrc
 source ~/.bashrc
 ```
+
+Caveats
+-------
+
+Neither redmine nor gitea cli clients can be configured exclusively with
+environment variables. Moreover gitea cli requires user name to be specified in
+addition to a token for smooth operation.
 
 Service Usage Examples
 ----------------------
@@ -230,9 +238,9 @@ and restarting the service.
 ### Redmine MCP Server (AI Agent Integration)
 
 1.  Log in to Redmine with administrator privileges
-2.  Go to "Administration" → "Settings" → "API" tab
-3.  Check "Enable REST web service"
-4.  Generate "API access key" in personal settings.
+2.  Go to “Administration” → “Settings” → “API” tab
+3.  Check “Enable REST web service”
+4.  Generate “API access key” in personal settings.
 
 ``` bash
 ./shoggoth/setup-client.sh --host shoggoth.local --redmine-token your-token
