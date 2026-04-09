@@ -81,4 +81,5 @@ personal_conf:
 	./shoggoth/setup-client.sh \
 		--client-conf \
 		--host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}" \
-		--gitea-token ${GITEA_TOKEN} --redmine-token ${REDMINE_TOKEN}
+		--gitea-token ${GITEA_TOKEN} --gitea-user ${GITEA_USER} \
+		--redmine-token ${REDMINE_TOKEN}

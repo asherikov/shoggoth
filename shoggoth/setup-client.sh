@@ -9,6 +9,7 @@ CONFIGURE_ALL="${CONFIGURE_ALL:-}"
 CONFIGURE_APT_CACHE="${CONFIGURE_APT_CACHE:-}"
 CONFIGURE_CLIENT_CONF="${CONFIGURE_CLIENT_CONF:-}"
 CONFIGURE_GITEA="${CONFIGURE_GITEA:-}"
+CONFIGURE_GITEA_USER="${CONFIGURE_GITEA_USER:-}"
 CONFIGURE_REDMINE="${CONFIGURE_REDMINE:-}"
 HOST="${HOST:-shoggoth.local}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
@@ -50,8 +51,9 @@ Options:
     --docker [PORT]         Configure Docker proxy, optionally with a port (default: 3128)
     --update-hosts          Append generated hosts file to /etc/hosts
     --apt-cache             Install apt cache config to system apt config
-    --gitea-token TOKEN     Configure gitea tea CLI auth and MCP server config
-    --redmine-token TOKEN   Configure redmine CLI auth and MCP server config
+    --gitea-token TOKEN     Configure gitea tea CLI auth, config file, and MCP server config
+    --gitea-user USER       Configure gitea tea CLI username for basic auth
+    --redmine-token TOKEN   Configure redmine CLI auth, config file, and MCP server config
     --client-conf [DIR]     Generate configuration files, optionally in DIR (default: ${HOME}/.config/shoggoth)
     --all                   Configure and print all setup instructions
     --help                  Show this help message
@@ -70,8 +72,9 @@ Environment variables:
     CONFIGURE_ALL           Set to "true" to configure all options
     CONFIGURE_APT_CACHE     Set to "true" to install apt cache config
     CONFIGURE_CLIENT_CONF   Set to "true" or a directory path to generate client config files
-    CONFIGURE_GITEA         Set to token for gitea tea CLI and MCP server config
-    CONFIGURE_REDMINE       Set to API key for redmine CLI and MCP server config
+    CONFIGURE_GITEA         Set to token for gitea tea CLI, config file, and MCP server config
+    CONFIGURE_GITEA_USER    Set to username for gitea tea CLI basic auth
+    CONFIGURE_REDMINE       Set to API key for redmine CLI, config file, and MCP server config
     CLIENT_CONF_DIR         Directory for config files (default: ${HOME}/.config/shoggoth)
 
 Examples:
@@ -118,6 +121,10 @@ parse_args() {
                 ;;
             --gitea-token)
                 CONFIGURE_GITEA="$2"
+                shift 2
+                ;;
+            --gitea-user)
+                CONFIGURE_GITEA_USER="$2"
                 shift 2
                 ;;
             --redmine-token)
@@ -324,6 +331,50 @@ EOF
     chmod 600 "${ENV_FILE}"
 }
 
+generate_gitea_cli_conf() {
+    local tea_config_file="${CLIENT_CONF_DIR}/tea-config.yml"
+
+    if [ -n "${CONFIGURE_GITEA_USER}" ]; then
+        cat > "${tea_config_file}" <<EOF
+logins:
+  - name: shoggoth
+    url: http://git.${HOST}
+    ssh_host: git.${HOST}:3022
+    token: ${CONFIGURE_GITEA}
+    user: ${CONFIGURE_GITEA_USER}
+    default: true
+    version_check: false
+EOF
+    else
+        cat > "${tea_config_file}" <<EOF
+logins:
+  - name: shoggoth
+    url: http://git.${HOST}
+    ssh_host: git.${HOST}:3022
+    token: ${CONFIGURE_GITEA}
+    default: true
+    version_check: false
+EOF
+    fi
+
+    chmod 600 "${tea_config_file}"
+    echo "Generated ${tea_config_file}"
+}
+
+generate_redmine_cli_conf() {
+    local redmine_config_file="${CLIENT_CONF_DIR}/redmine-config.yml"
+
+    cat > "${redmine_config_file}" <<EOF
+server: http://redmine.${HOST}
+auth_method: apikey
+api_key: ${CONFIGURE_REDMINE}
+no_color: true
+EOF
+
+    chmod 600 "${redmine_config_file}"
+    echo "Generated ${redmine_config_file}"
+}
+
 generate_client_conf() {
     mkdir -p "${CLIENT_CONF_DIR}"
     chmod 700 "${CLIENT_CONF_DIR}"
@@ -444,12 +495,14 @@ main() {
 
     if [ -n "${CONFIGURE_GITEA}" ] && [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
         generate_gitea_config
-        echo "Gitea tea CLI configured via environment variables (GITEA_SERVER_URL, GITEA_SERVER_TOKEN)"
+        generate_gitea_cli_conf
+        echo "Gitea tea CLI configured via environment variables (GITEA_SERVER_URL, GITEA_SERVER_TOKEN) and config file (${CLIENT_CONF_DIR}/tea-config.yml)"
     fi
 
     if [ -n "${CONFIGURE_REDMINE}" ] && [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
         generate_redmine_config
-        echo "Redmine CLI configured via environment variables (REDMINE_SERVER, REDMINE_API_KEY)"
+        generate_redmine_cli_conf
+        echo "Redmine CLI configured via environment variables (REDMINE_SERVER, REDMINE_API_KEY) and config file (${CLIENT_CONF_DIR}/redmine-config.yml)"
     fi
 
     if [ -n "${CONFIGURE_CLIENT_CONF}" ] && { [ -n "${CONFIGURE_GITEA}" ] || [ -n "${CONFIGURE_REDMINE}" ]; }; then

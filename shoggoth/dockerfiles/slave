@@ -2,7 +2,7 @@ ARG BASE_IMAGE=asherikov/ccws_qwen_noble:latest
 FROM ${BASE_IMAGE}
 
 ARG CCWS_BIN_DIR=/ccws/ccws/tools/bin/
-ARG QWEN_SKILL_DIR=/home/ccws/.qwen/skills/
+ARG QWEN_SKILL_DIR=/qwen/skills/
 
 USER root
 
@@ -24,6 +24,9 @@ RUN \
         docker-buildx-plugin \
         docker-compose-plugin \
     && usermod -aG docker ccws
+
+RUN mkdir -p ${QWEN_SKILL_DIR}/ \
+    chown -R ccws ${QWEN_SKILL_DIR}
 
 USER ccws
 
