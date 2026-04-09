@@ -5,15 +5,14 @@ set -e
 DOCKER_PROXY_PORT="${DOCKER_PROXY_PORT:-3128}"
 CONFIGURE_DOCKER="${CONFIGURE_DOCKER:-}"
 CONFIGURE_HOSTS="${CONFIGURE_HOSTS:-}"
-CONFIGURE_BUILD_CACHE="${CONFIGURE_BUILD_CACHE:-}"
 CONFIGURE_ALL="${CONFIGURE_ALL:-}"
-CONFIGURE_APT="${CONFIGURE_APT:-}"
-CONFIGURE_OLLAMA="${CONFIGURE_OLLAMA:-}"
-CONFIGURE_GITEA_MCP="${CONFIGURE_GITEA_MCP:-}"
-CONFIGURE_REDMINE_MCP="${CONFIGURE_REDMINE_MCP:-}"
-CONFIGURE_PROXPI="${CONFIGURE_PROXPI:-}"
+CONFIGURE_APT_CACHE="${CONFIGURE_APT_CACHE:-}"
+CONFIGURE_CLIENT_CONF="${CONFIGURE_CLIENT_CONF:-}"
+CONFIGURE_GITEA="${CONFIGURE_GITEA:-}"
+CONFIGURE_REDMINE="${CONFIGURE_REDMINE:-}"
 HOST="${HOST:-shoggoth.local}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
+CLIENT_CONF_DIR="${CLIENT_CONF_DIR:-${HOME}/.config/shoggoth}"
 
 PRIV_CMD=""
 USE_SU=""
@@ -43,50 +42,48 @@ usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Set up Docker client to use shoggoth proxy and generate ~/.shoggothrc file.
+Set up Docker client to use shoggoth proxy and generate configuration files.
 
 Options:
     -h, --host HOST         Hostname for /etc/hosts entries (default: shoggoth.local)
     --host-ip IP            IP address for /etc/hosts entries (default: 127.0.0.1)
-    -p, --port PORT         Proxy port (default: 3128, or \$DOCKER_PROXY_PORT)
-    --docker-proxy          Configure Docker proxy (default if no action specified)
-    --update-hosts          Update /etc/hosts to map all service hostnames to IP
-    --build-cache           Print build cache with nginx proxy setup instructions
-    --apt-proxy             Configure apt proxy for package caching
-    --ollama                Configure ollama client environment
-    --proxpi                Configure proxpi (PyPI caching proxy) client environment
-    --gitea-mcp TOKEN       Generate qwen-code MCP server configuration example with given token
-    --redmine-mcp TOKEN     Generate Redmine MCP server configuration example with given token
+    --docker [PORT]         Configure Docker proxy, optionally with a port (default: 3128)
+    --update-hosts          Append generated hosts file to /etc/hosts
+    --apt-cache             Install apt cache config to system apt config
+    --gitea-token TOKEN     Configure gitea tea CLI auth and MCP server config
+    --redmine-token TOKEN   Configure redmine CLI auth and MCP server config
+    --client-conf [DIR]     Generate configuration files, optionally in DIR (default: ${HOME}/.config/shoggoth)
     --all                   Configure and print all setup instructions
     --help                  Show this help message
 
-The script generates \${HOME}/.shoggothrc file with environment variables.
-Source this file in your .bashrc or .zshrc:
-    source ~/.shoggothrc
+The script generates an env file with environment variables (KEY=VALUE format)
+in the config directory. To load it in your shell, add to your ~/.bashrc or ~/.zshrc:
+    set -a; source ~/.config/shoggoth/env; set +a
+See: https://gist.github.com/mihow/9c7f559807069a03e302605691f85572
 
 Environment variables:
     DOCKER_PROXY_PORT       Proxy port (default: 3128)
     HOST                    Hostname for /etc/hosts (default: shoggoth.local)
     HOST_IP                 IP address for /etc/hosts (default: 127.0.0.1)
-    CONFIGURE_DOCKER        Set to "true" to configure Docker proxy
+    CONFIGURE_DOCKER        Set to "true" or a port number to configure Docker proxy
     CONFIGURE_HOSTS         Set to "true" to update /etc/hosts
-    CONFIGURE_BUILD_CACHE   Set to "true" to print build cache setup instructions
     CONFIGURE_ALL           Set to "true" to configure all options
-    CONFIGURE_APT           Set to "true" to configure apt proxy
-    CONFIGURE_OLLAMA        Set to "true" to configure ollama client
-    CONFIGURE_GITEA_MCP     Set to authorization token to generate qwen-code MCP configuration
-    CONFIGURE_REDMINE_MCP   Set to authorization token to generate qwen-code MCP configuration
-    CONFIGURE_PROXPI        Set to "true" to configure proxpi client
+    CONFIGURE_APT_CACHE     Set to "true" to install apt cache config
+    CONFIGURE_CLIENT_CONF   Set to "true" or a directory path to generate client config files
+    CONFIGURE_GITEA         Set to token for gitea tea CLI and MCP server config
+    CONFIGURE_REDMINE       Set to API key for redmine CLI and MCP server config
+    CLIENT_CONF_DIR         Directory for config files (default: ${HOME}/.config/shoggoth)
 
 Examples:
-    ./setup-client.sh --docker-proxy --host shoggoth.local --host-ip 192.168.1.100
+    ./setup-client.sh --docker --host shoggoth.local --host-ip 192.168.1.100
+    ./setup-client.sh --docker 8080 --host shoggoth.local --host-ip 192.168.1.100
     ./setup-client.sh --update-hosts --host shoggoth.local --host-ip 192.168.1.100
-    ./setup-client.sh --docker-proxy --update-hosts --host shoggoth.local --host-ip 192.168.1.100
-    ./setup-client.sh --apt-proxy --host shoggoth.local --host-ip 192.168.1.100
-    ./setup-client.sh --ollama --host shoggoth.local --host-ip 192.168.1.100
-    ./setup-client.sh --host shoggoth.local --gitea-mcp your-mcp-token
-    ./setup-client.sh --host shoggoth.local --redmine-mcp your-mcp-token
-    ./setup-client.sh --build-cache
+    ./setup-client.sh --docker --update-hosts --host shoggoth.local --host-ip 192.168.1.100
+    ./setup-client.sh --client-conf --host shoggoth.local
+    ./setup-client.sh --client-conf /path/to/dir --host shoggoth.local
+    ./setup-client.sh --client-conf --gitea-token your-token --host shoggoth.local
+    ./setup-client.sh --client-conf --apt-cache --host shoggoth.local --host-ip 192.168.1.100
+    ./setup-client.sh --host shoggoth.local --redmine-token your-token
     ./setup-client.sh --all
 EOF
 }
@@ -102,41 +99,39 @@ parse_args() {
                 HOST_IP="$2"
                 shift 2
                 ;;
-            -p|--port)
-                DOCKER_PROXY_PORT="$2"
-                shift 2
-                ;;
-            --docker-proxy)
+            --docker)
                 CONFIGURE_DOCKER="true"
-                shift
+                if [ -n "${2:-}" ] && [[ ! "${2:-}" == --* ]]; then
+                    DOCKER_PROXY_PORT="$2"
+                    shift 2
+                else
+                    shift
+                fi
                 ;;
             --update-hosts)
                 CONFIGURE_HOSTS="true"
                 shift
                 ;;
-            --build-cache)
-                CONFIGURE_BUILD_CACHE="true"
+            --apt-cache)
+                CONFIGURE_APT_CACHE="true"
                 shift
                 ;;
-            --apt-proxy)
-                CONFIGURE_APT="true"
-                shift
-                ;;
-            --ollama)
-                CONFIGURE_OLLAMA="true"
-                shift
-                ;;
-            --proxpi)
-                CONFIGURE_PROXPI="true"
-                shift
-                ;;
-            --gitea-mcp)
-                CONFIGURE_GITEA_MCP="$2"
+            --gitea-token)
+                CONFIGURE_GITEA="$2"
                 shift 2
                 ;;
-            --redmine-mcp)
-                CONFIGURE_REDMINE_MCP="$2"
+            --redmine-token)
+                CONFIGURE_REDMINE="$2"
                 shift 2
+                ;;
+            --client-conf)
+                CONFIGURE_CLIENT_CONF="true"
+                if [ -n "${2:-}" ] && [[ ! "${2:-}" == --* ]]; then
+                    CLIENT_CONF_DIR="$2"
+                    shift 2
+                else
+                    shift
+                fi
                 ;;
             --all)
                 CONFIGURE_ALL="true"
@@ -255,16 +250,20 @@ ${hosts_entries}EOF"
     echo "${hosts_entries}"
 }
 
-configure_apt_proxy() {
-    local apt_proxy_url="http://apt-cache.${HOST}:3142/"
-    local apt_config_file="/etc/apt/apt.conf.d/01-shoggoth-apt-proxy"
+generate_apt_cache_conf() {
+    cat <<EOF
+Acquire::http::Proxy "http://apt-cache.${HOST}:3142";
+Acquire::https::Proxy "false";
+EOF
+}
 
-    run_priv_cmd "cat > ${apt_config_file} <<EOF
-Acquire::http::Proxy \"${apt_proxy_url}\";
-Acquire::https::Proxy \"false\";
-EOF"
+configure_apt_cache() {
+    local apt_config_file="/etc/apt/apt.conf.d/01-shoggoth-apt-cache"
 
-    echo "Created ${apt_config_file} with proxy ${apt_proxy_url}"
+    generate_apt_cache_conf | run_priv_cmd "cat > ${apt_config_file}"
+    run_priv_cmd "chmod 644 ${apt_config_file}"
+
+    echo "Generated ${apt_config_file}"
     echo ""
     echo "Verifying apt configuration:"
     apt-config dump | grep -i proxy || true
@@ -272,75 +271,122 @@ EOF"
     echo "Test with: sudo apt update"
 }
 
-generate_shoggothrc() {
-    local shoggothrc_file="${HOME}/.shoggothrc"
-    local ollama_url="http://ollama.${HOST}"
-    local build_cache_url="http://build-cache.${HOST}"
-    local proxpi_url="http://proxpi.${HOST}"
+generate_shoggoth_conf() {
+    mkdir -p "${CLIENT_CONF_DIR}"
+    chmod 700 "${CLIENT_CONF_DIR}"
 
-    cat > "${shoggothrc_file}" <<EOF
+    cat > "${ENV_FILE}" <<EOF
 # Shoggoth environment variables
-# Source this file in your .bashrc or .zshrc
-# source ~/.shoggothrc
+# Load with: set -a; source ${ENV_FILE}; set +a
+# See: https://gist.github.com/mihow/9c7f559807069a03e302605691f85572
 
 # Ollama
-export OPENAI_API_KEY=ollama
-export OPENAI_BASE_URL="${ollama_url}/v1/"
-export OPENAI_MODEL="qwen3-coder:30b"
+OPENAI_API_KEY=ollama
+OPENAI_BASE_URL="http://ollama.${HOST}/v1/"
+OPENAI_MODEL="qwen3-coder:30b"
 
 # Build cache (ccache)
-export CCACHE_REMOTE_STORAGE="${build_cache_url}"
-export CCACHE_REMOTE_ONLY="true"
+CCACHE_REMOTE_STORAGE="http://build-cache.${HOST}"
+CCACHE_REMOTE_ONLY="true"
 
 # Proxpi (PyPI caching proxy)
-export PIP_INDEX_URL="${proxpi_url}/index/"
-export PIP_TRUSTED_HOST="proxpi.${HOST}"
+PIP_INDEX_URL="http://proxpi.${HOST}/index/"
+PIP_TRUSTED_HOST="proxpi.${HOST}"
 EOF
+    chmod 600 "${ENV_FILE}"
 
-    echo "Generated ${shoggothrc_file}"
+    echo "Generated ${ENV_FILE}"
     echo "Add the following to your ~/.bashrc or ~/.zshrc:"
-    echo "  source ~/.shoggothrc"
+    echo "  set -a; source ${ENV_FILE}; set +a"
+    echo "See: https://gist.github.com/mihow/9c7f559807069a03e302605691f85572"
 }
 
-generate_gitea_mcp_config() {
-    local mcp_server_url="http://gitea-mcp.${HOST}/mcp"
+generate_gitea_config() {
+    cat >> "${ENV_FILE}" <<EOF
 
-    cat <<EOF
-{
-  "mcpServers": {
-    "shoggoth-gitea-mcp": {
-      "httpUrl": "${mcp_server_url}",
-      "headers": {
-        "Authorization": "Bearer ${CONFIGURE_GITEA_MCP}"
+# Gitea tea CLI
+GITEA_SERVER_URL=http://git.${HOST}
+GITEA_SERVER_TOKEN=${CONFIGURE_GITEA}
+GITEA_INSTANCE_SSH_HOST=git.${HOST}:3022
+EOF
+    chmod 600 "${ENV_FILE}"
+}
+
+generate_redmine_config() {
+    cat >> "${ENV_FILE}" <<EOF
+
+# Redmine CLI
+REDMINE_SERVER=http://redmine.${HOST}
+REDMINE_AUTH_METHOD=apikey
+REDMINE_API_KEY=${CONFIGURE_REDMINE}
+EOF
+    chmod 600 "${ENV_FILE}"
+}
+
+generate_client_conf() {
+    mkdir -p "${CLIENT_CONF_DIR}"
+    chmod 700 "${CLIENT_CONF_DIR}"
+
+    generate_apt_cache_conf > "${CLIENT_CONF_DIR}/apt-cache.conf"
+    chmod 600 "${CLIENT_CONF_DIR}/apt-cache.conf"
+
+    local dns_ip
+    dns_ip=$(getent hosts dns.${HOST} | cut -f 1 -d ' ')
+
+    cat > "${CLIENT_CONF_DIR}/resolv.conf" <<EOF
+nameserver ${dns_ip}
+search ${HOST}
+EOF
+    chmod 600 "${CLIENT_CONF_DIR}/resolv.conf"
+
+    echo "Generated ${CLIENT_CONF_DIR}/apt-cache.conf"
+    echo "Generated ${CLIENT_CONF_DIR}/resolv.conf"
+}
+
+generate_qwen_conf() {
+    local mcp_servers=""
+
+    if [ -n "${CONFIGURE_GITEA}" ]; then
+        mcp_servers="${mcp_servers}
+    \"shoggoth-gitea-mcp\": {
+      \"httpUrl\": \"http://gitea-mcp.${HOST}/mcp\",
+      \"headers\": {
+        \"Authorization\": \"Bearer ${CONFIGURE_GITEA}\"
       },
-      "timeout": 5000
-    }
+      \"timeout\": 5000
+    }"
+    fi
+
+    if [ -n "${CONFIGURE_REDMINE}" ]; then
+        if [ -n "${mcp_servers}" ]; then
+            mcp_servers="${mcp_servers},"
+        fi
+        mcp_servers="${mcp_servers}
+    \"shoggoth-redmine-mcp\": {
+      \"url\": \"http://redmine-mcp.${HOST}/sse\",
+      \"headers\": {
+        \"X-Redmine-API-Key\": \"${CONFIGURE_REDMINE}\"
+      },
+      \"timeout\": 5000
+    }"
+    fi
+
+    if [ -n "${mcp_servers}" ]; then
+        cat > "${CLIENT_CONF_DIR}/qwen.json" <<EOF
+{
+  "mcpServers": {${mcp_servers}
   }
 }
 EOF
-}
-
-generate_redmine_mcp_config() {
-    local redmine_mcp_server_url="http://redmine-mcp.${HOST}/sse"
-
-    cat <<EOF
-{
-  "mcpServers": {
-    "shoggoth-redmine-mcp": {
-      "url": "${redmine_mcp_server_url}",
-      "headers": {
-        "X-Redmine-API-Key": "${CONFIGURE_REDMINE_MCP}"
-      },
-      "timeout": 5000
-    }
-  }
-}
-EOF
+        chmod 600 "${CLIENT_CONF_DIR}/qwen.json"
+        echo "Generated ${CLIENT_CONF_DIR}/qwen.json"
+    fi
 }
 
 main() {
     parse_args "$@"
 
+    ENV_FILE="${CLIENT_CONF_DIR}/env"
     PROXY_URL="http://${HOST}:${DOCKER_PROXY_PORT}"
 
     if [ $# -eq 0 ]; then
@@ -351,15 +397,27 @@ main() {
     if [ "${CONFIGURE_ALL}" = "true" ]; then
         CONFIGURE_DOCKER="true"
         CONFIGURE_HOSTS="true"
-        CONFIGURE_BUILD_CACHE="true"
-        CONFIGURE_APT="true"
-        CONFIGURE_OLLAMA="true"
-        CONFIGURE_PROXPI="true"
+        CONFIGURE_APT_CACHE="true"
+        CONFIGURE_CLIENT_CONF="true"
     fi
 
     get_priv_cmd
 
-    if [ "${CONFIGURE_DOCKER}" = "true" ]; then
+    if [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
+        if [[ "${CONFIGURE_CLIENT_CONF}" != "true" ]]; then
+            CLIENT_CONF_DIR="${CONFIGURE_CLIENT_CONF}"
+            ENV_FILE="${CLIENT_CONF_DIR}/env"
+        fi
+        echo ""
+        generate_shoggoth_conf
+        generate_client_conf
+    fi
+
+    if [ -n "${CONFIGURE_DOCKER}" ]; then
+        if [[ "${CONFIGURE_DOCKER}" =~ ^[0-9]+$ ]]; then
+            DOCKER_PROXY_PORT="${CONFIGURE_DOCKER}"
+            PROXY_URL="http://${HOST}:${DOCKER_PROXY_PORT}"
+        fi
         echo "Setting up Docker client to use shoggoth proxy at ${PROXY_URL}"
 
         configure_docker_proxy
@@ -377,25 +435,24 @@ main() {
         echo "Hosts file update complete."
     fi
 
-    if [ "${CONFIGURE_APT}" = "true" ]; then
-        echo "Setting up apt proxy at http://apt-cache.${HOST}/"
-        configure_apt_proxy
-        echo "Apt proxy setup complete."
+    if [ "${CONFIGURE_APT_CACHE}" = "true" ]; then
+        echo "Setting up apt cache at http://apt-cache.${HOST}/"
+        configure_apt_cache
+        echo "Apt cache setup complete."
     fi
 
-    if [ "${CONFIGURE_OLLAMA}" = "true" ] || [ "${CONFIGURE_BUILD_CACHE}" = "true" ] || [ "${CONFIGURE_PROXPI}" = "true" ]; then
-        echo ""
-        generate_shoggothrc
+    if [ -n "${CONFIGURE_GITEA}" ] && [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
+        generate_gitea_config
+        echo "Gitea tea CLI configured via environment variables (GITEA_SERVER_URL, GITEA_SERVER_TOKEN)"
     fi
 
-    if [ -n "${CONFIGURE_GITEA_MCP}" ]; then
-        echo ""
-        generate_gitea_mcp_config
+    if [ -n "${CONFIGURE_REDMINE}" ] && [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
+        generate_redmine_config
+        echo "Redmine CLI configured via environment variables (REDMINE_SERVER, REDMINE_API_KEY)"
     fi
 
-    if [ -n "${CONFIGURE_REDMINE_MCP}" ]; then
-        echo ""
-        generate_redmine_mcp_config
+    if [ -n "${CONFIGURE_CLIENT_CONF}" ] && { [ -n "${CONFIGURE_GITEA}" ] || [ -n "${CONFIGURE_REDMINE}" ]; }; then
+        generate_qwen_conf
     fi
 }
 

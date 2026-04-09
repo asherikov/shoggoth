@@ -98,39 +98,53 @@ network settings to use the shoggoth server IP as the DNS server.
 Client Configuration
 ====================
 
-Run the setup script on each client machine:
+Run the setup script on each client machine.
 
 ``` bash
-# Configure apt proxy
-./shoggoth/setup-client.sh --configure-apt --host shoggoth.local --host-ip 192.168.1.100
+# Generate config files in default directory `~/.config/shoggoth/`
+./shoggoth/setup-client.sh --client-conf --host shoggoth.local
 
-# Configure Docker proxy
-./shoggoth/setup-client.sh --docker-proxy --host shoggoth.local --host-ip 192.168.1.100
+# Generate config files in a custom directory
+./shoggoth/setup-client.sh --client-conf /path/to/dir --host shoggoth.local
 
-# Configure both apt and Docker proxy
-./shoggoth/setup-client.sh --configure-apt --docker-proxy --host shoggoth.local --host-ip 192.168.1.100
+# Configure Docker caching proxy (default port 3128) and registry
+./shoggoth/setup-client.sh --docker --host shoggoth.local --host-ip 192.168.1.100
 
-# Configure all services (apt, Docker, hosts, build cache)
+# Update /etc/hosts with service hostnames (modifies /etc/hosts directly)
+./shoggoth/setup-client.sh --update-hosts --host shoggoth.local --host-ip 192.168.1.100
+
+# Install apt cache config to system apt config (requires --client-conf first)
+./shoggoth/setup-client.sh --client-conf --apt-cache --host shoggoth.local --host-ip 192.168.1.100
+
+# Configure Docker, hosts, apt cache, and generate client config files
 ./shoggoth/setup-client.sh --all --host shoggoth.local --host-ip 192.168.1.100
 
-# Using environment variables
-HOST=shoggoth.local HOST_IP=192.168.1.100 CONFIGURE_APT=true ./shoggoth/setup-client.sh
+# Configure with Gitea and Redmine tokens (generates env, qwen.json)
+./shoggoth/setup-client.sh --client-conf --host shoggoth.local --gitea-token your-token --redmine-token your-token
 ```
 
-The script generates `${HOME}/.shoggothrc` file with environment variables for
-all services. Source this file in your `~/.bashrc` or `~/.zshrc`:
+The script generates the following files when `--client-conf` is used:
+
+| File | Description |
+|------|-------------|
+| `env` | Environment variables for all services (ollama, ccache, proxpi, gitea, redmine) |
+| `apt-cache.conf` | APT cache configuration |
+| `resolv.conf` | DNS resolver configuration |
+| `qwen.json` | Qwen Code MCP server configuration (generated when tokens are provided) |
+
+Source the `env` file in your `~/.bashrc` or `~/.zshrc`:
 
 ``` bash
-echo "source ~/.shoggothrc" >> ~/.bashrc
+echo 'set -a; source ~/.config/shoggoth/env; set +a' >> ~/.bashrc
 source ~/.bashrc
 ```
 
 Service Usage Examples
 ----------------------
 
-### APT Proxy
+### APT Cache
 
-After configuration, APT requests are automatically cached:
+After running `--apt-cache`, APT requests are automatically cached:
 
 ``` bash
 sudo apt update
@@ -151,12 +165,11 @@ docker pull ubuntu:24.04
 
 ### Build Cache (ccache/sccache)
 
-Source the `.shoggothrc` file and build with ccache:
+Source the `env` file and build with ccache:
 
 ``` bash
-source ~/.shoggothrc
-export CCACHE_REMOTE_STORAGE="http://build-cache.shoggoth.local"
-export CCACHE_REMOTE_ONLY=true
+set -a; source ~/.config/shoggoth/env; set +a
+# CCACHE_REMOTE_STORAGE and CCACHE_REMOTE_ONLY are already set
 ```
 
 ### Ollama AI Server
@@ -164,7 +177,7 @@ export CCACHE_REMOTE_ONLY=true
 Query the local AI model:
 
 ``` bash
-source ~/.shoggothrc
+set -a; source ~/.config/shoggoth/env; set +a
 curl http://ollama.shoggoth.local/api/tags
 curl http://ollama.shoggoth.local/v1/completions \
     -H "Content-Type: application/json" \
@@ -185,14 +198,18 @@ git clone ssh://git@git.shoggoth.local:3022/admin/repo.git
 git clone http://git.shoggoth.local/admin/repo.git
 ```
 
-### Gitea MCP Server (AI Agent Integration)
-
-Configure your AI coding agent (e.g., Qwen Code) with the MCP server:
+Configure the `tea` CLI by providing a token:
 
 ``` bash
-# Generate MCP configuration
-./shoggoth/setup-client.sh --mcp --host shoggoth.local --mcp-token your-api-token
+./shoggoth/setup-client.sh --host shoggoth.local --gitea-token your-token
+set -a; source ~/.config/shoggoth/env; set +a
+tea issues list
 ```
+
+### Gitea MCP Server (AI Agent Integration)
+
+The `--gitea-token` flag also generates `qwen.json` with the Gitea MCP server
+configuration. Copy the relevant server block into your Qwen Code MCP settings.
 
 ### Redmine Project Management Server
 
@@ -212,16 +229,17 @@ and restarting the service.
 
 ### Redmine MCP Server (AI Agent Integration)
 
-Configure your AI agent with the Redmine MCP server for project management:
-
 1.  Log in to Redmine with administrator privileges
-2.  Go to “Administration” → “Settings” → “API” tab
-3.  Check “Enable REST web service”
-4.  Generate “API access key” in personal settings.
+2.  Go to "Administration" → "Settings" → "API" tab
+3.  Check "Enable REST web service"
+4.  Generate "API access key" in personal settings.
 
 ``` bash
-./shoggoth/setup-client.sh --host shoggoth.local --redmine-mcp your-token
+./shoggoth/setup-client.sh --host shoggoth.local --redmine-token your-token
 ```
+
+The `--redmine-token` flag configures both the Redmine CLI environment variables
+and generates the MCP server entry in `qwen.json`.
 
 ### Git Pages (Static Site Hosting)
 
