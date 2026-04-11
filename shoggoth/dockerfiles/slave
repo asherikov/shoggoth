@@ -2,11 +2,12 @@ ARG BASE_IMAGE=asherikov/ccws_qwen_noble:latest
 FROM ${BASE_IMAGE}
 
 ARG CCWS_BIN_DIR=/ccws/ccws/tools/bin/
-ARG QWEN_SKILL_DIR=/qwen/skills/
+ARG SHOGGOTH_SKILL_DIR=/ccws/skills/
+ENV SHOGGOTH_SKILL_DIR=${SHOGGOTH_SKILL_DIR}
 
 USER root
 
-COPY client/apt-cache.conf /etc/apt/apt.conf.d/00-apt-cache
+COPY client/apt-cache.conf /etc/apt/apt.conf.d/00-shoggoth-apt-cache
 
 RUN \
 --mount=type=bind,source=client/resolv.conf,target=/etc/resolv.conf \
@@ -25,10 +26,16 @@ RUN \
         docker-compose-plugin \
     && usermod -aG docker ccws
 
-RUN mkdir -p ${QWEN_SKILL_DIR}/ \
-    chown -R ccws ${QWEN_SKILL_DIR}
+# "ssh-keyscan -p 3022 git.shoggoth.local" is the right thing to do, but the server might not be available at build time
+RUN \
+    echo "Host git.shoggoth.local" >> /etc/ssh/ssh_config \
+    && echo "    StrictHostKeyChecking no"
 
 USER ccws
+
+RUN \
+--mount=type=bind,source=skills/,target=/tmp/skills \
+    cp -R /tmp/skills/* ${SHOGGOTH_SKILL_DIR}/
 
 RUN curl -fsSL https://dl.gitea.io/tea/main/tea-main-linux-`dpkg --print-architecture` -o ${CCWS_BIN_DIR}/tea \
     && chmod +x ${CCWS_BIN_DIR}/tea
@@ -37,11 +44,11 @@ RUN curl -fsSL \
         "https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg --print-architecture`.tar.gz" \
     | tar -xz -C ${CCWS_BIN_DIR}/
 
-RUN mkdir -p ${QWEN_SKILL_DIR}/gitea-tea \
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/gitea-tea \
     && curl -fsSL \
         https://raw.githubusercontent.com/beshkenadze/claude-skills-marketplace/main/skills/development/gitea-tea/SKILL.md \
-        -o ${QWEN_SKILL_DIR}/gitea-tea/SKILL.md
+        -o ${SHOGGOTH_SKILL_DIR}/gitea-tea/SKILL.md
 
-RUN mkdir -p ${QWEN_SKILL_DIR}/redmine-cli \
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/redmine-cli \
     && curl -fsSL https://raw.githubusercontent.com/aarondpn/redmine-cli/main/skills/redmine-cli/SKILL.md \
-        -o ${QWEN_SKILL_DIR}/redmine-cli/SKILL.md
+        -o ${SHOGGOTH_SKILL_DIR}/redmine-cli/SKILL.md

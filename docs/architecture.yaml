@@ -117,10 +117,6 @@ nodes:
     scope: proxy_services
     style_notag: proxy_style
 
-  - id: ["redmine-mcp.", proxy_redmine_mcp]
-    scope: proxy_services
-    style_notag: proxy_style
-
   - id: ["proxpi.", proxy_proxpi]
     scope: proxy_services
     style_notag: proxy_style
@@ -198,10 +194,6 @@ nodes:
   - id: ["postgres\ndb", redmine_db]
     scope: redmine_group
     style_notag: hh_diagrams_onprem_database_postgresql
-
-  - id: ["redmine-mcp", redmine_mcp]
-    scope: redmine_group
-    style_notag: hh_diagrams_azure_identity_api_proxy
 
   # ============================================
   # External Services Group
@@ -320,14 +312,6 @@ edges:
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [ai_agent, proxy_redmine_mcp]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
-  - link: [proxy_redmine_mcp, redmine_mcp]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
 
   # Proxpi flow (via proxy)
   - link: [proxy_proxpi, proxpi_service]
@@ -389,10 +373,6 @@ edges:
 
   # Redmine ecosystem
   - link: [redmine_service, redmine_db]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
-  - link: [redmine_mcp, redmine_service]
     style: hh_diagrams_link
     graphviz:
       color: auto

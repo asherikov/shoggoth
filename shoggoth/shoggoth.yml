@@ -33,6 +33,26 @@ x-environment: &default_environment
 
 
 services:
+    web:
+        !!merge <<: *default_service
+        # https://github.com/ccache/ccache/wiki/HTTP-storage
+        image: docker.angie.software/angie:minimal
+        container_name: web.${SHOGGOTH_DOMAIN}
+        ports:
+            - "80:80"
+            # gitea ssh
+            - "${SHOGGOTH_GIT_SSH_PORT}:22"
+        volumes:
+            - ./angie/angie.conf:/etc/angie/angie.conf:ro
+            - ./angie/proxy-params.conf:/etc/angie/proxy-params.conf:ro
+            - ./angie/html:/data/html:ro
+            - ./angie/build_cache:/data/build_cache
+            - ./setup-client.sh:/data/setup-client.sh:ro
+        post_start:
+            # needs to be writable
+            - command: chown -R angie:angie /data/build_cache
+              user: root
+
     apt-cache:
         !!merge <<: *default_service
         # https://hub.docker.com/r/sameersbn/apt-cacher-ng
@@ -55,6 +75,20 @@ services:
             # needs to be writable
             - command: chown -R apt-cacher-ng:apt-cacher-ng /var/cache/apt-cacher-ng /var/log/apt-cacher-ng
               user: root
+
+    proxpi:
+        !!merge <<: *default_service
+        # https://github.com/EpicWink/proxpi
+        # https://hub.docker.com/r/epicwink/proxpi
+        image: epicwink/proxpi:latest
+        container_name: proxpi.${SHOGGOTH_DOMAIN}
+        volumes:
+            - ./proxpi/cache:/var/cache/proxpi
+        environment:
+            !!merge <<: *default_environment
+            PROXPI_CACHE_DIR: /var/cache/proxpi
+        # override default args to use port 80 instead of 5000
+        command: --bind 0.0.0.0:80 --threads 2
 
     docker-cache:
         !!merge <<: *default_service
@@ -88,6 +122,23 @@ services:
             # CA certificate storage
             - ./docker/cache/certs:/ca
 
+    docker-registry:
+        # gitea has registry too, but there are naming contraints
+        # https://github.com/distribution/distribution
+        # https://distribution.github.io/distribution/
+        !!merge <<: *default_service
+        image: registry:latest
+        container_name: docker-registry.${SHOGGOTH_DOMAIN}
+        volumes:
+            - ./docker/registry:/var/lib/registry
+        environment:
+            !!merge <<: *default_environment
+            REGISTRY_LOG_LEVEL: info
+            REGISTRY_HTTP_HOST: "docker-registry.${SHOGGOTH_DOMAIN}"
+            REGISTRY_HTTP_ADDR: ":80"
+            REGISTRY_HTTP_DEBUG_ADDR: ""
+            OTEL_TRACES_EXPORTER: none
+
     dns:
         #<<: *default_service
         # https://hub.docker.com/r/mvance/unbound/
@@ -106,26 +157,6 @@ services:
             shoggoth:
                 ipv4_address: 172.20.0.53
         restart: unless-stopped
-
-    web:
-        !!merge <<: *default_service
-        # https://github.com/ccache/ccache/wiki/HTTP-storage
-        image: docker.angie.software/angie:minimal
-        container_name: web.${SHOGGOTH_DOMAIN}
-        ports:
-            - "${SHOGGOTH_IP}:80:80"
-            # gitea ssh
-            - "${SHOGGOTH_IP}:${SHOGGOTH_GIT_SSH_PORT}:22"
-        volumes:
-            - ./angie/angie.conf:/etc/angie/angie.conf:ro
-            - ./angie/proxy-params.conf:/etc/angie/proxy-params.conf:ro
-            - ./angie/html:/data/html:ro
-            - ./angie/build_cache:/data/build_cache
-            - ./setup-client.sh:/data/setup-client.sh:ro
-        post_start:
-            # needs to be writable
-            - command: chown -R angie:angie /data/build_cache
-              user: root
 
     ollama:
         !!merge <<: *default_service
@@ -203,7 +234,7 @@ services:
             - ./gitea/runner/data:/data
             - ./gitea/runner/config.template.yaml:/config.template.yaml:ro
             - ./gitea/runner/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
-            - shoggoth_ci_cache:/shoggoth/cache
+            - shoggoth_ci_cache:/cache
             - /var/run/docker.sock:/var/run/docker.sock
         environment:
             !!merge <<: *default_environment
@@ -283,46 +314,18 @@ services:
         secrets:
             - redmine_db_password
 
-    redmine-mcp:
-        !!merge <<: *default_service
-        # alternatives
-        # - only local
-        #   - https://github.com/onozaty/redmine-mcp-server
-        #   - https://github.com/runekaagaard/mcp-redmine
-        # - remote service
-        #   - https://github.com/jztan/redmine-mcp-server oauth too much trouble
-        #   - https://github.com/yenpu/redmine-mcp no docker
-        #   - https://github.com/redmine-tx/redmine_tx_mcp plugin not compatible with the latest redmine
-        #   - https://github.com/daiji-sshr/redmine-mcp-stateless
-        image: redmine-mcp-stateless-redmine-mcp-stateless
-        container_name: redmine-mcp.${SHOGGOTH_DOMAIN}
-        environment:
-            !!merge <<: *default_environment
-
-    proxpi:
-        !!merge <<: *default_service
-        # https://github.com/EpicWink/proxpi
-        # https://hub.docker.com/r/epicwink/proxpi
-        image: epicwink/proxpi:latest
-        container_name: proxpi.${SHOGGOTH_DOMAIN}
-        volumes:
-            - ./proxpi/cache:/var/cache/proxpi
-        environment:
-            !!merge <<: *default_environment
-            PROXPI_CACHE_DIR: /var/cache/proxpi
-
-    docker-registry:
-        # gitea has registry too, but there are naming contraints
-        # https://github.com/distribution/distribution
-        # https://distribution.github.io/distribution/
-        !!merge <<: *default_service
-        image: registry:latest
-        container_name: docker-registry.${SHOGGOTH_DOMAIN}
-        volumes:
-            - ./docker/registry/:/var/lib/registry
-        environment:
-            !!merge <<: *default_environment
-            REGISTRY_LOG_LEVEL: info
-            REGISTRY_HTTP_ADDR: ":80"
-            REGISTRY_HTTP_DEBUG_ADDR: ""
-            OTEL_TRACES_EXPORTER: none
+    #redmine-mcp:
+    #    !!merge <<: *default_service
+    #    # alternatives
+    #    # - only local
+    #    #   - https://github.com/onozaty/redmine-mcp-server
+    #    #   - https://github.com/runekaagaard/mcp-redmine
+    #    # - remote service
+    #    #   - https://github.com/jztan/redmine-mcp-server oauth too much trouble
+    #    #   - https://github.com/yenpu/redmine-mcp no docker
+    #    #   - https://github.com/redmine-tx/redmine_tx_mcp plugin not compatible with the latest redmine
+    #    #   - https://github.com/daiji-sshr/redmine-mcp-stateless does not work behind proxy https://github.com/daiji-sshr/redmine-mcp-stateless/issues/2
+    #    image: redmine-mcp-stateless-redmine-mcp-stateless
+    #    container_name: redmine-mcp.${SHOGGOTH_DOMAIN}
+    #    environment:
+    #        !!merge <<: *default_environment
