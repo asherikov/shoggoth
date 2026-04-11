@@ -31,7 +31,7 @@ pull:
 log:
 	${MAKE} ssh_exec CMD='${COMPOSE_CMD} logs ${SERVICE} --follow'
 
-build: client_conf
+slave: client_conf
 	cd shoggoth \
 		&& docker build \
 			--build-arg BASE_IMAGE=asherikov/ccws_qwen_${DOCKER_DISTRO}:latest \

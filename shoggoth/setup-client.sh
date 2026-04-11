@@ -289,16 +289,16 @@ generate_shoggoth_conf() {
 
 # Ollama
 OPENAI_API_KEY=ollama
-OPENAI_BASE_URL="http://ollama.${HOST}/v1/"
-OPENAI_MODEL="qwen3-coder:30b"
+OPENAI_BASE_URL=http://ollama.${HOST}/v1/
+OPENAI_MODEL=qwen3-coder:30b
 
 # Build cache (ccache)
-CCACHE_REMOTE_STORAGE="http://build-cache.${HOST}"
-CCACHE_REMOTE_ONLY="true"
+CCACHE_REMOTE_STORAGE=http://build-cache.${HOST}
+CCACHE_REMOTE_ONLY=true
 
 # Proxpi (PyPI caching proxy)
-PIP_INDEX_URL="http://proxpi.${HOST}/index/"
-PIP_TRUSTED_HOST="proxpi.${HOST}"
+PIP_INDEX_URL=http://proxpi.${HOST}/index/
+PIP_TRUSTED_HOST=proxpi.${HOST}
 EOF
     chmod 600 "${ENV_FILE}"
 
