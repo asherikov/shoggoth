@@ -74,10 +74,11 @@ ollama_query:
 
 kestra_trigger:
 	# POST /api/v1/executions/webhook/{namespace}/{flowId}/{key}
+	# Sending a payload that matches Redmine webhook plugin structure
 	curl -X POST \
 		http://kestra.${SHOGGOTH_DOMAIN}/api/v1/executions/webhook/shoggoth/redmine-issue-updated/redmine-issue-updated \
 		-H "Content-Type: application/json" \
-		-d '{ "issue": { "id": 123, "subject": "Test issue" }, "action": "updated" }'
+		-d '{"event_id":"550e8400-e29b-41d4-a716-446655440000","event_type":"issue","action":"updated","occurred_at":"2024-01-08T12:00:00.000Z","delivery_mode":"minimal","schema_version":"1.0","issue":{"id":123,"subject":"Test issue"}}'
 
 client_conf:
 	./shoggoth/setup-client.sh \

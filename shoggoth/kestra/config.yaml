@@ -37,8 +37,6 @@ kestra:
     basic-auth:
       username: admin@shoggoth.local
       password: "${KESTRA_BASIC_AUTH_PASSWORD}"
-    liveness:
-      enabled: false
     termination-grace-period: 30s
   ai:
     enabled: false

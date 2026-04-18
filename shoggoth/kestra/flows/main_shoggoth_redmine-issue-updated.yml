@@ -9,19 +9,10 @@ triggers:
     type: io.kestra.plugin.core.trigger.Webhook
     key: redmine-issue-updated
 
-inputs:
-  - id: issue_id
-    type: INT
-    defaults: "{{ trigger.body.issue.id }}"
-
 tasks:
-  - id: run
-    type: io.kestra.plugin.docker.Run
-    containerImage: alpine:latest
-
-  - id: hi
+  - id: process_issue
     type: io.kestra.plugin.docker.Run
     containerImage: docker-registry.shoggoth.local/slave_noble:latest
     commands:
       - echo
-      - "{{ inputs.issue_id }}"
+      - "Processing Redmine issue ID: {{ trigger.body.issue.id }}"
