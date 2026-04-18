@@ -299,6 +299,15 @@ services:
         # https://hub.docker.com/_/redmine
         # https://www.redmine.org/
         # https://github.com/topics/redmine-plugin
+        #
+        # webhook
+        #   - planned for the next major release -> https://www.redmine.org/issues/29664
+        #   - https://github.com/guyinwonder168/redmine_webhook_plugin
+        #       - only manual triggers work, Zeitwerk naming issues
+        #   - https://github.com/itnode/redmine_webhook
+        #       - this is a fork, original is archived and does not work with 6.x
+        #       - obscure location (project settings -> enable webhook module -> webhook)
+        #       - not triggered by kanban (https://github.com/suer/redmine_webhook/issues/4, https://www.redmine.org/issues/8757)
         image: redmine:6.1.2-alpine
         container_name: redmine.${SHOGGOTH_DOMAIN}
         user: "${UID}:${GID}"
@@ -313,6 +322,7 @@ services:
         volumes:
             - ./redmine/files:/usr/src/redmine/files
             - ./redmine/plugins:/usr/src/redmine/plugins
+            - ./redmine/bundle_cache:/usr/local/bundle/cache/
         depends_on:
             - redmine-db
             - dns
@@ -360,6 +370,13 @@ services:
         # alternatives:
         #   - https://github.com/ncarlier/webhookd
         #     - simple triggers, no execution monitoring, persistance, execution limits, etc
+        #   - https://github.com/dagucloud/dagu/
+        #     - triggers are not specified in workflow files, needs proxy for injecting authorization headers
+        #   - lots of others
+        #     - gui only
+        #     - no support for custom webhooks
+        #     - complexity
+        #     - no declarative workflows
         image: kestra/kestra:latest
         container_name: kestra.${SHOGGOTH_DOMAIN}
         user: "root"

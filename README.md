@@ -291,3 +291,4 @@ References
 - <https://github.com/awesome-foss/awesome-sysadmin>
 - <https://leviwheatcroft.github.io/selfhosted-awesome-unlist/> (not maintained)
 - <https://gitea.com/gitea/awesome-gitea>
+- <https://github.com/trueforge-org/truecharts>

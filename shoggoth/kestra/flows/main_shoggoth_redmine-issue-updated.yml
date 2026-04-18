@@ -15,4 +15,4 @@ tasks:
     containerImage: docker-registry.shoggoth.local/slave_noble:latest
     commands:
       - echo
-      - "Processing Redmine issue ID: {{ trigger.body.issue.id }}"
+      - "Processing Redmine issue ID: {{ trigger.body.payload.issue.id }}"
