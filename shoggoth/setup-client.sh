@@ -203,7 +203,7 @@ configure_docker_proxy() {
     os_id=$(detect_os)
 
     if [ "$os_id" = "nixos" ]; then
-        echo "For NixOS, add the following to your configuration.nix (TODO this wont work):"
+        echo "For NixOS, add the following to your configuration.nix:"
         echo "  virtualisation.docker.daemon.settings = {"
         echo "    \"insecure-registries\" = [\"docker-registry.${HOST}\"];"
         echo "    proxies = {"
@@ -243,7 +243,7 @@ EOF"
 }
 
 update_hosts() {
-    local services=("dns" "apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp" "git-pages" "redmine" "redmine-mcp" "proxpi" "docker-registry")
+    local services=("kestra" "dns" "apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp" "git-pages" "redmine" "redmine-mcp" "proxpi" "docker-registry")
     local hosts_entries="${HOST_IP} ${HOST}"$'\n'
 
     for service in "${services[@]}"; do

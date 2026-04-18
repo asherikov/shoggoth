@@ -1,0 +1,56 @@
+datasources:
+  postgres:
+    url: jdbc:postgresql://kestra-db:5432/kestra
+    driverClassName: org.postgresql.Driver
+    username: kestra
+    password: "${KESTRA_DATASOURCES_POSTGRES_PASSWORD}"
+micronaut:
+  server:
+    host: 0.0.0.0
+    port: 80
+  application:
+    name: kestra
+  otel:
+    enabled: false
+  metrics:
+    export:
+      otlp:
+        enabled: false
+  io:
+    watch:
+      enabled: true
+      paths:
+        - /app/flows
+kestra:
+  storage:
+    type: local
+    local:
+      basePath: /app/storage
+  repository:
+    type: postgres
+  queue:
+    type: postgres
+  flows:
+    paths:
+      - /app/flows
+  server:
+    basic-auth:
+      username: admin@shoggoth.local
+      password: "${KESTRA_BASIC_AUTH_PASSWORD}"
+    liveness:
+      enabled: false
+    termination-grace-period: 30s
+  ai:
+    enabled: false
+  anonymous-usage-report:
+    enabled: false
+  ui-anonymous-usage-report:
+    enabled: false
+  tutorial-flows:
+    enabled: false
+
+grpc:
+  server:
+    enabled: false
+    health:
+      enabled: false

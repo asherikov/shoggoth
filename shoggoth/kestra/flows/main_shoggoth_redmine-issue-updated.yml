@@ -1,0 +1,27 @@
+id: redmine-issue-updated
+namespace: shoggoth
+
+concurrency:
+  limit: 2
+
+triggers:
+  - id: webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: redmine-issue-updated
+
+inputs:
+  - id: issue_id
+    type: INT
+    defaults: "{{ trigger.body.issue.id }}"
+
+tasks:
+  - id: run
+    type: io.kestra.plugin.docker.Run
+    containerImage: alpine:latest
+
+  - id: hi
+    type: io.kestra.plugin.docker.Run
+    containerImage: docker-registry.shoggoth.local/slave_noble:latest
+    commands:
+      - echo
+      - "{{ inputs.issue_id }}"

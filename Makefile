@@ -72,6 +72,13 @@ ollama_query:
 		-H "Authorization: ollama" \
 		-d '{"model": "qwen3-coder:30b", "prompt": "What is the capital of UAE?"}'
 
+kestra_trigger:
+	# POST /api/v1/executions/webhook/{namespace}/{flowId}/{key}
+	curl -X POST \
+		http://kestra.${SHOGGOTH_DOMAIN}/api/v1/executions/webhook/shoggoth/redmine-issue-updated/redmine-issue-updated \
+		-H "Content-Type: application/json" \
+		-d '{ "issue": { "id": 123, "subject": "Test issue" }, "action": "updated" }'
+
 client_conf:
 	./shoggoth/setup-client.sh \
 		--client-conf shoggoth/client \

@@ -31,11 +31,19 @@ pull:
 log:
 	${MAKE} ssh_exec CMD='${COMPOSE_CMD} logs ${SERVICE} --follow'
 
-slave: client_conf
+docker_build: client_conf
 	cd shoggoth \
 		&& docker build \
-			--build-arg BASE_IMAGE=asherikov/ccws_qwen_${DOCKER_DISTRO}:latest \
-			-f dockerfiles/slave \
-			-t docker-registry.${SHOGGOTH_DOMAIN}/slave_${DOCKER_DISTRO}:latest \
+			--build-arg BASE_IMAGE=${BASE_IMAGE} \
+			-f dockerfiles/${IMAGE} \
+			-t docker-registry.${SHOGGOTH_DOMAIN}/${IMAGE}_${DOCKER_DISTRO}:latest \
 			--progress plain \
+			--add-host apt-cache.${SHOGGOTH_DOMAIN}:${SHOGGOTH_IP} \
 			./
+
+slave:
+	${MAKE} docker_build IMAGE=slave BASE_IMAGE=asherikov/ccws_qwen_${DOCKER_DISTRO}:latest
+
+webhookd:
+	${MAKE} docker_build IMAGE=webhookd BASE_IMAGE=ubuntu:${DOCKER_DISTRO}
+

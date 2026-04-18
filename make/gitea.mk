@@ -14,9 +14,6 @@ SOURCES_DIR?=
 GITEA_PROJECT?=
 
 
-gitea_runner_token:
-	@openssl rand -hex 24 > shoggoth/gitea-runner/runner-token.txt
-
 github_to_gitea_repo:
 	echo "Copying ${GITHUB_USER}/${GITHUB_REPO}"
 	curl -s \

@@ -10,13 +10,12 @@ USER root
 COPY client/apt-cache.conf /etc/apt/apt.conf.d/00-shoggoth-apt-cache
 
 RUN \
---mount=type=bind,source=client/resolv.conf,target=/etc/resolv.conf \
 --mount=type=cache,target=/var/cache/apt,sharing=locked \
 --mount=type=cache,target=/var/lib/apt/lists/,sharing=locked \
 --mount=type=cache,target=/cache/pip,sharing=locked \
     curl -fsSL http://download.docker.com/linux/ubuntu/gpg -o /etc/apt/trusted.gpg.d/docker.asc \
     && echo "deb [arch=$(dpkg --print-architecture)] http://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-    | sudo tee /etc/apt/sources.list.d/docker.list \
+        | sudo tee /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && ${APT_INSTALL} \
         docker-ce \

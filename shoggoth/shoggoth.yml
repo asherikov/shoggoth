@@ -14,6 +14,10 @@ secrets:
         file: ./gitea/runner/runner-token.txt
     redmine_db_password:
         file: ./redmine/db-password.txt
+    kestra_db_password:
+        file: ./kestra/db-password.txt
+    kestra_basic_auth_password:
+        file: ./kestra/basic-auth-password.txt
 
 # https://docs.docker.com/compose/compose-file/11-extension/
 x-service: &default_service
@@ -305,6 +309,7 @@ services:
             REDMINE_DB_USERNAME: redmine
             REDMINE_DB_PASSWORD_FILE: /run/secrets/redmine_db_password
             REDMINE_SECRET_KEY_BASE: supersecretkey
+            REDMINE_PLUGINS_MIGRATE: true
         volumes:
             - ./redmine/files:/usr/src/redmine/files
             - ./redmine/plugins:/usr/src/redmine/plugins
@@ -329,3 +334,56 @@ services:
     #    container_name: redmine-mcp.${SHOGGOTH_DOMAIN}
     #    environment:
     #        !!merge <<: *default_environment
+
+    kestra-db:
+        !!merge <<: *default_service
+        # https://hub.docker.com/_/postgres
+        image: postgres:18-alpine
+        container_name: kestra-db.${SHOGGOTH_DOMAIN}
+        user: "${UID}:${GID}"
+        environment:
+            !!merge <<: *default_environment
+            POSTGRES_DB: kestra
+            POSTGRES_USER: kestra
+            POSTGRES_PASSWORD_FILE: /run/secrets/kestra_db_password
+        volumes:
+            - ./kestra/database:/var/lib/postgresql
+            # a hack for custom uid
+            - /etc/passwd:/etc/passwd:ro
+        secrets:
+            - kestra_db_password
+
+    kestra:
+        !!merge <<: *default_service
+        # https://kestra.io/docs
+        # https://github.com/kestra-io/kestra
+        image: kestra/kestra:latest
+        container_name: kestra.${SHOGGOTH_DOMAIN}
+        user: "root"
+        entrypoint: /shoggoth_bringup.sh
+        volumes:
+            - ./kestra/data:/app/storage
+            - ./kestra/flows:/app/flows
+            - ./kestra/plugins:/app/plugins
+            - ./kestra/config.yaml:/shoggoth_kestra.yaml:ro
+            - ./kestra/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
+            - /var/run/docker.sock:/var/run/docker.sock
+        depends_on:
+            - kestra-db
+            - dns
+        secrets:
+            - kestra_db_password
+            - kestra_basic_auth_password
+
+#    webhookd:
+#        !!merge <<: *default_service
+#        # https://github.com/ncarlier/webhookd
+#        image: docker-registry.shoggoth.local/webhookd_noble:latest
+#        container_name: webhookd.${SHOGGOTH_DOMAIN}
+#        entrypoint: /webhookd
+#        volumes:
+#            - ./webhookd/scripts:/scripts:ro
+#            - ./webhookd/webhookd.yaml:/webhookd.yaml:ro
+#            - /var/run/docker.sock:/var/run/docker.sock
+#        depends_on:
+#            - dns

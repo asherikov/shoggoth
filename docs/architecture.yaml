@@ -121,6 +121,10 @@ nodes:
     scope: proxy_services
     style_notag: proxy_style
 
+  - id: ["kestra.", proxy_kestra]
+    scope: proxy_services
+    style_notag: proxy_style
+
   - id: ["docker-registry.", proxy_docker_registry]
     scope: proxy_services
     style_notag: proxy_style
@@ -176,6 +180,11 @@ nodes:
   - id: ["LLM server\n(ollama)", ollama_service]
     scope: behind_proxy_group
     style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
+
+  # Kestra layer
+  - id: ["kestra", kestra_service]
+    scope: behind_proxy_group
+    style_notag: docker_service_style
 
   # Git-pages layer
   - id: ["git-pages", git_pages_service]
@@ -319,6 +328,16 @@ edges:
     graphviz:
       color: auto
 
+  # Kestra flow (via proxy)
+  - link: [client_browser, proxy_kestra]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [proxy_kestra, kestra_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+
   # Docker registry flow (via proxy)
   - link: [client_docker, proxy_docker_registry]
     style: hh_diagrams_link
@@ -423,6 +442,10 @@ edges:
     graphviz:
       style: invis
   - link: [build_cache, proxpi_service]
+    style: hh_diagrams_link
+    graphviz:
+      style: invis
+  - link: [build_cache, kestra_service]
     style: hh_diagrams_link
     graphviz:
       style: invis
