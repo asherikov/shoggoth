@@ -44,6 +44,3 @@ docker_build: client_conf
 slave:
 	${MAKE} docker_build IMAGE=slave BASE_IMAGE=asherikov/ccws_qwen_${DOCKER_DISTRO}:latest
 
-webhookd:
-	${MAKE} docker_build IMAGE=webhookd BASE_IMAGE=ubuntu:${DOCKER_DISTRO}
-

@@ -357,6 +357,9 @@ services:
         !!merge <<: *default_service
         # https://kestra.io/docs
         # https://github.com/kestra-io/kestra
+        # alternatives:
+        #   - https://github.com/ncarlier/webhookd
+        #     - simple triggers, no execution monitoring, persistance, execution limits, etc
         image: kestra/kestra:latest
         container_name: kestra.${SHOGGOTH_DOMAIN}
         user: "root"
@@ -374,16 +377,3 @@ services:
         secrets:
             - kestra_db_password
             - kestra_basic_auth_password
-
-#    webhookd:
-#        !!merge <<: *default_service
-#        # https://github.com/ncarlier/webhookd
-#        image: docker-registry.shoggoth.local/webhookd_noble:latest
-#        container_name: webhookd.${SHOGGOTH_DOMAIN}
-#        entrypoint: /webhookd
-#        volumes:
-#            - ./webhookd/scripts:/scripts:ro
-#            - ./webhookd/webhookd.yaml:/webhookd.yaml:ro
-#            - /var/run/docker.sock:/var/run/docker.sock
-#        depends_on:
-#            - dns
