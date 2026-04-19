@@ -11,13 +11,15 @@ volumes:
         name: "shoggoth_ci_cache"
 secrets:
     gitea_runner_token:
-        file: ./gitea/runner/runner-token.txt
+        file: ./secrets/gitea-runner-token.txt
     redmine_db_password:
-        file: ./redmine/db-password.txt
+        file: ./secrets/redmine-db-password.txt
     kestra_db_password:
-        file: ./kestra/db-password.txt
+        file: ./secrets/kestra-db-password.txt
     kestra_basic_auth_password:
-        file: ./kestra/basic-auth-password.txt
+        file: ./secrets/kestra-basic-auth-password.txt
+    ollama_bearer_token:
+        file: ./secrets/ollama-bearer-token.txt
 
 # https://docs.docker.com/compose/compose-file/11-extension/
 x-service: &default_service
@@ -185,7 +187,7 @@ services:
             #OLLAMA_LLM_LIBRARY: "cpu_avx2"
             OLLAMA_MAX_LOADED_MODELS: 1
             OLLAMA_NUM_PARALLEL: 1
-            OLLAMA_NO_CLOUD: 1
+            #OLLAMA_NO_CLOUD: 1
             OLLAMA_KEEP_ALIVE: 30m
             # amd igpu
             OLLAMA_VULKAN: 1
@@ -388,6 +390,9 @@ services:
             - ./kestra/config.yaml:/shoggoth_kestra.yaml:ro
             - ./kestra/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
             - /var/run/docker.sock:/var/run/docker.sock
+        environment:
+            !!merge <<: *default_environment
+            SHOGGOTH_SHOGGOTH_ROOT: ${SHOGGOTH_ROOT}
         depends_on:
             - kestra-db
             - dns

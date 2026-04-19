@@ -1,0 +1,30 @@
+id: redmine-task-processor
+namespace: shoggoth
+
+concurrency:
+  limit: 1
+
+triggers:
+  - id: schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "*/3 * * * *"
+    stopAfter:
+      - FAILED
+      - KILLED
+
+tasks:
+  - id: list_in_progress_tasks
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      volumes:
+        - "{{ envs.shoggoth_root }}/secrets/apt-cache.conf:/etc/apt/apt.conf.d/00-shoggoth-apt-cache"
+        - "{{ envs.shoggoth_root }}/secrets/env:/env"
+        - "{{ envs.shoggoth_root }}/secrets/resolv.conf:/etc/resolv.conf"
+        - "shoggoth_ci_cache:/cache"
+      pullPolicy: ALWAYS
+    containerImage: docker-registry.shoggoth.local/slave_noble:latest
+    commands:
+      - "bash -c 'set -a && source /env && set +a && redmine issues list --status=\"In Progress\" --limit=1 --output=json' > /home/ccws/tasks.json"
+      - "bash -c 'set -a && source /env && set +a && redmine issues update `jq '.[0].id' < /home/ccws/tasks.json` --status=Resolved'"
+      - "bash -c 'set -a && source /env && set +a && echo \"Selected task ID: `jq '.[0].id' < /home/ccws/tasks.json`\"'"

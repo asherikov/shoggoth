@@ -6,7 +6,7 @@ COMPOSE_CMD=env \
 			SHOGGOTH_IP=${SHOGGOTH_IP} \
 			SHOGGOTH_ROOT=`pwd` \
 			SHOGGOTH_DOMAIN='shoggoth.local' \
-			docker compose -f shoggoth.yml
+			docker compose -f docker-compose.yml
 SERVICE?=
 
 

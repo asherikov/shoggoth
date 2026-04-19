@@ -51,3 +51,7 @@ RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/gitea-tea \
 RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/redmine-cli \
     && curl -fsSL https://raw.githubusercontent.com/aarondpn/redmine-cli/main/skills/redmine-cli/SKILL.md \
         -o ${SHOGGOTH_SKILL_DIR}/redmine-cli/SKILL.md
+
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/kestra-flow \
+    && curl -fsSL https://raw.githubusercontent.com/kestra-io/agent-skills/main/skills/kestra-flow/SKILL.md \
+        -o ${SHOGGOTH_SKILL_DIR}/kestra-flow/SKILL.md

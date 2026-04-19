@@ -46,6 +46,14 @@ kestra:
     enabled: false
   tutorial-flows:
     enabled: false
+  plugins:
+    configurations:
+      - type: io.kestra.plugin.scripts.runner.docker.Docker
+        values:
+          volume-enabled: true
+  variables:
+    # prefix is omitted in workflows
+    env-vars-prefix: SHOGGOTH_
 
 grpc:
   server:

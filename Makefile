@@ -3,6 +3,7 @@ USER?=aleks
 SHOGGOTH_DOMAIN?=shoggoth.local
 SHOGGOTH_HOST?=${SHOGGOTH_DOMAIN}
 SHOGGOTH_IP?=$(shell getent hosts ${SHOGGOTH_DOMAIN} | cut -f 1 -d ' ')
+SHOGGOTH_CLIENT_CFG?=shoggoth/secrets
 REMOTE_PATH?=~/
 
 SSH_COMMON_ARGS=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
@@ -18,7 +19,7 @@ sync: client_conf
 	rsync -r shoggoth ${USER}@${SHOGGOTH_HOST}:${REMOTE_PATH} || true
 
 sync_restart:
-	${MAKE} down
+	-${MAKE} down
 	${MAKE} sync
 	${MAKE} up
 
@@ -39,7 +40,7 @@ ssh_exec:
 	ssh ${SSH_COMMON_ARGS} -t ${USER}@${SHOGGOTH_HOST} 'cd ${REMOTE_PATH}/shoggoth && ${CMD}'
 
 
-shutdown:
+shutdown: down
 	${MAKE} ssh_exec CMD='exec su -l -c "shutdown -P now"'
 
 hosts:
@@ -72,22 +73,13 @@ ollama_query:
 		-H "Authorization: ollama" \
 		-d '{"model": "qwen3-coder:30b", "prompt": "What is the capital of UAE?"}'
 
-kestra_trigger:
-	# POST /api/v1/executions/webhook/{namespace}/{flowId}/{key}
-	# Sending a payload that matches Redmine webhook plugin structure
-	curl -X POST \
-		http://kestra.${SHOGGOTH_DOMAIN}/api/v1/executions/webhook/shoggoth/redmine-issue-updated/redmine-issue-updated \
-		-H "Content-Type: application/json" \
-		-d '{"event_id":"550e8400-e29b-41d4-a716-446655440000","event_type":"issue","action":"updated","occurred_at":"2024-01-08T12:00:00.000Z","delivery_mode":"minimal","schema_version":"1.0","issue":{"id":123,"subject":"Test issue"}}'
+personal_conf:
+	${MAKE} client_conf SHOGGOTH_CLIENT_CFG=${HOME}/.config/shoggoth
 
 client_conf:
 	./shoggoth/setup-client.sh \
-		--client-conf shoggoth/client \
-		--host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}"
-
-personal_conf:
-	./shoggoth/setup-client.sh \
-		--client-conf \
+		--client-conf ${SHOGGOTH_CLIENT_CFG} \
 		--host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}" \
 		--gitea-token ${GITEA_TOKEN} --gitea-user ${GITEA_USER} \
+		--ollama-token ${OLLAMA_TOKEN} \
 		--redmine-token ${REDMINE_TOKEN}

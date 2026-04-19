@@ -11,6 +11,7 @@ CONFIGURE_CLIENT_CONF="${CONFIGURE_CLIENT_CONF:-}"
 CONFIGURE_GITEA="${CONFIGURE_GITEA:-}"
 CONFIGURE_GITEA_USER="${CONFIGURE_GITEA_USER:-}"
 CONFIGURE_REDMINE="${CONFIGURE_REDMINE:-}"
+CONFIGURE_OLLAMA_TOKEN="${CONFIGURE_OLLAMA_TOKEN:-ollama}"
 HOST="${HOST:-shoggoth.local}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
 CLIENT_CONF_DIR="${CLIENT_CONF_DIR:-${HOME}/.config/shoggoth}"
@@ -53,15 +54,11 @@ Options:
     --apt-cache             Install apt cache config to system apt config
     --gitea-token TOKEN     Configure gitea tea CLI auth, config file, and MCP server config
     --gitea-user USER       Configure gitea tea CLI username for basic auth
-    --redmine-token TOKEN   Configure redmine CLI auth, config file, and MCP server config
+    --redmine-token TOKEN   Configure redmine CLI auth via environment variables
+    --ollama-token TOKEN    Configure OpenAI API key for Ollama (OPENAI_API_KEY)
     --client-conf [DIR]     Generate configuration files, optionally in DIR (default: ${HOME}/.config/shoggoth)
     --all                   Configure and print all setup instructions
     --help                  Show this help message
-
-The script generates an env file with environment variables (KEY=VALUE format)
-in the config directory. To load it in your shell, add to your ~/.bashrc or ~/.zshrc:
-    set -a; source ~/.config/shoggoth/env; set +a
-See: https://gist.github.com/mihow/9c7f559807069a03e302605691f85572
 
 Environment variables:
     DOCKER_PROXY_PORT       Proxy port (default: 3128)
@@ -74,20 +71,9 @@ Environment variables:
     CONFIGURE_CLIENT_CONF   Set to "true" or a directory path to generate client config files
     CONFIGURE_GITEA         Set to token for gitea tea CLI, config file, and MCP server config
     CONFIGURE_GITEA_USER    Set to username for gitea tea CLI basic auth
-    CONFIGURE_REDMINE       Set to API key for redmine CLI, config file, and MCP server config
+    CONFIGURE_REDMINE       Set to API key for redmine CLI via environment variables
+    CONFIGURE_OLLAMA_TOKEN  Set to API key for OpenAI API (Ollama)
     CLIENT_CONF_DIR         Directory for config files (default: ${HOME}/.config/shoggoth)
-
-Examples:
-    ./setup-client.sh --docker --host shoggoth.local --host-ip 192.168.1.100
-    ./setup-client.sh --docker 8080 --host shoggoth.local --host-ip 192.168.1.100
-    ./setup-client.sh --update-hosts --host shoggoth.local --host-ip 192.168.1.100
-    ./setup-client.sh --docker --update-hosts --host shoggoth.local --host-ip 192.168.1.100
-    ./setup-client.sh --client-conf --host shoggoth.local
-    ./setup-client.sh --client-conf /path/to/dir --host shoggoth.local
-    ./setup-client.sh --client-conf --gitea-token your-token --host shoggoth.local
-    ./setup-client.sh --client-conf --apt-cache --host shoggoth.local --host-ip 192.168.1.100
-    ./setup-client.sh --host shoggoth.local --redmine-token your-token
-    ./setup-client.sh --all
 EOF
 }
 
@@ -129,6 +115,10 @@ parse_args() {
                 ;;
             --redmine-token)
                 CONFIGURE_REDMINE="$2"
+                shift 2
+                ;;
+            --ollama-token)
+                CONFIGURE_OLLAMA_TOKEN="$2"
                 shift 2
                 ;;
             --client-conf)
@@ -288,9 +278,11 @@ generate_shoggoth_conf() {
 # See: https://gist.github.com/mihow/9c7f559807069a03e302605691f85572
 
 # Ollama
-OPENAI_API_KEY=ollama
+OPENAI_API_KEY=${CONFIGURE_OLLAMA_TOKEN}
 OPENAI_BASE_URL=http://ollama.${HOST}/v1/
-OPENAI_MODEL=qwen3-coder:30b
+OPENAI_MODEL=qwen3-coder-next:cloud
+#qwen3-coder:30b
+#qwen3-coder:480b-cloud
 
 # Build cache (ccache)
 CCACHE_REMOTE_STORAGE=http://build-cache.${HOST}
@@ -326,6 +318,7 @@ generate_redmine_config() {
 REDMINE_SERVER=http://redmine.${HOST}
 REDMINE_AUTH_METHOD=apikey
 REDMINE_API_KEY=${CONFIGURE_REDMINE}
+REDMINE_NO_UPDATE_CHECK=1
 EOF
     chmod 600 "${ENV_FILE}"
 }
@@ -403,20 +396,6 @@ generate_qwen_conf() {
       \"httpUrl\": \"http://gitea-mcp.${HOST}/mcp\",
       \"headers\": {
         \"Authorization\": \"Bearer ${CONFIGURE_GITEA}\"
-      },
-      \"timeout\": 5000
-    }"
-    fi
-
-    if [ -n "${CONFIGURE_REDMINE}" ]; then
-        if [ -n "${mcp_servers}" ]; then
-            mcp_servers="${mcp_servers},"
-        fi
-        mcp_servers="${mcp_servers}
-    \"shoggoth-redmine-mcp\": {
-      \"url\": \"http://redmine-mcp.${HOST}/sse\",
-      \"headers\": {
-        \"X-Redmine-API-Key\": \"${CONFIGURE_REDMINE}\"
       },
       \"timeout\": 5000
     }"
@@ -501,10 +480,10 @@ main() {
     if [ -n "${CONFIGURE_REDMINE}" ] && [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
         generate_redmine_config
         generate_redmine_cli_conf
-        echo "Redmine CLI configured via environment variables (REDMINE_SERVER, REDMINE_API_KEY) and config file (${CLIENT_CONF_DIR}/redmine-config.yml)"
+        echo "Redmine CLI configured via environment variables (REDMINE_SERVER, REDMINE_AUTH_METHOD, REDMINE_API_KEY)"
     fi
 
-    if [ -n "${CONFIGURE_CLIENT_CONF}" ] && { [ -n "${CONFIGURE_GITEA}" ] || [ -n "${CONFIGURE_REDMINE}" ]; }; then
+    if [ -n "${CONFIGURE_CLIENT_CONF}" ] && { [ -n "${CONFIGURE_GITEA}" ] || [ -n "${CONFIGURE_REDMINE}" ] || [ -n "${CONFIGURE_OLLAMA_TOKEN}" ]; }; then
         generate_qwen_conf
     fi
 }
