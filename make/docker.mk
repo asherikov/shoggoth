@@ -1,35 +1,27 @@
 DOCKER_DISTRO?=noble
-
-COMPOSE_CMD=env \
-		UID=`id -u` \
-			GID=`id -g` \
-			SHOGGOTH_IP=${SHOGGOTH_IP} \
-			SHOGGOTH_ROOT=`pwd` \
-			SHOGGOTH_DOMAIN='shoggoth.local' \
-			docker compose -f docker-compose.yml
 SERVICE?=
 
 
 exec:
-	${MAKE} ssh_exec CMD='${COMPOSE_CMD} exec ${SERVICE} sh'
+	${MAKE} ssh_exec CMD='docker compose exec ${SERVICE} sh'
 
 up:
-	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} up -d ${SERVICE}'
-	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} up -d'
+	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='./setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d ${SERVICE}'
+	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='./setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d'
 
 down:
-	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} down ${SERVICE}'
-	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='${COMPOSE_CMD} down'
+	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose down ${SERVICE}'
+	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose down'
 
 restart:
 	${MAKE} down
 	${MAKE} up
 
 pull:
-	${MAKE} ssh_exec CMD='${COMPOSE_CMD} pull'
+	${MAKE} ssh_exec CMD='docker compose pull'
 
 log:
-	${MAKE} ssh_exec CMD='${COMPOSE_CMD} logs ${SERVICE} --follow'
+	${MAKE} ssh_exec CMD='docker compose logs ${SERVICE} --follow'
 
 docker_build: client_conf
 	cd shoggoth \

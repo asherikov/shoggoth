@@ -2,7 +2,7 @@ DIAGRAMS_RESOURCES=$(shell find ${HOME} ${PIPX_HOME} ${PIPX_GLOBAL_HOME} -ipath 
 
 graph:
 	rm -f docs/*.svg docs/*.gv docs/*.png
-	hiearch -f svg:cairo -r ${DIAGRAMS_RESOURCES} -t private/docs -o docs docs/*.yaml
+	hiearch -f svg:cairo -r ${DIAGRAMS_RESOURCES} -o docs docs/*.yaml
 
 fmt:
 	cp README.md README.md.back

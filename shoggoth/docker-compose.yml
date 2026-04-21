@@ -11,15 +11,15 @@ volumes:
         name: "shoggoth_ci_cache"
 secrets:
     gitea_runner_token:
-        file: ./secrets/gitea-runner-token.txt
+        file: ./private/gitea-runner-token.txt
     redmine_db_password:
-        file: ./secrets/redmine-db-password.txt
+        file: ./private/redmine-db-password.txt
     kestra_db_password:
-        file: ./secrets/kestra-db-password.txt
+        file: ./private/kestra-db-password.txt
     kestra_basic_auth_password:
-        file: ./secrets/kestra-basic-auth-password.txt
+        file: ./private/kestra-basic-auth-password.txt
     ollama_bearer_token:
-        file: ./secrets/ollama-bearer-token.txt
+        file: ./private/ollama-bearer-token.txt
 
 # https://docs.docker.com/compose/compose-file/11-extension/
 x-service: &default_service
@@ -212,7 +212,10 @@ services:
             # disabled: ,repo.packages,repo.actions
             GITEA__repository__DEFAULT_REPO_UNITS: 'repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects'
             # avoid conflict with ssh running on the host system, see web service config as well
+            GITEA__server__START_SSH_SERVER: 'true'
             GITEA__server__SSH_PORT: "${SHOGGOTH_GIT_SSH_PORT}"
+            GITEA__server__SSH_LISTEN_PORT: "${SHOGGOTH_GIT_SSH_PORT}"
+            GITEA__server__HTTP_PORT: "80"
             GITEA__server__ROOT_URL: 'http://git.${SHOGGOTH_DOMAIN}'
             GITEA__webhook__ALLOWED_HOST_LIST: 'private'
             # https://forum.gitea.com/t/unattended-gitea-installation-from-the-cli/3373/23
@@ -240,15 +243,17 @@ services:
             - ./gitea/runner/data:/data
             - ./gitea/runner/config.template.yaml:/config.template.yaml:ro
             - ./gitea/runner/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
+            - ./private/env:/slave_env:ro
             - shoggoth_ci_cache:/cache
             - /var/run/docker.sock:/var/run/docker.sock
         environment:
             !!merge <<: *default_environment
             SHOGGOTH_ROOT: ${SHOGGOTH_ROOT}
-            GITEA_INSTANCE_URL: http://git:3000
+            GITEA_INSTANCE_URL: http://git
             GITEA_RUNNER_NAME: shoggoth-runner
             GITEA_RUNNER_LABELS: ubuntu-latest,ubuntu-24.04
             GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
+            SSH_AUTH_SOCK: ${SSH_AUTH_SOCK}
         entrypoint: /shoggoth_bringup.sh
         secrets:
             - gitea_runner_token
@@ -262,8 +267,9 @@ services:
         environment:
             !!merge <<: *default_environment
             MCP_MODE: http
-            GITEA_HOST: http://git:3000
+            GITEA_HOST: http://git
             GITEA_INSECURE: true
+        command: /app/gitea-mcp --port 80
 
     git-pages:
         !!merge <<: *default_service
@@ -330,6 +336,7 @@ services:
             - dns
         secrets:
             - redmine_db_password
+        command: rails server -b 0.0.0.0 -p 80
 
     #redmine-mcp:
     #    !!merge <<: *default_service
@@ -392,7 +399,8 @@ services:
             - /var/run/docker.sock:/var/run/docker.sock
         environment:
             !!merge <<: *default_environment
-            SHOGGOTH_SHOGGOTH_ROOT: ${SHOGGOTH_ROOT}
+            FLOWENV_SHOGGOTH_ROOT: ${SHOGGOTH_ROOT}
+            FLOWENV_SSH_AUTH_SOCK: ${SSH_AUTH_SOCK}
         depends_on:
             - kestra-db
             - dns

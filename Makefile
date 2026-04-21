@@ -3,7 +3,7 @@ USER?=aleks
 SHOGGOTH_DOMAIN?=shoggoth.local
 SHOGGOTH_HOST?=${SHOGGOTH_DOMAIN}
 SHOGGOTH_IP?=$(shell getent hosts ${SHOGGOTH_DOMAIN} | cut -f 1 -d ' ')
-SHOGGOTH_CLIENT_CFG?=shoggoth/secrets
+SHOGGOTH_CLIENT_CFG?=shoggoth/private
 REMOTE_PATH?=~/
 
 SSH_COMMON_ARGS=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
@@ -13,7 +13,7 @@ help:
 	@grep -v "^	" Makefile make/*.mk | grep -v "^ " | grep -v "^$$" | grep -v "^\." | grep -v ".mk:$$"
 
 -include make/*.mk
--include private/*.mk
+-include shoggoth/private/*.mk
 
 sync: client_conf
 	rsync -r shoggoth ${USER}@${SHOGGOTH_HOST}:${REMOTE_PATH} || true

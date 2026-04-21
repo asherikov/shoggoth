@@ -2,7 +2,7 @@
 log-format = "text"
 
 [server]
-pages = "tcp/:3000"
+pages = "tcp/:80"
 caddy = "-"
 metrics = "-"
 

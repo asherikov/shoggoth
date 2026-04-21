@@ -46,7 +46,7 @@ github_to_gitea_user:
 		headerfile=$$(mktemp); \
 		curl -s --dump-header "$$headerfile" "https://api.github.com/users/${GITHUB_USER}/repos?page=$${page}&per_page=100" \
 			| jq -r '.[] | "\(.name)\t\(.description // empty)"' | while IFS=$$'\t' read -r name desc; do \
-			if [ -f private/github_to_gitea.blacklist ] && grep -qx "$$name" private/github_to_gitea.blacklist; then \
+			if [ -f shoggoth/private/github_to_gitea.blacklist ] && grep -qx "$$name" shoggoth/private/github_to_gitea.blacklist; then \
 				echo "Skipping blacklisted repository: $$name"; \
 			else \
 				${MAKE} github_to_gitea_repo GITHUB_REPO="$$name" REPO_DESCRIPTION="$$desc"; \

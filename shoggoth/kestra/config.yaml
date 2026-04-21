@@ -53,7 +53,8 @@ kestra:
           volume-enabled: true
   variables:
     # prefix is omitted in workflows
-    env-vars-prefix: SHOGGOTH_
+    # variables converted to lower case
+    env-vars-prefix: FLOWENV_
 
 grpc:
   server:

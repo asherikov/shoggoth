@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # substitute environment variables
-if [ -n "${SHOGGOTH_ROOT:-}" ]; then
-    sed "s|\${SHOGGOTH_ROOT}|${SHOGGOTH_ROOT}|g" /config.template.yaml > /config.yaml
-    export CONFIG_FILE=/config.yaml
-fi
+sed \
+    -e "s|\${SHOGGOTH_ROOT}|${SHOGGOTH_ROOT}|g" \
+    -e "s|\${SSH_AUTH_SOCK}|${SSH_AUTH_SOCK}|g" \
+    /config.template.yaml > /config.yaml
+export CONFIG_FILE=/config.yaml
 
 # setup cache permissions assuming certain UID/GID
 mkdir -p /cache/ccws/pip
