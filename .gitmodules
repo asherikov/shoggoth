@@ -1,0 +1,6 @@
+[submodule "shoggoth/unbound/dns-zone-blacklist"]
+	path = shoggoth/unbound/dns-zone-blacklist
+	url = https://github.com/iYUYUE/dns-zone-blacklist.git
+[submodule "shoggoth/redmine/plugins/kanban"]
+	path = shoggoth/redmine/plugins/kanban
+	url = https://github.com/happy-se-life/kanban
