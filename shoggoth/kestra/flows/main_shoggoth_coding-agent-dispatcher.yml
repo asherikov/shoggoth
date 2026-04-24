@@ -1,0 +1,47 @@
+id: coding-agent-dispatcher
+namespace: shoggoth
+
+inputs:
+  - id: script
+    type: STRING
+  - id: payload
+    type: STRING
+    defaults: ""
+  - id: task_id
+    type: STRING
+    defaults: ""
+
+outputs:
+  - id: exitCode
+    type: INT
+    value: "{{ outputs.run_script.exitCode }}"
+  - id: vars
+    type: JSON
+    value: "{{ outputs.run_script.vars }}"
+
+concurrency:
+  limit: 1
+  behavior: QUEUE
+
+tasks:
+  - id: run_script
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      volumes:
+        - "{{ envs.shoggoth_root }}/private/apt-cache.conf:/etc/apt/apt.conf.d/00-shoggoth-apt-cache"
+        - "{{ envs.shoggoth_root }}/private/env:/shoggoth/env"
+        - "{{ envs.shoggoth_root }}/private/resolv.conf:/etc/resolv.conf"
+        - "{{ envs.gitea_ssh_auth_sock }}:{{ envs.gitea_ssh_auth_sock }}"
+        - "{{ envs.gitea_token_auth_sock }}:/home/ccws/.git-credential-cache/socket"
+        - "shoggoth_ci_cache:/cache"
+        - "{{ envs.shoggoth_root }}/scripts:/shoggoth/scripts"
+      pullPolicy: ALWAYS
+    containerImage: docker-registry.shoggoth.local/slave_noble:latest
+    networkMode: host
+    commands:
+      - "bash {{ inputs.script }} {{ inputs.task_id }}"
+    env:
+      SHOGGOTH_ENV: "/shoggoth/env"
+      GITEA_TOKEN_AUTH_SOCK: "/home/ccws/.git-credential-cache/socket"
+      GITEA_PAYLOAD: "{{ inputs.payload }}"

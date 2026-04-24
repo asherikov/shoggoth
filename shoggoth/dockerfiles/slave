@@ -7,7 +7,7 @@ ENV SHOGGOTH_SKILL_DIR=${SHOGGOTH_SKILL_DIR}
 
 USER root
 
-COPY client/apt-cache.conf /etc/apt/apt.conf.d/00-shoggoth-apt-cache
+COPY private/apt-cache.conf /etc/apt/apt.conf.d/00-shoggoth-apt-cache
 
 RUN \
 --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -25,12 +25,23 @@ RUN \
         docker-compose-plugin \
     && usermod -aG docker ccws
 
+# nodejs is needed for some actions, e.g., actions/checkout@v5
+RUN \
+--mount=type=cache,target=/var/cache/apt,sharing=locked \
+--mount=type=cache,target=/var/lib/apt/lists/,sharing=locked \
+--mount=type=cache,target=/cache/pip,sharing=locked \
+    ${APT_INSTALL} nodejs
+
 # "ssh-keyscan -p 3022 git.shoggoth.local" is the right thing to do, but the server might not be available at build time
 RUN \
     echo "Host git.shoggoth.local" >> /etc/ssh/ssh_config \
-    && echo "    StrictHostKeyChecking no"
+    && echo "    StrictHostKeyChecking no"  >> /etc/ssh/ssh_config
 
 USER ccws
+
+# credential cache is used to provide access via http
+RUN \
+    git config --global credential.helper 'cache'
 
 RUN \
 --mount=type=bind,source=skills/,target=/tmp/skills \

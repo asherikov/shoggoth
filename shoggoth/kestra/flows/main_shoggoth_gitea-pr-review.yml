@@ -1,0 +1,27 @@
+#kestra_trigger:
+#	curl -X POST \
+#		http://kestra.${SHOGGOTH_DOMAIN}/api/v1/main/executions/webhook/shoggoth/gitea-pr-review/key \
+#		-H "Content-Type: application/json" \
+#		-H "X-Gitea-Event: pull_request" \
+#		-d '{"action":"opened","number":1,"pull_request":{"id":1,"number":1,"title":"Test PR","body":"Description","html_url":"http://git.shoggoth.local/owner/repo/pulls/1","base":{"repo":{"full_name":"owner/repo"},"ref":"main"},"head":{"ref":"feature-branch","sha":"abc123"}},"repository":{"full_name":"owner/repo","html_url":"http://git.shoggoth.local/owner/repo"},"sender":{"login":"user"}}'
+
+id: gitea-pr-review
+namespace: shoggoth
+disabled: false
+
+triggers:
+  - id: webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: key
+    allowConcurrent: true
+
+tasks:
+  - id: review_pr
+    type: io.kestra.plugin.core.flow.Subflow
+    namespace: shoggoth
+    flowId: coding-agent-dispatcher
+    wait: true
+    transmitFailed: true
+    inputs:
+      script: "/shoggoth/scripts/gitea-pr-review.sh"
+      payload: "{{ trigger.body | json }}"

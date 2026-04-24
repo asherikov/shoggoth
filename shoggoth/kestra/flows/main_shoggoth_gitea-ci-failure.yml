@@ -1,0 +1,27 @@
+#kestra_trigger:
+#	curl -X POST \
+#		http://kestra.${SHOGGOTH_DOMAIN}/api/v1/main/executions/webhook/shoggoth/gitea-ci-failure/key \
+#		-H "Content-Type: application/json" \
+#		-H "X-Gitea-Event: workflow_run" \
+#		-d '{"action":"completed","workflow":{"name":"CI"},"workflow_run":{"id":1,"conclusion":"failure","head_sha":"abc123","head_branch":"feature-branch","html_url":"http://git.shoggoth.local/owner/repo/actions/runs/1"},"repository":{"full_name":"owner/repo","html_url":"http://git.shoggoth.local/owner/repo"},"sender":{"login":"user"}}'
+
+id: gitea-ci-failure
+namespace: shoggoth
+disabled: true
+
+triggers:
+  - id: webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: key
+    allowConcurrent: true
+
+tasks:
+  - id: resolve_ci_failure
+    type: io.kestra.plugin.core.flow.Subflow
+    namespace: shoggoth
+    flowId: coding-agent-dispatcher
+    wait: true
+    transmitFailed: true
+    inputs:
+      script: "/shoggoth/scripts/gitea-ci-failure.sh"
+      payload: "{{ trigger.body | json }}"

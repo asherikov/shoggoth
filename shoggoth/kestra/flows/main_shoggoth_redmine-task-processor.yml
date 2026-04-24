@@ -1,32 +1,44 @@
 id: redmine-task-processor
 namespace: shoggoth
-disabled: true
+#disabled: true
 
-concurrency:
-  limit: 1
-
-triggers:
-  - id: schedule
-    type: io.kestra.plugin.core.trigger.Schedule
-    cron: "*/10 * * * *"
-    stopAfter:
-      - FAILED
-      - KILLED
+#triggers:
+#  - id: schedule
+#    type: io.kestra.plugin.core.trigger.Schedule
+#    cron: "0 * * * *"
+#    allowConcurrent: false
 
 tasks:
-  - id: list_in_progress_tasks
+  - id: list_tasks
     type: io.kestra.plugin.scripts.shell.Commands
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       volumes:
-        - "{{ envs.shoggoth_root }}/private/apt-cache.conf:/etc/apt/apt.conf.d/00-shoggoth-apt-cache"
-        - "{{ envs.shoggoth_root }}/private/env:/env"
+        - "{{ envs.shoggoth_root }}/private/env:/shoggoth/env"
         - "{{ envs.shoggoth_root }}/private/resolv.conf:/etc/resolv.conf"
-        - "{{ envs.ssh_auth_sock }}:{{ envs.ssh_auth_sock }}"
-        - "shoggoth_ci_cache:/cache"
+        - "{{ envs.shoggoth_root }}/scripts:/shoggoth/scripts"
       pullPolicy: ALWAYS
     containerImage: docker-registry.shoggoth.local/slave_noble:latest
+    networkMode: host
     commands:
-      - "bash -c 'set -a && source /env && set +a && redmine issues list --status=\"In Progress\" --limit=1 --output=json' > /home/ccws/tasks.json"
-      - "bash -c 'set -a && source /env && set +a && redmine issues update `jq '.[0].id' < /home/ccws/tasks.json` --status=Resolved'"
-      - "bash -c 'set -a && source /env && set +a && echo \"Selected task ID: `jq '.[0].id' < /home/ccws/tasks.json`\"'"
+      - bash /shoggoth/scripts/redmine-task-list.sh
+    env:
+      SHOGGOTH_ENV: "/shoggoth/env"
+
+  - id: print
+    type: io.kestra.plugin.core.log.Log
+    message: "{{ outputs.list_tasks }}"
+
+  - id: process_tasks
+    type: io.kestra.plugin.core.flow.EachParallel
+    value: "{{ outputs.list_tasks.exitCode == 0 ? outputs.list_tasks.vars.task_ids : [] }}"
+    tasks:
+      - id: process_task
+        type: io.kestra.plugin.core.flow.Subflow
+        namespace: shoggoth
+        flowId: coding-agent-dispatcher
+        wait: true
+        transmitFailed: true
+        inputs:
+          script: "/shoggoth/scripts/redmine-task-processor.sh"
+          task_id: "{{ taskrun.value }}"

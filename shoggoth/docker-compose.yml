@@ -153,6 +153,8 @@ services:
         volumes:
             - ./unbound/unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
             - ./unbound/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
+            - ./unbound/dns-zone-blacklist/unbound/unbound.blacklist:/opt/unbound/etc/unbound/unbound.blacklist:ro
+            - ./unbound/dns-zone-blacklist/unbound/unbound-nxdomain.blacklist:/opt/unbound/etc/unbound/unbound-nxdomain.blacklist:ro
         environment:
             !!merge <<: *default_environment
         command: "/shoggoth_bringup.sh"
@@ -243,7 +245,7 @@ services:
             - ./gitea/runner/data:/data
             - ./gitea/runner/config.template.yaml:/config.template.yaml:ro
             - ./gitea/runner/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
-            - ./private/env:/slave_env:ro
+            - ./private/env:/shoggoth/env:ro
             - shoggoth_ci_cache:/cache
             - /var/run/docker.sock:/var/run/docker.sock
         environment:
@@ -253,7 +255,8 @@ services:
             GITEA_RUNNER_NAME: shoggoth-runner
             GITEA_RUNNER_LABELS: ubuntu-latest,ubuntu-24.04
             GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
-            SSH_AUTH_SOCK: ${SSH_AUTH_SOCK}
+            GITEA_SSH_AUTH_SOCK: ${GITEA_SSH_AUTH_SOCK}
+            GITEA_TOKEN_AUTH_SOCK: ${GITEA_TOKEN_AUTH_SOCK}
         entrypoint: /shoggoth_bringup.sh
         secrets:
             - gitea_runner_token
@@ -365,8 +368,11 @@ services:
             POSTGRES_DB: kestra
             POSTGRES_USER: kestra
             POSTGRES_PASSWORD_FILE: /run/secrets/kestra_db_password
+        tmpfs:
+            # workaround for https://github.com/kestra-io/kestra/issues/13700
+            - /var/lib/postgresql
         volumes:
-            - ./kestra/database:/var/lib/postgresql
+            #- ./kestra/database:/var/lib/postgresql
             # a hack for custom uid
             - /etc/passwd:/etc/passwd:ro
         secrets:
@@ -400,7 +406,8 @@ services:
         environment:
             !!merge <<: *default_environment
             FLOWENV_SHOGGOTH_ROOT: ${SHOGGOTH_ROOT}
-            FLOWENV_SSH_AUTH_SOCK: ${SSH_AUTH_SOCK}
+            FLOWENV_GITEA_SSH_AUTH_SOCK: ${GITEA_SSH_AUTH_SOCK}
+            FLOWENV_GITEA_TOKEN_AUTH_SOCK: ${GITEA_TOKEN_AUTH_SOCK}
         depends_on:
             - kestra-db
             - dns

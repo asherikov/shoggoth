@@ -280,9 +280,8 @@ generate_shoggoth_conf() {
 # Ollama
 OPENAI_API_KEY=${CONFIGURE_OLLAMA_TOKEN}
 OPENAI_BASE_URL=http://ollama.${HOST}/v1/
-OPENAI_MODEL=qwen3-coder-next:cloud
-#qwen3-coder:30b
-#qwen3-coder:480b-cloud
+OPENAI_MODEL=glm-5.1:cloud
+#qwen3-coder-next:cloud, qwen3-coder:30b, qwen3-coder:480b-cloud
 
 # Build cache (ccache)
 CCACHE_REMOTE_STORAGE=http://build-cache.${HOST}

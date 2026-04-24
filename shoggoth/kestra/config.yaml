@@ -37,6 +37,9 @@ kestra:
     basic-auth:
       username: admin@shoggoth.local
       password: "${KESTRA_BASIC_AUTH_PASSWORD}"
+      open-urls:
+        - "/api/v1/executions/webhook/"
+        - "/api/v1/main/executions/webhook/"
     termination-grace-period: 30s
   ai:
     enabled: false

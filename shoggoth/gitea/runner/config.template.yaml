@@ -20,7 +20,7 @@ runner:
     RUNNER_TOOL_CACHE: /toolcache
   # Extra environment variables to run jobs from a file.
   # It will be ignored if it's empty or the file doesn't exist. (inside runner container)
-  env_file: /slave_env
+  env_file: /shoggoth/env
   # The timeout for a job to be finished.
   # Please note that the Gitea instance also has a timeout (3h by default) for the job.
   # So the job could be stopped by the Gitea instance if its timeout is shorter than this.
@@ -76,7 +76,8 @@ container:
   privileged: false
   # Any other options to be used when the container is started (e.g., --add-host=my.gitea.url:host-gateway).
   options: "--volume ${SHOGGOTH_ROOT}/private/apt-cache.conf:/etc/apt/apt.conf.d/00-shoggoth-apt-cache
-            --volume ${SSH_AUTH_SOCK}:${SSH_AUTH_SOCK}
+            --volume ${GITEA_SSH_AUTH_SOCK}:${GITEA_SSH_AUTH_SOCK}
+            --volume ${GITEA_TOKEN_AUTH_SOCK}:/home/ccws/.git-credential-cache/socket
             --volume shoggoth_ci_cache:/cache"
   # The parent directory of a job's working directory.
   # NOTE: There is no need to add the first '/' of the path as act_runner will add it automatically.
