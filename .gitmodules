@@ -4,3 +4,6 @@
 [submodule "shoggoth/redmine/plugins/kanban"]
 	path = shoggoth/redmine/plugins/kanban
 	url = https://github.com/happy-se-life/kanban
+[submodule "shoggoth/redmine/plugins/redmine_forgejo_webhook"]
+	path = shoggoth/redmine/plugins/redmine_forgejo_webhook
+	url = https://github.com/vanzhiganov/redmine-forgejo-webhook
