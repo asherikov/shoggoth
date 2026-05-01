@@ -30,9 +30,6 @@ x-service: &default_service
     # resolves names to the external host IP, not useful in internal network
     #dns:
     #    - 172.20.0.53
-    depends_on:
-        dns:
-            condition: service_started
 
 x-environment: &default_environment
     SHOGGOTH_IP: ${SHOGGOTH_IP}
@@ -46,8 +43,6 @@ services:
         container_name: web.${SHOGGOTH_DOMAIN}
         ports:
             - "80:80"
-            # gitea ssh
-            - "${SHOGGOTH_GIT_SSH_PORT}:22"
         volumes:
             - ./angie/angie.conf:/etc/angie/angie.conf:ro
             - ./angie/proxy-params.conf:/etc/angie/proxy-params.conf:ro
@@ -102,6 +97,8 @@ services:
         # alternatives
         #   - https://docs.docker.com/docker-hub/image-library/mirror/#run-a-registry-as-a-pull-through-cache
         #     "Only the central Hub can be mirrored."
+        #   - https://github.com/spegel-org/spegel
+        #     needs kubernetes
         image: rpardini/docker-registry-proxy:0.6.5
         container_name: docker-cache.${SHOGGOTH_DOMAIN}
         environment:
@@ -180,6 +177,7 @@ services:
             - /dev/kfd:/dev/kfd
         environment:
             !!merge <<: *default_environment
+            OLLAMA_HOST: "0.0.0.0:80"
             # 2 to log prompts
             OLLAMA_DEBUG: 1
             # https://docs.ollama.com/context-length
@@ -229,6 +227,8 @@ services:
             - ./gitea/data:/data
             - /etc/timezone:/etc/timezone:ro
             - /etc/localtime:/etc/localtime:ro
+        ports:
+            - "${SHOGGOTH_GIT_SSH_PORT}:${SHOGGOTH_GIT_SSH_PORT}"
         secrets:
             - gitea_runner_token
 
@@ -261,18 +261,60 @@ services:
         secrets:
             - gitea_runner_token
 
-    gitea-mcp:
+    mcp-gitea:
         !!merge <<: *default_service
         # https://gitea.com/gitea/gitea-mcp
         # https://hub.docker.com/r/gitea/gitea-mcp-server
         image: docker.gitea.com/gitea-mcp-server:latest
-        container_name: gitea-mcp.${SHOGGOTH_DOMAIN}
+        container_name: mcp-gitea.${SHOGGOTH_DOMAIN}
         environment:
             !!merge <<: *default_environment
             MCP_MODE: http
             GITEA_HOST: http://git
             GITEA_INSECURE: true
         command: /app/gitea-mcp --port 80
+
+    basic-memory:
+        !!merge <<: *default_service
+        # https://basicmemory.com
+        # https://docs.basicmemory.com/reference/docker
+        # alternatives
+        #   - https://github.com/doobidoo/mcp-memory-service
+        #       - very sloppy
+        #   - https://github.com/rohitg00/agentmemory
+        #       - no docker
+        #   - https://github.com/Gentleman-Programming/engram
+        #       - always keeps local database
+        #   - https://github.com/MemPalace/mempalace
+        #       - hype
+        #   - https://github.com/volcengine/OpenViking
+        #       - requires llm
+        image: ghcr.io/basicmachines-co/basic-memory:latest
+        container_name: basic-memory.${SHOGGOTH_DOMAIN}
+        volumes:
+            - ./basic_memory/data:/app/data
+        environment:
+            !!merge <<: *default_environment
+            BASIC_MEMORY_HOME: /app/data/basic-memory
+            BASIC_MEMORY_PROJECT_ROOT: /app/data
+            BASIC_MEMORY_SEMANTIC_EMBEDDING_PROVIDER: openai
+            BASIC_MEMORY_SEMANTIC_EMBEDDING_MODEL: nomic-embed-text
+            OPENAI_API_KEY: ollama
+            OPENAI_BASE_URL: http://ollama/v1
+        command: ["basic-memory", "mcp", "--transport", "sse", "--host", "0.0.0.0", "--port", "80"]
+
+    mcp-skills:
+        !!merge <<: *default_service
+        # https://gofastmcp.com/servers/providers/skills
+        # alternatives:
+        #   - https://skill-to-mcp.readthedocs.io/en/latest/
+        image: docker-registry.${SHOGGOTH_DOMAIN}/mcp_skills:latest
+        container_name: mcp-skills.${SHOGGOTH_DOMAIN}
+        volumes:
+            - ./skills:/app/skills:ro
+        environment:
+            !!merge <<: *default_environment
+            MCP_SKILLS_PORT: 80
 
     git-pages:
         !!merge <<: *default_service
@@ -341,22 +383,6 @@ services:
             - redmine_db_password
         command: rails server -b 0.0.0.0 -p 80
 
-    #redmine-mcp:
-    #    !!merge <<: *default_service
-    #    # alternatives
-    #    # - only local
-    #    #   - https://github.com/onozaty/redmine-mcp-server
-    #    #   - https://github.com/runekaagaard/mcp-redmine
-    #    # - remote service
-    #    #   - https://github.com/jztan/redmine-mcp-server oauth too much trouble
-    #    #   - https://github.com/yenpu/redmine-mcp no docker
-    #    #   - https://github.com/redmine-tx/redmine_tx_mcp plugin not compatible with the latest redmine
-    #    #   - https://github.com/daiji-sshr/redmine-mcp-stateless does not work behind proxy https://github.com/daiji-sshr/redmine-mcp-stateless/issues/2
-    #    image: redmine-mcp-stateless-redmine-mcp-stateless
-    #    container_name: redmine-mcp.${SHOGGOTH_DOMAIN}
-    #    environment:
-    #        !!merge <<: *default_environment
-
     kestra-db:
         !!merge <<: *default_service
         # https://hub.docker.com/_/postgres
@@ -387,6 +413,8 @@ services:
         #     - simple triggers, no execution monitoring, persistance, execution limits, etc
         #   - https://github.com/dagucloud/dagu/
         #     - triggers are not specified in workflow files, needs proxy for injecting authorization headers
+        #   - https://github.com/StackStorm/st2
+        #     - an overkill
         #   - lots of others
         #     - gui only
         #     - no support for custom webhooks

@@ -233,7 +233,7 @@ EOF"
 }
 
 update_hosts() {
-    local services=("kestra" "dns" "apt-cache" "docker-cache" "ollama" "git" "build-cache" "gitea-mcp" "git-pages" "redmine" "redmine-mcp" "proxpi" "docker-registry")
+    local services=("kestra" "dns" "apt-cache" "docker-cache" "ollama" "git" "build-cache" "mcp-gitea" "basic-memory" "mcp-skills" "git-pages" "redmine" "redmine-mcp" "proxpi" "docker-registry")
     local hosts_entries="${HOST_IP} ${HOST}"$'\n'
 
     for service in "${services[@]}"; do
@@ -391,14 +391,24 @@ generate_qwen_conf() {
 
     if [ -n "${CONFIGURE_GITEA}" ]; then
         mcp_servers="${mcp_servers}
-    \"shoggoth-gitea-mcp\": {
-      \"httpUrl\": \"http://gitea-mcp.${HOST}/mcp\",
+    \"shoggoth-mcp-gitea\": {
+      \"httpUrl\": \"http://mcp-gitea.${HOST}/mcp\",
       \"headers\": {
         \"Authorization\": \"Bearer ${CONFIGURE_GITEA}\"
       },
       \"timeout\": 5000
-    }"
+    },"
     fi
+
+    mcp_servers="${mcp_servers}
+    \"shoggoth-basic-memory\": {
+      \"httpUrl\": \"http://basic-memory.${HOST}/mcp\",
+      \"timeout\": 5000
+    },
+    \"shoggoth-mcp-skills\": {
+      \"httpUrl\": \"http://mcp-skills.${HOST}/mcp\",
+      \"timeout\": 5000
+    }"
 
     if [ -n "${mcp_servers}" ]; then
         cat > "${CLIENT_CONF_DIR}/qwen.json" <<EOF
@@ -482,7 +492,7 @@ main() {
         echo "Redmine CLI configured via environment variables (REDMINE_SERVER, REDMINE_AUTH_METHOD, REDMINE_API_KEY)"
     fi
 
-    if [ -n "${CONFIGURE_CLIENT_CONF}" ] && { [ -n "${CONFIGURE_GITEA}" ] || [ -n "${CONFIGURE_REDMINE}" ] || [ -n "${CONFIGURE_OLLAMA_TOKEN}" ]; }; then
+    if [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
         generate_qwen_conf
     fi
 }

@@ -18,8 +18,8 @@ tasks:
         - "{{ envs.shoggoth_root }}/private/resolv.conf:/etc/resolv.conf"
         - "{{ envs.shoggoth_root }}/scripts:/shoggoth/scripts"
       pullPolicy: ALWAYS
+      networkMode: host
     containerImage: docker-registry.shoggoth.local/slave_noble:latest
-    networkMode: host
     commands:
       - bash /shoggoth/scripts/redmine-task-list.sh
     env:

@@ -32,13 +32,15 @@ tasks:
         - "{{ envs.shoggoth_root }}/private/apt-cache.conf:/etc/apt/apt.conf.d/00-shoggoth-apt-cache"
         - "{{ envs.shoggoth_root }}/private/env:/shoggoth/env"
         - "{{ envs.shoggoth_root }}/private/resolv.conf:/etc/resolv.conf"
+        - "{{ envs.shoggoth_root }}/private/qwen.json:/home/ccws/.qwen/settings.json"
+        - "{{ envs.shoggoth_root }}/private/qwen.json:/root/.qwen/settings.json"
         - "{{ envs.gitea_ssh_auth_sock }}:{{ envs.gitea_ssh_auth_sock }}"
         - "{{ envs.gitea_token_auth_sock }}:/home/ccws/.git-credential-cache/socket"
         - "shoggoth_ci_cache:/cache"
         - "{{ envs.shoggoth_root }}/scripts:/shoggoth/scripts"
       pullPolicy: ALWAYS
+      networkMode: host
     containerImage: docker-registry.shoggoth.local/slave_noble:latest
-    networkMode: host
     commands:
       - "bash {{ inputs.script }} {{ inputs.task_id }}"
     env:

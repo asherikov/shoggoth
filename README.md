@@ -64,7 +64,7 @@ The following services are available:
 | `git` | `git.<host>` | Gitea Git server with web UI |
 | `git-pages` | `git-pages.<host>` | Git Pages static site hosting |
 | `gitea-runner` | \- | Gitea Actions runner |
-| `gitea-mcp` | `gitea-mcp.<host>` | Gitea MCP server for AI agents |
+| `mcp-gitea` | `mcp-gitea.<host>` | Gitea MCP server for AI agents |
 | `proxpi` | `proxpi.<host>` | Python package caching proxy |
 | `redmine` | `redmine.<host>` | Redmine project management server |
 | `redmine-mcp` | `redmine-mcp.<host>` | Redmine MCP server for AI agents |

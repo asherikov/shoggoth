@@ -6,6 +6,9 @@ SHOGGOTH_IP?=$(shell getent hosts ${SHOGGOTH_DOMAIN} | cut -f 1 -d ' ')
 SHOGGOTH_CLIENT_CFG?=shoggoth/private
 REMOTE_PATH?=~/
 
+OLLAMA_MODEL?=nomic-embed-text
+
+
 SSH_COMMON_ARGS=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 
 
@@ -83,3 +86,6 @@ client_conf:
 		--gitea-token ${GITEA_TOKEN} --gitea-user ${GITEA_USER} \
 		--ollama-token ${OLLAMA_TOKEN} \
 		--redmine-token ${REDMINE_TOKEN}
+
+ollama_pull:
+	${MAKE} ssh_exec CMD='docker compose exec ollama ollama pull ${OLLAMA_MODEL}'

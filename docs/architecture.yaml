@@ -93,19 +93,28 @@ nodes:
     scope: proxy_services
     style_notag: proxy_style
 
-  - id: [":3022\ngit/ssh", proxy_git]
+  - id: ["AI", proxy_ai_group]
     scope: proxy_services
+    graphviz:
+      style: invis
+
+  - id: ["mcp-gitea.", proxy_mcp_gitea]
+    scope: proxy_ai_group
     style_notag: proxy_style
 
-  - id: ["gitea-mcp.", proxy_mcp]
-    scope: proxy_services
+  - id: ["basic-memory.", proxy_basic_memory]
+    scope: proxy_ai_group
     style_notag: proxy_style
 
-  - id: ["git-pages.", proxy_git_pages]
-    scope: proxy_services
+  - id: ["mcp-skills.", proxy_mcp_skills]
+    scope: proxy_ai_group
     style_notag: proxy_style
 
   - id: ["ollama.", proxy_ollama]
+    scope: proxy_ai_group
+    style_notag: proxy_style
+
+  - id: ["git-pages.", proxy_git_pages]
     scope: proxy_services
     style_notag: proxy_style
 
@@ -134,21 +143,30 @@ nodes:
     style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
   # Caching layer
+  - id: ["", caching_group]
+    scope: shoggoth_host
+    graphviz:
+      style: invis
+
   - id: ["apt-cacher-ng", apt_cache]
-    scope: behind_proxy_group
+    scope: caching_group
     style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
   - id: [":3128\n(docker registry\ncaching proxy)", docker_cache]
-    scope: direct_access_group
+    scope: caching_group
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
+
+  - id: ["data cache\nvolume", ci_cache_volume]
+    scope: caching_group
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
+
+  - id: ["proxpi", proxpi_service]
+    scope: caching_group
     style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
   - id: ["local container\nregistry", docker_registry]
     scope: behind_proxy_group
     style_notag: hh_diagrams_alibabacloud_compute_container_service
-
-  - id: ["proxpi", proxpi_service]
-    scope: behind_proxy_group
-    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
   # Development layer - Gitea services
   - id: ["gitea", gitea_group]
@@ -163,28 +181,39 @@ nodes:
     scope: gitea_group
     style_notag: hh_diagrams_onprem_ci_github_actions
 
-  - id: ["mcp", gitea_mcp]
+  - id: ["mcp-gitea", mcp_gitea]
     scope: gitea_group
-    style_notag: hh_diagrams_azure_identity_api_proxy
-
-  - id: ["CI job", ci_job]
-    scope: gitea_group
+    style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
+  # Slave (shared by Gitea CI and Kestra)
+  - id: ["shoggoth\nslave", slave]
+    scope: behind_proxy_group
     style_notag: hh_diagrams_onprem_ci_github_actions
 
-  # Cache volume mounted to CI jobs
-  - id: ["data cache\nvolume", ci_cache_volume]
-    scope: gitea_group
-    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
-
-  # AI layer
   - id: ["LLM server\n(ollama)", ollama_service]
+    scope: behind_proxy_group
+    style_notag: hh_diagrams_azure_aimachinelearning_azure_openai
+
+  - id: ["basic\nmemory", basic_memory_service]
+    scope: behind_proxy_group
+    style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
+
+  # MCP skills layer
+  - id: ["mcp-skills", mcp_skills_service]
     scope: behind_proxy_group
     style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
 
   # Kestra layer
-  - id: ["kestra", kestra_service]
+  - id: ["kestra", kestra_group]
     scope: behind_proxy_group
     style_notag: docker_service_style
+
+  - id: ["kestra", kestra_service]
+    scope: kestra_group
+    style_notag: hh_diagrams_oci_monitoring_workflow
+
+  - id: ["postgres\ndb", kestra_db]
+    scope: kestra_group
+    style_notag: hh_diagrams_onprem_database_postgresql
 
   # Git-pages layer
   - id: ["git-pages", git_pages_service]
@@ -229,6 +258,10 @@ nodes:
     scope: external_services
     style_notag: hh_diagrams_alibabacloud_web_dns
 
+  - id: ["Cloud\nOllama", cloud_ollama]
+    scope: external_services
+    style_notag: hh_diagrams_azure_aimachinelearning_azure_openai
+
 edges:
   # ============================================
   # Client -> Shoggoth Services
@@ -256,22 +289,34 @@ edges:
     graphviz:
       color: auto
 
-  # Git client flow (via proxy)
-  - link: [client_git, proxy_git]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
-  - link: [proxy_git, git_service]
+  # Git client flow (direct SSH)
+  - link: [client_git, git_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
 
   # AI agent flow (via proxy)
-  - link: [ai_agent, proxy_mcp]
+  - link: [ai_agent, proxy_mcp_gitea]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [proxy_mcp, gitea_mcp]
+  - link: [proxy_mcp_gitea, mcp_gitea]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [ai_agent, proxy_basic_memory]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [proxy_basic_memory, basic_memory_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [ai_agent, proxy_mcp_skills]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [proxy_mcp_skills, mcp_skills_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
@@ -361,37 +406,66 @@ edges:
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [gitea_mcp, git_service]
+  - link: [mcp_gitea, git_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [ci_job, apt_cache]
+  - link: [slave, apt_cache]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [ci_job, build_cache]
+  - link: [slave, build_cache]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [ci_job, ci_cache_volume]
+  - link: [slave, ci_cache_volume]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [ci_job, git_pages_service]
+  - link: [slave, git_pages_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [ci_job, proxpi_service]
+  - link: [slave, proxpi_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [gitea_runner, ci_job]
+  - link: [slave, ollama_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [gitea_runner, slave]
     style: hh_diagrams_link
     graphviz:
       color: auto
 
   # Redmine ecosystem
   - link: [redmine_service, redmine_db]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+
+  # Kestra flow triggers
+  - link: [git_service, kestra_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [redmine_service, kestra_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+
+  - link: [kestra_service, slave]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [kestra_service, kestra_db]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+
+  # basic memory -> ollama (if using embeddings)
+  - link: [basic_memory_service, ollama_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
@@ -415,40 +489,10 @@ edges:
     style: hh_diagrams_link
     graphviz:
       color: auto
-
-  # Invisible edges for layout (direct_access_group -> behind_proxy_group)
-  - link: [build_cache, ci_job]
+  - link: [ollama_service, cloud_ollama]
     style: hh_diagrams_link
     graphviz:
-      style: invis
-  - link: [build_cache, apt_cache]
-    style: hh_diagrams_link
-    graphviz:
-      style: invis
-  - link: [build_cache, git_service]
-    style: hh_diagrams_link
-    graphviz:
-      style: invis
-  - link: [build_cache, gitea_runner]
-    style: hh_diagrams_link
-    graphviz:
-      style: invis
-  - link: [build_cache, gitea_mcp]
-    style: hh_diagrams_link
-    graphviz:
-      style: invis
-  - link: [build_cache, ollama_service]
-    style: hh_diagrams_link
-    graphviz:
-      style: invis
-  - link: [build_cache, proxpi_service]
-    style: hh_diagrams_link
-    graphviz:
-      style: invis
-  - link: [build_cache, kestra_service]
-    style: hh_diagrams_link
-    graphviz:
-      style: invis
+      color: auto
 
 views:
   # ============================================

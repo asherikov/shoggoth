@@ -23,16 +23,23 @@ pull:
 log:
 	${MAKE} ssh_exec CMD='docker compose logs ${SERVICE} --follow'
 
+DOCKER_TAG_SUFFIX?=_${DOCKER_DISTRO}
+
 docker_build: client_conf
 	cd shoggoth \
 		&& docker build \
 			--build-arg BASE_IMAGE=${BASE_IMAGE} \
 			-f dockerfiles/${IMAGE} \
-			-t docker-registry.${SHOGGOTH_DOMAIN}/${IMAGE}_${DOCKER_DISTRO}:latest \
+			-t docker-registry.${SHOGGOTH_DOMAIN}/${IMAGE}${DOCKER_TAG_SUFFIX}:latest \
 			--progress plain \
 			--add-host apt-cache.${SHOGGOTH_DOMAIN}:${SHOGGOTH_IP} \
+			--add-host proxpi.${SHOGGOTH_DOMAIN}:${SHOGGOTH_IP} \
+			${DOCKER_BUILD_ADD_HOST} \
 			./
 
 slave:
 	${MAKE} docker_build IMAGE=slave BASE_IMAGE=asherikov/ccws_qwen_${DOCKER_DISTRO}:latest
+
+mcp_skills:
+	${MAKE} docker_build IMAGE=mcp_skills DOCKER_TAG_SUFFIX=
 
