@@ -13,8 +13,17 @@
 Introduction
 ============
 
-`shoggoth` is a self-hosted development service multitool intended for personal
-use.
+`shoggoth` is a self-hosted agentic development multitool intended for
+personal use.
+
+Goals
+-----
+
+- Build an environment where coding agents work as team members, execute
+  assigned tasks, perform and respond to code reviews.
+
+- All components of the system should be open source, self-hostable, and
+  replaceable by similar software.
 
 Features
 --------
@@ -28,13 +37,28 @@ Features
   - Local AI model server (`ollama`).
   - Docker registry.
   - Git server (`gitea`) with CI/CD actions support.
-  - Gitea MCP server for AI coding agent integration.
 - Project management
   - Redmine project management server.
+- Coding agents:
+  - Gitea MCP server for AI coding agent integration.
   - Redmine MCP server for AI agent integration.
+- Other:
+  - DNS server with blacklisting support.
+
+Disclaimer
+----------
+
+- This is an experimental project in an early development stage, do not expect
+  it to work out of the box.
+
+- Security is non-existent: it is not a priority atm and shoggoth is supposed
+  to be running in a local network only.
+
+- The project is tailered for my primary stack (Ubuntu/C++/python) and working
+  style (no IDE, no GUI, everything-as-code).
 
 Architecture
-------------
+============
 
 The system consists of three parts:
 
@@ -71,6 +95,24 @@ The following services are available:
 
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture" />
 
+Shoggoth slave container
+------------------------
+
+Shoggoth slave container includes three main layers:
+- <https://github.com/asherikov/ccws> build environemnt with compilers, static
+  analysis tools, documentation and other utilitites, refer to
+  <https://github.com/asherikov/ccws/blob/master/ccws/examples/Dockerfile>.
+- <https://github.com/QwenLM/qwen-code> terminal coding agent, see
+  <https://github.com/asherikov/ccws/blob/master/ccws/examples/Dockerfile.qwen>.
+- `shoggoth`-sepecific set iof utilities, such as gitea and redmin cli clients,
+  docker file is located in `shoggoth/dockerfiles/slave`.
+
+The slave container is intended to be used in three different ways:
+- plain CI/CD;
+- non-interactive agentic flows, e.g., coding or reviews;
+- interactive development with or without a coding agent.
+
+
 Domain Name Resolution
 ----------------------
 
@@ -93,8 +135,7 @@ Add service hostnames to `/etc/hosts` on each client machine:
 ### DNS Resolution
 
 The `dns` service (Unbound) can be configured as the DNS server on client
-machines. It resolves all service hostnames automatically. Configure your
-network settings to use the shoggoth server IP as the DNS server.
+machines, use the shoggoth server IP as the DNS server.
 
 Client Configuration
 ====================
@@ -120,7 +161,7 @@ Run the setup script on each client machine.
 # Configure Docker, hosts, apt cache, and generate client config files
 ./shoggoth/setup-client.sh --all --host shoggoth.local --host-ip 192.168.1.100
 
-# Configure with Gitea and Redmine tokens (generates env, qwen.json)
+# Configure with Gitea and Redmine tokens (generates env, qwen configuration)
 ./shoggoth/setup-client.sh --client-conf --host shoggoth.local --gitea-token your-token --redmine-token your-token
 ```
 
@@ -131,7 +172,7 @@ The script generates the following files when `--client-conf` is used:
 | `env` | Environment variables for all services (ollama, ccache, proxpi, gitea, redmine) |
 | `apt-cache.conf` | APT cache configuration |
 | `resolv.conf` | DNS resolver configuration |
-| `qwen.json` | Qwen Code MCP server configuration (generated when tokens are provided) |
+| `qwen/settings.json` | Qwen Code configuration |
 
 Source the `env` file in your `~/.bashrc` or `~/.zshrc`:
 
@@ -182,16 +223,7 @@ set -a; source ~/.config/shoggoth/env; set +a
 
 ### Ollama AI Server
 
-Query the local AI model:
-
-``` bash
-set -a; source ~/.config/shoggoth/env; set +a
-curl http://ollama.shoggoth.local/api/tags
-curl http://ollama.shoggoth.local/v1/completions \
-    -H "Content-Type: application/json" \
-    -H "Authorization: ollama" \
-    -d '{"model": "qwen3-coder:30b", "prompt": "What is the capital of UAE?"}'
-```
+Query the local AI model: `make ollama_tags`, `make ollama_query`.
 
 ### Gitea Git Server
 
@@ -216,8 +248,9 @@ tea issues list
 
 ### Gitea MCP Server (AI Agent Integration)
 
-The `--gitea-token` flag also generates `qwen.json` with the Gitea MCP server
-configuration. Copy the relevant server block into your Qwen Code MCP settings.
+The `--gitea-token` flag also generates qwen-code settings with the Gitea MCP
+server configuration. Copy the relevant server block into your Qwen Code MCP
+settings.
 
 ### Redmine Project Management Server
 
@@ -247,7 +280,7 @@ and restarting the service.
 ```
 
 The `--redmine-token` flag configures both the Redmine CLI environment variables
-and generates the MCP server entry in `qwen.json`.
+and generates the MCP server entry in `qwen/settings.json`.
 
 ### Git Pages (Static Site Hosting)
 

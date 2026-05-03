@@ -23,5 +23,5 @@ tasks:
     wait: true
     transmitFailed: true
     inputs:
-      script: "/shoggoth/scripts/gitea-pr-review.sh"
+      script: "gitea_pr_review.sh"
       payload: "{{ trigger.body | json }}"

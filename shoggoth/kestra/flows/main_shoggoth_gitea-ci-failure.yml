@@ -23,5 +23,5 @@ tasks:
     wait: true
     transmitFailed: true
     inputs:
-      script: "/shoggoth/scripts/gitea-ci-failure.sh"
+      script: "gitea_ci_failure.sh"
       payload: "{{ trigger.body | json }}"

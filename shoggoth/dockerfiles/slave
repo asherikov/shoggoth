@@ -43,6 +43,14 @@ USER ccws
 RUN \
     git config --global credential.helper 'cache'
 
+# create qwen directory with correct permissions to facilitate mounting files inside
+RUN \
+    mkdir -p /home/ccws/.qwen/
+
+RUN \
+--mount=type=cache,target=/cache/pip,sharing=locked \
+    pip install mcp
+
 RUN \
 --mount=type=bind,source=skills/,target=/tmp/skills \
     cp -R /tmp/skills/* ${SHOGGOTH_SKILL_DIR}/

@@ -21,6 +21,9 @@ CI_BRANCH="$(echo "${PAYLOAD}" | jq -r '.workflow_run.head_branch')"
 CI_RUN_URL="$(echo "${PAYLOAD}" | jq -r '.workflow_run.html_url')"
 CI_WORKFLOW="$(echo "${PAYLOAD}" | jq -r '.workflow.name')"
 
+export SHOGGOTH_REPO="${CI_REPO}"
+export SHOGGOTH_PROJECT="$(echo "${CI_REPO}" | awk -F'/' '{print $NF}')"
+
 cd /ccws/workspace/src
 
 REPO_DIR="$(echo "${CI_REPO}" | cut -d'/' -f2)"

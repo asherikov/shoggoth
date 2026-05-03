@@ -6,8 +6,6 @@ SHOGGOTH_IP?=$(shell getent hosts ${SHOGGOTH_DOMAIN} | cut -f 1 -d ' ')
 SHOGGOTH_CLIENT_CFG?=shoggoth/private
 REMOTE_PATH?=~/
 
-OLLAMA_MODEL?=nomic-embed-text
-
 
 SSH_COMMON_ARGS=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 
@@ -64,17 +62,11 @@ test:
 	host ${SHOGGOTH_DOMAIN} dns.${SHOGGOTH_DOMAIN}
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> ollama"
-	curl http://ollama.${SHOGGOTH_DOMAIN}/api/tags
+	${MAKE} ollama_tags
 	@echo ""
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> apt-proxy"
 	curl http://apt-cache.${SHOGGOTH_DOMAIN}/acng-report.html --output /dev/null
-
-ollama_query:
-	time curl http://ollama.${SHOGGOTH_DOMAIN}/v1/completions \
-		-H "Content-Type: application/json" \
-		-H "Authorization: ollama" \
-		-d '{"model": "qwen3-coder:30b", "prompt": "What is the capital of UAE?"}'
 
 personal_conf:
 	${MAKE} client_conf SHOGGOTH_CLIENT_CFG=${HOME}/.config/shoggoth
@@ -87,5 +79,3 @@ client_conf:
 		--ollama-token ${OLLAMA_TOKEN} \
 		--redmine-token ${REDMINE_TOKEN}
 
-ollama_pull:
-	${MAKE} ssh_exec CMD='docker compose exec ollama ollama pull ${OLLAMA_MODEL}'

@@ -20,6 +20,9 @@ PR_REPO="$(echo "${PAYLOAD}" | jq -r '.repository.full_name')"
 PR_BRANCH="$(echo "${PAYLOAD}" | jq -r '.pull_request.head.ref')"
 CLONE_URL="$(echo "${PAYLOAD}" | jq -r '.repository.ssh_url')"
 
+export SHOGGOTH_REPO="${PR_REPO}"
+export SHOGGOTH_PROJECT="$(echo "${PR_REPO}" | awk -F'/' '{print $NF}')"
+
 mkdir -p /ccws/workspace/src
 cd /ccws/workspace/src
 
@@ -33,4 +36,4 @@ cd "${REPO_DIR}"
 git fetch origin
 git checkout "origin/${PR_BRANCH}"
 
-qwen --yolo --prompt "Address the review comments on PR ${PR_URL}. Read the PR review comments, fix the code accordingly, commit, and push."
+qwen --yolo --prompt "Address only the unresolved review comments on PR ${PR_URL}. Read the PR review comments, skip any that are already resolved, fix the code for the unresolved ones, commit, and push."

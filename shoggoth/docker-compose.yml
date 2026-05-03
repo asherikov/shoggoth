@@ -301,7 +301,7 @@ services:
             BASIC_MEMORY_SEMANTIC_EMBEDDING_MODEL: nomic-embed-text
             OPENAI_API_KEY: ollama
             OPENAI_BASE_URL: http://ollama/v1
-        command: ["basic-memory", "mcp", "--transport", "sse", "--host", "0.0.0.0", "--port", "80"]
+        command: ["basic-memory", "mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "80"]
 
     mcp-skills:
         !!merge <<: *default_service
