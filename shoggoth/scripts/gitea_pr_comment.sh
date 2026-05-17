@@ -7,6 +7,13 @@ set -a
 source "${ENV_FILE}"
 set +a
 
+strip_repo_to_project() {
+    local repo="$1"
+    repo="${repo%.git}"
+    repo="${repo%/}"
+    echo "${repo}" | awk -F'/' '{print $(NF-1)}'
+}
+
 PAYLOAD="${GITEA_PAYLOAD}"
 
 ACTION="$(echo "${PAYLOAD}" | jq -r '.action')"
@@ -21,7 +28,10 @@ PR_BRANCH="$(echo "${PAYLOAD}" | jq -r '.pull_request.head.ref')"
 CLONE_URL="$(echo "${PAYLOAD}" | jq -r '.repository.ssh_url')"
 
 export SHOGGOTH_REPO="${PR_REPO}"
-export SHOGGOTH_PROJECT="$(echo "${PR_REPO}" | awk -F'/' '{print $NF}')"
+if [ -z "${SHOGGOTH_PROJECT:-}" ]; then
+    REPO_URL="$(echo "${PAYLOAD}" | jq -r '.repository.html_url')"
+    export SHOGGOTH_PROJECT="$(strip_repo_to_project "${REPO_URL}")"
+fi
 
 mkdir -p /ccws/workspace/src
 cd /ccws/workspace/src

@@ -7,6 +7,13 @@ set -a
 source "${ENV_FILE}"
 set +a
 
+strip_repo_to_project() {
+    local repo="$1"
+    repo="${repo%.git}"
+    repo="${repo%/}"
+    echo "${repo}" | awk -F'/' '{print $(NF-1)}'
+}
+
 PAYLOAD="${GITEA_PAYLOAD}"
 
 CONCLUSION="$(echo "${PAYLOAD}" | jq -r '.workflow_run.conclusion')"
@@ -22,7 +29,10 @@ CI_RUN_URL="$(echo "${PAYLOAD}" | jq -r '.workflow_run.html_url')"
 CI_WORKFLOW="$(echo "${PAYLOAD}" | jq -r '.workflow.name')"
 
 export SHOGGOTH_REPO="${CI_REPO}"
-export SHOGGOTH_PROJECT="$(echo "${CI_REPO}" | awk -F'/' '{print $NF}')"
+if [ -z "${SHOGGOTH_PROJECT:-}" ]; then
+    REPO_URL="$(echo "${PAYLOAD}" | jq -r '.repository.html_url')"
+    export SHOGGOTH_PROJECT="$(strip_repo_to_project "${REPO_URL}")"
+fi
 
 cd /ccws/workspace/src
 

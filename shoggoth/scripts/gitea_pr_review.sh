@@ -9,16 +9,9 @@ set +a
 
 strip_repo_to_project() {
     local repo="$1"
-    repo="${repo#ssh://}"
-    repo="${repo#git://}"
-    repo="${repo#http://}"
-    repo="${repo#https://}"
-    repo="${repo#*@}"
     repo="${repo%.git}"
-    if [[ "${repo}" == *:* ]]; then
-        repo="${repo#*:}"
-    fi
-    echo "${repo}" | awk -F'/' '{print $NF}'
+    repo="${repo%/}"
+    echo "${repo}" | awk -F'/' '{print $(NF-1)}'
 }
 
 PAYLOAD="${GITEA_PAYLOAD}"
@@ -35,7 +28,10 @@ PR_REPO="$(echo "${PAYLOAD}" | jq -r '.repository.full_name')"
 PR_BRANCH="$(echo "${PAYLOAD}" | jq -r '.pull_request.head.ref')"
 
 export SHOGGOTH_REPO="${PR_REPO}"
-export SHOGGOTH_PROJECT="$(strip_repo_to_project "${PR_REPO}")"
+if [ -z "${SHOGGOTH_PROJECT:-}" ]; then
+    REPO_URL="$(echo "${PAYLOAD}" | jq -r '.repository.html_url')"
+    export SHOGGOTH_PROJECT="$(strip_repo_to_project "${REPO_URL}")"
+fi
 
 cd /ccws/workspace/src
 

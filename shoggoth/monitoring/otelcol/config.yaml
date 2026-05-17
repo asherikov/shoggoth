@@ -1,0 +1,159 @@
+extensions:
+    docker_observer:
+        endpoint: unix:///var/run/docker.sock
+        excluded_images:
+            - 'otel/opentelemetry-collector-contrib*'
+        timeout: 5s
+        cache_sync_interval: 60m
+
+receivers:
+    otlp:
+        protocols:
+            grpc:
+                endpoint: 0.0.0.0:4317
+            http:
+                endpoint: 0.0.0.0:4318
+
+    receiver_creator/docker-logs:
+        watch_observers: [docker_observer]
+        receivers:
+            filelog/per-container:
+                rule: type == "container"
+                resource_attributes:
+                    container.id: '`container_id`'
+                    container.name: '`name`'
+                    container.image.name: '`image`'
+                config:
+                    include:
+                        - /var/lib/docker/containers/`container_id`/`container_id`-json.log
+                    include_file_path: false
+                    include_file_name: false
+                    start_at: end
+                    poll_interval: 200ms
+                    operators:
+                        - id: container-parser
+                          type: container
+                          format: docker
+                          add_metadata_from_filepath: false
+
+    docker_stats:
+        collection_interval: 15s
+        container_labels_to_metric_labels:
+            com.docker.compose.service: compose_service
+        env_vars_to_metric_labels:
+            SHOGGOTH_DOMAIN: shoggoth_domain
+
+    prometheus:
+        config:
+            scrape_configs:
+                - job_name: node-exporter
+                  scrape_interval: 15s
+                  static_configs:
+                      - targets:
+                            - node-exporter:9100
+                  metric_relabel_configs:
+                      - source_labels: [instance]
+                        target_label: instance_name
+                        regex: "(.+)"
+                      - source_labels: [instance]
+                        target_label: hostname
+                        regex: "([^:]+):.*"
+                      - source_labels: [job]
+                        target_label: job_name
+                        regex: "(.+)"
+                - job_name: cadvisor
+                  scrape_interval: 15s
+                  static_configs:
+                      - targets:
+                            - cadvisor:8080
+                  metric_relabel_configs:
+                      - source_labels: [name]
+                        target_label: container
+                        regex: "(.+)"
+                      - source_labels: [container_label_compose_service]
+                        target_label: compose_service
+                        regex: "(.+)"
+                      - source_labels: [instance]
+                        target_label: instance_name
+                        regex: "(.+)"
+                      - source_labels: [instance]
+                        target_label: hostname
+                        regex: "([^:]+):.*"
+                      - source_labels: [job]
+                        target_label: job_name
+                        regex: "(.+)"
+                      - regex: "container_label_.+"
+                        action: labeldrop
+                - job_name: git-pages
+                  scrape_interval: 15s
+                  static_configs:
+                      - targets:
+                            - git-pages:9253
+                  metric_relabel_configs:
+                      - source_labels: [instance]
+                        target_label: instance_name
+                        regex: "(.+)"
+                      - source_labels: [instance]
+                        target_label: hostname
+                        regex: "([^:]+):.*"
+                      - source_labels: [job]
+                        target_label: job_name
+                        regex: "(.+)"
+
+processors:
+    memory_limiter:
+        check_interval: 1s
+        limit_mib: 4000
+        spike_limit_mib: 800
+    resourcedetection:
+        detectors: [env, system]
+        timeout: 5s
+        system:
+            hostname_sources: [os]
+    transform/docker-meta:
+        log_statements:
+            - context: resource
+              statements:
+                  - set(attributes["container.runtime"], "docker")
+    batch:
+        send_batch_size: 1024
+        send_batch_max_size: 2048
+        timeout: 10s
+
+exporters:
+    otlp_http:
+        endpoint: http://openobserve:80/api/default
+        headers:
+            Authorization: "Basic ${env:OPENOBSERVE_AUTH_BASIC}"
+
+service:
+    extensions: [docker_observer]
+    telemetry:
+        logs:
+            level: warn
+    pipelines:
+        traces:
+            receivers:
+                - otlp
+            processors:
+                - batch
+            exporters:
+                - otlp_http
+        logs:
+            receivers:
+                - receiver_creator/docker-logs
+            processors:
+                - memory_limiter
+                - resourcedetection
+                - transform/docker-meta
+                - batch
+            exporters:
+                - otlp_http
+        metrics:
+            receivers:
+                - docker_stats
+                - prometheus
+            processors:
+                - batch
+            exporters:
+                - otlp_http

@@ -1,15 +1,21 @@
 nodes:
+  - id: ["", default_style]
+    tags: []
+    graphviz:
+      shape: box
+
   - id: ["", proxy_style]
+    style_notag: default_style
     tags: []
     graphviz:
       fillcolor: lightgreen
       style: filled
-      shape: box
       fixedsize: true
       width: 3.5
       height: 1
 
   - id: ["", docker_service_style]
+    style_notag: default_style
     tags: []
     graphviz:
       fillcolor: lightsteelblue
@@ -19,10 +25,11 @@ nodes:
   # ============================================
   # Client Host Boundary
   # ============================================
-  - id: ["Client", client_host]
+  - id: ["client", client_host]
+    style_notag: default_style
     graphviz:
       fillcolor: "#f0f0f0"
-      style: "filled,dashed"
+      style: "filled"
 
   # Client applications
   - id: ["apt", client_apt]
@@ -53,65 +60,58 @@ nodes:
   # Shoggoth Host Boundary
   # ============================================
   - id: ["shoggoth.local", shoggoth_host]
+    style_notag: default_style
     graphviz:
       fillcolor: "#e8f4f8"
-      style: "filled,dashed"
+      style: "filled"
 
-  # Infrastructure group (nameless scope for layout)
-  - id: ["", direct_access_group]
-    scope: shoggoth_host
-    graphviz:
-      style: invis
-
-  # Services group (invisible scope for layout)
+  # Services group
   - id: ["", behind_proxy_group]
+    style_notag: default_style
     scope: shoggoth_host
-    graphviz:
-      style: invis
 
   # Infrastructure layer
   - id: [":53 DNS", dns_service]
-    scope: direct_access_group
+    scope: shoggoth_host
     style_notag: hh_diagrams_alibabacloud_web_dns
 
+  - id: [":3128\n(caching proxy)", docker_cache]
+    scope: containers_group
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
+
   # Proxy layer (Angie reverse proxy + build cache storage)
-  - id: ["web (angie)", service_proxy]
-    scope: direct_access_group
+  - id: ["http", http]
+    scope: shoggoth_host
     style_notag: docker_service_style
 
   # Home page within web service
   - id: [":80\nhome page", home_page]
-    scope: service_proxy
+    scope: http
     style_notag: hh_diagrams_azure_web_static_apps
 
   # Proxy services scope
   - id: ["proxies", proxy_services]
-    scope: service_proxy
+    scope: http
     style_notag: hh_diagrams_scope
 
   - id: ["apt-cache.", proxy_apt]
     scope: proxy_services
     style_notag: proxy_style
 
-  - id: ["AI", proxy_ai_group]
-    scope: proxy_services
-    graphviz:
-      style: invis
-
   - id: ["mcp-gitea.", proxy_mcp_gitea]
-    scope: proxy_ai_group
+    scope: proxy_services
     style_notag: proxy_style
 
   - id: ["basic-memory.", proxy_basic_memory]
-    scope: proxy_ai_group
+    scope: proxy_services
     style_notag: proxy_style
 
   - id: ["mcp-skills.", proxy_mcp_skills]
-    scope: proxy_ai_group
+    scope: proxy_services
     style_notag: proxy_style
 
   - id: ["ollama.", proxy_ollama]
-    scope: proxy_ai_group
+    scope: proxy_services
     style_notag: proxy_style
 
   - id: ["git-pages.", proxy_git_pages]
@@ -138,34 +138,47 @@ nodes:
     scope: proxy_services
     style_notag: proxy_style
 
+  - id: ["openobserve.", proxy_openobserve]
+    scope: proxy_services
+    style_notag: proxy_style
+
   - id: ["build-cache.", build_cache]
-    scope: service_proxy
+    scope: http
     style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
-  # Caching layer
-  - id: ["", caching_group]
-    scope: shoggoth_host
-    graphviz:
-      style: invis
+  # Packaging layer
+  - id: ["packaging", packaging_group]
+    scope: behind_proxy_group
+    style_notag: docker_service_style
 
   - id: ["apt-cacher-ng", apt_cache]
-    scope: caching_group
-    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
-
-  - id: [":3128\n(docker registry\ncaching proxy)", docker_cache]
-    scope: caching_group
-    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
-
-  - id: ["data cache\nvolume", ci_cache_volume]
-    scope: caching_group
+    scope: packaging_group
     style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
   - id: ["proxpi", proxpi_service]
-    scope: caching_group
+    scope: packaging_group
     style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
 
-  - id: ["local container\nregistry", docker_registry]
+  # Executor layer
+  - id: ["executor", executor_group]
     scope: behind_proxy_group
+    style_notag: docker_service_style
+
+  - id: ["shoggoth\nslave", slave]
+    scope: executor_group
+    style_notag: hh_diagrams_onprem_ci_github_actions
+
+  - id: ["data cache\nvolume", ci_cache_volume]
+    scope: executor_group
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
+
+  # Containers layer
+  - id: ["containers", containers_group]
+    scope: behind_proxy_group
+    style_notag: docker_service_style
+
+  - id: ["local registry", docker_registry]
+    scope: containers_group
     style_notag: hh_diagrams_alibabacloud_compute_container_service
 
   # Development layer - Gitea services
@@ -181,28 +194,28 @@ nodes:
     scope: gitea_group
     style_notag: hh_diagrams_onprem_ci_github_actions
 
-  - id: ["mcp-gitea", mcp_gitea]
-    scope: gitea_group
-    style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
-  # Slave (shared by Gitea CI and Kestra)
-  - id: ["shoggoth\nslave", slave]
+  # AI layer
+  - id: ["AI", ai_group]
     scope: behind_proxy_group
-    style_notag: hh_diagrams_onprem_ci_github_actions
+    style_notag: docker_service_style
 
   - id: ["LLM server\n(ollama)", ollama_service]
-    scope: behind_proxy_group
+    scope: ai_group
     style_notag: hh_diagrams_azure_aimachinelearning_azure_openai
 
   - id: ["basic\nmemory", basic_memory_service]
-    scope: behind_proxy_group
+    scope: ai_group
     style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
 
-  # MCP skills layer
   - id: ["mcp-skills", mcp_skills_service]
-    scope: behind_proxy_group
+    scope: ai_group
     style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
 
-  # Kestra layer
+  - id: ["mcp-gitea", mcp_gitea]
+    scope: ai_group
+    style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
+
+  # Slave (shared by Gitea CI and Kestra)
   - id: ["kestra", kestra_group]
     scope: behind_proxy_group
     style_notag: docker_service_style
@@ -215,10 +228,30 @@ nodes:
     scope: kestra_group
     style_notag: hh_diagrams_onprem_database_postgresql
 
-  # Git-pages layer
   - id: ["git-pages", git_pages_service]
-    scope: behind_proxy_group
+    scope: gitea_group
     style_notag: hh_diagrams_azure_web_static_apps
+
+  # Monitoring layer
+  - id: ["monitoring", monitoring_group]
+    scope: behind_proxy_group
+    style_notag: docker_service_style
+
+  - id: ["OpenObserve", openobserve_service]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_monitoring_grafana
+
+  - id: ["OTel\ncollector", otelcol_service]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_aggregator_fluentd
+
+  - id: ["node\nexporter", node_exporter_service]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_monitoring_prometheus
+
+  - id: ["cAdvisor", cadvisor_service]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_container_docker
 
   # Redmine layer
   - id: ["redmine", redmine_group]
@@ -236,11 +269,12 @@ nodes:
   # ============================================
   # External Services Group
   # ============================================
-  - id: ["External Services", external_services]
+  - id: ["external", external_services]
+    style_notag: default_style
     graphviz:
       fillcolor: honeydew
       style: filled
-      shape: cylinder
+      shape: box
 
   - id: ["APT Repositories\n(Ubuntu/Debian)", apt_repos]
     scope: external_services
@@ -393,6 +427,16 @@ edges:
     graphviz:
       color: auto
 
+  # Monitoring flow (via proxy)
+  - link: [client_browser, proxy_openobserve]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [proxy_openobserve, openobserve_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+
   # ============================================
   # Internal Shoggoth Service Interactions
   # ============================================
@@ -411,6 +455,10 @@ edges:
     graphviz:
       color: auto
   - link: [slave, apt_cache]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [slave, git_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
@@ -466,6 +514,20 @@ edges:
 
   # basic memory -> ollama (if using embeddings)
   - link: [basic_memory_service, ollama_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+
+  # Monitoring internal flows
+  - link: [node_exporter_service, otelcol_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [cadvisor_service, otelcol_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [otelcol_service, openobserve_service]
     style: hh_diagrams_link
     graphviz:
       color: auto

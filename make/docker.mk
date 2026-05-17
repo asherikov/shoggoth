@@ -7,7 +7,7 @@ exec:
 
 up:
 	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='./setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d ${SERVICE}'
-	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='./setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d'
+	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='./setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d && sleep 5'
 
 down:
 	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose down ${SERVICE}'

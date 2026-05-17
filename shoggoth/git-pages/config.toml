@@ -4,7 +4,7 @@ log-format = "text"
 [server]
 pages = "tcp/:80"
 caddy = "-"
-metrics = "-"
+metrics = "tcp/:9253"
 
 #[[wildcard]]
 ## Domain pattern for user sites (e.g., user.git-pages.shoggoth.local)

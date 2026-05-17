@@ -233,7 +233,7 @@ EOF"
 }
 
 update_hosts() {
-    local services=("kestra" "dns" "apt-cache" "docker-cache" "ollama" "git" "build-cache" "mcp-gitea" "basic-memory" "mcp-skills" "git-pages" "redmine" "redmine-mcp" "proxpi" "docker-registry")
+    local services=("kestra" "dns" "apt-cache" "docker-cache" "ollama" "git" "build-cache" "mcp-gitea" "basic-memory" "mcp-skills" "git-pages" "redmine" "redmine-mcp" "proxpi" "docker-registry" "openobserve" "otelcol")
     local hosts_entries="${HOST_IP} ${HOST}"$'\n'
 
     for service in "${services[@]}"; do
@@ -387,10 +387,9 @@ EOF
 }
 
 generate_qwen_conf() {
-    local mcp_servers=""
-
+    local gitea_block=""
     if [ -n "${CONFIGURE_GITEA}" ]; then
-        mcp_servers="${mcp_servers}
+        gitea_block="
     \"shoggoth-mcp-gitea\": {
       \"httpUrl\": \"http://mcp-gitea.${HOST}/mcp\",
       \"headers\": {
@@ -400,26 +399,32 @@ generate_qwen_conf() {
     },"
     fi
 
-    mcp_servers="${mcp_servers}
-    \"shoggoth-basic-memory\": {
-      \"httpUrl\": \"http://basic-memory.${HOST}/mcp\",
-      \"timeout\": 5000
-    },
-    \"shoggoth-mcp-skills\": {
-      \"httpUrl\": \"http://mcp-skills.${HOST}/mcp\",
-      \"timeout\": 5000
-    }"
-
-    if [ -n "${mcp_servers}" ]; then
-        cat > "${CLIENT_CONF_DIR}/qwen.json" <<EOF
+    cat > "${CLIENT_CONF_DIR}/qwen.json" <<EOF
 {
-  "mcpServers": {${mcp_servers}
+  "mcpServers": {${gitea_block}
+    "shoggoth-basic-memory": {
+      "httpUrl": "http://basic-memory.${HOST}/mcp",
+      "timeout": 5000
+    },
+    "shoggoth-mcp-skills": {
+      "httpUrl": "http://mcp-skills.${HOST}/mcp",
+      "timeout": 5000
+    }
+  },
+  "telemetry": {
+    "enabled": true,
+    "target": "local",
+    "otlpEndpoint": "http://otelcol.${HOST}:4317",
+    "otlpProtocol": "grpc",
+    "logPrompts": false,
+    "includeSensitiveSpanAttributes": false
   }
 }
 EOF
-        chmod 600 "${CLIENT_CONF_DIR}/qwen.json"
-        echo "Generated ${CLIENT_CONF_DIR}/qwen.json"
-    fi
+    chmod 600 "${CLIENT_CONF_DIR}/qwen.json"
+    echo "Generated ${CLIENT_CONF_DIR}/qwen.json"
+    echo "Telemetry exports to OpenObserve via otelcol at http://otelcol.${HOST}:4317"
+    echo "Dashboard: http://openobserve.${HOST} (admin@shoggoth.local)"
 }
 
 main() {

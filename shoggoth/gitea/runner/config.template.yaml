@@ -78,6 +78,7 @@ container:
   options: "--volume ${SHOGGOTH_ROOT}/private/apt-cache.conf:/etc/apt/apt.conf.d/00-shoggoth-apt-cache
             --volume ${GITEA_SSH_AUTH_SOCK}:${GITEA_SSH_AUTH_SOCK}
             --volume ${GITEA_TOKEN_AUTH_SOCK}:/home/ccws/.git-credential-cache/socket
+            --volume ${GITEA_TOKEN_AUTH_SOCK}:/root/.git-credential-cache/socket
             --volume shoggoth_ci_cache:/cache"
   # The parent directory of a job's working directory.
   # NOTE: There is no need to add the first '/' of the path as act_runner will add it automatically.

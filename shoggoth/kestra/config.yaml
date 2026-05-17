@@ -11,11 +11,13 @@ micronaut:
   application:
     name: kestra
   otel:
-    enabled: false
+    enabled: true
+    endpoint: http://otelcol:4317
   metrics:
     export:
       otlp:
-        enabled: false
+        enabled: true
+        url: http://otelcol:4318/v1/metrics
   io:
     watch:
       enabled: true

@@ -78,22 +78,41 @@ The following services are available:
 
 | Service | Hostname | Description |
 |----|----|----|
+| `web` | `<host>` | Welcome home page and Angie reverse proxy |
+| `web` | `build-cache.<host>` | Build cache storage (ccache/sccache) |
+| `dns` | `<host>` | Unbound DNS resolver with blacklisting |
 | `apt-cache` | `apt-cache.<host>` | APT package caching proxy |
-| `docker-cache` | `<host>` | Docker registry caching proxy |
+| `docker-cache` | `<host>:3128` | Docker registry caching proxy |
 | `docker-registry` | `docker-registry.<host>` | Private Docker registry |
-| `dns` | `<host>` | Unbound DNS resolver |
-| `web` | `<host>` | Welcome home page and angie reverse proxy |
-| `web` | `build-cache.<host>` | Build cache storage |
+| `proxpi` | `proxpi.<host>` | Python package caching proxy |
 | `ollama` | `ollama.<host>` | Local AI model server |
 | `git` | `git.<host>` | Gitea Git server with web UI |
 | `git-pages` | `git-pages.<host>` | Git Pages static site hosting |
-| `gitea-runner` | \- | Gitea Actions runner |
+| `gitea-runner` | — | Gitea Actions runner |
 | `mcp-gitea` | `mcp-gitea.<host>` | Gitea MCP server for AI agents |
-| `proxpi` | `proxpi.<host>` | Python package caching proxy |
+| `basic-memory` | `basic-memory.<host>` | Basic Memory MCP server for AI agents |
+| `mcp-skills` | `mcp-skills.<host>` | Skills MCP server for AI agents |
+| `kestra` | `kestra.<host>` | Kestra workflow orchestration |
 | `redmine` | `redmine.<host>` | Redmine project management server |
-| `redmine-mcp` | `redmine-mcp.<host>` | Redmine MCP server for AI agents |
+| `openobserve` | `openobserve.<host>` | Observability backend (traces, metrics, dashboards) |
+| `node-exporter` | — | Host-level metrics (CPU, memory, disk, network) |
+| `cadvisor` | — | Container metrics (per-container resource usage) |
+| `otelcol` | — | OpenTelemetry Collector (Prometheus scrape → OTLP) |
 
-<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture" />
+Monitoring
+----------
+
+Shoggoth uses [OpenObserve](https://openobserve.ai/) as the central
+observability backend, with an [OpenTelemetry
+Collector](https://opentelemetry.io/docs/collector/) pipeline for metrics
+ingestion. Traces and metrics from services and the host system are collected
+and forwarded to OpenObserve, where they can be viewed on the dashboard at
+`http://openobserve.<host>` (default user: `admin@shoggoth.local`, password
+stored in Docker secret).
+
+<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture overview" />
+
+The diagram above shows the high-level architecture.
 
 Shoggoth slave container
 ------------------------
