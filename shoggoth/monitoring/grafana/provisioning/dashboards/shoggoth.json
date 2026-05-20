@@ -1,0 +1,185 @@
+{
+    "annotations": {
+        "list": []
+    },
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 1,
+    "id": null,
+    "links": [],
+    "panels": [
+        {
+            "title": "Host CPU Utilization",
+            "type": "timeseries",
+            "gridPos": {"h": 9, "w": 6, "x": 0, "y": 0},
+            "datasource": {"uid": "vm"},
+            "targets": [{"expr": "100 - (avg by(hostname)(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", "legendFormat": "{{hostname}}", "refId": "A"}],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percent",
+                    "min": 0,
+                    "max": 100,
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Host Memory Usage",
+            "type": "timeseries",
+            "gridPos": {"h": 9, "w": 6, "x": 6, "y": 0},
+            "datasource": {"uid": "vm"},
+            "targets": [{"expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100", "legendFormat": "{{hostname}}", "refId": "A"}],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percent",
+                    "min": 0,
+                    "max": 100,
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Host Disk Usage",
+            "type": "timeseries",
+            "gridPos": {"h": 9, "w": 6, "x": 12, "y": 0},
+            "datasource": {"uid": "vm"},
+            "targets": [{"expr": "(1 - node_filesystem_avail_bytes{fstype!~\"tmpfs|squashfs|overlay\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|squashfs|overlay\"}) * 100", "legendFormat": "{{mountpoint}}", "refId": "A"}],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percent",
+                    "min": 0,
+                    "max": 100,
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Network Throughput",
+            "type": "timeseries",
+            "gridPos": {"h": 9, "w": 6, "x": 18, "y": 0},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "rate(node_network_receive_bytes_total{device=~\"eth.*|wlan.*|enp.*\"}[5m])", "legendFormat": "↓ {{device}}", "refId": "A"},
+                {"expr": "rate(node_network_transmit_bytes_total{device=~\"eth.*|wlan.*|enp.*\"}[5m])", "legendFormat": "↑ {{device}}", "refId": "B"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "Bps",
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Load Average (1m / 5m / 15m)",
+            "type": "timeseries",
+            "gridPos": {"h": 9, "w": 12, "x": 0, "y": 10},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "node_load1", "legendFormat": "load 1m", "refId": "A"},
+                {"expr": "node_load5", "legendFormat": "load 5m", "refId": "B"},
+                {"expr": "node_load15", "legendFormat": "load 15m", "refId": "C"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "System Uptime",
+            "type": "stat",
+            "gridPos": {"h": 9, "w": 12, "x": 12, "y": 10},
+            "datasource": {"uid": "vm"},
+            "targets": [{"expr": "node_time_seconds - node_boot_time_seconds", "legendFormat": "{{hostname}}", "refId": "A"}],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Error Logs",
+            "type": "logs",
+            "gridPos": {"h": 18, "w": 24, "x": 0, "y": 20},
+            "datasource": {"uid": "loki"},
+            "targets": [
+                {"expr": "{service_name=~\".+\"} |~ \"(?i)(error|fatal|panic|critical|fail|FATAL|CRIT)|ERR\" !~ \"(?i)trace\" | line_format \"{{.service_name}} {{__line__}}\"", "refId": "A"}
+            ],
+            "options": {"showLabels": false, "showTime": true, "sortOrder": "Descending", "enableLogDetails": true, "wrapLogMessage": true, "prettifyLogMessage": true}
+        },
+        {
+            "title": "Trace Rate",
+            "type": "timeseries",
+            "gridPos": {"h": 9, "w": 12, "x": 0, "y": 39},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "sum(rate(traces_spanmetrics_calls_total[5m]))", "legendFormat": "traces/s", "refId": "A"},
+                {"expr": "sum(rate(traces_spanmetrics_calls_total{status_code=\"ERROR\"}[5m]))", "legendFormat": "errors/s", "refId": "B"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": [
+                    {
+                        "matcher": {"id": "byName", "options": "errors/s"},
+                        "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]
+                    }
+                ]
+            }
+        },
+        {
+            "title": "Trace Duration (p50 / p95 / p99)",
+            "type": "timeseries",
+            "gridPos": {"h": 9, "w": 12, "x": 12, "y": 39},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "histogram_quantile(0.5, sum(rate(traces_spanmetrics_latency_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A"},
+                {"expr": "histogram_quantile(0.95, sum(rate(traces_spanmetrics_latency_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B"},
+                {"expr": "histogram_quantile(0.99, sum(rate(traces_spanmetrics_latency_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "C"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Traces",
+            "type": "table",
+            "gridPos": {"h": 12, "w": 24, "x": 0, "y": 49},
+            "datasource": {"type": "tempo", "uid": "tempo"},
+            "targets": [
+                {"refId": "A", "datasource": {"type": "tempo", "uid": "tempo"}, "query": "{}", "queryType": "traceql", "tableType": "traces", "limit": 20}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {"cellOptions": {"type": "auto"}}
+                },
+                "overrides": []
+            },
+            "options": {"showHeader": true}
+        }
+    ],
+    "refresh": "30s",
+    "schemaVersion": 40,
+    "tags": ["shoggoth"],
+    "templating": {
+        "list": []
+    },
+    "time": {"from": "now-1h", "to": "now"},
+    "title": "Shoggoth",
+    "description": "Shoggoth infrastructure overview: host metrics and traces",
+    "uid": "shoggoth",
+    "version": 1
+}

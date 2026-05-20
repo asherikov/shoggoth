@@ -2,4 +2,11 @@
 mountpoint
 docs/*.gv
 docs/*.png
+docs/alibabacloud/
+docs/aws/
+docs/azure/
+docs/generic/
+docs/oci/
+docs/onprem/
+docs/programming/
 README.md.back

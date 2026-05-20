@@ -40,6 +40,3 @@ docker_build: client_conf
 slave:
 	${MAKE} docker_build IMAGE=slave BASE_IMAGE=asherikov/ccws_qwen_${DOCKER_DISTRO}:latest
 
-mcp_skills:
-	${MAKE} docker_build IMAGE=mcp_skills DOCKER_TAG_SUFFIX=
-

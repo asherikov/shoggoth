@@ -1,0 +1,604 @@
+{
+    "annotations": {
+        "list": []
+    },
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 1,
+    "id": null,
+    "links": [],
+    "panels": [
+        {
+            "title": "LLM Request Rate",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 0,
+                "y": 0
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate(litellm_request_total_latency_metric_count[5m])) by (requested_model)",
+                    "legendFormat": "{{requested_model}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum(rate(litellm_deployment_failure_responses_total[5m])) by (requested_model)",
+                    "legendFormat": "{{requested_model}} errors",
+                    "refId": "B"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byRegexp",
+                            "options": ".*errors"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "red",
+                                    "mode": "fixed"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "title": "LLM Request Latency",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 8,
+                "y": 0
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "histogram_quantile(0.5, sum(rate(litellm_request_total_latency_metric_bucket[5m])) by (le, requested_model))",
+                    "legendFormat": "p50 {{requested_model}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "histogram_quantile(0.95, sum(rate(litellm_request_total_latency_metric_bucket[5m])) by (le, requested_model))",
+                    "legendFormat": "p95 {{requested_model}}",
+                    "refId": "B"
+                },
+                {
+                    "expr": "histogram_quantile(0.99, sum(rate(litellm_request_total_latency_metric_bucket[5m])) by (le, requested_model))",
+                    "legendFormat": "p99 {{requested_model}}",
+                    "refId": "C"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "LLM Token Throughput",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 16,
+                "y": 0
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate(litellm_input_tokens_metric_total[5m])) by (requested_model)",
+                    "legendFormat": "input {{requested_model}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum(rate(litellm_output_tokens_metric_total[5m])) by (requested_model)",
+                    "legendFormat": "output {{requested_model}}",
+                    "refId": "B"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "tok/s",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Token Counters",
+            "type": "stat",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 0,
+                "y": 9
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum(litellm_input_tokens_metric_total)",
+                    "legendFormat": "Input Tokens",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum(litellm_output_tokens_metric_total)",
+                    "legendFormat": "Output Tokens",
+                    "refId": "B"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            }
+                        ]
+                    },
+                    "color": {
+                        "mode": "thresholds"
+                    },
+                    "unit": "none"
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "LLM In-Flight Requests",
+            "type": "stat",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 8,
+                "y": 9
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "litellm_in_flight_requests",
+                    "legendFormat": "in-flight",
+                    "refId": "A"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            },
+                            {
+                                "color": "yellow",
+                                "value": 10
+                            },
+                            {
+                                "color": "red",
+                                "value": 50
+                            }
+                        ]
+                    },
+                    "color": {
+                        "mode": "thresholds"
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "LLM Deployment Latency per Output Token",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 16,
+                "y": 9
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "histogram_quantile(0.5, sum(rate(litellm_deployment_latency_per_output_token_bucket[5m])) by (le, litellm_model_name))",
+                    "legendFormat": "p50 {{litellm_model_name}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "histogram_quantile(0.99, sum(rate(litellm_deployment_latency_per_output_token_bucket[5m])) by (le, litellm_model_name))",
+                    "legendFormat": "p99 {{litellm_model_name}}",
+                    "refId": "B"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "LiteLLM Trace Rate",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 0,
+                "y": 18
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"litellm\"}[5m])) by (span_name)",
+                    "legendFormat": "{{span_name}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"litellm\", status_code=\"ERROR\"}[5m])) by (span_name)",
+                    "legendFormat": "{{span_name}} errors",
+                    "refId": "B"
+                }
+            ],
+            "description": "All LiteLLM spans by operation. LLM proxy and MCP gateway calls share the same span names and cannot be separated in span-metrics; use AI Traces below to inspect individual requests.",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byRegexp",
+                            "options": ".*errors"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "red",
+                                    "mode": "fixed"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "title": "LiteLLM Trace Duration (p50 / p95 / p99)",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 8,
+                "y": 18
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "histogram_quantile(0.5, sum(rate(traces_spanmetrics_latency_bucket{service=\"litellm\"}[5m])) by (le, span_name))",
+                    "legendFormat": "p50 {{span_name}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "histogram_quantile(0.95, sum(rate(traces_spanmetrics_latency_bucket{service=\"litellm\"}[5m])) by (le, span_name))",
+                    "legendFormat": "p95 {{span_name}}",
+                    "refId": "B"
+                },
+                {
+                    "expr": "histogram_quantile(0.99, sum(rate(traces_spanmetrics_latency_bucket{service=\"litellm\"}[5m])) by (le, span_name))",
+                    "legendFormat": "p99 {{span_name}}",
+                    "refId": "C"
+                }
+            ],
+            "description": "All LiteLLM span duration by operation",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "LiteLLM Trace Error Rate",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 16,
+                "y": 18
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"litellm\", status_code=\"ERROR\"}[5m])) by (span_name)",
+                    "legendFormat": "{{span_name}}",
+                    "refId": "A"
+                }
+            ],
+            "description": "All LiteLLM error spans by operation",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "color": {
+                        "fixedColor": "red",
+                        "mode": "fixed"
+                    },
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "MCP Client Call Rate",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 12,
+                "w": 8,
+                "x": 0,
+                "y": 27
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\"}[5m])) by (span_name)",
+                    "legendFormat": "{{span_name}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\", status_code=\"ERROR\"}[5m])) by (span_name)",
+                    "legendFormat": "{{span_name}} errors",
+                    "refId": "B"
+                }
+            ],
+            "description": "Direct MCP client (hooks): span rate by operation",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byRegexp",
+                            "options": ".*errors"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "red",
+                                    "mode": "fixed"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        {
+            "title": "MCP Client Duration (p50 / p95 / p99)",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 12,
+                "w": 8,
+                "x": 8,
+                "y": 27
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "histogram_quantile(0.5, sum(rate(traces_spanmetrics_latency_bucket{service=\"basic-memory-mcp-client\"}[5m])) by (le, span_name))",
+                    "legendFormat": "p50 {{span_name}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "histogram_quantile(0.95, sum(rate(traces_spanmetrics_latency_bucket{service=\"basic-memory-mcp-client\"}[5m])) by (le, span_name))",
+                    "legendFormat": "p95 {{span_name}}",
+                    "refId": "B"
+                },
+                {
+                    "expr": "histogram_quantile(0.99, sum(rate(traces_spanmetrics_latency_bucket{service=\"basic-memory-mcp-client\"}[5m])) by (le, span_name))",
+                    "legendFormat": "p99 {{span_name}}",
+                    "refId": "C"
+                }
+            ],
+            "description": "Direct MCP client (hooks): duration percentiles by operation",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "MCP Client Hook Activity",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 12,
+                "w": 8,
+                "x": 16,
+                "y": 27
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\", span_name=~\"hook\\\\..+\"}[5m])) by (span_name)",
+                    "legendFormat": "{{span_name}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\", span_name=~\"mcp\\\\.call_tool\\\\..+\"}[5m])) by (span_name)",
+                    "legendFormat": "{{span_name}}",
+                    "refId": "B"
+                }
+            ],
+            "description": "Direct MCP client: hook and tool call activity",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "AI Traces",
+            "type": "table",
+            "gridPos": {
+                "h": 12,
+                "w": 24,
+                "x": 0,
+                "y": 39
+            },
+            "datasource": {
+                "type": "tempo",
+                "uid": "tempo"
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "datasource": {
+                        "type": "tempo",
+                        "uid": "tempo"
+                    },
+                    "query": "{ resource.service.name =~ \"litellm|basic-memory.*|mcp-gitea\" }",
+                    "queryType": "traceql",
+                    "tableType": "traces"
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "custom": {
+                        "cellOptions": {
+                            "type": "auto"
+                        }
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "showHeader": true
+            }
+        }
+    ],
+    "refresh": "30s",
+    "schemaVersion": 40,
+    "tags": [
+        "shoggoth",
+        "ai"
+    ],
+    "templating": {
+        "list": []
+    },
+    "time": {
+        "from": "now-1h",
+        "to": "now"
+    },
+    "title": "Shoggoth AI",
+    "description": "LLM proxy metrics, LiteLLM trace observability, and direct MCP client telemetry",
+    "uid": "shoggoth-ai",
+    "version": 1
+}

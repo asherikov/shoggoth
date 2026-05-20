@@ -1,7 +1,11 @@
 - [Introduction](#introduction)
+  - [Goals](#goals)
   - [Features](#features)
-  - [Architecture](#architecture)
+  - [Disclaimer](#disclaimer)
+- [Architecture](#architecture)
   - [Services](#services)
+  - [Monitoring](#monitoring)
+  - [Shoggoth slave container](#shoggoth-slave-container)
   - [Domain Name Resolution](#domain-name-resolution)
 - [Client Configuration](#client-configuration)
   - [Caveats](#caveats)
@@ -13,8 +17,8 @@
 Introduction
 ============
 
-`shoggoth` is a self-hosted agentic development multitool intended for
-personal use.
+`shoggoth` is a self-hosted agentic development multitool intended for personal
+use.
 
 Goals
 -----
@@ -51,10 +55,10 @@ Disclaimer
 - This is an experimental project in an early development stage, do not expect
   it to work out of the box.
 
-- Security is non-existent: it is not a priority atm and shoggoth is supposed
-  to be running in a local network only.
+- Security is non-existent: it is not a priority atm and shoggoth is supposed to
+  be running in a local network only.
 
-- The project is tailered for my primary stack (Ubuntu/C++/python) and working
+- The project is tailored for my primary stack (Ubuntu/C++/python) and working
   style (no IDE, no GUI, everything-as-code).
 
 Architecture
@@ -85,39 +89,39 @@ The following services are available:
 | `docker-cache` | `<host>:3128` | Docker registry caching proxy |
 | `docker-registry` | `docker-registry.<host>` | Private Docker registry |
 | `proxpi` | `proxpi.<host>` | Python package caching proxy |
-| `ollama` | `ollama.<host>` | Local AI model server |
+| `ollama`/`litellm` | `ollama.<host>` | LLM proxy (LiteLLM) with MCP gateway |
 | `git` | `git.<host>` | Gitea Git server with web UI |
 | `git-pages` | `git-pages.<host>` | Git Pages static site hosting |
 | `gitea-runner` | — | Gitea Actions runner |
-| `mcp-gitea` | `mcp-gitea.<host>` | Gitea MCP server for AI agents |
-| `basic-memory` | `basic-memory.<host>` | Basic Memory MCP server for AI agents |
-| `mcp-skills` | `mcp-skills.<host>` | Skills MCP server for AI agents |
+| `mcp-gitea` | — | Gitea MCP server (proxied via LiteLLM) |
+| `basic-memory` | — | Basic Memory MCP server (proxied via LiteLLM) |
 | `kestra` | `kestra.<host>` | Kestra workflow orchestration |
 | `redmine` | `redmine.<host>` | Redmine project management server |
-| `openobserve` | `openobserve.<host>` | Observability backend (traces, metrics, dashboards) |
+| `grafana` | `grafana.<host>` | Observability dashboard (traces, metrics, logs) |
+| `loki` | — | Log aggregation backend |
+| `tempo` | — | Trace storage backend |
+| `victoria-metrics` | — | Metrics storage backend (Prometheus-compatible) |
 | `node-exporter` | — | Host-level metrics (CPU, memory, disk, network) |
 | `cadvisor` | — | Container metrics (per-container resource usage) |
 | `otelcol` | — | OpenTelemetry Collector (Prometheus scrape → OTLP) |
 
+<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture overview" />
+
 Monitoring
 ----------
 
-Shoggoth uses [OpenObserve](https://openobserve.ai/) as the central
-observability backend, with an [OpenTelemetry
-Collector](https://opentelemetry.io/docs/collector/) pipeline for metrics
-ingestion. Traces and metrics from services and the host system are collected
-and forwarded to OpenObserve, where they can be viewed on the dashboard at
-`http://openobserve.<host>` (default user: `admin@shoggoth.local`, password
-stored in Docker secret).
-
-<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture overview" />
-
-The diagram above shows the high-level architecture.
+Shoggoth uses the [LGTM stack](https://grafana.com/docs/) (Loki + Grafana +
+Tempo + VictoriaMetrics) as the central observability backend, with an
+[OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) pipeline for
+telemetry ingestion. Traces, metrics, and logs from services and the host system
+are collected and forwarded to the appropriate backends, where they can be
+viewed on the Grafana dashboard.
 
 Shoggoth slave container
 ------------------------
 
 Shoggoth slave container includes three main layers:
+
 - <https://github.com/asherikov/ccws> build environemnt with compilers, static
   analysis tools, documentation and other utilitites, refer to
   <https://github.com/asherikov/ccws/blob/master/ccws/examples/Dockerfile>.
@@ -127,10 +131,10 @@ Shoggoth slave container includes three main layers:
   docker file is located in `shoggoth/dockerfiles/slave`.
 
 The slave container is intended to be used in three different ways:
+
 - plain CI/CD;
 - non-interactive agentic flows, e.g., coding or reviews;
 - interactive development with or without a coding agent.
-
 
 Domain Name Resolution
 ----------------------
@@ -331,6 +335,17 @@ make sync_restart
 Troubleshooting
 ===============
 
+- `LiteLLM:ERROR: opentelemetry.py - 'list' object has no attribute 'get'`:
+  known LiteLLM bug (PR
+  [\#26713](https://github.com/BerriAI/litellm/pull/26713)) where the OTel
+  callback calls `.get()` on `response_obj` which can be a list instead of a
+  dict. Non-fatal — traces still emit, just missing some attributes. Will be
+  resolved when the PR merges into a stable release.
+- `Tempo: "failed to find segment for index"`: WAL watcher error in
+  `metrics_generator` after config changes (e.g. `span_metrics.dimensions`).
+  Self-healing — the watcher retries every 5 seconds and recovers once new WAL
+  segments are written. If persistent, stop Tempo and delete
+  `monitoring/tempo/data/generator/wal/` before restarting.
 - cmake builds fail to find packages in Ubuntu due to missing system
   information, e.g., `CMAKE_LIBRARY_ARCHITECTURE`: check that build cache is
   operational.

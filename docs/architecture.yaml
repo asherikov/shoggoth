@@ -98,17 +98,6 @@ nodes:
     scope: proxy_services
     style_notag: proxy_style
 
-  - id: ["mcp-gitea.", proxy_mcp_gitea]
-    scope: proxy_services
-    style_notag: proxy_style
-
-  - id: ["basic-memory.", proxy_basic_memory]
-    scope: proxy_services
-    style_notag: proxy_style
-
-  - id: ["mcp-skills.", proxy_mcp_skills]
-    scope: proxy_services
-    style_notag: proxy_style
 
   - id: ["ollama.", proxy_ollama]
     scope: proxy_services
@@ -138,7 +127,7 @@ nodes:
     scope: proxy_services
     style_notag: proxy_style
 
-  - id: ["openobserve.", proxy_openobserve]
+  - id: ["grafana.", proxy_grafana]
     scope: proxy_services
     style_notag: proxy_style
 
@@ -203,11 +192,11 @@ nodes:
     scope: ai_group
     style_notag: hh_diagrams_azure_aimachinelearning_azure_openai
 
-  - id: ["basic\nmemory", basic_memory_service]
+  - id: ["LLM proxy\n(litellm)", litellm_service]
     scope: ai_group
-    style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
+    style_notag: hh_diagrams_azure_aimachinelearning_azure_openai
 
-  - id: ["mcp-skills", mcp_skills_service]
+  - id: ["basic\nmemory", basic_memory_service]
     scope: ai_group
     style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
 
@@ -237,9 +226,21 @@ nodes:
     scope: behind_proxy_group
     style_notag: docker_service_style
 
-  - id: ["OpenObserve", openobserve_service]
+  - id: ["Grafana", grafana_service]
     scope: monitoring_group
     style_notag: hh_diagrams_onprem_monitoring_grafana
+
+  - id: ["Loki", loki_service]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_logging_loki
+
+  - id: ["Tempo", tempo_service]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_tracing_tempo
+
+  - id: ["Victoria\nMetrics", victoria_metrics_service]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_monitoring_prometheus
 
   - id: ["OTel\ncollector", otelcol_service]
     scope: monitoring_group
@@ -329,36 +330,16 @@ edges:
     graphviz:
       color: auto
 
-  # AI agent flow (via proxy)
-  - link: [ai_agent, proxy_mcp_gitea]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
-  - link: [proxy_mcp_gitea, mcp_gitea]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
-  - link: [ai_agent, proxy_basic_memory]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
-  - link: [proxy_basic_memory, basic_memory_service]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
-  - link: [ai_agent, proxy_mcp_skills]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
-  - link: [proxy_mcp_skills, mcp_skills_service]
-    style: hh_diagrams_link
-    graphviz:
-      color: auto
+  # AI agent flow (via proxy → LiteLLM MCP gateway)
   - link: [ai_agent, proxy_ollama]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [proxy_ollama, ollama_service]
+  - link: [proxy_ollama, litellm_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [litellm_service, ollama_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
@@ -428,11 +409,11 @@ edges:
       color: auto
 
   # Monitoring flow (via proxy)
-  - link: [client_browser, proxy_openobserve]
+  - link: [client_browser, proxy_grafana]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [proxy_openobserve, openobserve_service]
+  - link: [proxy_grafana, grafana_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
@@ -447,6 +428,10 @@ edges:
     graphviz:
       color: auto
   - link: [gitea_runner, docker_cache]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [gitea_runner, git_pages_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
@@ -478,7 +463,7 @@ edges:
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [slave, ollama_service]
+  - link: [slave, litellm_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
@@ -492,6 +477,18 @@ edges:
     style: hh_diagrams_link
     graphviz:
       color: auto
+
+  # Layout edge: pull redmine group closer to proxy layer
+  - link: [build_cache, redmine_service]
+    style: hh_diagrams_link
+    graphviz:
+      style: invis
+
+  # Layout edge: pull AI group closer to proxy layer
+  - link: [home_page, litellm_service]
+    style: hh_diagrams_link
+    graphviz:
+      style: invis
 
   # Kestra flow triggers
   - link: [git_service, kestra_service]
@@ -512,8 +509,24 @@ edges:
     graphviz:
       color: auto
 
-  # basic memory -> ollama (if using embeddings)
-  - link: [basic_memory_service, ollama_service]
+  # basic memory -> litellm (embeddings)
+  - link: [basic_memory_service, litellm_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+
+  # litellm -> mcp servers (MCP gateway)
+  - link: [litellm_service, mcp_gitea]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [litellm_service, basic_memory_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+
+  # litellm -> otelcol (prometheus metrics + otel tracing)
+  - link: [litellm_service, otelcol_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
@@ -527,7 +540,27 @@ edges:
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [otelcol_service, openobserve_service]
+  - link: [otelcol_service, victoria_metrics_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [otelcol_service, loki_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [otelcol_service, tempo_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [grafana_service, victoria_metrics_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [grafana_service, loki_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+  - link: [grafana_service, tempo_service]
     style: hh_diagrams_link
     graphviz:
       color: auto

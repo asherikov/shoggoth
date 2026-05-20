@@ -99,6 +99,25 @@ receivers:
                       - source_labels: [job]
                         target_label: job_name
                         regex: "(.+)"
+                - job_name: otelcol
+                  scrape_interval: 15s
+                  static_configs:
+                      - targets:
+                            - otelcol:8888
+                  metric_relabel_configs:
+                      - source_labels: [job]
+                        target_label: job_name
+                        regex: "(.+)"
+                - job_name: litellm
+                  scrape_interval: 15s
+                  metrics_path: /metrics/
+                  static_configs:
+                      - targets:
+                            - litellm:80
+                  metric_relabel_configs:
+                      - source_labels: [job]
+                        target_label: job_name
+                        regex: "(.+)"
 
 processors:
     memory_limiter:
@@ -115,30 +134,50 @@ processors:
             - context: resource
               statements:
                   - set(attributes["container.runtime"], "docker")
+                  - set(attributes["service.name"], attributes["container.name"])
     batch:
         send_batch_size: 1024
         send_batch_max_size: 2048
         timeout: 10s
 
 exporters:
-    otlp_http:
-        endpoint: http://openobserve:80/api/default
-        headers:
-            Authorization: "Basic ${env:OPENOBSERVE_AUTH_BASIC}"
+    prometheusremotewrite:
+        endpoint: http://victoria-metrics:80/api/v1/write
+        tls:
+            insecure: true
+        resource_to_telemetry_conversion:
+            enabled: true
+    otlphttp/tempo:
+        endpoint: http://tempo:4318
+        tls:
+            insecure: true
+    otlphttp/loki:
+        endpoint: http://loki:3100/otlp
+        tls:
+            insecure: true
 
 service:
     extensions: [docker_observer]
     telemetry:
         logs:
             level: warn
+        metrics:
+            level: detailed
+            readers:
+                - pull:
+                    exporter:
+                        prometheus:
+                            host: '0.0.0.0'
+                            port: 8888
     pipelines:
         traces:
             receivers:
                 - otlp
             processors:
+                - memory_limiter
                 - batch
             exporters:
-                - otlp_http
+                - otlphttp/tempo
         logs:
             receivers:
                 - receiver_creator/docker-logs
@@ -148,12 +187,14 @@ service:
                 - transform/docker-meta
                 - batch
             exporters:
-                - otlp_http
+                - otlphttp/loki
         metrics:
             receivers:
                 - docker_stats
+                - otlp
                 - prometheus
             processors:
+                - memory_limiter
                 - batch
             exporters:
-                - otlp_http
+                - prometheusremotewrite

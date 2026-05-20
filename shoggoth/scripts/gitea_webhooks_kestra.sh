@@ -38,22 +38,21 @@ for GITEA_PROJECT in "${GITEA_PROJECTS[@]}"; do
         http://${KESTRA_HOST}/api/v1/main/executions/webhook/shoggoth/gitea-ci-failure/key|workflow_run
     ")
 
+    mapfile -t HOOK_IDS < <(echo "${EXISTING}" | jq -r '.[].id')
+    for HOOK_ID in "${HOOK_IDS[@]}"; do
+        echo "Removing webhook from ${GITEA_PROJECT} (id=${HOOK_ID})"
+        curl -s -X DELETE \
+            "${GITEA_API}/orgs/${GITEA_PROJECT}/hooks/${HOOK_ID}" \
+            -H "Authorization: token ${GITEA_AUTH_TOKEN}" > /dev/null
+    done
+
     for WEBHOOK_SPEC in ${WEBHOOKS[@]}; do
         WEBHOOK_URL="${WEBHOOK_SPEC%%|*}"
         WEBHOOK_EVENTS="${WEBHOOK_SPEC##*|}"
 
         EVENTS_JSON="$(echo "${WEBHOOK_EVENTS}" | sed 's/,/","/g' | sed 's/^/"/;s/$/"/')"
 
-        HOOK_ID="$(echo "${EXISTING}" | jq -r ".[] | select(.config.url == \"${WEBHOOK_URL}\") | .id" | head -1)"
-
-        if [ -n "${HOOK_ID}" ]; then
-            echo "Replacing webhook ${WEBHOOK_URL} in ${GITEA_PROJECT} (id=${HOOK_ID})"
-            curl -s -X DELETE \
-                "${GITEA_API}/orgs/${GITEA_PROJECT}/hooks/${HOOK_ID}" \
-                -H "Authorization: token ${GITEA_AUTH_TOKEN}" > /dev/null
-        else
-            echo "Adding webhook to ${GITEA_PROJECT}: ${WEBHOOK_URL}"
-        fi
+        echo "Adding webhook to ${GITEA_PROJECT}: ${WEBHOOK_URL}"
 
         curl -s -X POST \
             "${GITEA_API}/orgs/${GITEA_PROJECT}/hooks" \

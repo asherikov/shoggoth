@@ -7,6 +7,15 @@ set -a
 source "${ENV_FILE}"
 set +a
 
+normalize_for_branch() {
+    local INPUT="$1"
+    echo "${INPUT}" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed 's/[^a-z0-9]/-/g' \
+        | sed 's/-\+/-/g' \
+        | sed 's/^-\|-$//g'
+}
+
 strip_repo_to_project() {
     local repo="$1"
     repo="${repo#ssh://}"
@@ -27,7 +36,6 @@ TASK_DETAILS="$(redmine issues get "${TASK_ID}" --journals --children --output=j
 
 TASK_SUBJECT="$(echo "${TASK_DETAILS}" | jq -r '.subject')"
 TASK_PROJECT="$(echo "${TASK_DETAILS}" | jq -r '.project.name // empty')"
-TASK_PROJECT_ID="$(echo "${TASK_DETAILS}" | jq -r '.project.id // empty')"
 
 if [ -z "${TASK_PROJECT}" ]; then
     TASK_DESCRIPTION="$(echo "${TASK_DETAILS}" | jq -r '(.description // "")')"
@@ -37,12 +45,14 @@ if [ -z "${TASK_PROJECT}" ]; then
     fi
 fi
 
-export SHOGGOTH_PROJECT="${TASK_PROJECT}"
-export SHOGGOTH_PROJECT_ID="${TASK_PROJECT_ID}"
+export SHOGGOTH_PROJECT="$(normalize_for_branch "${TASK_PROJECT}")"
+export SHOGGOTH_BRANCH="${SHOGGOTH_PROJECT}/$(normalize_for_branch "${TASK_SUBJECT}")"
 
 qwen --yolo --output-format json --prompt "Find and execute Redmine task #${TASK_ID}: ${TASK_SUBJECT}
 
 Task details:
-${TASK_DETAILS}"
+${TASK_DETAILS}
+
+If the given task requires modification of repositories, create a feature branch with the name taken from the SHOGGOTH_BRANCH environment variable (${SHOGGOTH_BRANCH}) before making changes, push it after completion, and open a pull request using the Gitea CLI (tea)."
 
 redmine issues update "${TASK_ID}" --status "Resolved"

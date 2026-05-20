@@ -69,7 +69,7 @@ Environment variables:
     CONFIGURE_ALL           Set to "true" to configure all options
     CONFIGURE_APT_CACHE     Set to "true" to install apt cache config
     CONFIGURE_CLIENT_CONF   Set to "true" or a directory path to generate client config files
-    CONFIGURE_GITEA         Set to token for gitea tea CLI, config file, and MCP server config
+    CONFIGURE_GITEA         Set to token for gitea tea CLI
     CONFIGURE_GITEA_USER    Set to username for gitea tea CLI basic auth
     CONFIGURE_REDMINE       Set to API key for redmine CLI via environment variables
     CONFIGURE_OLLAMA_TOKEN  Set to API key for OpenAI API (Ollama)
@@ -233,7 +233,7 @@ EOF"
 }
 
 update_hosts() {
-    local services=("kestra" "dns" "apt-cache" "docker-cache" "ollama" "git" "build-cache" "mcp-gitea" "basic-memory" "mcp-skills" "git-pages" "redmine" "redmine-mcp" "proxpi" "docker-registry" "openobserve" "otelcol")
+    local services=("kestra" "dns" "apt-cache" "docker-cache" "ollama" "git" "build-cache" "git-pages" "redmine" "redmine-mcp" "proxpi" "docker-registry" "grafana" "otelcol")
     local hosts_entries="${HOST_IP} ${HOST}"$'\n'
 
     for service in "${services[@]}"; do
@@ -277,7 +277,7 @@ generate_shoggoth_conf() {
 # Load with: set -a; source ${ENV_FILE}; set +a
 # See: https://gist.github.com/mihow/9c7f559807069a03e302605691f85572
 
-# Ollama
+# LLM (LiteLLM → Ollama)
 OPENAI_API_KEY=${CONFIGURE_OLLAMA_TOKEN}
 OPENAI_BASE_URL=http://ollama.${HOST}/v1/
 OPENAI_MODEL=glm-5.1:cloud
@@ -387,27 +387,11 @@ EOF
 }
 
 generate_qwen_conf() {
-    local gitea_block=""
-    if [ -n "${CONFIGURE_GITEA}" ]; then
-        gitea_block="
-    \"shoggoth-mcp-gitea\": {
-      \"httpUrl\": \"http://mcp-gitea.${HOST}/mcp\",
-      \"headers\": {
-        \"Authorization\": \"Bearer ${CONFIGURE_GITEA}\"
-      },
-      \"timeout\": 5000
-    },"
-    fi
-
     cat > "${CLIENT_CONF_DIR}/qwen.json" <<EOF
 {
-  "mcpServers": {${gitea_block}
-    "shoggoth-basic-memory": {
-      "httpUrl": "http://basic-memory.${HOST}/mcp",
-      "timeout": 5000
-    },
-    "shoggoth-mcp-skills": {
-      "httpUrl": "http://mcp-skills.${HOST}/mcp",
+  "mcpServers": {
+    "shoggoth-mcp": {
+      "httpUrl": "http://ollama.${HOST}/mcp",
       "timeout": 5000
     }
   },
@@ -423,8 +407,8 @@ generate_qwen_conf() {
 EOF
     chmod 600 "${CLIENT_CONF_DIR}/qwen.json"
     echo "Generated ${CLIENT_CONF_DIR}/qwen.json"
-    echo "Telemetry exports to OpenObserve via otelcol at http://otelcol.${HOST}:4317"
-    echo "Dashboard: http://openobserve.${HOST} (admin@shoggoth.local)"
+    echo "Telemetry exports to Grafana (LGTM stack) via otelcol at http://otelcol.${HOST}:4317"
+    echo "Dashboard: http://grafana.${HOST} (admin)"
 }
 
 main() {

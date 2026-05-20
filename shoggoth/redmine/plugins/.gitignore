@@ -1,3 +1,4 @@
 *
+!.gitignore
 !kanban
 !redmine_forgejo_webhook

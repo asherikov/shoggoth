@@ -47,7 +47,7 @@ runner:
   labels:
     - "ubuntu-latest:docker://docker-registry.shoggoth.local/slave_noble"
     - "ubuntu-24.04:docker://docker-registry.shoggoth.local/slave_noble"
-    - "ubuntu-22.04:docker://docker-registry.shoggoth.local/slave_jammy"
+#    - "ubuntu-22.04:docker://docker-registry.shoggoth.local/slave_jammy"
 
 cache:
   # Enable cache server to use actions/cache.

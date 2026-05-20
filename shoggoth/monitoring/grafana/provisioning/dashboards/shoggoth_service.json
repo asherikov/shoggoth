@@ -1,0 +1,135 @@
+{
+    "annotations": {
+        "list": []
+    },
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 1,
+    "id": null,
+    "links": [],
+    "panels": [
+        {
+            "title": "CPU Usage",
+            "type": "timeseries",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "sum by(container) (rate(container_cpu_usage_seconds_total{container=\"$service\"}[5m])) * 100", "legendFormat": "CPU %", "refId": "A"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "percent",
+                    "min": 0,
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Memory Usage",
+            "type": "timeseries",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "sum by(container) (container_memory_working_set_bytes{container=\"$service\"})", "legendFormat": "Working set", "refId": "A"},
+                {"expr": "sum by(container) (container_memory_rss_bytes{container=\"$service\"})", "legendFormat": "RSS", "refId": "B"},
+                {"expr": "sum by(container) (container_memory_cache_bytes{container=\"$service\"})", "legendFormat": "Cache", "refId": "C"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "bytes",
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Network I/O",
+            "type": "timeseries",
+            "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "sum by(container) (rate(container_network_receive_bytes_total{container=\"$service\"}[5m]))", "legendFormat": "↓ Receive", "refId": "A"},
+                {"expr": "sum by(container) (rate(container_network_transmit_bytes_total{container=\"$service\"}[5m]))", "legendFormat": "↑ Transmit", "refId": "B"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "Bps",
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Restart Count",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 12, "x": 0, "y": 16},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "max(container_restart_total{container=\"$service\"}) or on() vector(0)", "legendFormat": "", "refId": "A"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]},
+                    "color": {"mode": "thresholds"}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Uptime",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 12, "x": 12, "y": 16},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "max by(container) (time() - container_start_time_seconds{container=\"$service\"})", "legendFormat": "", "refId": "A"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+                    "color": {"mode": "thresholds"}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Service Logs",
+            "type": "logs",
+            "gridPos": {"h": 12, "w": 24, "x": 0, "y": 20},
+            "datasource": {"uid": "loki"},
+            "targets": [
+                {"expr": "{service_name=~\"$service\"}", "refId": "A"}
+            ],
+            "options": {"showLabels": false, "showTime": true, "sortOrder": "Descending", "enableLogDetails": true, "wrapLogMessage": true, "prettifyLogMessage": true}
+        }
+    ],
+    "refresh": "30s",
+    "schemaVersion": 40,
+    "tags": ["shoggoth", "service"],
+    "templating": {
+        "list": [
+            {
+                "current": {"text": "", "value": ""},
+                "definition": "label_values(container_cpu_usage_seconds_total{container=~\".+\"}, container)",
+                "hide": 0,
+                "includeAll": false,
+                "label": "Service",
+                "multi": false,
+                "name": "service",
+                "options": [],
+                "query": {"qryType": 1, "query": "label_values(container_cpu_usage_seconds_total{container=~\".+\"}, container)", "refId": "VariableQuery-0"},
+                "refresh": 2,
+                "regex": "/\\.shoggoth\\.local$/",
+                "sort": 1,
+                "type": "query",
+                "datasource": {"uid": "vm"}
+            }
+        ]
+    },
+    "time": {"from": "now-1h", "to": "now"},
+    "title": "Shoggoth Service",
+    "description": "Per-service observability: CPU, memory, network, disk, and logs for a single selected container",
+    "uid": "shoggoth-service",
+    "version": 1
+}

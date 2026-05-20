@@ -18,6 +18,8 @@ micronaut:
       otlp:
         enabled: true
         url: http://otelcol:4318/v1/metrics
+        resource-attributes:
+          service.name: kestra
   io:
     watch:
       enabled: true

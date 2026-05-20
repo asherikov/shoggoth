@@ -1,8 +1,7 @@
 OLLAMA_MODEL?=qwen3-coder:30b
-#OLLAMA_MODEL?=nomic-embed-text
 
 ollama_tags:
-	curl http://ollama.shoggoth.local/api/tags
+	${MAKE} ssh_exec CMD='docker compose exec ollama ollama list'
 
 ollama_query:
 	time curl http://ollama.${SHOGGOTH_DOMAIN}/v1/completions \

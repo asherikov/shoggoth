@@ -13,8 +13,9 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-BM_MCP_URL = os.environ.get("BM_MCP_URL", "http://basic-memory.shoggoth.local/mcp")
+BM_MCP_URL = os.environ.get("BM_MCP_URL", "http://ollama.shoggoth.local/mcp")
 BM_MCP_TIMEOUT = int(os.environ.get("BM_MCP_TIMEOUT", "10"))
+BM_TOOL_PREFIX = os.environ.get("BM_TOOL_PREFIX", "basic_memory-")
 BM_OTEL_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otelcol.shoggoth.local:4317")
 SHOGGOTH_PROJECT = os.environ.get("SHOGGOTH_PROJECT", "")
 
@@ -28,8 +29,9 @@ _tracer = trace.get_tracer(__name__)
 
 
 async def call_tool(tool_name: str, arguments: dict | None = None) -> str:
+    namespaced = f"{BM_TOOL_PREFIX}{tool_name}"
     with _tracer.start_as_current_span(
-        f"mcp.call_tool.{tool_name}", attributes={"mcp.tool_name": tool_name}
+        f"mcp.call_tool.{tool_name}", attributes={"mcp.tool_name": namespaced}
     ) as span:
         try:
             async with streamablehttp_client(BM_MCP_URL, timeout=BM_MCP_TIMEOUT) as (
@@ -39,7 +41,7 @@ async def call_tool(tool_name: str, arguments: dict | None = None) -> str:
             ):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
-                    result = await session.call_tool(tool_name, arguments or {})
+                    result = await session.call_tool(namespaced, arguments or {})
                     texts = [c.text for c in result.content if hasattr(c, "text")]
                     return "\n".join(texts) if texts else json.dumps(
                         [c.model_dump() for c in result.content], default=str
@@ -184,6 +186,7 @@ def main():
         data = read_input()
         result = HOOKS[command](data)
         print(json.dumps(result))
+        _tracer_provider.force_flush()
         return
 
     tool_name = command
@@ -193,6 +196,7 @@ def main():
         print(result)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
+        _tracer_provider.force_flush()
         sys.exit(1)
 
 
