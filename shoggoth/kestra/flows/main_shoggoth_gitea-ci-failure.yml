@@ -23,5 +23,6 @@ tasks:
     wait: true
     transmitFailed: true
     inputs:
-      script: "gitea_ci_failure.sh"
+      script: "gitea_event.sh"
+      task_id: "ci-failure"
       payload: "{{ trigger.body | json }}"

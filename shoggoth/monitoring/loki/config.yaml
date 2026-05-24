@@ -49,6 +49,7 @@ distributor:
             - service.instance.id
             - container.name
             - deployment.environment.name
+            - session.id
 
 limits_config:
     retention_period: 8760h

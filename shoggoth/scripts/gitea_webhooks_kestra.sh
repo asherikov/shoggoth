@@ -33,8 +33,7 @@ for GITEA_PROJECT in "${GITEA_PROJECTS[@]}"; do
         -H "Authorization: token ${GITEA_AUTH_TOKEN}")"
 
     WEBHOOKS=("
-        http://${KESTRA_HOST}/api/v1/main/executions/webhook/shoggoth/gitea-pr-review/key|pull_request
-        http://${KESTRA_HOST}/api/v1/main/executions/webhook/shoggoth/gitea-pr-comment/key|pull_request_review,pull_request_comment
+        http://${KESTRA_HOST}/api/v1/main/executions/webhook/shoggoth/gitea-pr-update/key|pull_request,pull_request_review
         http://${KESTRA_HOST}/api/v1/main/executions/webhook/shoggoth/gitea-ci-failure/key|workflow_run
     ")
 

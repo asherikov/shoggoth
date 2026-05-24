@@ -99,7 +99,7 @@ nodes:
     style_notag: proxy_style
 
 
-  - id: ["ollama.", proxy_ollama]
+  - id: ["ai.", proxy_ai]
     scope: proxy_services
     style_notag: proxy_style
 
@@ -331,11 +331,11 @@ edges:
       color: auto
 
   # AI agent flow (via proxy → LiteLLM MCP gateway)
-  - link: [ai_agent, proxy_ollama]
+  - link: [ai_agent, proxy_ai]
     style: hh_diagrams_link
     graphviz:
       color: auto
-  - link: [proxy_ollama, litellm_service]
+  - link: [proxy_ai, litellm_service]
     style: hh_diagrams_link
     graphviz:
       color: auto
@@ -521,6 +521,11 @@ edges:
     graphviz:
       color: auto
   - link: [litellm_service, basic_memory_service]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+
+  - link: [ai_agent, otelcol_service]
     style: hh_diagrams_link
     graphviz:
       color: auto

@@ -6,23 +6,24 @@ import os
 import sys
 
 from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-BM_MCP_URL = os.environ.get("BM_MCP_URL", "http://ollama.shoggoth.local/mcp")
+BM_MCP_URL = os.environ.get("BM_MCP_URL", "http://ai.shoggoth.local/mcp")
 BM_MCP_TIMEOUT = int(os.environ.get("BM_MCP_TIMEOUT", "10"))
 BM_TOOL_PREFIX = os.environ.get("BM_TOOL_PREFIX", "basic_memory-")
-BM_OTEL_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otelcol.shoggoth.local:4317")
+BM_OTEL_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otelcol:4318")
+BM_OTEL_TRACES_ENDPOINT = BM_OTEL_ENDPOINT.rstrip("/") + "/v1/traces"
 SHOGGOTH_PROJECT = os.environ.get("SHOGGOTH_PROJECT", "")
 
 _resource = Resource.create({"service.name": os.environ.get("OTEL_SERVICE_NAME", "basic-memory-mcp-client")})
 _tracer_provider = TracerProvider(resource=_resource)
 _tracer_provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint=BM_OTEL_ENDPOINT))
+    BatchSpanProcessor(OTLPSpanExporter(endpoint=BM_OTEL_TRACES_ENDPOINT))
 )
 trace.set_tracer_provider(_tracer_provider)
 _tracer = trace.get_tracer(__name__)

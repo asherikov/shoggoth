@@ -38,7 +38,7 @@ Features
   - Python package caching proxy (`proxpi`).
   - Build cache server, to be used with ccache or sccache.
 - Development:
-  - Local AI model server (`ollama`).
+  - Local AI model server (`ollama`) and LLM proxy.
   - Docker registry.
   - Git server (`gitea`) with CI/CD actions support.
 - Project management
@@ -89,21 +89,27 @@ The following services are available:
 | `docker-cache` | `<host>:3128` | Docker registry caching proxy |
 | `docker-registry` | `docker-registry.<host>` | Private Docker registry |
 | `proxpi` | `proxpi.<host>` | Python package caching proxy |
-| `ollama`/`litellm` | `ollama.<host>` | LLM proxy (LiteLLM) with MCP gateway |
+| `ollama`/`litellm` | `ai.<host>` | LLM proxy (LiteLLM) with MCP gateway |
 | `git` | `git.<host>` | Gitea Git server with web UI |
 | `git-pages` | `git-pages.<host>` | Git Pages static site hosting |
-| `gitea-runner` | — | Gitea Actions runner |
-| `mcp-gitea` | — | Gitea MCP server (proxied via LiteLLM) |
-| `basic-memory` | — | Basic Memory MCP server (proxied via LiteLLM) |
 | `kestra` | `kestra.<host>` | Kestra workflow orchestration |
 | `redmine` | `redmine.<host>` | Redmine project management server |
 | `grafana` | `grafana.<host>` | Observability dashboard (traces, metrics, logs) |
-| `loki` | — | Log aggregation backend |
-| `tempo` | — | Trace storage backend |
-| `victoria-metrics` | — | Metrics storage backend (Prometheus-compatible) |
-| `node-exporter` | — | Host-level metrics (CPU, memory, disk, network) |
-| `cadvisor` | — | Container metrics (per-container resource usage) |
-| `otelcol` | — | OpenTelemetry Collector (Prometheus scrape → OTLP) |
+
+Internal services:
+
+| Service | Description |
+|----|----|
+| `gitea-runner` | Gitea Actions runner |
+| `mcp-gitea` | Gitea MCP server (proxied via LiteLLM) |
+| `basic-memory` | Basic Memory MCP server (proxied via LiteLLM) |
+| `loki` | Log aggregation backend |
+| `tempo` | Trace storage backend |
+| `victoria-metrics` | Metrics storage backend (Prometheus-compatible) |
+| `node-exporter` | Host-level metrics (CPU, memory, disk, network) |
+| `cadvisor` | Container metrics (per-container resource usage) |
+| `otelcol` | OpenTelemetry Collector (Prometheus scrape → OTLP) |
+
 
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture overview" />
 
@@ -192,7 +198,7 @@ The script generates the following files when `--client-conf` is used:
 
 | File | Description |
 |----|----|
-| `env` | Environment variables for all services (ollama, ccache, proxpi, gitea, redmine) |
+| `env` | Environment variables for all services (ai, ccache, proxpi, gitea, redmine) |
 | `apt-cache.conf` | APT cache configuration |
 | `resolv.conf` | DNS resolver configuration |
 | `qwen/settings.json` | Qwen Code configuration |
@@ -243,10 +249,6 @@ Source the `env` file and build with ccache:
 set -a; source ~/.config/shoggoth/env; set +a
 # CCACHE_REMOTE_STORAGE and CCACHE_REMOTE_ONLY are already set
 ```
-
-### Ollama AI Server
-
-Query the local AI model: `make ollama_tags`, `make ollama_query`.
 
 ### Gitea Git Server
 

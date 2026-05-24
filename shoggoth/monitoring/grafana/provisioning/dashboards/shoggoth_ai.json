@@ -430,7 +430,7 @@
                     "refId": "B"
                 }
             ],
-            "description": "Direct MCP client (hooks): span rate by operation",
+            "description": "MCP client hooks: span rate by operation",
             "fieldConfig": {
                 "defaults": {
                     "unit": "reqps",
@@ -490,7 +490,7 @@
                     "refId": "C"
                 }
             ],
-            "description": "Direct MCP client (hooks): duration percentiles by operation",
+            "description": "MCP client hooks: duration percentiles by operation",
             "fieldConfig": {
                 "defaults": {
                     "unit": "s",
@@ -529,7 +529,7 @@
                     "refId": "B"
                 }
             ],
-            "description": "Direct MCP client: hook and tool call activity",
+            "description": "MCP client hooks and tool call activity",
             "fieldConfig": {
                 "defaults": {
                     "unit": "reqps",
@@ -545,13 +545,150 @@
             }
         },
         {
+            "title": "Agent Session Rate",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 0,
+                "y": 39
+            },
+            "datasource": {
+                "uid": "loki"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate({service_name=~\"qwen-.*\"}[5m])) by (service_name)",
+                    "legendFormat": "{{service_name}}",
+                    "refId": "A"
+                }
+            ],
+            "description": "Coding agent session log event rate by event type",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Agent Active Sessions",
+            "type": "stat",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 8,
+                "y": 39
+            },
+            "datasource": {
+                "uid": "loki"
+            },
+            "targets": [
+                {
+                    "expr": "count(count_over_time({service_name=~\"qwen-.*\"}[5m])) by (service_name)",
+                    "legendFormat": "{{service_name}}",
+                    "refId": "A"
+                }
+            ],
+            "description": "Distinct agent sessions with log activity in the last 5 minutes",
+            "fieldConfig": {
+                "defaults": {
+                    "thresholds": {
+                        "mode": "absolute",
+                        "steps": [
+                            {
+                                "color": "green",
+                                "value": null
+                            }
+                        ]
+                    },
+                    "color": {
+                        "mode": "thresholds"
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Agent Session Errors",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 16,
+                "y": 39
+            },
+            "datasource": {
+                "uid": "loki"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate({service_name=~\"qwen-.*\"} |~ \"(?i)error|fail|exception|timeout\"[5m])) by (service_name)",
+                    "legendFormat": "{{service_name}}",
+                    "refId": "A"
+                }
+            ],
+            "description": "Agent log lines matching error patterns",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "color": {
+                        "fixedColor": "red",
+                        "mode": "fixed"
+                    },
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Agent Logs",
+            "type": "logs",
+            "gridPos": {
+                "h": 12,
+                "w": 24,
+                "x": 0,
+                "y": 48
+            },
+            "datasource": {
+                "uid": "loki"
+            },
+            "targets": [
+                {
+                    "expr": "{service_name=~\"qwen-.*\"} | line_format \"{{.service_name}} {{__line__}}\"",
+                    "refId": "A"
+                }
+            ],
+            "options": {
+                "showTime": true,
+                "showLabels": false,
+                "sortOrder": "Descending",
+                "enableLogDetails": true,
+                "wrapLogMessage": true,
+                "prettifyLogMessage": true
+            }
+        },
+        {
             "title": "AI Traces",
             "type": "table",
             "gridPos": {
                 "h": 12,
                 "w": 24,
                 "x": 0,
-                "y": 39
+                "y": 60
             },
             "datasource": {
                 "type": "tempo",
@@ -598,7 +735,7 @@
         "to": "now"
     },
     "title": "Shoggoth AI",
-    "description": "LLM proxy metrics, LiteLLM trace observability, and direct MCP client telemetry",
+    "description": "LLM proxy metrics, LiteLLM trace observability, direct MCP client telemetry, and coding agent session logs",
     "uid": "shoggoth-ai",
     "version": 1
 }

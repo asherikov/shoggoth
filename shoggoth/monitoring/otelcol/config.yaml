@@ -134,7 +134,7 @@ processors:
             - context: resource
               statements:
                   - set(attributes["container.runtime"], "docker")
-                  - set(attributes["service.name"], attributes["container.name"])
+                  - set(attributes["service.name"], attributes["container.name"]) where attributes["container.name"] != nil
     batch:
         send_batch_size: 1024
         send_batch_max_size: 2048
@@ -181,6 +181,7 @@ service:
         logs:
             receivers:
                 - receiver_creator/docker-logs
+                - otlp
             processors:
                 - memory_limiter
                 - resourcedetection

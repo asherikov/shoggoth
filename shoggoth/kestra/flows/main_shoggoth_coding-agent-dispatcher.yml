@@ -45,5 +45,6 @@ tasks:
       - "export PATH=\"/shoggoth/scripts:${PATH}\" && {{ inputs.script }} {{ inputs.task_id }}"
     env:
       SHOGGOTH_ENV: "/shoggoth/env"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318"
       GITEA_TOKEN_AUTH_SOCK: "/home/ccws/.git-credential-cache/socket"
       GITEA_PAYLOAD: "{{ inputs.payload }}"

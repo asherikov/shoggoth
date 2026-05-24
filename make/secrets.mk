@@ -9,7 +9,3 @@ secret_kestra_db:
 
 secret_kestra_basic_auth:
 	@pwgen -1 > shoggoth/private/kestra-basic-auth-password.txt
-
-secret_ollama_bearer_token:
-	@openssl rand -hex 32 > shoggoth/private/ollama-bearer-token.txt
-	@chmod 600 shoggoth/private/ollama-bearer-token.txt

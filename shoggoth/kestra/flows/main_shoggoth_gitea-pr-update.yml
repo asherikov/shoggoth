@@ -1,11 +1,17 @@
 #kestra_trigger:
 #	curl -X POST \
-#		http://kestra.${SHOGGOTH_DOMAIN}/api/v1/main/executions/webhook/shoggoth/gitea-pr-comment/key \
+#		http://kestra.${SHOGGOTH_DOMAIN}/api/v1/main/executions/webhook/shoggoth/gitea-pr-update/key \
+#		-H "Content-Type: application/json" \
+#		-H "X-Gitea-Event: pull_request" \
+#		-d '{"action":"opened","number":1,"pull_request":{"id":1,"number":1,"title":"Test PR","body":"Description","html_url":"http://git.shoggoth.local/owner/repo/pulls/1","base":{"repo":{"full_name":"owner/repo"},"ref":"main"},"head":{"ref":"feature-branch","sha":"abc123"}},"repository":{"full_name":"owner/repo","html_url":"http://git.shoggoth.local/owner/repo"},"sender":{"login":"user"}}'
+#
+#	curl -X POST \
+#		http://kestra.${SHOGGOTH_DOMAIN}/api/v1/main/executions/webhook/shoggoth/gitea-pr-update/key \
 #		-H "Content-Type: application/json" \
 #		-H "X-Gitea-Event: pull_request_review" \
 #		-d '{"action":"submitted","number":1,"pull_request":{"id":1,"number":1,"title":"Test PR","body":"Description","html_url":"http://git.shoggoth.local/owner/repo/pulls/1","base":{"repo":{"full_name":"owner/repo"},"ref":"main"},"head":{"ref":"feature-branch","sha":"abc123"}},"review":{"id":1,"type":"comment","body":"Please fix these issues"},"repository":{"full_name":"owner/repo","html_url":"http://git.shoggoth.local/owner/repo"},"sender":{"login":"reviewer"}}'
 
-id: gitea-pr-comment
+id: gitea-pr-update
 namespace: shoggoth
 disabled: false
 
@@ -23,5 +29,6 @@ tasks:
     wait: true
     transmitFailed: true
     inputs:
-      script: "gitea_pr_comment.sh"
+      script: "gitea_event.sh"
+      task_id: "pr-update"
       payload: "{{ trigger.body | json }}"

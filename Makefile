@@ -76,6 +76,6 @@ client_conf:
 		--client-conf ${SHOGGOTH_CLIENT_CFG} \
 		--host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}" \
 		--gitea-token ${GITEA_TOKEN} --gitea-user ${GITEA_USER} \
-		--ollama-token ${OLLAMA_TOKEN} \
+		--ai-token ${AI_TOKEN} \
 		--redmine-token ${REDMINE_TOKEN}
 

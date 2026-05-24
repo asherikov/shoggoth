@@ -1,7 +1,6 @@
 ARG BASE_IMAGE=asherikov/ccws_qwen_noble:latest
 FROM ${BASE_IMAGE}
 
-ARG CCWS_BIN_DIR=/ccws/ccws/tools/bin/
 ARG SHOGGOTH_SKILL_DIR=/ccws/skills/
 ENV SHOGGOTH_SKILL_DIR=${SHOGGOTH_SKILL_DIR}
 
@@ -37,6 +36,13 @@ RUN \
     echo "Host git.shoggoth.local" >> /etc/ssh/ssh_config \
     && echo "    StrictHostKeyChecking no"  >> /etc/ssh/ssh_config
 
+RUN curl -fsSL https://dl.gitea.io/tea/main/tea-main-linux-`dpkg --print-architecture` -o /usr/bin/tea \
+    && chmod +x /usr/bin/tea
+
+RUN curl -fsSL \
+        "https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg --print-architecture`.tar.gz" \
+    | tar -xz -C /usr/bin
+
 USER ccws
 
 # credential cache is used to provide access via http
@@ -49,18 +55,11 @@ RUN \
 
 RUN \
 --mount=type=cache,target=/cache/pip,sharing=locked \
-    pip install mcp opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-grpc
+    pip install mcp opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 
 RUN \
---mount=type=bind,source=skills/,target=/tmp/skills \
+--mount=type=bind,source=ai/skills/,target=/tmp/skills \
     cp -R /tmp/skills/* ${SHOGGOTH_SKILL_DIR}/
-
-RUN curl -fsSL https://dl.gitea.io/tea/main/tea-main-linux-`dpkg --print-architecture` -o ${CCWS_BIN_DIR}/tea \
-    && chmod +x ${CCWS_BIN_DIR}/tea
-
-RUN curl -fsSL \
-        "https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg --print-architecture`.tar.gz" \
-    | tar -xz -C ${CCWS_BIN_DIR}/
 
 RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/gitea-tea \
     && curl -fsSL \

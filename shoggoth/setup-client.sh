@@ -11,7 +11,7 @@ CONFIGURE_CLIENT_CONF="${CONFIGURE_CLIENT_CONF:-}"
 CONFIGURE_GITEA="${CONFIGURE_GITEA:-}"
 CONFIGURE_GITEA_USER="${CONFIGURE_GITEA_USER:-}"
 CONFIGURE_REDMINE="${CONFIGURE_REDMINE:-}"
-CONFIGURE_OLLAMA_TOKEN="${CONFIGURE_OLLAMA_TOKEN:-ollama}"
+CONFIGURE_AI_TOKEN="${CONFIGURE_AI_TOKEN:-ai}"
 HOST="${HOST:-shoggoth.local}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
 CLIENT_CONF_DIR="${CLIENT_CONF_DIR:-${HOME}/.config/shoggoth}"
@@ -55,7 +55,7 @@ Options:
     --gitea-token TOKEN     Configure gitea tea CLI auth, config file, and MCP server config
     --gitea-user USER       Configure gitea tea CLI username for basic auth
     --redmine-token TOKEN   Configure redmine CLI auth via environment variables
-    --ollama-token TOKEN    Configure OpenAI API key for Ollama (OPENAI_API_KEY)
+    --ai-token TOKEN        Configure OpenAI API key for AI services (OPENAI_API_KEY)
     --client-conf [DIR]     Generate configuration files, optionally in DIR (default: ${HOME}/.config/shoggoth)
     --all                   Configure and print all setup instructions
     --help                  Show this help message
@@ -72,7 +72,7 @@ Environment variables:
     CONFIGURE_GITEA         Set to token for gitea tea CLI
     CONFIGURE_GITEA_USER    Set to username for gitea tea CLI basic auth
     CONFIGURE_REDMINE       Set to API key for redmine CLI via environment variables
-    CONFIGURE_OLLAMA_TOKEN  Set to API key for OpenAI API (Ollama)
+    CONFIGURE_AI_TOKEN        Set to API key for OpenAI API
     CLIENT_CONF_DIR         Directory for config files (default: ${HOME}/.config/shoggoth)
 EOF
 }
@@ -117,8 +117,8 @@ parse_args() {
                 CONFIGURE_REDMINE="$2"
                 shift 2
                 ;;
-            --ollama-token)
-                CONFIGURE_OLLAMA_TOKEN="$2"
+            --ai-token)
+                CONFIGURE_AI_TOKEN="$2"
                 shift 2
                 ;;
             --client-conf)
@@ -233,7 +233,7 @@ EOF"
 }
 
 update_hosts() {
-    local services=("kestra" "dns" "apt-cache" "docker-cache" "ollama" "git" "build-cache" "git-pages" "redmine" "redmine-mcp" "proxpi" "docker-registry" "grafana" "otelcol")
+    local services=("kestra" "dns" "apt-cache" "docker-cache" "ai" "git" "build-cache" "git-pages" "redmine" "proxpi" "docker-registry" "grafana" "otelcol")
     local hosts_entries="${HOST_IP} ${HOST}"$'\n'
 
     for service in "${services[@]}"; do
@@ -278,8 +278,8 @@ generate_shoggoth_conf() {
 # See: https://gist.github.com/mihow/9c7f559807069a03e302605691f85572
 
 # LLM (LiteLLM → Ollama)
-OPENAI_API_KEY=${CONFIGURE_OLLAMA_TOKEN}
-OPENAI_BASE_URL=http://ollama.${HOST}/v1/
+OPENAI_API_KEY=${CONFIGURE_AI_TOKEN}
+OPENAI_BASE_URL=http://ai.${HOST}/v1/
 OPENAI_MODEL=glm-5.1:cloud
 #qwen3-coder-next:cloud, qwen3-coder:30b, qwen3-coder:480b-cloud
 
@@ -391,7 +391,7 @@ generate_qwen_conf() {
 {
   "mcpServers": {
     "shoggoth-mcp": {
-      "httpUrl": "http://ollama.${HOST}/mcp",
+      "httpUrl": "http://ai.${HOST}/mcp",
       "timeout": 5000
     }
   },
