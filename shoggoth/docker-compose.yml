@@ -245,7 +245,7 @@ services:
             USER_UID: ${UID}
             USER_GID: ${GID}
             GITEA__overall__APP_NAME: 'git.${SHOGGOTH_DOMAIN}'
-            GITEA__repository__FORCE_PRIVATE: 'true'
+            GITEA__repository__FORCE_PRIVATE: 'false'
             GITEA__repository__USE_COMPAT_SSH_URI: 'false'
             #GITEA__repository__DISABLE_HTTP_GIT: 'true'
             GITEA__repository__DEFAULT_BRANCH: 'main'
@@ -296,7 +296,7 @@ services:
         environment:
             !!merge <<: *default_environment
             SHOGGOTH_ROOT: ${SHOGGOTH_ROOT}
-            GITEA_INSTANCE_URL: http://git
+            GITEA_INSTANCE_URL: http://git.${SHOGGOTH_DOMAIN}
             GITEA_RUNNER_NAME: shoggoth-runner
             GITEA_RUNNER_LABELS: ubuntu-latest,ubuntu-24.04
             GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
@@ -315,7 +315,7 @@ services:
         environment:
             !!merge <<: *default_environment
             MCP_MODE: http
-            GITEA_HOST: http://git
+            GITEA_HOST: http://git.${SHOGGOTH_DOMAIN}
             GITEA_INSECURE: true
         command: /app/gitea-mcp --port 80
 

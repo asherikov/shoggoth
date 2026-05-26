@@ -43,11 +43,11 @@ RUN curl -fsSL \
         "https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg --print-architecture`.tar.gz" \
     | tar -xz -C /usr/bin
 
-USER ccws
-
 # credential cache is used to provide access via http
 RUN \
-    git config --global credential.helper 'cache'
+    git config --system credential.helper 'cache'
+
+USER ccws
 
 # create qwen directory with correct permissions to facilitate mounting files inside
 RUN \
@@ -73,3 +73,31 @@ RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/redmine-cli \
 RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/kestra-flow \
     && curl -fsSL https://raw.githubusercontent.com/kestra-io/agent-skills/main/skills/kestra-flow/SKILL.md \
         -o ${SHOGGOTH_SKILL_DIR}/kestra-flow/SKILL.md
+
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-notes \
+    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-notes/SKILL.md \
+        -o ${SHOGGOTH_SKILL_DIR}/memory-notes/SKILL.md
+
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-reflect \
+    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-reflect/SKILL.md \
+        -o ${SHOGGOTH_SKILL_DIR}/memory-reflect/SKILL.md
+
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-schema \
+    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-schema/SKILL.md \
+        -o ${SHOGGOTH_SKILL_DIR}/memory-schema/SKILL.md
+
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-defrag \
+    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-defrag/SKILL.md \
+        -o ${SHOGGOTH_SKILL_DIR}/memory-defrag/SKILL.md
+
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-lifecycle \
+    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-lifecycle/SKILL.md \
+        -o ${SHOGGOTH_SKILL_DIR}/memory-lifecycle/SKILL.md
+
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-ingest \
+    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-ingest/SKILL.md \
+        -o ${SHOGGOTH_SKILL_DIR}/memory-ingest/SKILL.md
+
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-metadata-search \
+    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-metadata-search/SKILL.md \
+        -o ${SHOGGOTH_SKILL_DIR}/memory-metadata-search/SKILL.md

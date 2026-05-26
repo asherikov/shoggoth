@@ -1,3 +1,4 @@
+#!/usr/bin/bash -x
 #!/usr/bin/env bash
 
 set -euo pipefail
@@ -102,7 +103,7 @@ start_session_log() {
 }
 
 qwen_with_log() {
-    qwen --output-format stream-json "$@" > "${SESSION_LOG_FIFO}" 2>/dev/null
+    qwen --yolo --output-format stream-json "$@" > "${SESSION_LOG_FIFO}" 2>/dev/null
 }
 
 stop_session_log() {
@@ -148,7 +149,7 @@ cmd_ci_failure() {
 
     start_session_log "ci-failure"
 
-    qwen_with_log --yolo --session-id "${SESSION_ID}" --prompt "CI workflow '${CI_WORKFLOW}' failed on repository ${CI_REPO} at commit ${CI_SHA} (branch ${CI_BRANCH}).
+    qwen_with_log --session-id "${SESSION_ID}" --prompt "CI workflow '${CI_WORKFLOW}' failed on repository ${CI_REPO} at commit ${CI_SHA} (branch ${CI_BRANCH}).
 Run URL: ${CI_RUN_URL}
 
 CI logs:
@@ -216,7 +217,7 @@ cmd_pr_review() {
 
     start_session_log "pr-review"
 
-    qwen_with_log --yolo --session-id "${SESSION_ID}" --prompt "/review ${PR_URL}"
+    qwen_with_log --session-id "${SESSION_ID}" --prompt "/review ${PR_URL}"
 
     stop_session_log
 }
@@ -229,11 +230,63 @@ cmd_pr_comment() {
     local PR_BRANCH="${5}"
     local TASK_SUBJECT="${6}"
 
-    tea login add --name shoggoth --url "${GITEA_SERVER_URL}" --token "${GITEA_SERVER_TOKEN}"
-    tea login default shoggoth
+    local PR_OWNER PR_REPO_NAME API_AUTH
+    PR_OWNER="$(echo "${PR_REPO}" | cut -d'/' -f1)"
+    PR_REPO_NAME="$(echo "${PR_REPO}" | cut -d'/' -f2)"
+    API_AUTH=(-H "Authorization: token ${GITEA_SERVER_TOKEN}" -H "Content-Type: application/json")
+    API_BASE="${GITEA_SERVER_URL}/api/v1/repos/${PR_OWNER}/${PR_REPO_NAME}"
+
+    local ALL_REVIEWS="[]"
+    local PAGE=1
+    local LIMIT=50
+
+    while true; do
+        local PAGE_JSON
+        PAGE_JSON="$(curl -sfS \
+            "${API_AUTH[@]}" \
+            "${API_BASE}/pulls/${PR_NUMBER}/reviews?page=${PAGE}&limit=${LIMIT}")"
+
+        if [ -z "${PAGE_JSON}" ] || echo "${PAGE_JSON}" | jq -e 'length == 0' >/dev/null; then
+            break
+        fi
+
+        ALL_REVIEWS="$(echo "${ALL_REVIEWS}" | jq -c --argjson page "${PAGE_JSON}" '. + $page')"
+
+        if [ "$(echo "${PAGE_JSON}" | jq 'length')" -lt "${LIMIT}" ]; then
+            break
+        fi
+
+        PAGE=$((PAGE + 1))
+    done
+
+    local ALL_COMMENTS="[]"
+    local REVIEW_ID
+    for REVIEW_ID in $(echo "${ALL_REVIEWS}" | jq -r '.[].id'); do
+        local PAGE=1
+        local LIMIT=50
+
+        while true; do
+            local PAGE_JSON
+            PAGE_JSON="$(curl -sfS \
+                "${API_AUTH[@]}" \
+                "${API_BASE}/pulls/${PR_NUMBER}/reviews/${REVIEW_ID}/comments?page=${PAGE}&limit=${LIMIT}")"
+
+            if [ -z "${PAGE_JSON}" ] || echo "${PAGE_JSON}" | jq -e 'length == 0' >/dev/null; then
+                break
+            fi
+
+            ALL_COMMENTS="$(echo "${ALL_COMMENTS}" | jq -c --argjson page "${PAGE_JSON}" '. + $page')"
+
+            if [ "$(echo "${PAGE_JSON}" | jq 'length')" -lt "${LIMIT}" ]; then
+                break
+            fi
+
+            PAGE=$((PAGE + 1))
+        done
+    done
 
     local COMMENTS_JSON
-    COMMENTS_JSON="$(tea pulls review-comments "${PR_NUMBER}" --repo "${PR_REPO}" --output json | jq -c '[.[] | select(.resolver == "") | {id: .id, path: .path, line: .line, body: .body}]')"
+    COMMENTS_JSON="$(echo "${ALL_COMMENTS}" | jq -c '[.[] | select(.resolver == null or .resolver == "") | {id: .id, path: .path, line: .line, body: .body}]')"
 
     local COMMENT_COUNT
     COMMENT_COUNT="$(echo "${COMMENTS_JSON}" | jq 'length')"
@@ -244,10 +297,9 @@ cmd_pr_comment() {
 
     start_session_log "pr-comment"
 
+    qwen_with_log --session-id "${SESSION_ID}" --prompt "Load memories regarding the project ${SHOGGOTH_PROJECT} from basic memory. Proceed if memory is not available."
     if [ -n "${TASK_SUBJECT}" ]; then
-        qwen_with_log --yolo --session-id "${SESSION_ID}" --prompt "Load your memories regarding the project ${SHOGGOTH_PROJECT} and task \"${TASK_SUBJECT}\" from basic memory."
-    else
-        qwen_with_log --yolo --session-id "${SESSION_ID}" --prompt "Load your memories regarding the project ${SHOGGOTH_PROJECT} from basic memory."
+        qwen_with_log --resume "${SESSION_ID}" --prompt "Load memories regarding task \"${TASK_SUBJECT}\" in project ${SHOGGOTH_PROJECT} from basic memory. Proceed if memory is not available."
     fi
 
     local I COMMENT_BODY COMMENT_PATH COMMENT_LINE
@@ -256,19 +308,22 @@ cmd_pr_comment() {
         COMMENT_PATH="$(echo "${COMMENTS_JSON}" | jq -r ".[${I}].path")"
         COMMENT_LINE="$(echo "${COMMENTS_JSON}" | jq -r ".[${I}].line")"
 
-        qwen_with_log --yolo --resume "${SESSION_ID}" --prompt "Address the following review comment on PR ${PR_URL} (file: ${COMMENT_PATH}, line: ${COMMENT_LINE}): ${COMMENT_BODY}."
+        qwen_with_log --resume "${SESSION_ID}" --prompt "Address the following review comment on PR ${PR_URL} (file: ${COMMENT_PATH}, line: ${COMMENT_LINE}): ${COMMENT_BODY}. Commit implemented changes in the repository."
     done
 
+    qwen_with_log --resume "${SESSION_ID}" --prompt "Finalize all remaining work. Update basic memory with any new information learned about the project ${SHOGGOTH_PROJECT}. Then commit any remaining changes and push."
     if [ -n "${TASK_SUBJECT}" ]; then
-        qwen_with_log --yolo --resume "${SESSION_ID}" --prompt "Update basic memory with any new information learned about the project ${SHOGGOTH_PROJECT} or task \"${TASK_SUBJECT}\". Then commit any remaining changes and push."
-    else
-        qwen_with_log --yolo --resume "${SESSION_ID}" --prompt "Update basic memory with any new information learned about the project ${SHOGGOTH_PROJECT}. Then commit any remaining changes and push."
+        qwen_with_log --resume "${SESSION_ID}" --prompt "Update basic memory with any new information learned about the task \"${TASK_SUBJECT}\"."
     fi
 
-    local COMMENT_ID
+    local COMMENT_ID RESOLVE_URL
     for I in $(seq 0 $((COMMENT_COUNT - 1))); do
         COMMENT_ID="$(echo "${COMMENTS_JSON}" | jq -r ".[${I}].id")"
-        tea pulls resolve --repo "${PR_REPO}" "${COMMENT_ID}" || true
+        RESOLVE_URL="${GITEA_SERVER_URL}/api/v1/repos/${PR_OWNER}/${PR_REPO_NAME}/pulls/comments/${COMMENT_ID}/resolve"
+        curl -sfS -X POST \
+            -H "Authorization: token ${GITEA_SERVER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${RESOLVE_URL}" || true
     done
 
     stop_session_log
