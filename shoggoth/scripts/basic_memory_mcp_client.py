@@ -13,7 +13,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-BM_MCP_URL = os.environ.get("BM_MCP_URL", "http://ai.shoggoth.local/mcp")
+BM_MCP_URL = os.environ.get("BM_MCP_URL", "http://litellm.shoggoth.local/mcp")
 BM_MCP_TIMEOUT = int(os.environ.get("BM_MCP_TIMEOUT", "10"))
 BM_TOOL_PREFIX = os.environ.get("BM_TOOL_PREFIX", "basic_memory-")
 BM_OTEL_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otelcol:4318")

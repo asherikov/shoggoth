@@ -668,17 +668,16 @@
             },
             "targets": [
                 {
-                    "expr": "{service_name=~\"qwen-.*\"} | line_format \"{{.service_name}} {{__line__}}\"",
+                    "expr": "{service_name=~\"qwen-.*\"}",
                     "refId": "A"
                 }
             ],
             "options": {
                 "showTime": true,
-                "showLabels": false,
+                "showLabels": true,
                 "sortOrder": "Descending",
                 "enableLogDetails": true,
-                "wrapLogMessage": true,
-                "prettifyLogMessage": true
+                "wrapLogMessage": true
             }
         },
         {

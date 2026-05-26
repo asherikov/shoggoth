@@ -89,7 +89,7 @@ The following services are available:
 | `docker-cache` | `<host>:3128` | Docker registry caching proxy |
 | `docker-registry` | `docker-registry.<host>` | Private Docker registry |
 | `proxpi` | `proxpi.<host>` | Python package caching proxy |
-| `ollama`/`litellm` | `ai.<host>` | LLM proxy (LiteLLM) with MCP gateway |
+| `litellm` | `litellm.<host>` | LLM proxy (LiteLLM) with MCP gateway |
 | `git` | `git.<host>` | Gitea Git server with web UI |
 | `git-pages` | `git-pages.<host>` | Git Pages static site hosting |
 | `kestra` | `kestra.<host>` | Kestra workflow orchestration |

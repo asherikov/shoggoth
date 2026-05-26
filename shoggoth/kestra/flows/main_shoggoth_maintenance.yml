@@ -19,10 +19,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       volumes:
         - "{{ envs.shoggoth_root }}/private/env:/shoggoth/env:ro"
-        - "{{ envs.shoggoth_root }}/private/resolv.conf:/etc/resolv.conf:ro"
         - "{{ envs.shoggoth_root }}/scripts:/shoggoth/scripts:ro"
       pullPolicy: ALWAYS
-      networkMode: host
+      networkMode: shoggoth
     containerImage: docker-registry.shoggoth.local/slave_noble:latest
     commands:
       - /shoggoth/scripts/gitea_webhooks_kestra.sh
@@ -35,10 +34,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       volumes:
         - "{{ envs.shoggoth_root }}/private/env:/shoggoth/env:ro"
-        - "{{ envs.shoggoth_root }}/private/resolv.conf:/etc/resolv.conf:ro"
         - "{{ envs.shoggoth_root }}/scripts:/shoggoth/scripts:ro"
       pullPolicy: ALWAYS
-      networkMode: host
+      networkMode: shoggoth
     containerImage: docker-registry.shoggoth.local/slave_noble:latest
     commands:
       - /shoggoth/scripts/gitea_webhooks_redmine.sh

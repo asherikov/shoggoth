@@ -233,7 +233,7 @@ EOF"
 }
 
 update_hosts() {
-    local services=("kestra" "dns" "apt-cache" "docker-cache" "ai" "git" "build-cache" "git-pages" "redmine" "proxpi" "docker-registry" "grafana" "otelcol")
+    local services=("kestra" "dns" "apt-cache" "docker-cache" "litellm" "git" "build-cache" "git-pages" "redmine" "proxpi" "docker-registry" "grafana" "otelcol")
     local hosts_entries="${HOST_IP} ${HOST}"$'\n'
 
     for service in "${services[@]}"; do
@@ -279,7 +279,7 @@ generate_shoggoth_conf() {
 
 # LLM (LiteLLM → Ollama)
 OPENAI_API_KEY=${CONFIGURE_AI_TOKEN}
-OPENAI_BASE_URL=http://ai.${HOST}/v1/
+OPENAI_BASE_URL=http://litellm.${HOST}/v1/
 OPENAI_MODEL=glm-5.1:cloud
 #qwen3-coder-next:cloud, qwen3-coder:30b, qwen3-coder:480b-cloud
 
@@ -391,7 +391,7 @@ generate_qwen_conf() {
 {
   "mcpServers": {
     "shoggoth-mcp": {
-      "httpUrl": "http://ai.${HOST}/mcp",
+      "httpUrl": "http://litellm.${HOST}/mcp",
       "timeout": 5000
     }
   },
