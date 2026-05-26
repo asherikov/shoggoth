@@ -135,6 +135,50 @@ gitea_delete_org:
 		-H "accept: application/json" \
 		-H "Authorization: token ${GITEA_TOKEN}"
 
+gitea_make_all_repos_public:
+	@echo "Making all repositories public in all Gitea projects"
+	@page=1; \
+	while true; do \
+		orgs=$$(curl -s \
+			"${GITEA_API}/orgs?page=$${page}&limit=50" \
+			-H "accept: application/json" \
+			-H "Authorization: token ${GITEA_TOKEN}"); \
+		if [ -z "$$orgs" ] || echo "$$orgs" | jq -e 'length == 0' >/dev/null; then break; fi; \
+		echo "$$orgs" | jq -r '.[].username' | while read -r org; do \
+			${MAKE} gitea_make_repos_public GITEA_PROJECT="$$org"; \
+		done; \
+		if echo "$$orgs" | jq 'length' | grep -qE "^50$$"; then \
+			page=$$((page + 1)); \
+		else \
+			break; \
+		fi; \
+	done
+
+gitea_make_repos_public:
+	@echo "Making all repositories public in Gitea project ${GITEA_PROJECT}"
+	@page=1; \
+	while true; do \
+		repos=$$(curl -s \
+			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=$${page}&limit=50" \
+			-H "accept: application/json" \
+			-H "Authorization: token ${GITEA_TOKEN}"); \
+		if [ -z "$$repos" ] || echo "$$repos" | jq -e 'length == 0' >/dev/null; then break; fi; \
+		echo "$$repos" | jq -r '.[].name' | while read -r name; do \
+			echo "Making ${GITEA_PROJECT}/$$name public"; \
+			curl -sfS -X PATCH \
+				"${GITEA_API}/repos/${GITEA_PROJECT}/$$name" \
+				-H "accept: application/json" \
+				-H "Authorization: token ${GITEA_TOKEN}" \
+				-H "Content-Type: application/json" \
+				-d '{"private": false}' > /dev/null; \
+		done; \
+		if echo "$$repos" | jq 'length' | grep -qE "^50$$"; then \
+			page=$$((page + 1)); \
+		else \
+			break; \
+		fi; \
+	done
+
 gitea_remove_project:
 	@echo "Removing Gitea project ${GITEA_PROJECT} with all repositories"
 	${MAKE} gitea_delete_repos
