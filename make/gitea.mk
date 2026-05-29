@@ -1,4 +1,4 @@
-export GITEA_URL?=git.shoggoth.local
+export GITEA_URL?=git.s.local
 export GITEA_API=http://${GITEA_URL}/api/v1
 #export GITEA_TOKEN?=<token> # use auth.mk
 # issues not copied if true, see https://github.com/go-gitea/gitea/pull/20311 and https://forum.gitea.com/t/mirror-a-github-site-does-not-mirror-issues/8141

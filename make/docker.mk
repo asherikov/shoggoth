@@ -6,8 +6,8 @@ exec:
 	${MAKE} ssh_exec CMD='docker compose exec ${SERVICE} sh'
 
 up:
-	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='./setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d ${SERVICE}'
-	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='./setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d && sleep 5'
+	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='./bringup/setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d ${SERVICE}'
+	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='./bringup/setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d && sleep 5'
 
 down:
 	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose down ${SERVICE}'
@@ -25,7 +25,7 @@ log:
 
 DOCKER_TAG_SUFFIX?=_${DOCKER_DISTRO}
 
-docker_build: client_conf
+docker_build:
 	cd shoggoth \
 		&& docker build \
 			--build-arg BASE_IMAGE=${BASE_IMAGE} \

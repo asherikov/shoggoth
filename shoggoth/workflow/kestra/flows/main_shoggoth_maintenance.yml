@@ -1,0 +1,42 @@
+id: maintenance
+namespace: shoggoth
+disabled: false
+
+concurrency:
+  limit: 1
+  behavior: CANCEL
+
+#triggers:
+#  - id: schedule
+#    type: io.kestra.plugin.core.trigger.Schedule
+#    cron: "0 3 * * *"
+#    allowConcurrent: false
+
+tasks:
+  - id: setup_kestra_webhooks
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      volumes:
+        - "shoggoth_workflow:/shoggoth/workflow:ro"
+      pullPolicy: ALWAYS
+      networkMode: shoggoth
+    containerImage: docker-registry.s.local/slave_noble:latest
+    commands:
+      - /shoggoth/workflow/scripts/gitea_webhooks_kestra.sh
+    env:
+      SHOGGOTH_ENV: "/shoggoth/workflow/env"
+
+  - id: setup_redmine_webhooks
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      volumes:
+        - "shoggoth_workflow:/shoggoth/workflow:ro"
+      pullPolicy: ALWAYS
+      networkMode: shoggoth
+    containerImage: docker-registry.s.local/slave_noble:latest
+    commands:
+      - /shoggoth/workflow/scripts/gitea_webhooks_redmine.sh
+    env:
+      SHOGGOTH_ENV: "/shoggoth/workflow/env"

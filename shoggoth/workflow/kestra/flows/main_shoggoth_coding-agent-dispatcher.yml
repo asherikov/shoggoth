@@ -1,0 +1,45 @@
+id: coding-agent-dispatcher
+namespace: shoggoth
+
+inputs:
+  - id: script
+    type: STRING
+  - id: payload
+    type: STRING
+    defaults: ""
+  - id: task_id
+    type: STRING
+    defaults: ""
+
+outputs:
+  - id: exitCode
+    type: INT
+    value: "{{ outputs.run_script.exitCode }}"
+  - id: vars
+    type: JSON
+    value: "{{ outputs.run_script.vars }}"
+
+concurrency:
+  limit: 1
+  behavior: QUEUE
+
+tasks:
+  - id: run_script
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      volumes:
+        - "shoggoth_git_cred:/shoggoth/git-cred"
+        - "shoggoth_workflow:/shoggoth/workflow:ro"
+        - "shoggoth_ci_cache:/cache"
+      pullPolicy: ALWAYS
+      networkMode: shoggoth
+    containerImage: docker-registry.s.local/slave_noble:latest
+    commands:
+      - "export PATH=\"/shoggoth/workflow/scripts:${PATH}\" && {{ inputs.script }} {{ inputs.task_id }}"
+    env:
+      SHOGGOTH_ENV: "/shoggoth/workflow/env"
+      APT_CONFIG: "/shoggoth/workflow/apt-cache.conf"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
+      SSH_AUTH_SOCK: "/shoggoth/git-cred/ssh_auth_sock"
+      GITEA_PAYLOAD: "{{ inputs.payload }}"

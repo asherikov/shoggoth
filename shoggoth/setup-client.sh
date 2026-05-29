@@ -12,9 +12,12 @@ CONFIGURE_GITEA="${CONFIGURE_GITEA:-}"
 CONFIGURE_GITEA_USER="${CONFIGURE_GITEA_USER:-}"
 CONFIGURE_REDMINE="${CONFIGURE_REDMINE:-}"
 CONFIGURE_AI_TOKEN="${CONFIGURE_AI_TOKEN:-ai}"
-HOST="${HOST:-shoggoth.local}"
+CONFIGURE_RESOLV_CONF="${CONFIGURE_RESOLV_CONF:-}"
+CONFIGURE_SSH_CONFIG="${CONFIGURE_SSH_CONFIG:-}"
+HOST="${HOST:-s.local}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
 CLIENT_CONF_DIR="${CLIENT_CONF_DIR:-${HOME}/.config/shoggoth}"
+SSH_PORT="${SSH_PORT:-3022}"
 
 PRIV_CMD=""
 USE_SU=""
@@ -47,7 +50,7 @@ Usage: $0 [OPTIONS]
 Set up Docker client to use shoggoth proxy and generate configuration files.
 
 Options:
-    -h, --host HOST         Hostname for /etc/hosts entries (default: shoggoth.local)
+    -h, --host HOST         Hostname for /etc/hosts entries (default: s.local)
     --host-ip IP            IP address for /etc/hosts entries (default: 127.0.0.1)
     --docker [PORT]         Configure Docker proxy, optionally with a port (default: 3128)
     --update-hosts          Append generated hosts file to /etc/hosts
@@ -56,13 +59,15 @@ Options:
     --gitea-user USER       Configure gitea tea CLI username for basic auth
     --redmine-token TOKEN   Configure redmine CLI auth via environment variables
     --ai-token TOKEN        Configure OpenAI API key for AI services (OPENAI_API_KEY)
+    --resolv-conf           Generate resolv.conf with DNS server address
+    --ssh-config            Generate SSH config with known hosts for git server
     --client-conf [DIR]     Generate configuration files, optionally in DIR (default: ${HOME}/.config/shoggoth)
     --all                   Configure and print all setup instructions
     --help                  Show this help message
 
 Environment variables:
     DOCKER_PROXY_PORT       Proxy port (default: 3128)
-    HOST                    Hostname for /etc/hosts (default: shoggoth.local)
+    HOST                    Hostname for /etc/hosts (default: s.local)
     HOST_IP                 IP address for /etc/hosts (default: 127.0.0.1)
     CONFIGURE_DOCKER        Set to "true" or a port number to configure Docker proxy
     CONFIGURE_HOSTS         Set to "true" to update /etc/hosts
@@ -73,7 +78,10 @@ Environment variables:
     CONFIGURE_GITEA_USER    Set to username for gitea tea CLI basic auth
     CONFIGURE_REDMINE       Set to API key for redmine CLI via environment variables
     CONFIGURE_AI_TOKEN        Set to API key for OpenAI API
+    CONFIGURE_RESOLV_CONF   Set to "true" to generate resolv.conf
+    CONFIGURE_SSH_CONFIG    Set to "true" to generate SSH config and known hosts
     CLIENT_CONF_DIR         Directory for config files (default: ${HOME}/.config/shoggoth)
+    SSH_PORT                SSH port for git server (default: 3022)
 EOF
 }
 
@@ -120,6 +128,14 @@ parse_args() {
             --ai-token)
                 CONFIGURE_AI_TOKEN="$2"
                 shift 2
+                ;;
+            --resolv-conf)
+                CONFIGURE_RESOLV_CONF="true"
+                shift
+                ;;
+            --ssh-config)
+                CONFIGURE_SSH_CONFIG="true"
+                shift
                 ;;
             --client-conf)
                 CONFIGURE_CLIENT_CONF="true"
@@ -282,6 +298,7 @@ OPENAI_API_KEY=${CONFIGURE_AI_TOKEN}
 OPENAI_BASE_URL=http://litellm.${HOST}/v1/
 OPENAI_MODEL=glm-5.1:cloud
 #qwen3-coder-next:cloud, qwen3-coder:30b, qwen3-coder:480b-cloud
+BM_MCP_URL=http://litellm.${HOST}/mcp
 
 # Build cache (ccache)
 CCACHE_REMOTE_STORAGE=http://build-cache.${HOST}
@@ -290,6 +307,9 @@ CCACHE_REMOTE_ONLY=true
 # Proxpi (PyPI caching proxy)
 PIP_INDEX_URL=http://proxpi.${HOST}/index/
 PIP_TRUSTED_HOST=proxpi.${HOST}
+
+# Kestra
+KESTRA_HOST=kestra.${HOST}
 EOF
     chmod 600 "${ENV_FILE}"
 
@@ -373,17 +393,49 @@ generate_client_conf() {
     generate_apt_cache_conf > "${CLIENT_CONF_DIR}/apt-cache.conf"
     chmod 600 "${CLIENT_CONF_DIR}/apt-cache.conf"
 
-    local dns_ip
-    dns_ip=$(getent hosts dns.${HOST} | cut -f 1 -d ' ')
+    if [ "${CONFIGURE_RESOLV_CONF}" = "true" ]; then
+        local dns_ip
+        dns_ip=$(getent hosts dns.${HOST} | cut -f 1 -d ' ')
 
-    cat > "${CLIENT_CONF_DIR}/resolv.conf" <<EOF
+        cat > "${CLIENT_CONF_DIR}/resolv.conf" <<EOF
 nameserver ${dns_ip}
 search ${HOST}
 EOF
-    chmod 600 "${CLIENT_CONF_DIR}/resolv.conf"
+        chmod 600 "${CLIENT_CONF_DIR}/resolv.conf"
+        echo "Generated ${CLIENT_CONF_DIR}/resolv.conf"
+    fi
 
     echo "Generated ${CLIENT_CONF_DIR}/apt-cache.conf"
-    echo "Generated ${CLIENT_CONF_DIR}/resolv.conf"
+}
+
+generate_ssh_config() {
+    mkdir -p "${CLIENT_CONF_DIR}"
+
+    local KNOWN_HOSTS_FILE="${CLIENT_CONF_DIR}/known_hosts"
+    local GIT_HOST="git.${HOST}"
+
+    local SSH_KEYSCAN_OUTPUT
+    SSH_KEYSCAN_OUTPUT="$(ssh-keyscan -p "${SSH_PORT}" "${GIT_HOST}" 2>/dev/null)" || {
+        echo "Warning: ssh-keyscan for ${GIT_HOST}:${SSH_PORT} failed" >&2
+        echo "The git server may not be reachable. SSH host key verification will fail." >&2
+        return 1
+    }
+    printf '%s\n' "${SSH_KEYSCAN_OUTPUT}" > "${KNOWN_HOSTS_FILE}"
+
+    chmod 600 "${KNOWN_HOSTS_FILE}"
+
+    local SSH_CONFIG_FILE="${CLIENT_CONF_DIR}/ssh_config"
+    cat > "${SSH_CONFIG_FILE}" <<EOF
+Host ${GIT_HOST}
+    Port ${SSH_PORT}
+    UserKnownHostsFile ${KNOWN_HOSTS_FILE}
+EOF
+    chmod 600 "${SSH_CONFIG_FILE}"
+
+    echo "Add the following to your ~/.ssh/config:"
+    echo "  Include ${SSH_CONFIG_FILE}"
+    echo ""
+    echo "Generated SSH config for ${GIT_HOST}:${SSH_PORT} with known hosts in ${CLIENT_CONF_DIR}"
 }
 
 generate_qwen_conf() {
@@ -427,6 +479,8 @@ main() {
         CONFIGURE_HOSTS="true"
         CONFIGURE_APT_CACHE="true"
         CONFIGURE_CLIENT_CONF="true"
+        CONFIGURE_RESOLV_CONF="true"
+        CONFIGURE_SSH_CONFIG="true"
     fi
 
     get_priv_cmd
@@ -483,6 +537,10 @@ main() {
 
     if [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
         generate_qwen_conf
+    fi
+
+    if [ "${CONFIGURE_SSH_CONFIG}" = "true" ]; then
+        generate_ssh_config
     fi
 }
 

@@ -1,9 +1,9 @@
 JOBS?=4
 USER?=aleks
-SHOGGOTH_DOMAIN?=shoggoth.local
+SHOGGOTH_DOMAIN?=s.local
 SHOGGOTH_HOST?=${SHOGGOTH_DOMAIN}
 SHOGGOTH_IP?=$(shell getent hosts ${SHOGGOTH_DOMAIN} | cut -f 1 -d ' ')
-SHOGGOTH_CLIENT_CFG?=shoggoth/private
+GITEA_TOKEN?=$(shell cat shoggoth/private/gitea-server-token.txt)
 REMOTE_PATH?=~/
 
 
@@ -16,7 +16,7 @@ help:
 -include make/*.mk
 -include shoggoth/private/*.mk
 
-sync: client_conf
+sync:
 	rsync -r shoggoth ${USER}@${SHOGGOTH_HOST}:${REMOTE_PATH} || true
 
 sync_restart:
@@ -69,13 +69,11 @@ test:
 	curl http://apt-cache.${SHOGGOTH_DOMAIN}/acng-report.html --output /dev/null
 
 personal_conf:
-	${MAKE} client_conf SHOGGOTH_CLIENT_CFG=${HOME}/.config/shoggoth
-
-client_conf:
 	./shoggoth/setup-client.sh \
-		--client-conf ${SHOGGOTH_CLIENT_CFG} \
+		--client-conf ${HOME}/.config/shoggoth \
 		--host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}" \
-		--gitea-token ${GITEA_TOKEN} --gitea-user ${GITEA_USER} \
+		--gitea-token ${GITEA_TOKEN} \
+		--gitea-user $$(cat shoggoth/private/gitea-user.txt) \
 		--ai-token ${AI_TOKEN} \
-		--redmine-token ${REDMINE_TOKEN}
-
+		--redmine-token $$(cat shoggoth/private/redmine-token.txt) \
+		--ssh-config

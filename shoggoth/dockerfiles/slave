@@ -6,8 +6,6 @@ ENV SHOGGOTH_SKILL_DIR=${SHOGGOTH_SKILL_DIR}
 
 USER root
 
-COPY private/apt-cache.conf /etc/apt/apt.conf.d/00-shoggoth-apt-cache
-
 RUN \
 --mount=type=cache,target=/var/cache/apt,sharing=locked \
 --mount=type=cache,target=/var/lib/apt/lists/,sharing=locked \
@@ -31,11 +29,6 @@ RUN \
 --mount=type=cache,target=/cache/pip,sharing=locked \
     ${APT_INSTALL} nodejs
 
-# "ssh-keyscan -p 3022 git.shoggoth.local" is the right thing to do, but the server might not be available at build time
-RUN \
-    echo "Host git.shoggoth.local" >> /etc/ssh/ssh_config \
-    && echo "    StrictHostKeyChecking no"  >> /etc/ssh/ssh_config
-
 RUN curl -fsSL https://dl.gitea.io/tea/main/tea-main-linux-`dpkg --print-architecture` -o /usr/bin/tea \
     && chmod +x /usr/bin/tea
 
@@ -45,7 +38,10 @@ RUN curl -fsSL \
 
 # credential cache is used to provide access via http
 RUN \
-    git config --system credential.helper 'cache'
+    git config --system credential.helper 'cache --socket=/shoggoth/git-cred/git_credential_sock' \
+    && mkdir -p /shoggoth/git-cred \
+    && printf 'Host *\n  UserKnownHostsFile /shoggoth/git-cred/known_hosts\n' > /etc/ssh/ssh_config.d/shoggoth.conf \
+    && touch /shoggoth/git-cred/known_hosts
 
 USER ccws
 
@@ -56,10 +52,6 @@ RUN \
 RUN \
 --mount=type=cache,target=/cache/pip,sharing=locked \
     pip install mcp opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
-
-RUN \
---mount=type=bind,source=ai/skills/,target=/tmp/skills \
-    cp -R /tmp/skills/* ${SHOGGOTH_SKILL_DIR}/
 
 RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/gitea-tea \
     && curl -fsSL \
@@ -101,3 +93,7 @@ RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-ingest \
 RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-metadata-search \
     && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-metadata-search/SKILL.md \
         -o ${SHOGGOTH_SKILL_DIR}/memory-metadata-search/SKILL.md
+
+RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/caveman \
+    && curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/main/skills/caveman/SKILL.md \
+        -o ${SHOGGOTH_SKILL_DIR}/caveman/SKILL.md

@@ -154,11 +154,11 @@ Add service hostnames to `/etc/hosts` on each client machine:
 
 ``` bash
 # Using the setup script
-./shoggoth/setup-client.sh --update-hosts --host shoggoth.local --host-ip 192.168.1.100
+./shoggoth/setup-client.sh --update-hosts --host s.local --host-ip 192.168.1.100
 
 # Or manually add to /etc/hosts:
-192.168.1.100 shoggoth.local
-192.168.1.100 <service>.shoggoth.local
+192.168.1.100 s.local
+192.168.1.100 <service>.s.local
 ```
 
 ### DNS Resolution
@@ -173,25 +173,25 @@ Run the setup script on each client machine.
 
 ``` bash
 # Generate config files in default directory `~/.config/shoggoth/`
-./shoggoth/setup-client.sh --client-conf --host shoggoth.local
+./shoggoth/setup-client.sh --client-conf --host s.local
 
 # Generate config files in a custom directory
-./shoggoth/setup-client.sh --client-conf /path/to/dir --host shoggoth.local
+./shoggoth/setup-client.sh --client-conf /path/to/dir --host s.local
 
 # Configure Docker caching proxy (default port 3128) and registry
-./shoggoth/setup-client.sh --docker --host shoggoth.local --host-ip 192.168.1.100
+./shoggoth/setup-client.sh --docker --host s.local --host-ip 192.168.1.100
 
 # Update /etc/hosts with service hostnames (modifies /etc/hosts directly)
-./shoggoth/setup-client.sh --update-hosts --host shoggoth.local --host-ip 192.168.1.100
+./shoggoth/setup-client.sh --update-hosts --host s.local --host-ip 192.168.1.100
 
 # Install apt cache config to system apt config (requires --client-conf first)
-./shoggoth/setup-client.sh --client-conf --apt-cache --host shoggoth.local --host-ip 192.168.1.100
+./shoggoth/setup-client.sh --client-conf --apt-cache --host s.local --host-ip 192.168.1.100
 
 # Configure Docker, hosts, apt cache, and generate client config files
-./shoggoth/setup-client.sh --all --host shoggoth.local --host-ip 192.168.1.100
+./shoggoth/setup-client.sh --all --host s.local --host-ip 192.168.1.100
 
 # Configure with Gitea and Redmine tokens (generates env, qwen configuration)
-./shoggoth/setup-client.sh --client-conf --host shoggoth.local --gitea-token your-token --redmine-token your-token
+./shoggoth/setup-client.sh --client-conf --host s.local --gitea-token your-token --redmine-token your-token
 ```
 
 The script generates the following files when `--client-conf` is used:
@@ -229,7 +229,7 @@ sudo apt update
 sudo apt install <package>
 
 # View cache statistics
-firefox http://apt-cache.shoggoth.local/acng-report.html
+firefox http://apt-cache.s.local/acng-report.html
 ```
 
 ### Docker Registry Proxy
@@ -257,16 +257,16 @@ conflicts with ssh server running on the host machine:
 
 ``` bash
 # SSH (configure SSH key in Gitea first)
-git clone ssh://git@git.shoggoth.local:3022/admin/repo.git
+git clone ssh://git@git.s.local:3022/admin/repo.git
 
 # HTTP
-git clone http://git.shoggoth.local/admin/repo.git
+git clone http://git.s.local/admin/repo.git
 ```
 
 Configure the `tea` CLI by providing a token:
 
 ``` bash
-./shoggoth/setup-client.sh --host shoggoth.local --gitea-token your-token
+./shoggoth/setup-client.sh --host s.local --gitea-token your-token
 set -a; source ~/.config/shoggoth/env; set +a
 tea issues list
 ```
@@ -283,7 +283,7 @@ Access the Redmine web interface:
 
 ``` bash
 # Open Redmine in browser
-firefox http://redmine.shoggoth.local
+firefox http://redmine.s.local
 
 # Default credentials (change after first login)
 # Username: admin
@@ -301,7 +301,7 @@ and restarting the service.
 4.  Generate “API access key” in personal settings.
 
 ``` bash
-./shoggoth/setup-client.sh --host shoggoth.local --redmine-token your-token
+./shoggoth/setup-client.sh --host s.local --redmine-token your-token
 ```
 
 The `--redmine-token` flag configures both the Redmine CLI environment variables

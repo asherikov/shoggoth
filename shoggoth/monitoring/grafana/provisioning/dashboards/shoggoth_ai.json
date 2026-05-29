@@ -369,7 +369,7 @@
             }
         },
         {
-            "title": "LiteLLM Trace Error Rate",
+            "title": "Tokens per Request",
             "type": "timeseries",
             "gridPos": {
                 "h": 9,
@@ -382,19 +382,20 @@
             },
             "targets": [
                 {
-                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"litellm\", status_code=\"ERROR\"}[5m])) by (span_name)",
-                    "legendFormat": "{{span_name}}",
+                    "expr": "sum by (requested_model) (rate(litellm_input_tokens_metric_total[5m]) + rate(litellm_output_tokens_metric_total[5m])) / sum by (requested_model) (rate(litellm_request_total_latency_metric_count[5m]))",
+                    "legendFormat": "{{requested_model}}",
                     "refId": "A"
+                },
+                {
+                    "expr": "sum by (requested_model) (rate(litellm_input_tokens_metric_total[1d]) + rate(litellm_output_tokens_metric_total[1d])) / sum by (requested_model) (rate(litellm_request_total_latency_metric_count[1d]))",
+                    "legendFormat": "daily avg {{requested_model}}",
+                    "refId": "B"
                 }
             ],
-            "description": "All LiteLLM error spans by operation",
+            "description": "Average token consumption per request by model (input + output). Daily average uses a 1d rate window.",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "reqps",
-                    "color": {
-                        "fixedColor": "red",
-                        "mode": "fixed"
-                    },
+                    "unit": "none",
                     "custom": {
                         "drawStyle": "line",
                         "lineInterpolation": "smooth",
@@ -403,7 +404,26 @@
                         "fillOpacity": 10
                     }
                 },
-                "overrides": []
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byRegexp",
+                            "options": "daily avg.*"
+                        },
+                        "properties": [
+                            {
+                                "id": "custom.lineStyle",
+                                "value": {
+                                    "dash": [
+                                        10,
+                                        10
+                                    ],
+                                    "fill": "dash"
+                                }
+                            }
+                        ]
+                    }
+                ]
             }
         },
         {

@@ -9,20 +9,14 @@ networks:
 volumes:
     shoggoth_ci_cache:
         name: "shoggoth_ci_cache"
+    shoggoth_git_cred:
+        name: "shoggoth_git_cred"
+    shoggoth_workflow:
+        name: "shoggoth_workflow"
+
 secrets:
-    gitea_runner_token:
-        file: ./private/gitea-runner-token.txt
     gitea_server_token:
         file: ./private/gitea-server-token.txt
-    redmine_db_password:
-        file: ./private/redmine-db-password.txt
-    kestra_db_password:
-        file: ./private/kestra-db-password.txt
-    kestra_basic_auth_password:
-        file: ./private/kestra-basic-auth-password.txt
-    grafana_admin_password:
-        file: ./private/grafana-admin-password.txt
-
 
 x-service: &default_service
     networks:
@@ -42,10 +36,62 @@ x-service: &default_service
 x-environment: &default_environment
     SHOGGOTH_IP: ${SHOGGOTH_IP}
     OTEL_TRACES_EXPORTER: otlp
-    OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4317
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
 
 
 services:
+    bringup:
+        image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+        user: "root"
+        container_name: bringup.${SHOGGOTH_DOMAIN}
+        networks:
+            - shoggoth
+        volumes:
+            # bringup scripts, templates, auto_secrets (generated), and rendered output
+            - ./bringup:/shoggoth/bringup
+            # setup-client.sh for configuration generation
+            - ./setup-client.sh:/shoggoth/setup-client.sh:ro
+            # private directory (user-provided tokens and config files)
+            - ./private:/shoggoth/private:ro
+            - ./workflow/scripts:/shoggoth/scripts:ro
+            - shoggoth_workflow:/shoggoth/workflow
+            # persistent data directories (mkdir + chown for correct ownership)
+            - ./git/data:/shoggoth/data/gitea
+            - ./git/runner/data:/shoggoth/data/gitea-runner
+            - ./redmine/database:/shoggoth/data/redmine-database
+            - ./redmine/files:/shoggoth/data/redmine-files
+            - ./redmine/plugins:/shoggoth/data/redmine-plugins
+            - ./redmine/bundle_cache:/shoggoth/data/redmine-bundle-cache
+            - ./ai/litellm/data:/shoggoth/data/litellm
+            - shoggoth_ci_cache:/shoggoth/data/ci-cache
+        environment:
+            !!merge <<: *default_environment
+            SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
+        secrets:
+            - gitea_server_token
+        entrypoint: /shoggoth/bringup/bringup.sh
+
+    git-cred:
+        !!merge <<: *default_service
+        # SSH agent and git credential cache daemon for CI/CD and agent workloads
+        image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+        container_name: git-cred.${SHOGGOTH_DOMAIN}
+        user: "1000"
+        entrypoint: /shoggoth_entrypoint.sh
+        volumes:
+            - ./git/cred/shoggoth_entrypoint.sh:/shoggoth_entrypoint.sh:ro
+            - ./private/ssh/id_rsa:/home/ccws/.ssh/id_rsa:ro
+            - shoggoth_git_cred:/shoggoth/git-cred
+        environment:
+            !!merge <<: *default_environment
+            SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
+            SHOGGOTH_GIT_SSH_PORT: ${SHOGGOTH_GIT_SSH_PORT}
+        secrets:
+            - gitea_server_token
+        depends_on:
+            git:
+                condition: service_started
+
     web:
         !!merge <<: *default_service
         # https://github.com/ccache/ccache/wiki/HTTP-storage
@@ -164,13 +210,12 @@ services:
         image: mvance/unbound:latest
         container_name: dns.${SHOGGOTH_DOMAIN}
         volumes:
-            - ./unbound/unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
-            - ./unbound/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
+            - ./bringup/rendered/unbound/unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
+            - ./bringup/rendered/unbound/local-data.conf:/opt/unbound/etc/unbound/local-data.conf:ro
             - ./unbound/dns-zone-blacklist/unbound/unbound.blacklist:/opt/unbound/etc/unbound/unbound.blacklist:ro
             - ./unbound/dns-zone-blacklist/unbound/unbound-nxdomain.blacklist:/opt/unbound/etc/unbound/unbound-nxdomain.blacklist:ro
         environment:
             !!merge <<: *default_environment
-        command: "/shoggoth_bringup.sh"
         ports:
             - "${SHOGGOTH_IP}:53:53/tcp"
             - "${SHOGGOTH_IP}:53:53/udp"
@@ -178,6 +223,9 @@ services:
             shoggoth:
                 ipv4_address: 172.20.0.53
         restart: unless-stopped
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
 
     ollama:
         !!merge <<: *default_service
@@ -216,23 +264,23 @@ services:
         !!merge <<: *default_service
         image: ghcr.io/berriai/litellm:main-stable
         container_name: litellm.${SHOGGOTH_DOMAIN}
-        entrypoint: ["/app/shoggoth_bringup.sh"]
         environment:
             !!merge <<: *default_environment
             OTEL_SERVICE_NAME: litellm
             OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
             OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
-            GITEA_SERVER_TOKEN_FILE: /run/secrets/gitea_server_token
-        secrets:
-            - gitea_server_token
         volumes:
-            - ./ai/litellm/config.yaml:/app/config.yaml:ro
+            - ./bringup/rendered/litellm/config.yaml:/app/config.yaml:ro
             - ./ai/litellm/data:/app/litellm
-            - ./ai/litellm/shoggoth_bringup.sh:/app/shoggoth_bringup.sh:ro
         depends_on:
-            - ollama
-            - mcp-gitea
-            - basic-memory
+            ollama:
+                condition: service_started
+            mcp-gitea:
+                condition: service_started
+            basic-memory:
+                condition: service_started
+            bringup:
+                condition: service_completed_successfully
         command: ["--config", "/app/config.yaml", "--port", "80"]
 
     git:
@@ -242,8 +290,6 @@ services:
         environment:
             !!merge <<: *default_environment
             # https://docs.gitea.com/next/administration/config-cheat-sheet
-            USER_UID: ${UID}
-            USER_GID: ${GID}
             GITEA__overall__APP_NAME: 'git.${SHOGGOTH_DOMAIN}'
             GITEA__repository__FORCE_PRIVATE: 'false'
             GITEA__repository__USE_COMPAT_SSH_URI: 'false'
@@ -258,6 +304,9 @@ services:
             GITEA__server__SSH_LISTEN_PORT: "${SHOGGOTH_GIT_SSH_PORT}"
             GITEA__server__HTTP_PORT: "80"
             GITEA__server__ROOT_URL: 'http://git.${SHOGGOTH_DOMAIN}'
+            GITEA__server__DOMAIN: 'git.${SHOGGOTH_DOMAIN}'
+            GITEA__server__SSH_DOMAIN: 'git.${SHOGGOTH_DOMAIN}'
+            GITEA__service__NO_REPLY_ADDRESS: 'noreply.git.${SHOGGOTH_DOMAIN}'
             GITEA__webhook__ALLOWED_HOST_LIST: 'private'
             # https://forum.gitea.com/t/unattended-gitea-installation-from-the-cli/3373/23
             #GITEA__security__INSTALL_LOCK: 'true' # skip installation page
@@ -267,13 +316,15 @@ services:
             GITEA__opentelemetry__ENDPOINT: 'http://otelcol:4317'
             GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
         volumes:
-            - ./gitea/data:/data
+            - ./git/data:/data
+            - ./bringup/rendered/secrets/gitea-runner-token:/run/secrets/gitea_runner_token:ro
             - /etc/timezone:/etc/timezone:ro
             - /etc/localtime:/etc/localtime:ro
         ports:
             - "${SHOGGOTH_GIT_SSH_PORT}:${SHOGGOTH_GIT_SSH_PORT}"
-        secrets:
-            - gitea_runner_token
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
 
     gitea-runner:
         !!merge <<: *default_service
@@ -287,24 +338,24 @@ services:
         image: gitea/act_runner:latest
         container_name: gitea-runner.${SHOGGOTH_DOMAIN}
         volumes:
-            - ./gitea/runner/data:/data
-            - ./gitea/runner/config.template.yaml:/config.template.yaml:ro
-            - ./gitea/runner/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
-            - ./private/env:/shoggoth/env:ro
+            - ./git/runner/data:/data
+            - ./bringup/rendered/gitea-runner/config.yaml:/config.yaml:ro
+            - shoggoth_workflow:/shoggoth/workflow
             - shoggoth_ci_cache:/cache
             - /var/run/docker.sock:/var/run/docker.sock
+            - ./bringup/rendered/secrets/gitea-runner-token:/run/secrets/gitea_runner_token:ro
         environment:
             !!merge <<: *default_environment
-            SHOGGOTH_ROOT: ${SHOGGOTH_ROOT}
             GITEA_INSTANCE_URL: http://git.${SHOGGOTH_DOMAIN}
             GITEA_RUNNER_NAME: shoggoth-runner
             GITEA_RUNNER_LABELS: ubuntu-latest,ubuntu-24.04
             GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
-            GITEA_SSH_AUTH_SOCK: ${GITEA_SSH_AUTH_SOCK}
-            GITEA_TOKEN_AUTH_SOCK: ${GITEA_TOKEN_AUTH_SOCK}
-        entrypoint: /shoggoth_bringup.sh
-        secrets:
-            - gitea_runner_token
+            CONFIG_FILE: /config.yaml
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
+            git-cred:
+                condition: service_started
 
     mcp-gitea:
         !!merge <<: *default_service
@@ -345,8 +396,8 @@ services:
         image: codeberg.org/git-pages/git-pages:latest
         container_name: git-pages.${SHOGGOTH_DOMAIN}
         volumes:
-            - ./git-pages/data:/app/data
-            - ./git-pages/config.toml:/app/config.toml:ro
+            - ./git/pages/data:/app/data
+            - ./git/pages/config.toml:/app/config.toml:ro
         environment:
             !!merge <<: *default_environment
             PAGES_INSECURE: 1
@@ -356,7 +407,6 @@ services:
         # https://hub.docker.com/_/postgres
         image: postgres:18-alpine
         container_name: redmine-db.${SHOGGOTH_DOMAIN}
-        user: "${UID}:${GID}"
         environment:
             !!merge <<: *default_environment
             POSTGRES_DB: redmine
@@ -364,10 +414,10 @@ services:
             POSTGRES_PASSWORD_FILE: /run/secrets/redmine_db_password
         volumes:
             - ./redmine/database:/var/lib/postgresql
-            # a hack for custom uid
-            - /etc/passwd:/etc/passwd:ro
-        secrets:
-            - redmine_db_password
+            - ./bringup/rendered/secrets/redmine-db/redmine-db/password:/run/secrets/redmine_db_password:ro
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
 
     redmine:
         !!merge <<: *default_service
@@ -376,24 +426,27 @@ services:
         # https://github.com/topics/redmine-plugin
         image: redmine:6.1.2-alpine
         container_name: redmine.${SHOGGOTH_DOMAIN}
-        user: "${UID}:${GID}"
         environment:
             !!merge <<: *default_environment
             REDMINE_DB_POSTGRES: redmine-db
             REDMINE_DB_DATABASE: redmine
             REDMINE_DB_USERNAME: redmine
             REDMINE_DB_PASSWORD_FILE: /run/secrets/redmine_db_password
-            REDMINE_SECRET_KEY_BASE: supersecretkey
+            REDMINE_SECRET_KEY_BASE_FILE: /run/secrets/redmine_secret_key_base
             REDMINE_PLUGINS_MIGRATE: true
         volumes:
             - ./redmine/files:/usr/src/redmine/files
             - ./redmine/plugins:/usr/src/redmine/plugins
             - ./redmine/bundle_cache:/usr/local/bundle/cache/
+            - ./bringup/rendered/secrets/redmine-db/redmine/password:/run/secrets/redmine_db_password:ro
+            - ./bringup/rendered/secrets/redmine/secret-key-base:/run/secrets/redmine_secret_key_base:ro
         depends_on:
-            - redmine-db
-            - dns
-        secrets:
-            - redmine_db_password
+            redmine-db:
+                condition: service_started
+            dns:
+                condition: service_started
+            bringup:
+                condition: service_completed_successfully
         command: rails server -b 0.0.0.0 -p 80
 
     kestra-db:
@@ -401,7 +454,6 @@ services:
         # https://hub.docker.com/_/postgres
         image: postgres:18-alpine
         container_name: kestra-db.${SHOGGOTH_DOMAIN}
-        user: "${UID}:${GID}"
         environment:
             !!merge <<: *default_environment
             POSTGRES_DB: kestra
@@ -411,11 +463,24 @@ services:
             # workaround for https://github.com/kestra-io/kestra/issues/13700
             - /var/lib/postgresql
         volumes:
-            #- ./kestra/database:/var/lib/postgresql
-            # a hack for custom uid
-            - /etc/passwd:/etc/passwd:ro
-        secrets:
-            - kestra_db_password
+            - ./bringup/rendered/secrets/kestra-db/password:/run/secrets/kestra_db_password:ro
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
+
+    kestra-init:
+        image: kestra/kestra:latest
+        container_name: kestra-init.${SHOGGOTH_DOMAIN}
+        user: "root"
+        restart: "no"
+        networks:
+            - shoggoth
+        volumes:
+            - ./workflow/kestra/plugins:/app/plugins
+        command: >
+            plugins install
+            io.kestra.plugin:plugin-docker:LATEST
+            io.kestra.plugin:plugin-script-shell:LATEST
 
     kestra:
         !!merge <<: *default_service
@@ -424,25 +489,24 @@ services:
         image: kestra/kestra:latest
         container_name: kestra.${SHOGGOTH_DOMAIN}
         user: "root"
-        entrypoint: /shoggoth_bringup.sh
         volumes:
-            - ./kestra/data:/app/storage
-            - ./kestra/flows:/app/flows
-            - ./kestra/plugins:/app/plugins
-            - ./kestra/config.yaml:/shoggoth_kestra.yaml:ro
-            - ./kestra/shoggoth_bringup.sh:/shoggoth_bringup.sh:ro
+            - ./workflow/kestra/data:/app/storage
+            - ./workflow/kestra/flows:/app/flows
+            - ./workflow/kestra/plugins:/app/plugins
+            - ./bringup/rendered/kestra/config.yaml:/shoggoth_kestra.yaml:ro
             - /var/run/docker.sock:/var/run/docker.sock
         environment:
             !!merge <<: *default_environment
-            FLOWENV_SHOGGOTH_ROOT: ${SHOGGOTH_ROOT}
-            FLOWENV_GITEA_SSH_AUTH_SOCK: ${GITEA_SSH_AUTH_SOCK}
-            FLOWENV_GITEA_TOKEN_AUTH_SOCK: ${GITEA_TOKEN_AUTH_SOCK}
+        command: server standalone --config /shoggoth_kestra.yaml --flow-path /app/flows
         depends_on:
-            - kestra-db
-            - dns
-        secrets:
-            - kestra_db_password
-            - kestra_basic_auth_password
+            kestra-db:
+                condition: service_started
+            bringup:
+                condition: service_completed_successfully
+            kestra-init:
+                condition: service_completed_successfully
+            git-cred:
+                condition: service_started
 
     grafana:
         # https://grafana.com/
@@ -467,8 +531,10 @@ services:
         volumes:
             - ./monitoring/grafana/data:/var/lib/grafana
             - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-        secrets:
-            - grafana_admin_password
+            - ./bringup/rendered/secrets/grafana/admin-password:/run/secrets/grafana_admin_password:ro
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
 
     loki:
         # https://github.com/grafana/loki

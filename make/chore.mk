@@ -2,12 +2,12 @@ DIAGRAMS_RESOURCES=$(shell find ${HOME} ${PIPX_HOME} ${PIPX_GLOBAL_HOME} -ipath 
 
 graph:
 	rm -f docs/*.svg docs/*.gv docs/*.png
-	hiearch -f svg:cairo -r ${DIAGRAMS_RESOURCES} -o docs docs/*.yaml
+	hiearch -f svg:cairo -r ${DIAGRAMS_RESOURCES} --temp-dir .tmp/ -o docs docs/*.yaml
 
 fmt:
-	cp README.md README.md.back
+	cp README.md .tmp/README.md.back
 	# copy everything starting from Introduction section (skip toc)
-	sed '/^Introduction$$/,$$!d' README.md.back > README.md
+	sed '/^Introduction$$/,$$!d' .tmp/README.md.back > README.md
 	pandoc --standalone --columns=80 --markdown-headings=setext --tab-stop=4 --to=gfm --toc --toc-depth=2 README.md -o README.fmt.md
 	mv README.fmt.md README.md
 
