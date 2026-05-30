@@ -5,7 +5,7 @@ CREDENTIAL_TIMEOUT=31536000
 SSH_AUTH_SOCK="/shoggoth/git-cred/ssh_auth_sock"
 GIT_CREDENTIAL_SOCK="/shoggoth/git-cred/git_credential_sock"
 KNOWN_HOSTS="/shoggoth/git-cred/known_hosts"
-GITEA_SERVER_TOKEN="$(sudo cat /run/secrets/gitea_server_token)"
+GITEA_SERVER_TOKEN="$(cat /shoggoth/git-cred/secrets/gitea_server_token)"
 
 echo "Cleaning up stale sockets..." >&2
 rm -f "${SSH_AUTH_SOCK}" "${GIT_CREDENTIAL_SOCK}"
@@ -36,8 +36,8 @@ echo "Starting SSH agent at ${SSH_AUTH_SOCK}..." >&2
 eval "$(ssh-agent -a "${SSH_AUTH_SOCK}")"
 chmod 600 "${SSH_AUTH_SOCK}"
 
-echo "Adding SSH identity /home/ccws/.ssh/id_rsa..." >&2
-ssh-add -v /home/ccws/.ssh/id_rsa
+echo "Adding SSH identity /shoggoth/git-cred/secrets/ssh_id_rsa..." >&2
+ssh-add -v /shoggoth/git-cred/secrets/ssh_id_rsa
 
 echo "Listing SSH agent identities:" >&2
 ssh-add -l >&2

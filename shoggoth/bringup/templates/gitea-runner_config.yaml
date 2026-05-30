@@ -14,15 +14,8 @@ runner:
   capacity: 1
   # Extra environment variables to run jobs.
   envs:
-    CCWS_CACHE: /cache/ccws/
-    PIP_CACHE_DIR: /cache/ccws/pip
     # https://about.gitea.com/resources/tutorials/enable-gitea-actions-cache-to-accelerate-cicd
     RUNNER_TOOL_CACHE: /toolcache
-    SSH_AUTH_SOCK: /shoggoth/git-cred/ssh_auth_sock
-    APT_CONFIG: /shoggoth/workflow/apt-cache.conf
-  # Extra environment variables to run jobs from a file.
-  # It will be ignored if it's empty or the file doesn't exist. (inside runner container)
-  env_file: /shoggoth/workflow/env
   # The timeout for a job to be finished.
   # Please note that the Gitea instance also has a timeout (3h by default) for the job.
   # So the job could be stopped by the Gitea instance if its timeout is shorter than this.
@@ -47,9 +40,9 @@ runner:
   # If it's empty when registering, it will ask for inputting labels.
   # If it's empty when execute `daemon`, will use labels in `.runner` file.
   labels:
-    - "ubuntu-latest:docker://docker-registry.${SHOGGOTH_DOMAIN}/slave_noble"
-    - "ubuntu-24.04:docker://docker-registry.${SHOGGOTH_DOMAIN}/slave_noble"
-    - "ubuntu-22.04:docker://docker-registry.${SHOGGOTH_DOMAIN}/NOT_EXIST"
+    - "ubuntu-latest:docker://docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:dind"
+    - "ubuntu-24.04:docker://docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:dind"
+    - "ubuntu-22.04:docker://docker-registry.${SHOGGOTH_DOMAIN}/slave_jammy:dind"
 
 cache:
   # Enable cache server to use actions/cache.
@@ -73,13 +66,12 @@ container:
   # Specifies the network to which the container will connect.
   # Could be host, bridge or the name of a custom network.
   # If it's empty, act_runner will create a network automatically.
-  network: "shoggoth"
+  network: "host"
   # Whether to use privileged mode or not when launching task containers (privileged mode is required for Docker-in-Docker).
   privileged: false
   # Any other options to be used when the container is started (e.g., --add-host=my.gitea.url:host-gateway).
-  options: "--volume shoggoth_git_cred:/shoggoth/git-cred
-            --volume shoggoth_workflow:/shoggoth/workflow:ro
-            --volume shoggoth_ci_cache:/cache"
+  options: "--volume /shoggoth/git-cred:/shoggoth/git-cred
+            --volume /shoggoth/ci_cache:/cache"
   # The parent directory of a job's working directory.
   # NOTE: There is no need to add the first '/' of the path as act_runner will add it automatically.
   # If the path starts with '/', the '/' will be trimmed.
@@ -100,9 +92,10 @@ container:
   # If it's empty, act_runner will find an available docker host automatically.
   # If it's "-", act_runner will find an available docker host automatically, but the docker host won't be mounted to the job containers and service containers.
   # If it's not empty or "-", the specified docker host will be used. An error will be returned if it doesn't work.
-  docker_host: ""
+  docker_host: "unix:///dind/docker.sock"
   # Pull docker image(s) even if already present
-  force_pull: true
+  # SHOGGOTH: inorder to update container dind-slave service have to be restarted
+  force_pull: false
   # Rebuild docker image(s) even if already present
   force_rebuild: false
   # Always require a reachable docker daemon, even if not required by act_runner

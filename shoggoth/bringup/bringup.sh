@@ -15,29 +15,13 @@ generate_secret_hex() {
     fi
 }
 
-CLIENT_CONF=/tmp/client_conf
-
 mkdir -p /shoggoth/bringup/auto_secrets
 mkdir -p /shoggoth/bringup/rendered/secrets
-mkdir -p /shoggoth/workflow
 
 GITEA_SERVER_TOKEN="$(cat /run/secrets/gitea_server_token)"
 export GITEA_SERVER_TOKEN
-GITEA_USER="$(cat /shoggoth/private/gitea-user.txt)"
-REDMINE_TOKEN="$(cat /shoggoth/private/redmine-token.txt)"
 
-/shoggoth/setup-client.sh \
-    --client-conf "${CLIENT_CONF}" \
-    --host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}" \
-    --gitea-token "${GITEA_SERVER_TOKEN}" --gitea-user "${GITEA_USER}" \
-    --ai-token litellm \
-    --redmine-token "${REDMINE_TOKEN}"
-
-cp "${CLIENT_CONF}/env" /shoggoth/workflow/env
-cp "${CLIENT_CONF}/apt-cache.conf" /shoggoth/workflow/apt-cache.conf
-cp "${CLIENT_CONF}/qwen.json" /shoggoth/workflow/qwen-settings.json
-cp -r /shoggoth/scripts /shoggoth/workflow/scripts
-chown -R 1000:1000 /shoggoth/workflow
+mkdir -p /shoggoth/bringup/rendered/secrets
 
 mkdir -p /shoggoth/bringup/rendered/unbound
 envsubst '${SHOGGOTH_IP} ${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/unbound_local-data.conf > /shoggoth/bringup/rendered/unbound/local-data.conf
@@ -117,6 +101,3 @@ chown 999:999 /shoggoth/data/redmine-files /shoggoth/data/redmine-plugins /shogg
 
 mkdir -p /shoggoth/data/litellm
 chown 1000:1000 /shoggoth/data/litellm
-
-mkdir -p /shoggoth/data/ci-cache/ccws/pip
-chown -R 1000:1000 /shoggoth/data/ci-cache

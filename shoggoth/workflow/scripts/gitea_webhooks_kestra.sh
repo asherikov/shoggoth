@@ -2,11 +2,6 @@
 
 set -euxo pipefail
 
-ENV_FILE="${SHOGGOTH_ENV:-/shoggoth/workflow/env}"
-set -a
-source "${ENV_FILE}"
-set +a
-
 GITEA_API="${GITEA_SERVER_URL}/api/v1"
 GITEA_AUTH_TOKEN="${GITEA_SERVER_TOKEN:-${GITEA_TOKEN}}"
 KESTRA_HOST="${KESTRA_HOST}"

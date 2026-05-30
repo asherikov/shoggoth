@@ -17,26 +17,18 @@ tasks:
     type: io.kestra.plugin.scripts.shell.Commands
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      volumes:
-        - "shoggoth_workflow:/shoggoth/workflow:ro"
-      pullPolicy: ALWAYS
-      networkMode: shoggoth
-    containerImage: docker-registry.s.local/slave_noble:latest
+      #pullPolicy: ALWAYS
+      networkMode: host
+    containerImage: docker-registry.s.local/slave_noble:dind
     commands:
       - /shoggoth/workflow/scripts/gitea_webhooks_kestra.sh
-    env:
-      SHOGGOTH_ENV: "/shoggoth/workflow/env"
 
   - id: setup_redmine_webhooks
     type: io.kestra.plugin.scripts.shell.Commands
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
-      volumes:
-        - "shoggoth_workflow:/shoggoth/workflow:ro"
-      pullPolicy: ALWAYS
-      networkMode: shoggoth
-    containerImage: docker-registry.s.local/slave_noble:latest
+      #pullPolicy: ALWAYS
+      networkMode: host
+    containerImage: docker-registry.s.local/slave_noble:dind
     commands:
       - /shoggoth/workflow/scripts/gitea_webhooks_redmine.sh
-    env:
-      SHOGGOTH_ENV: "/shoggoth/workflow/env"

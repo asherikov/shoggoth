@@ -58,6 +58,7 @@ kestra:
       - type: io.kestra.plugin.scripts.runner.docker.Docker
         values:
           volume-enabled: true
+          dockerHost: unix:///dind/docker.sock
   variables:
     env-vars-prefix: FLOWENV_
 grpc:

@@ -36,13 +36,6 @@ RUN curl -fsSL \
         "https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg --print-architecture`.tar.gz" \
     | tar -xz -C /usr/bin
 
-# credential cache is used to provide access via http
-RUN \
-    git config --system credential.helper 'cache --socket=/shoggoth/git-cred/git_credential_sock' \
-    && mkdir -p /shoggoth/git-cred \
-    && printf 'Host *\n  UserKnownHostsFile /shoggoth/git-cred/known_hosts\n' > /etc/ssh/ssh_config.d/shoggoth.conf \
-    && touch /shoggoth/git-cred/known_hosts
-
 USER ccws
 
 # create qwen directory with correct permissions to facilitate mounting files inside

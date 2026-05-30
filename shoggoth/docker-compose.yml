@@ -7,12 +7,8 @@ networks:
                 - subnet: 172.20.0.0/24
 
 volumes:
-    shoggoth_ci_cache:
-        name: "shoggoth_ci_cache"
-    shoggoth_git_cred:
-        name: "shoggoth_git_cred"
-    shoggoth_workflow:
-        name: "shoggoth_workflow"
+    shoggoth_dind-slave_socket:
+        name: "shoggoth_dind-slave_socket"
     shoggoth_redmine_db:
         name: "shoggoth_redmine_db"
     shoggoth_angie_build_cache:
@@ -33,6 +29,12 @@ volumes:
 secrets:
     gitea_server_token:
         file: ./private/gitea-server-token.txt
+    redmine_token:
+        file: ./private/redmine-token.txt
+    ssh_id_rsa:
+        file: ./private/ssh/id_rsa
+    gitea_user:
+        file: ./private/gitea-user.txt
 
 x-service: &default_service
     networks:
@@ -65,12 +67,8 @@ services:
         volumes:
             # bringup scripts, templates, auto_secrets (generated), and rendered output
             - ./bringup:/shoggoth/bringup
-            # setup-client.sh for configuration generation
-            - ./setup-client.sh:/shoggoth/setup-client.sh:ro
             # private directory (user-provided tokens and config files)
             - ./private:/shoggoth/private:ro
-            - ./workflow/scripts:/shoggoth/scripts:ro
-            - shoggoth_workflow:/shoggoth/workflow
             # persistent data directories (mkdir + chown for correct ownership)
             - ./git/data:/shoggoth/data/gitea
             - ./git/runner/data:/shoggoth/data/gitea-runner
@@ -79,7 +77,6 @@ services:
             - ./redmine/plugins:/shoggoth/data/redmine-plugins
             - shoggoth_redmine_bundle_cache:/shoggoth/data/redmine-bundle-cache
             - ./ai/litellm/data:/shoggoth/data/litellm
-            - shoggoth_ci_cache:/shoggoth/data/ci-cache
         environment:
             !!merge <<: *default_environment
             SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
@@ -87,26 +84,41 @@ services:
             - gitea_server_token
         entrypoint: /shoggoth/bringup/bringup.sh
 
-    git-cred:
-        !!merge <<: *default_service
-        # SSH agent and git credential cache daemon for CI/CD and agent workloads
-        image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
-        container_name: git-cred.${SHOGGOTH_DOMAIN}
-        user: "1000"
-        entrypoint: /shoggoth_entrypoint.sh
+    dind-slave:
+        image: docker:dind
+        container_name: dind-slave.${SHOGGOTH_DOMAIN}
+        privileged: true
+        restart: unless-stopped
+        networks:
+            - shoggoth
         volumes:
-            - ./git/cred/shoggoth_entrypoint.sh:/shoggoth_entrypoint.sh:ro
-            - ./private/ssh/id_rsa:/home/ccws/.ssh/id_rsa:ro
-            - shoggoth_git_cred:/shoggoth/git-cred
+            - shoggoth_dind-slave_socket:/dind
+            - ./workflow/scripts:/host_volumes/workflow-scripts:ro
+            - ./docker/dind-slave/entrypoint.sh:/dind_entrypoint.sh:ro
+            - ./git/cred/shoggoth_entrypoint.sh:/host_volumes/git-cred-entrypoint:ro
+            - ./setup-client.sh:/host_volumes/setup-client.sh:ro
         environment:
             !!merge <<: *default_environment
             SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
             SHOGGOTH_GIT_SSH_PORT: ${SHOGGOTH_GIT_SSH_PORT}
+            DOCKER_HOST: unix:///dind/docker.sock
         secrets:
             - gitea_server_token
+            - redmine_token
+            - ssh_id_rsa
+            - gitea_user
+        entrypoint: /dind_entrypoint.sh
         depends_on:
             git:
                 condition: service_started
+            docker-registry:
+                condition: service_started
+        healthcheck:
+            test: ["CMD-SHELL", "docker info > /dev/null 2>&1 && docker image inspect docker-registry.s.local/slave_noble:dind > /dev/null 2>&1 && test -S /shoggoth/git-cred/ssh_auth_sock"]
+            interval: 5s
+            timeout: 3s
+            retries: 30
+            start_period: 120s
 
     web:
         !!merge <<: *default_service
@@ -356,9 +368,7 @@ services:
         volumes:
             - ./git/runner/data:/data
             - ./bringup/rendered/gitea-runner/config.yaml:/config.yaml:ro
-            - shoggoth_workflow:/shoggoth/workflow
-            - shoggoth_ci_cache:/cache
-            - /var/run/docker.sock:/var/run/docker.sock
+            - shoggoth_dind-slave_socket:/dind
             - ./bringup/rendered/secrets/gitea-runner-token:/run/secrets/gitea_runner_token:ro
         environment:
             !!merge <<: *default_environment
@@ -368,10 +378,8 @@ services:
             GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
             CONFIG_FILE: /config.yaml
         depends_on:
-            bringup:
-                condition: service_completed_successfully
-            git-cred:
-                condition: service_started
+            dind-slave:
+                condition: service_healthy
 
     mcp-gitea:
         !!merge <<: *default_service
@@ -510,7 +518,7 @@ services:
             - ./workflow/kestra/flows:/app/flows
             - ./workflow/kestra/plugins:/app/plugins
             - ./bringup/rendered/kestra/config.yaml:/shoggoth_kestra.yaml:ro
-            - /var/run/docker.sock:/var/run/docker.sock
+            - shoggoth_dind-slave_socket:/dind
         environment:
             !!merge <<: *default_environment
         command: server standalone --config /shoggoth_kestra.yaml --flow-path /app/flows
@@ -521,8 +529,8 @@ services:
                 condition: service_completed_successfully
             kestra-init:
                 condition: service_completed_successfully
-            git-cred:
-                condition: service_started
+            dind-slave:
+                condition: service_healthy
 
     grafana:
         # https://grafana.com/

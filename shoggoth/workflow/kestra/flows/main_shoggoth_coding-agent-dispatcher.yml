@@ -29,17 +29,13 @@ tasks:
     taskRunner:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       volumes:
-        - "shoggoth_git_cred:/shoggoth/git-cred"
-        - "shoggoth_workflow:/shoggoth/workflow:ro"
-        - "shoggoth_ci_cache:/cache"
-      pullPolicy: ALWAYS
-      networkMode: shoggoth
-    containerImage: docker-registry.s.local/slave_noble:latest
+        - "/shoggoth/git-cred:/shoggoth/git-cred"
+        - "/shoggoth/ci_cache:/cache"
+      #pullPolicy: ALWAYS
+      networkMode: host
+    containerImage: docker-registry.s.local/slave_noble:dind
     commands:
       - "export PATH=\"/shoggoth/workflow/scripts:${PATH}\" && {{ inputs.script }} {{ inputs.task_id }}"
     env:
-      SHOGGOTH_ENV: "/shoggoth/workflow/env"
-      APT_CONFIG: "/shoggoth/workflow/apt-cache.conf"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
-      SSH_AUTH_SOCK: "/shoggoth/git-cred/ssh_auth_sock"
       GITEA_PAYLOAD: "{{ inputs.payload }}"

@@ -2,11 +2,6 @@
 
 set -euo pipefail
 
-ENV_FILE="${SHOGGOTH_ENV:-/shoggoth/workflow/env}"
-set -a
-source "${ENV_FILE}"
-set +a
-
 cp /shoggoth/workflow/qwen-settings.json "${HOME}/.qwen/settings.json"
 
 OTEL_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT}"

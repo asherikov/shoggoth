@@ -1,5 +1,4 @@
-#!/usr/bin/env bash
-set -o pipefail
+#!/bin/sh
 set -e
 
 DOCKER_PROXY_PORT="${DOCKER_PROXY_PORT:-3128}"
@@ -39,7 +38,7 @@ run_priv_cmd() {
     if [ "$USE_SU" = "true" ]; then
         $PRIV_CMD -c "$*"
     else
-        $PRIV_CMD bash -c "$*"
+        $PRIV_CMD sh -c "$*"
     fi
 }
 
@@ -98,12 +97,13 @@ parse_args() {
                 ;;
             --docker)
                 CONFIGURE_DOCKER="true"
-                if [ -n "${2:-}" ] && [[ ! "${2:-}" == --* ]]; then
-                    DOCKER_PROXY_PORT="$2"
-                    shift 2
-                else
-                    shift
+                if [ -n "${2:-}" ]; then
+                    case "${2}" in
+                        --*) ;;
+                        *) DOCKER_PROXY_PORT="$2"; shift ;;
+                    esac
                 fi
+                shift
                 ;;
             --update-hosts)
                 CONFIGURE_HOSTS="true"
@@ -139,12 +139,13 @@ parse_args() {
                 ;;
             --client-conf)
                 CONFIGURE_CLIENT_CONF="true"
-                if [ -n "${2:-}" ] && [[ ! "${2:-}" == --* ]]; then
-                    CLIENT_CONF_DIR="$2"
-                    shift 2
-                else
-                    shift
+                if [ -n "${2:-}" ]; then
+                    case "${2}" in
+                        --*) ;;
+                        *) CLIENT_CONF_DIR="$2"; shift ;;
+                    esac
                 fi
+                shift
                 ;;
             --all)
                 CONFIGURE_ALL="true"
@@ -249,11 +250,13 @@ EOF"
 }
 
 update_hosts() {
-    local services=("kestra" "dns" "apt-cache" "docker-cache" "litellm" "git" "build-cache" "git-pages" "redmine" "proxpi" "docker-registry" "grafana" "otelcol")
-    local hosts_entries="${HOST_IP} ${HOST}"$'\n'
+    services="kestra dns apt-cache docker-cache litellm git build-cache git-pages redmine proxpi docker-registry grafana otelcol"
+    hosts_entries="${HOST_IP} ${HOST}
+"
 
-    for service in "${services[@]}"; do
-        hosts_entries="${hosts_entries}${HOST_IP} ${service}.${HOST}"$'\n'
+    for service in ${services}; do
+        hosts_entries="${hosts_entries}${HOST_IP} ${service}.${HOST}
+"
     done
 
     run_priv_cmd "sed -i '/${HOST}/d' /etc/hosts && cat >> /etc/hosts <<EOF
@@ -486,7 +489,7 @@ main() {
     get_priv_cmd
 
     if [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
-        if [[ "${CONFIGURE_CLIENT_CONF}" != "true" ]]; then
+        if [ "${CONFIGURE_CLIENT_CONF}" != "true" ]; then
             CLIENT_CONF_DIR="${CONFIGURE_CLIENT_CONF}"
             ENV_FILE="${CLIENT_CONF_DIR}/env"
         fi
@@ -496,10 +499,10 @@ main() {
     fi
 
     if [ -n "${CONFIGURE_DOCKER}" ]; then
-        if [[ "${CONFIGURE_DOCKER}" =~ ^[0-9]+$ ]]; then
-            DOCKER_PROXY_PORT="${CONFIGURE_DOCKER}"
-            PROXY_URL="http://${HOST}:${DOCKER_PROXY_PORT}"
-        fi
+        case "${CONFIGURE_DOCKER}" in
+            ''|*[!0-9]*) ;;
+            *) DOCKER_PROXY_PORT="${CONFIGURE_DOCKER}"; PROXY_URL="http://${HOST}:${DOCKER_PROXY_PORT}" ;;
+        esac
         echo "Setting up Docker client to use shoggoth proxy at ${PROXY_URL}"
 
         configure_docker_proxy
