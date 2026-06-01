@@ -53,6 +53,8 @@ ping:
 home:
 	firefox http://${SHOGGOTH_DOMAIN}
 
+API_HOST=api.${SHOGGOTH_DOMAIN}
+
 test:
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> docker cache"
@@ -60,6 +62,21 @@ test:
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> DNS"
 	host ${SHOGGOTH_DOMAIN} dns.${SHOGGOTH_DOMAIN}
+	@echo "======================================================="
+	@echo ">>>>>>>>>>>> api gateway /gitea redirect"
+	curl -s -o /dev/null -w '%{http_code} %{redirect_url}' http://${API_HOST}/gitea | grep -q '^301 http://${API_HOST}/gitea/' && echo "OK" || echo "FAIL"
+	@echo "======================================================="
+	@echo ">>>>>>>>>>>> api gateway /gitea/"
+	curl -s -o /dev/null -w '%{http_code}' http://${API_HOST}/gitea/ | grep -q '^200' && echo "OK" || echo "FAIL"
+	@echo "======================================================="
+	@echo ">>>>>>>>>>>> api gateway /gitea/api/v1/version"
+	curl -s -o /dev/null -w '%{http_code}' http://${API_HOST}/gitea/api/v1/version | grep -q '^200' && echo "OK" || echo "FAIL"
+	@echo "======================================================="
+	@echo ">>>>>>>>>>>> api gateway /redmine redirect"
+	curl -s -o /dev/null -w '%{http_code} %{redirect_url}' http://${API_HOST}/redmine | grep -q '^301 http://${API_HOST}/redmine/' && echo "OK" || echo "FAIL"
+	@echo "======================================================="
+	@echo ">>>>>>>>>>>> api gateway /redmine/"
+	curl -s -o /dev/null -w '%{http_code}' http://${API_HOST}/redmine/ | grep -q '^200' && echo "OK" || echo "FAIL"
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> ollama"
 	${MAKE} ollama_tags
@@ -72,8 +89,6 @@ personal_conf:
 	./shoggoth/setup-client.sh \
 		--client-conf ${HOME}/.config/shoggoth \
 		--host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}" \
-		--gitea-token ${GITEA_TOKEN} \
 		--gitea-user $$(cat shoggoth/private/gitea-user.txt) \
 		--ai-token ${AI_TOKEN} \
-		--redmine-token $$(cat shoggoth/private/redmine-token.txt) \
 		--ssh-config

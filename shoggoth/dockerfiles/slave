@@ -20,6 +20,7 @@ RUN \
         containerd.io \
         docker-buildx-plugin \
         docker-compose-plugin \
+        ttyd \
     && usermod -aG docker ccws
 
 # nodejs is needed for some actions, e.g., actions/checkout@v5

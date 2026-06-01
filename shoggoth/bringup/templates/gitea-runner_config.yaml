@@ -94,7 +94,7 @@ container:
   # If it's not empty or "-", the specified docker host will be used. An error will be returned if it doesn't work.
   docker_host: "unix:///dind/docker.sock"
   # Pull docker image(s) even if already present
-  # SHOGGOTH: inorder to update container dind-slave service have to be restarted
+  # SHOGGOTH: inorder to update container slave-dind service have to be restarted
   force_pull: false
   # Rebuild docker image(s) even if already present
   force_rebuild: false

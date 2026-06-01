@@ -7,8 +7,8 @@ networks:
                 - subnet: 172.20.0.0/24
 
 volumes:
-    shoggoth_dind-slave_socket:
-        name: "shoggoth_dind-slave_socket"
+    shoggoth_slave-dind_socket:
+        name: "shoggoth_slave-dind_socket"
     shoggoth_redmine_db:
         name: "shoggoth_redmine_db"
     shoggoth_angie_build_cache:
@@ -82,20 +82,20 @@ services:
             SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
         secrets:
             - gitea_server_token
+            - redmine_token
         entrypoint: /shoggoth/bringup/bringup.sh
 
-    dind-slave:
+    slave-dind:
         image: docker:dind
-        container_name: dind-slave.${SHOGGOTH_DOMAIN}
+        container_name: slave-dind.${SHOGGOTH_DOMAIN}
         privileged: true
         restart: unless-stopped
         networks:
             - shoggoth
         volumes:
-            - shoggoth_dind-slave_socket:/dind
+            - shoggoth_slave-dind_socket:/dind
             - ./workflow/scripts:/host_volumes/workflow-scripts:ro
-            - ./docker/dind-slave/entrypoint.sh:/dind_entrypoint.sh:ro
-            - ./git/cred/shoggoth_entrypoint.sh:/host_volumes/git-cred-entrypoint:ro
+            - ./docker/slave-dind/entrypoint.sh:/dind_entrypoint.sh:ro
             - ./setup-client.sh:/host_volumes/setup-client.sh:ro
         environment:
             !!merge <<: *default_environment
@@ -104,7 +104,6 @@ services:
             DOCKER_HOST: unix:///dind/docker.sock
         secrets:
             - gitea_server_token
-            - redmine_token
             - ssh_id_rsa
             - gitea_user
         entrypoint: /dind_entrypoint.sh
@@ -127,23 +126,39 @@ services:
         container_name: web.${SHOGGOTH_DOMAIN}
         ports:
             - "80:80"
+        networks:
+            shoggoth:
+                aliases:
+                    - api
         volumes:
-            - ./angie/angie.conf:/etc/angie/angie.conf:ro
+            - ./bringup/rendered/angie/angie.conf:/etc/angie/angie.conf:ro
             - ./angie/proxy-params.conf:/etc/angie/proxy-params.conf:ro
             - ./angie/html:/data/html:ro
             - shoggoth_angie_build_cache:/data/build_cache
             - ./setup-client.sh:/data/setup-client.sh:ro
         depends_on:
-            - apt-cache
-            - docker-registry
-            - ollama
-            - litellm
-            - git
-            - git-pages
-            - redmine
-            - proxpi
-            - kestra
-            - grafana
+            bringup:
+                condition: service_completed_successfully
+            apt-cache:
+                condition: service_started
+            docker-registry:
+                condition: service_started
+            ollama:
+                condition: service_started
+            litellm:
+                condition: service_started
+            git:
+                condition: service_started
+            git-pages:
+                condition: service_started
+            redmine:
+                condition: service_started
+            proxpi:
+                condition: service_started
+            kestra:
+                condition: service_started
+            grafana:
+                condition: service_started
         post_start:
             # needs to be writable
             - command: chown -R angie:angie /data/build_cache
@@ -368,7 +383,7 @@ services:
         volumes:
             - ./git/runner/data:/data
             - ./bringup/rendered/gitea-runner/config.yaml:/config.yaml:ro
-            - shoggoth_dind-slave_socket:/dind
+            - shoggoth_slave-dind_socket:/dind
             - ./bringup/rendered/secrets/gitea-runner-token:/run/secrets/gitea_runner_token:ro
         environment:
             !!merge <<: *default_environment
@@ -378,7 +393,7 @@ services:
             GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
             CONFIG_FILE: /config.yaml
         depends_on:
-            dind-slave:
+            slave-dind:
                 condition: service_healthy
 
     mcp-gitea:
@@ -518,7 +533,7 @@ services:
             - ./workflow/kestra/flows:/app/flows
             - ./workflow/kestra/plugins:/app/plugins
             - ./bringup/rendered/kestra/config.yaml:/shoggoth_kestra.yaml:ro
-            - shoggoth_dind-slave_socket:/dind
+            - shoggoth_slave-dind_socket:/dind
         environment:
             !!merge <<: *default_environment
         command: server standalone --config /shoggoth_kestra.yaml --flow-path /app/flows
@@ -529,7 +544,7 @@ services:
                 condition: service_completed_successfully
             kestra-init:
                 condition: service_completed_successfully
-            dind-slave:
+            slave-dind:
                 condition: service_healthy
 
     grafana:

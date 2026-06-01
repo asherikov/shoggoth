@@ -21,6 +21,9 @@ mkdir -p /shoggoth/bringup/rendered/secrets
 GITEA_SERVER_TOKEN="$(cat /run/secrets/gitea_server_token)"
 export GITEA_SERVER_TOKEN
 
+REDMINE_TOKEN="$(cat /run/secrets/redmine_token)"
+export REDMINE_TOKEN
+
 mkdir -p /shoggoth/bringup/rendered/secrets
 
 mkdir -p /shoggoth/bringup/rendered/unbound
@@ -76,10 +79,14 @@ chown 1000:1000 /shoggoth/bringup/rendered/secrets/gitea-runner-token
 mkdir -p /shoggoth/bringup/rendered/litellm
 envsubst '${GITEA_SERVER_TOKEN}' < /shoggoth/bringup/templates/litellm_config.yaml > /shoggoth/bringup/rendered/litellm/config.yaml
 
+mkdir -p /shoggoth/bringup/rendered/angie
+envsubst '${SHOGGOTH_DOMAIN} ${GITEA_SERVER_TOKEN} ${REDMINE_TOKEN}' < /shoggoth/bringup/templates/angie.conf > /shoggoth/bringup/rendered/angie/angie.conf
+
 find /shoggoth/bringup/rendered -type d -exec chmod a+rx {} +
 find /shoggoth/bringup/rendered -type f -not -path '*/secrets/*' -not -name 'config.yaml' -exec chmod a+r {} +
 chmod 600 /shoggoth/bringup/rendered/litellm/config.yaml
 chmod 600 /shoggoth/bringup/rendered/kestra/config.yaml
+chmod 600 /shoggoth/bringup/rendered/angie/angie.conf
 chmod 400 /shoggoth/bringup/rendered/secrets/kestra-db/password
 chmod 400 /shoggoth/bringup/rendered/secrets/redmine-db/redmine-db/password
 chmod 400 /shoggoth/bringup/rendered/secrets/redmine-db/redmine/password
