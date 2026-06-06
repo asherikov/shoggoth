@@ -27,7 +27,7 @@ export REDMINE_TOKEN
 mkdir -p /shoggoth/bringup/rendered/secrets
 
 mkdir -p /shoggoth/bringup/rendered/unbound
-envsubst '${SHOGGOTH_IP} ${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/unbound_local-data.conf > /shoggoth/bringup/rendered/unbound/local-data.conf
+envsubst '${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/unbound_local-data.conf > /shoggoth/bringup/rendered/unbound/local-data.conf
 envsubst '${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/unbound.conf > /shoggoth/bringup/rendered/unbound/unbound.conf
 
 generate_secret /shoggoth/bringup/auto_secrets/kestra-db-password.txt
@@ -82,8 +82,10 @@ envsubst '${GITEA_SERVER_TOKEN}' < /shoggoth/bringup/templates/litellm_config.ya
 mkdir -p /shoggoth/bringup/rendered/angie
 envsubst '${SHOGGOTH_DOMAIN} ${GITEA_SERVER_TOKEN} ${REDMINE_TOKEN}' < /shoggoth/bringup/templates/angie.conf > /shoggoth/bringup/rendered/angie/angie.conf
 
+mkdir -p /shoggoth/vpn/wireguard/data
+
 find /shoggoth/bringup/rendered -type d -exec chmod a+rx {} +
-find /shoggoth/bringup/rendered -type f -not -path '*/secrets/*' -not -name 'config.yaml' -exec chmod a+r {} +
+find /shoggoth/bringup/rendered -type f -not -path '*/secrets/*' -not -name 'config.yaml' -not -name '*.sh' -exec chmod a+r {} +
 chmod 600 /shoggoth/bringup/rendered/litellm/config.yaml
 chmod 600 /shoggoth/bringup/rendered/kestra/config.yaml
 chmod 600 /shoggoth/bringup/rendered/angie/angie.conf

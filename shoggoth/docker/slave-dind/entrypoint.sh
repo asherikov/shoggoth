@@ -65,7 +65,7 @@ mkdir -p "${BUILD_DIR}/workflow" "${BUILD_DIR}/scripts"
 echo "Generating client configuration..." >&2
 /host_volumes/setup-client.sh \
     --client-conf "${BUILD_DIR}/workflow" \
-    --host "${SHOGGOTH_DOMAIN}" --host-ip "${SHOGGOTH_IP}" \
+    --domain "${SHOGGOTH_DOMAIN}" \
     --api-gateway \
     --gitea-user "$(cat /run/secrets/gitea_user)" \
     --ai-token litellm
@@ -124,16 +124,16 @@ chmod 0700 /shoggoth/git-cred
 echo "Cleaning up stale sockets..." >&2
 rm -f "${SSH_AUTH_SOCK}" "${GIT_CREDENTIAL_SOCK}"
 
-echo "Scanning Gitea SSH host keys on git.${SHOGGOTH_DOMAIN}:${SHOGGOTH_GIT_SSH_PORT:-3022}..." >&2
+echo "Scanning Gitea SSH host keys on git.${SHOGGOTH_DOMAIN}..." >&2
 for ATTEMPT in $(seq 1 30); do
-    if ssh-keyscan -p "${SHOGGOTH_GIT_SSH_PORT:-3022}" "git.${SHOGGOTH_DOMAIN}" > "${KNOWN_HOSTS}.tmp" 2>/dev/null; then
+    if ssh-keyscan "git.${SHOGGOTH_DOMAIN}" > "${KNOWN_HOSTS}.tmp" 2>/dev/null; then
         mv "${KNOWN_HOSTS}.tmp" "${KNOWN_HOSTS}"
         chmod 644 "${KNOWN_HOSTS}"
         echo "ssh-keyscan succeeded on attempt ${ATTEMPT}" >&2
         break
     fi
     SLEEP=$((ATTEMPT < 10 ? 2 : 5))
-    echo "Waiting for Gitea SSH on git.${SHOGGOTH_DOMAIN}:${SHOGGOTH_GIT_SSH_PORT:-3022} (attempt ${ATTEMPT}/30)..." >&2
+    echo "Waiting for Gitea SSH on git.${SHOGGOTH_DOMAIN} (attempt ${ATTEMPT}/30)..." >&2
     sleep "${SLEEP}"
 done
 

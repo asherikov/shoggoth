@@ -7,7 +7,7 @@ ollama_pull:
 	${MAKE} ssh_exec CMD='docker compose exec ollama ollama pull ${AI_MODEL}'
 
 ai_query:
-	time curl http://ai.${SHOGGOTH_DOMAIN}/v1/completions \
+	time curl http://ai.${DOMAIN}/v1/completions \
 		-H "Content-Type: application/json" \
 		-H "Authorization: ai" \
 		-d '{"model": "${AI_MODEL}", "prompt": "What is the capital of UAE?"}'

@@ -10,12 +10,10 @@ CONFIGURE_CLIENT_CONF="${CONFIGURE_CLIENT_CONF:-}"
 CONFIGURE_GITEA_USER="${CONFIGURE_GITEA_USER:-}"
 CONFIGURE_AI_TOKEN="${CONFIGURE_AI_TOKEN:-ai}"
 CONFIGURE_API_GATEWAY="${CONFIGURE_API_GATEWAY:-}"
-CONFIGURE_RESOLV_CONF="${CONFIGURE_RESOLV_CONF:-}"
 CONFIGURE_SSH_CONFIG="${CONFIGURE_SSH_CONFIG:-}"
-HOST="${HOST:-s.local}"
+DOMAIN="${DOMAIN:-s.local}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
 CLIENT_CONF_DIR="${CLIENT_CONF_DIR:-${HOME}/.config/shoggoth}"
-SSH_PORT="${SSH_PORT:-3022}"
 
 PRIV_CMD=""
 USE_SU=""
@@ -48,7 +46,7 @@ Usage: $0 [OPTIONS]
 Set up Docker client to use shoggoth proxy and generate configuration files.
 
 Options:
-    -h, --host HOST         Hostname for /etc/hosts entries (default: s.local)
+    --domain DOMAIN         Domain name for service URLs and hosts entries (default: s.local)
     --host-ip IP            IP address for /etc/hosts entries (default: 127.0.0.1)
     --docker [PORT]         Configure Docker proxy, optionally with a port (default: 3128)
     --update-hosts          Append generated hosts file to /etc/hosts
@@ -56,36 +54,18 @@ Options:
     --gitea-user USER       Configure gitea tea CLI username for basic auth
     --ai-token TOKEN        Configure OpenAI API key for AI services (OPENAI_API_KEY)
     --api-gateway           Use API gateway for Gitea/Redmine auth (tokens injected by gateway)
-    --resolv-conf           Generate resolv.conf with DNS server address
     --ssh-config            Generate SSH config with known hosts for git server
     --client-conf [DIR]     Generate configuration files, optionally in DIR (default: ${HOME}/.config/shoggoth)
     --all                   Configure and print all setup instructions
     --help                  Show this help message
-
-Environment variables:
-    DOCKER_PROXY_PORT       Proxy port (default: 3128)
-    HOST                    Hostname for /etc/hosts (default: s.local)
-    HOST_IP                 IP address for /etc/hosts (default: 127.0.0.1)
-    CONFIGURE_DOCKER        Set to "true" or a port number to configure Docker proxy
-    CONFIGURE_HOSTS         Set to "true" to update /etc/hosts
-    CONFIGURE_ALL           Set to "true" to configure all options
-    CONFIGURE_APT_CACHE     Set to "true" to install apt cache config
-    CONFIGURE_CLIENT_CONF   Set to "true" or a directory path to generate client config files
-    CONFIGURE_GITEA_USER    Set to username for gitea tea CLI basic auth
-    CONFIGURE_AI_TOKEN        Set to API key for OpenAI API
-    CONFIGURE_API_GATEWAY   Set to "true" to use API gateway for Gitea/Redmine auth
-    CONFIGURE_RESOLV_CONF   Set to "true" to generate resolv.conf
-    CONFIGURE_SSH_CONFIG    Set to "true" to generate SSH config and known hosts
-    CLIENT_CONF_DIR         Directory for config files (default: ${HOME}/.config/shoggoth)
-    SSH_PORT                SSH port for git server (default: 3022)
 EOF
 }
 
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
-            -h|--host)
-                HOST="$2"
+            --domain)
+                DOMAIN="$2"
                 shift 2
                 ;;
             --host-ip)
@@ -120,10 +100,6 @@ parse_args() {
                 ;;
             --api-gateway)
                 CONFIGURE_API_GATEWAY="true"
-                shift
-                ;;
-            --resolv-conf)
-                CONFIGURE_RESOLV_CONF="true"
                 shift
                 ;;
             --ssh-config)
@@ -205,11 +181,11 @@ configure_docker_proxy() {
     if [ "$os_id" = "nixos" ]; then
         echo "For NixOS, add the following to your configuration.nix:"
         echo "  virtualisation.docker.daemon.settings = {"
-        echo "    \"insecure-registries\" = [\"docker-registry.${HOST}\"];"
+        echo "    \"insecure-registries\" = [\"docker-registry.${DOMAIN}\"];"
         echo "    proxies = {"
-        echo "      \"http-proxy\" = \"${PROXY_URL}\";"
-        echo "      \"https-proxy\" = \"${PROXY_URL}\";"
-        echo "      \"no-proxy\" = \"*.${HOST}\";"
+        echo "      \"http-proxy\" = \"http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\";"
+        echo "      \"https-proxy\" = \"http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\";"
+        echo "      \"no-proxy\" = \"*.${DOMAIN}\";"
         echo "    };"
         echo "  };"
         echo "Then run: nixos-rebuild switch"
@@ -223,11 +199,11 @@ configure_docker_proxy() {
 
     run_priv_cmd "cat > ${docker_daemon_file} <<EOF
 {
-  \"insecure-registries\": [\"docker-registry.${HOST}\"],
+  \"insecure-registries\": [\"docker-registry.${DOMAIN}\"],
   \"proxies\": {
     \"http-proxy\": \"${PROXY_URL}\",
     \"https-proxy\": \"${PROXY_URL}\",
-    \"no-proxy\": \"*.${HOST}\"
+    \"no-proxy\": \"*.${DOMAIN}\"
   }
 }
 EOF"
@@ -244,15 +220,15 @@ EOF"
 
 update_hosts() {
     services="kestra dns apt-cache docker-cache litellm git build-cache git-pages redmine proxpi docker-registry grafana otelcol api slave-term"
-    hosts_entries="${HOST_IP} ${HOST}
+    hosts_entries="${HOST_IP} ${DOMAIN}
 "
 
     for service in ${services}; do
-        hosts_entries="${hosts_entries}${HOST_IP} ${service}.${HOST}
+        hosts_entries="${hosts_entries}${HOST_IP} ${service}.${DOMAIN}
 "
     done
 
-    run_priv_cmd "sed -i '/${HOST}/d' /etc/hosts && cat >> /etc/hosts <<EOF
+    run_priv_cmd "sed -i '/${DOMAIN}/d' /etc/hosts && cat >> /etc/hosts <<EOF
 ${hosts_entries}EOF"
 
     echo "Updated /etc/hosts with entries for all services:"
@@ -261,7 +237,7 @@ ${hosts_entries}EOF"
 
 generate_apt_cache_conf() {
     cat <<EOF
-Acquire::http::Proxy "http://apt-cache.${HOST}:3142";
+Acquire::http::Proxy "http://apt-cache.${DOMAIN}:3142";
 Acquire::https::Proxy "false";
 EOF
 }
@@ -291,21 +267,21 @@ generate_shoggoth_conf() {
 
 # LLM (LiteLLM → Ollama)
 OPENAI_API_KEY=${CONFIGURE_AI_TOKEN}
-OPENAI_BASE_URL=http://litellm.${HOST}/v1/
+OPENAI_BASE_URL=http://litellm.${DOMAIN}/v1/
 OPENAI_MODEL=glm-5.1:cloud
 #qwen3-coder-next:cloud, qwen3-coder:30b, qwen3-coder:480b-cloud
-BM_MCP_URL=http://litellm.${HOST}/mcp
+BM_MCP_URL=http://litellm.${DOMAIN}/mcp
 
 # Build cache (ccache)
-CCACHE_REMOTE_STORAGE=http://build-cache.${HOST}
+CCACHE_REMOTE_STORAGE=http://build-cache.${DOMAIN}
 CCACHE_REMOTE_ONLY=true
 
 # Proxpi (PyPI caching proxy)
-PIP_INDEX_URL=http://proxpi.${HOST}/index/
-PIP_TRUSTED_HOST=proxpi.${HOST}
+PIP_INDEX_URL=http://proxpi.${DOMAIN}/index/
+PIP_TRUSTED_HOST=proxpi.${DOMAIN}
 
 # Kestra
-KESTRA_HOST=kestra.${HOST}
+KESTRA_HOST=kestra.${DOMAIN}
 EOF
     chmod 600 "${ENV_FILE}"
 
@@ -319,9 +295,9 @@ generate_gitea_config() {
     cat >> "${ENV_FILE}" <<EOF
 
 # Gitea tea CLI
-GITEA_SERVER_URL=http://api.${HOST}/gitea
+GITEA_SERVER_URL=http://api.${DOMAIN}/gitea
 GITEA_SERVER_TOKEN=gateway
-GITEA_INSTANCE_SSH_HOST=git.${HOST}:3022
+GITEA_INSTANCE_SSH_HOST=git.${DOMAIN}
 EOF
     chmod 600 "${ENV_FILE}"
 }
@@ -330,7 +306,7 @@ generate_redmine_config() {
     cat >> "${ENV_FILE}" <<EOF
 
 # Redmine CLI
-REDMINE_SERVER=http://api.${HOST}/redmine
+REDMINE_SERVER=http://api.${DOMAIN}/redmine
 REDMINE_AUTH_METHOD=apikey
 REDMINE_API_KEY=gateway
 REDMINE_NO_UPDATE_CHECK=1
@@ -345,8 +321,8 @@ generate_gitea_cli_conf() {
         cat > "${tea_config_file}" <<EOF
 logins:
   - name: shoggoth
-    url: http://api.${HOST}/gitea
-    ssh_host: git.${HOST}:3022
+    url: http://api.${DOMAIN}/gitea
+    ssh_host: git.${DOMAIN}
     token: gateway
     user: ${CONFIGURE_GITEA_USER}
     default: true
@@ -356,8 +332,8 @@ EOF
         cat > "${tea_config_file}" <<EOF
 logins:
   - name: shoggoth
-    url: http://api.${HOST}/gitea
-    ssh_host: git.${HOST}:3022
+    url: http://api.${DOMAIN}/gitea
+    ssh_host: git.${DOMAIN}
     token: gateway
     default: true
     version_check: false
@@ -372,7 +348,7 @@ generate_redmine_cli_conf() {
     local redmine_config_file="${CLIENT_CONF_DIR}/redmine-config.yml"
 
     cat > "${redmine_config_file}" <<EOF
-server: http://api.${HOST}/redmine
+server: http://api.${DOMAIN}/redmine
 auth_method: apikey
 api_key: gateway
 no_color: true
@@ -389,18 +365,6 @@ generate_client_conf() {
     generate_apt_cache_conf > "${CLIENT_CONF_DIR}/apt-cache.conf"
     chmod 600 "${CLIENT_CONF_DIR}/apt-cache.conf"
 
-    if [ "${CONFIGURE_RESOLV_CONF}" = "true" ]; then
-        local dns_ip
-        dns_ip=$(getent hosts dns.${HOST} | cut -f 1 -d ' ')
-
-        cat > "${CLIENT_CONF_DIR}/resolv.conf" <<EOF
-nameserver ${dns_ip}
-search ${HOST}
-EOF
-        chmod 600 "${CLIENT_CONF_DIR}/resolv.conf"
-        echo "Generated ${CLIENT_CONF_DIR}/resolv.conf"
-    fi
-
     echo "Generated ${CLIENT_CONF_DIR}/apt-cache.conf"
 }
 
@@ -408,11 +372,11 @@ generate_ssh_config() {
     mkdir -p "${CLIENT_CONF_DIR}"
 
     local KNOWN_HOSTS_FILE="${CLIENT_CONF_DIR}/known_hosts"
-    local GIT_HOST="git.${HOST}"
+    local GIT_HOST="git.${DOMAIN}"
 
     local SSH_KEYSCAN_OUTPUT
-    SSH_KEYSCAN_OUTPUT="$(ssh-keyscan -p "${SSH_PORT}" "${GIT_HOST}" 2>/dev/null)" || {
-        echo "Warning: ssh-keyscan for ${GIT_HOST}:${SSH_PORT} failed" >&2
+    SSH_KEYSCAN_OUTPUT="$(ssh-keyscan "${GIT_HOST}" 2>/dev/null)" || {
+        echo "Warning: ssh-keyscan for ${GIT_HOST}:22 failed" >&2
         echo "The git server may not be reachable. SSH host key verification will fail." >&2
         return 1
     }
@@ -423,7 +387,6 @@ generate_ssh_config() {
     local SSH_CONFIG_FILE="${CLIENT_CONF_DIR}/ssh_config"
     cat > "${SSH_CONFIG_FILE}" <<EOF
 Host ${GIT_HOST}
-    Port ${SSH_PORT}
     UserKnownHostsFile ${KNOWN_HOSTS_FILE}
 EOF
     chmod 600 "${SSH_CONFIG_FILE}"
@@ -431,7 +394,7 @@ EOF
     echo "Add the following to your ~/.ssh/config:"
     echo "  Include ${SSH_CONFIG_FILE}"
     echo ""
-    echo "Generated SSH config for ${GIT_HOST}:${SSH_PORT} with known hosts in ${CLIENT_CONF_DIR}"
+    echo "Generated SSH config for ${GIT_HOST} with known hosts in ${CLIENT_CONF_DIR}"
 }
 
 generate_qwen_conf() {
@@ -439,14 +402,14 @@ generate_qwen_conf() {
 {
   "mcpServers": {
     "shoggoth-mcp": {
-      "httpUrl": "http://litellm.${HOST}/mcp",
+      "httpUrl": "http://litellm.${DOMAIN}/mcp",
       "timeout": 5000
     }
   },
   "telemetry": {
     "enabled": true,
     "target": "local",
-    "otlpEndpoint": "http://otelcol.${HOST}:4317",
+    "otlpEndpoint": "http://otelcol.${DOMAIN}:4317",
     "otlpProtocol": "grpc",
     "logPrompts": false,
     "includeSensitiveSpanAttributes": false
@@ -455,15 +418,15 @@ generate_qwen_conf() {
 EOF
     chmod 600 "${CLIENT_CONF_DIR}/qwen.json"
     echo "Generated ${CLIENT_CONF_DIR}/qwen.json"
-    echo "Telemetry exports to Grafana (LGTM stack) via otelcol at http://otelcol.${HOST}:4317"
-    echo "Dashboard: http://grafana.${HOST} (admin)"
+    echo "Telemetry exports to Grafana (LGTM stack) via otelcol at http://otelcol.${DOMAIN}:4317"
+    echo "Dashboard: http://grafana.${DOMAIN} (admin)"
 }
 
 main() {
     parse_args "$@"
 
     ENV_FILE="${CLIENT_CONF_DIR}/env"
-    PROXY_URL="http://${HOST}:${DOCKER_PROXY_PORT}"
+    PROXY_URL="http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}"
 
     if [ $# -eq 0 ]; then
         usage
@@ -476,7 +439,6 @@ main() {
         CONFIGURE_APT_CACHE="true"
         CONFIGURE_CLIENT_CONF="true"
         CONFIGURE_API_GATEWAY="true"
-        CONFIGURE_RESOLV_CONF="true"
         CONFIGURE_SSH_CONFIG="true"
     fi
 
@@ -495,7 +457,7 @@ main() {
     if [ -n "${CONFIGURE_DOCKER}" ]; then
         case "${CONFIGURE_DOCKER}" in
             ''|*[!0-9]*) ;;
-            *) DOCKER_PROXY_PORT="${CONFIGURE_DOCKER}"; PROXY_URL="http://${HOST}:${DOCKER_PROXY_PORT}" ;;
+            *) DOCKER_PROXY_PORT="${CONFIGURE_DOCKER}"; PROXY_URL="http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}" ;;
         esac
         echo "Setting up Docker client to use shoggoth proxy at ${PROXY_URL}"
 
@@ -515,7 +477,7 @@ main() {
     fi
 
     if [ "${CONFIGURE_APT_CACHE}" = "true" ]; then
-        echo "Setting up apt cache at http://apt-cache.${HOST}/"
+        echo "Setting up apt cache at http://apt-cache.${DOMAIN}/"
         configure_apt_cache
         echo "Apt cache setup complete."
     fi

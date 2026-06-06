@@ -100,7 +100,7 @@ gitea_push_repo:
 	@echo "Adding shoggoth remote to ${REPO_NAME}"
 	cd "${REPO_PATH}" \
 		&& (git remote remove shoggoth 2>/dev/null || true) \
-		&& git remote add shoggoth "ssh://git@${GITEA_URL}:3022/${GITEA_PROJECT}/${REPO_NAME}.git" \
+		&& git remote add shoggoth "ssh://git@${GITEA_URL}/${GITEA_PROJECT}/${REPO_NAME}.git" \
 		&& git push --mirror shoggoth
 
 gitea_import:

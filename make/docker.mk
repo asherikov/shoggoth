@@ -6,8 +6,8 @@ exec:
 	${MAKE} ssh_exec CMD='docker compose exec ${SERVICE} sh'
 
 up:
-	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='./bringup/setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d ${SERVICE}'
-	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='./bringup/setup-env.sh ${SHOGGOTH_DOMAIN} ${SHOGGOTH_IP} && docker compose up -d && sleep 5'
+	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose up -d ${SERVICE}'
+	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose up -d && sleep 5'
 
 down:
 	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose down ${SERVICE}'
@@ -30,10 +30,8 @@ docker_build:
 		&& docker build \
 			--build-arg BASE_IMAGE=${BASE_IMAGE} \
 			-f dockerfiles/${IMAGE} \
-			-t docker-registry.${SHOGGOTH_DOMAIN}/${IMAGE}${DOCKER_TAG_SUFFIX}:latest \
+			-t docker-registry.${DOMAIN}/${IMAGE}${DOCKER_TAG_SUFFIX}:latest \
 			--progress plain \
-			--add-host apt-cache.${SHOGGOTH_DOMAIN}:${SHOGGOTH_IP} \
-			--add-host proxpi.${SHOGGOTH_DOMAIN}:${SHOGGOTH_IP} \
 			${DOCKER_BUILD_ADD_HOST} \
 			./
 

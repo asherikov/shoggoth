@@ -126,6 +126,55 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
 
 - **[unbound](https://hub.docker.com/r/mvance/unbound/)** (selected)
 
+### Dynamic DNS injection from Docker
+
+Current Unbound setup uses static records rendered once by the bringup
+container. Adding/removing services requires editing the template and
+re-deploying. Dynamic injection would allow Docker containers to register their
+own DNS records on start/stop.
+
+- <https://github.com/nginx-proxy/docker-gen> + **[Dnsmasq](https://thekelleys.org.uk/dnsmasq/doc.html)**
+  - docker-gen watches Docker events (`start`, `stop`, `die`), generates dnsmasq hosts file from Go template
+  - dnsmasq auto-reloads via `--hostsdir=` (inotify-like, no restart or signal needed)
+  - wildcard subdomains work natively: `address=/.s.local/172.20.0.80`
+  - + lightest option (~50MB alpine image for dnsmasq, ~20MB for docker-gen)
+  - + no restart, no signal, truly zero-downtime record updates
+  - - loses Unbound blacklist format (needs conversion to dnsmasq `address=/...` syntax)
+  - - docker-gen template needs writing and maintaining
+- <https://github.com/nginx-proxy/docker-gen> + Unbound
+  - docker-gen generates `unbound_local-data.conf`, triggers Unbound reload
+  - + keeps Unbound, existing blacklist, existing setup
+  - - Unbound cannot reload `local-data` on SIGHUP (only reopens logs); requires full `unbound-control reload` or process restart
+  - - restart causes brief DNS outage on every container start/stop
+  - - `redirect` zone type requires per-subdomain zone+record pairs (awkward for dynamic generation)
+- <https://coredns.io/> + <https://etcd.io/> (etcd plugin)
+  - CoreDNS reads DNS records from etcd dynamically; a bridge process writes records on container events
+  - + truly dynamic — no file regeneration, no restarts, etcd API is simple (HTTP PUT/DELETE)
+  - + CoreDNS is production-grade (used by Kubernetes)
+  - - adds significant complexity (etcd cluster + CoreDNS + bridge process) for ~10 services
+  - - no native Docker watcher — needs custom bridge
+  - - no built-in ad-blocking (no equivalent to Unbound blacklist)
+- <https://github.com/mageddo/dns-proxy-server>
+  - standalone DNS server that natively reads Docker container names/hostnames
+  - + zero configuration — auto-discovers containers, wildcard hostname support
+  - + solves `host.docker` to Docker host IP, simple web UI
+  - - Java-based (heavy JVM footprint), less mature, no ad-blocking, no DNSSEC
+- **[Pi-hole](https://pi-hole.net/)** + docker-gen
+  - Pi-hole runs dnsmasq/FTL under the hood; combines DNS serving + ad-blocking in one tool
+  - docker-gen writes to `/etc/pihole/custom.list` (hosts format) or dnsmasq snippets to `/etc/dnsmasq.d/`, then SIGHUPs FTL
+  - wildcard subdomains work natively: `address=/.s.local/172.20.0.80`
+  - + built-in ad-blocking replaces both Unbound and vendored blacklist — no format conversion needed
+  - + web UI for DNS query log, local record management, blacklist inspection
+  - + well-maintained Docker image (`pihole/pihole`)
+  - + SIGHUP reloads custom.list without restart (not inotify-like, but fast)
+  - - heavier than plain dnsmasq (PHP web UI, FTL daemon, lighttpd — ~100MB image)
+  - - local DNS records in hosts format only via `custom.list` (A/AAAA only; CNAME/SRV/TXT needs dnsmasq snippets)
+  - - another web UI to manage alongside Angie and wg-easy
+- Docker network aliases
+  - `aliases` in compose network definitions, resolved by Docker's embedded DNS (127.0.0.11)
+  - + already built into Docker, fully automatic, zero extra software
+  - - only works for containers on the same Docker network — VPN clients cannot reach 127.0.0.11
+
 ## AI
 
 ### Model server
@@ -262,3 +311,56 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
 
 - **[ttyd](https://github.com/tsl0922/ttyd)** (selected)
 - <https://github.com/gbasin/agentboard>
+
+## VPN
+
+- **[wg-easy](https://github.com/wg-easy/wg-easy)** (selected)
+  - WireGuard VPN server with web management UI; single container, no extra databases
+  - + simplest possible WireGuard deployment — web UI for peer management, QR code config
+  - + single container (WireGuard + UI), standard WireGuard protocol
+  - + INIT_* environment variables allow zero-config first boot
+  - + DNS pushed to clients via INIT_DNS, replaces /etc/hosts workflow
+  - + no control plane, no relay, no external dependencies — perfect for private LAN where server IP is known
+  - + ~4,000 LOC in-kernel WireGuard, formally verified cryptography, no opaque binary blobs
+  - - no automatic key exchange or enrollment (peers added manually via web UI)
+  - - no NAT traversal / DERP relay — requires direct UDP connectivity
+  - - no ACL policies or subnet routing
+- <https://github.com/gravitl/netmaker> (Apache-2.0 core, commercial Pro license)
+  - WireGuard mesh VPN with orchestrator, web UI, private DNS, and ACLs
+  - + mesh topology — peers connect directly, not through a hub
+  - + built-in private DNS (CoreDNS integration)
+  - + access control lists, OAuth, remote access gateways, Kubernetes support
+  - + automatic node enrollment via netclient agent
+  - + STUN-based hole punching for NAT traversal
+  - - 4+ container deployment (netmaker, netmaker-ui, caddy, mosquitto) vs wg-easy's single container
+  - - requires wildcard DNS and static public IP
+  - - Pro features (ACLs, OAuth, egress gateways) require commercial license
+  - - significantly more complex setup and maintenance for a personal/homelab use case
+- <https://github.com/juanfont/headscale> (BSD-3-Clause)
+  - Open-source Tailscale coordination server; clients use Tailscale
+  - + automatic key exchange and peer enrollment (auth keys)
+  - + MagicDNS pushes Unbound through the tunnel — replaces `/etc/hosts` workflow
+  - + NAT traversal via STUN + DERP relay fallback
+  - + ACL policies, subnet routing (`--advertise-routes`)
+  - + single container + SQLite, no extra databases
+  - - Tailscale client GUI wrappers on non-Linux platforms are proprietary (networking core is BSD-3-Clause)
+  - - coordination server dependency (existing tunnels survive server downtime, but new peers cannot enroll)
+  - - DERP relay requires containers on bridge networks to reach host LAN IP, which Docker blocks by default — fundamental blocker for Docker deployments
+- <https://github.com/DefGuard/defguard> (AGPL-3.0 core, proprietary client, enterprise license)
+  - + per-connection MFA on WireGuard, LDAP/OIDC integration, nftables-based gateway
+  - + compliance-oriented (GDPR, HIPAA, PCI-DSS)
+  - - multi-container architecture (core, gateway, proxy, avanguard), proprietary desktop/mobile clients
+  - - overkill for personal use; MFA on WireGuard is enterprise compliance theater
+- <https://github.com/firezone/firezone> (Elastic License 2.0 + Apache-2.0)
+  - + well-engineered (Elixir control plane, Rust data plane), WebRTC NAT traversal
+  - + OIDC/SSO integration, split-DNS
+  - - self-hosting explicitly "not production supported" — app store clients only work with managed Cloud
+  - - self-hosters must build their own clients from source (Rust/Swift/Kotlin)
+  - - source-available freemium model; self-hosting is second-class experience
+- <https://github.com/slackhq/nebula> (MIT)
+  - + fully open-source (all platforms, including mobile), single binary, no kernel module
+  - + mesh topology with lighthouse discovery, UDP hole punching, built-in DNS
+  - + certificate-based auth with groups and firewall rules
+  - - different protocol (Noise Protocol Framework), not WireGuard — smaller ecosystem
+  - - no automatic enrollment; certificates must be signed and distributed manually
+  - - userspace-only (slightly higher latency than kernel WireGuard)

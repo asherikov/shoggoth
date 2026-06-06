@@ -3,10 +3,14 @@
   - [Features](#features)
   - [Disclaimer](#disclaimer)
 - [Architecture](#architecture)
-  - [Services](#services)
+  - [Service interaction diagram](#service-interaction-diagram)
+  - [Interaction with the client and external services](#interaction-with-the-client-and-external-services)
+  - [Bringup order](#bringup-order)
+  - [Internal services](#internal-services)
   - [Monitoring](#monitoring)
   - [Shoggoth slave container](#shoggoth-slave-container)
   - [Domain Name Resolution](#domain-name-resolution)
+  - [VPN](#vpn)
 - [Client Configuration](#client-configuration)
   - [Caveats](#caveats)
   - [Service Usage Examples](#service-usage-examples)
@@ -32,22 +36,45 @@ Goals
 Features
 --------
 
+Shoogoth includes a number of containerized services that are available under
+configurable domain, set to `s.local` by default.
+
+- Networking:
+  - `wireguard.<domain>` — WireGuard VPN server with web management UI
+    (wg-easy), most services are available only through VPN connection
+  - `dns.<domain>` — Unbound DNS resolver with blacklisting support.
 - Caching:
-  - Debian/Ubuntu package caching proxy (`apt-cacher-ng`).
-  - Docker registry caching proxy.
-  - Python package caching proxy (`proxpi`).
-  - Build cache server, to be used with ccache or sccache.
+  - `apt-cache.<domain>` — Debian/Ubuntu package caching proxy (`apt-cacher-ng`).
+  - `docker-cache.<domain>` — Docker registry caching proxy.
+  - `proxpi.<domain>` — Python package caching proxy.
+  - `build-cache.<domain>` — build cache server for ccache/sccache.
 - Development:
-  - Local AI model server (`ollama`) and LLM proxy.
-  - Docker registry.
-  - Git server (`gitea`) with CI/CD actions support.
-- Project management
-  - Redmine project management server.
-- Coding agents:
-  - Gitea MCP server for AI coding agent integration.
-  - Redmine MCP server for AI agent integration.
-- Other:
-  - DNS server with blacklisting support.
+  - `docker-registry.<domain>` — private Docker registry.
+  - Gitea development suite:
+    - `git.<domain>` — Gitea Git server.
+    - `git-pages.<domain>` — Git Pages static site hosting.
+    - `gitea-runner` — Gitea Actions runner.
+  - `kestra.<domain>` — Kestra workflow orchestration.
+  - `slave-dind.<domain>` -- Docker-in-Docker service for CI and workflow executors:
+    - `slave-term.<domain>` — interactive web terminal (ttyd + tmux + Qwen Code).
+- Project management:
+  - `redmine.<domain>` — Redmine project management server.
+- LLM and coding agents:
+  - `litellm.<domain>` — LLM proxy (LiteLLM) with MCP gateway.
+    - Gitea MCP server for AI coding agent integration.
+    - `ollama.<domain>` — local LLM model server.
+    - `basic-memory.<domain>` — Basic Memory MCP server.
+- Grafana monitoring suite:
+  - `grafana.<domain>` — observability dashboard (traces, metrics, logs).
+  - `loki.<domain>` — log aggregation backend.
+  - `tempo.<domain>` — trace storage backend.
+  - `victoria-metrics.<domain>` — metrics storage backend (Prometheus-compatible).
+  - `cadvisor.<domain>` — container metrics (per-container resource usage).
+  - `node-exporter.<domain>` — host-level metrics (CPU, memory, disk, network).
+  - `otelcol.<domain>` — OpenTelemetry Collector (Prometheus scrape → OTLP).
+- Web:
+  - `<domain>` — welcome home page.
+  - `api.<domain>` — single entry point for other services' API.
 
 Disclaimer
 ----------
@@ -75,51 +102,19 @@ The system consists of three parts:
 The main use-case is to run the services on a dedicated headless server and use
 or control them from multiple client computers.
 
-Services
---------
+Service interaction diagram
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The following services are available:
-
-| Service | Hostname | Description |
-|----|----|----|
-| `web` | `<host>` | Welcome home page and Angie reverse proxy |
-| `web` | `build-cache.<host>` | Build cache storage (ccache/sccache) |
-| `dns` | `<host>` | Unbound DNS resolver with blacklisting |
-| `apt-cache` | `apt-cache.<host>` | APT package caching proxy |
-| `docker-cache` | `<host>:3128` | Docker registry caching proxy |
-| `docker-registry` | `docker-registry.<host>` | Private Docker registry |
-| `proxpi` | `proxpi.<host>` | Python package caching proxy |
-| `litellm` | `litellm.<host>` | LLM proxy (LiteLLM) with MCP gateway |
-| `git` | `git.<host>` | Gitea Git server with web UI |
-| `git-pages` | `git-pages.<host>` | Git Pages static site hosting |
-| `kestra` | `kestra.<host>` | Kestra workflow orchestration |
-| `redmine` | `redmine.<host>` | Redmine project management server |
-| `grafana` | `grafana.<host>` | Observability dashboard (traces, metrics, logs) |
-| `slave-term` | `slave-term.<host>` | Interactive web terminal (ttyd + tmux + Qwen Code, runs inside slave-dind) |
-
-Internal services:
-
-| Service | Description |
-|----|----|
-| `slave-dind` | Docker-in-Docker host for slave containers |
-| `gitea-runner` | Gitea Actions runner |
-| `mcp-gitea` | Gitea MCP server (proxied via LiteLLM) |
-| `basic-memory` | Basic Memory MCP server (proxied via LiteLLM) |
-| `loki` | Log aggregation backend |
-| `tempo` | Trace storage backend |
-| `victoria-metrics` | Metrics storage backend (Prometheus-compatible) |
-| `node-exporter` | Host-level metrics (CPU, memory, disk, network) |
-| `cadvisor` | Container metrics (per-container resource usage) |
-| `ollama` | Local LLM model server |
-| `otelcol` | OpenTelemetry Collector (Prometheus scrape → OTLP) |
-
-### Service interaction diagram
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture" />
 
-### Interaction with the client and external services
+Interaction with the client and external services
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/external.svg" alt="external" />
 
-### Bringup order
+Bringup order
+~~~~~~~~~~~~~
+
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/bringup.svg" alt="bringup" />
 
 
@@ -152,29 +147,6 @@ The slave container is intended to be used in three different ways:
 - non-interactive agentic flows, e.g., coding or reviews;
 - interactive development with or without a coding agent.
 
-Domain Name Resolution
-----------------------
-
-Domain names are used to access services via the angie reverse proxy server. Two
-resolution methods are supported:
-
-### Hosts File Resolution
-
-Add service hostnames to `/etc/hosts` on each client machine:
-
-``` bash
-# Using the setup script
-./shoggoth/setup-client.sh --update-hosts --host s.local --host-ip 192.168.1.100
-
-# Or manually add to /etc/hosts:
-192.168.1.100 s.local
-192.168.1.100 <service>.s.local
-```
-
-### DNS Resolution
-
-The `dns` service (Unbound) can be configured as the DNS server on client
-machines, use the shoggoth server IP as the DNS server.
 
 Client Configuration
 ====================
@@ -183,25 +155,25 @@ Run the setup script on each client machine.
 
 ``` bash
 # Generate config files in default directory `~/.config/shoggoth/`
-./shoggoth/setup-client.sh --client-conf --host s.local
+./shoggoth/setup-client.sh --client-conf --domain s.local
 
 # Generate config files in a custom directory
-./shoggoth/setup-client.sh --client-conf /path/to/dir --host s.local
+./shoggoth/setup-client.sh --client-conf /path/to/dir --domain s.local
 
-# Configure Docker caching proxy (default port 3128) and registry
-./shoggoth/setup-client.sh --docker --host s.local --host-ip 192.168.1.100
+# Configure Docker caching proxy and registry
+./shoggoth/setup-client.sh --docker --domain s.local --host-ip 192.168.1.100
 
 # Update /etc/hosts with service hostnames (modifies /etc/hosts directly)
-./shoggoth/setup-client.sh --update-hosts --host s.local --host-ip 192.168.1.100
+./shoggoth/setup-client.sh --update-hosts --domain s.local --host-ip 192.168.1.100
 
 # Install apt cache config to system apt config (requires --client-conf first)
-./shoggoth/setup-client.sh --client-conf --apt-cache --host s.local --host-ip 192.168.1.100
+./shoggoth/setup-client.sh --client-conf --apt-cache --domain s.local --host-ip 192.168.1.100
 
 # Configure Docker, hosts, apt cache, and generate client config files
-./shoggoth/setup-client.sh --all --host s.local --host-ip 192.168.1.100
+./shoggoth/setup-client.sh --all --domain s.local --host-ip 192.168.1.100
 
 # Configure with Gitea and Redmine tokens (generates env, qwen configuration)
-./shoggoth/setup-client.sh --client-conf --host s.local --gitea-token your-token --redmine-token your-token
+./shoggoth/setup-client.sh --client-conf --domain s.local --gitea-token your-token --redmine-token your-token
 ```
 
 The script generates the following files when `--client-conf` is used:
@@ -262,12 +234,11 @@ set -a; source ~/.config/shoggoth/env; set +a
 
 ### Gitea Git Server
 
-Clone repositories via SSH or HTTP, note that port 3022 is used to avoid
-conflicts with ssh server running on the host machine:
+Clone repositories via SSH or HTTP:
 
 ``` bash
 # SSH (configure SSH key in Gitea first)
-git clone ssh://git@git.s.local:3022/admin/repo.git
+git clone ssh://git@git.s.local/admin/repo.git
 
 # HTTP
 git clone http://git.s.local/admin/repo.git
@@ -276,7 +247,7 @@ git clone http://git.s.local/admin/repo.git
 Configure the `tea` CLI by providing a token:
 
 ``` bash
-./shoggoth/setup-client.sh --host s.local --gitea-token your-token
+./shoggoth/setup-client.sh --domain s.local --gitea-token your-token
 set -a; source ~/.config/shoggoth/env; set +a
 tea issues list
 ```
@@ -311,7 +282,7 @@ and restarting the service.
 4.  Generate “API access key” in personal settings.
 
 ``` bash
-./shoggoth/setup-client.sh --host s.local --redmine-token your-token
+./shoggoth/setup-client.sh --domain s.local --redmine-token your-token
 ```
 
 The `--redmine-token` flag configures both the Redmine CLI environment variables
@@ -368,6 +339,19 @@ References
 - <https://www.reddit.com/r/selfhosted/>
 - <https://github.com/awesome-selfhosted/awesome-selfhosted>
 - <https://github.com/awesome-foss/awesome-sysadmin>
+- <https://github.com/meirwah/awesome-workflow-engines>
 - <https://leviwheatcroft.github.io/selfhosted-awesome-unlist/> (not maintained)
 - <https://gitea.com/gitea/awesome-gitea>
 - <https://github.com/trueforge-org/truecharts>
+
+Agentic coding
+--------------
+
+- <https://github.com/bradAGI/awesome-cli-coding-agents>
+- <https://github.com/JuliusBrussee/caveman>
+- <https://github.com/mattpocock/skills>
+- <https://github.com/K-Dense-AI/scientific-agent-skills>
+- <https://github.com/arpitg1304/robotics-agent-skills>
+- <https://github.com/punkpeye/awesome-mcp-servers>
+- <https://github.com/mahdin75/gis-mcp>
+- <https://github.com/jjsantos01/qgis_mcp>

@@ -2,6 +2,9 @@ networks:
     shoggoth:
         name: shoggoth
         external: false
+    vpn:
+        name: vpn
+        external: false
         ipam:
             config:
                 - subnet: 172.20.0.0/24
@@ -52,7 +55,6 @@ x-service: &default_service
     #    - 172.20.0.53
 
 x-environment: &default_environment
-    SHOGGOTH_IP: ${SHOGGOTH_IP}
     OTEL_TRACES_EXPORTER: otlp
     OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
 
@@ -100,7 +102,6 @@ services:
         environment:
             !!merge <<: *default_environment
             SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
-            SHOGGOTH_GIT_SSH_PORT: ${SHOGGOTH_GIT_SSH_PORT}
             DOCKER_HOST: unix:///dind/docker.sock
         secrets:
             - gitea_server_token
@@ -124,12 +125,12 @@ services:
         # https://github.com/ccache/ccache/wiki/HTTP-storage
         image: docker.angie.software/angie:latest
         container_name: web.${SHOGGOTH_DOMAIN}
-        ports:
-            - "80:80"
         networks:
             shoggoth:
                 aliases:
                     - api
+            vpn:
+                ipv4_address: 172.20.0.80
         volumes:
             - ./bringup/rendered/angie/angie.conf:/etc/angie/angie.conf:ro
             - ./angie/proxy-params.conf:/etc/angie/proxy-params.conf:ro
@@ -172,6 +173,10 @@ services:
         # https://www.dotlinux.net/blog/quick-debian-ubuntu-package-caching-proxy-setup-with-apt-cacher-ng/
         image: sameersbn/apt-cacher-ng:latest
         container_name: apt-cache.${SHOGGOTH_DOMAIN}
+        networks:
+            shoggoth:
+            vpn:
+                ipv4_address: 172.20.0.40
         volumes:
             # Cache storage directory (relative to this compose file location)
             - shoggoth_apt_cache:/var/cache/apt-cacher-ng
@@ -179,9 +184,6 @@ services:
             - ./apt-cacher-ng/logs:/var/log/apt-cacher-ng
         environment:
             !!merge <<: *default_environment
-        ports:
-            # has to be exposed: apt uses ip and cannot be redirected by proxy
-            - "3142:3142"
         post_start:
             # needs to be writable
             - command: chown -R apt-cacher-ng:apt-cacher-ng /var/cache/apt-cacher-ng /var/log/apt-cacher-ng
@@ -206,6 +208,10 @@ services:
         # https://github.com/rpardini/docker-registry-proxy
         image: rpardini/docker-registry-proxy:0.6.5
         container_name: docker-cache.${SHOGGOTH_DOMAIN}
+        networks:
+            shoggoth:
+            vpn:
+                ipv4_address: 172.20.0.30
         environment:
             !!merge <<: *default_environment
             # Common registries to cache
@@ -259,13 +265,51 @@ services:
             - ./unbound/dns-zone-blacklist/unbound/unbound-nxdomain.blacklist:/opt/unbound/etc/unbound/unbound-nxdomain.blacklist:ro
         environment:
             !!merge <<: *default_environment
-        ports:
-            - "${SHOGGOTH_IP}:53:53/tcp"
-            - "${SHOGGOTH_IP}:53:53/udp"
         networks:
-            shoggoth:
+            vpn:
                 ipv4_address: 172.20.0.53
         restart: unless-stopped
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
+
+    wireguard:
+        # https://github.com/wg-easy/wg-easy
+        # WireGuard VPN server with web management UI
+        !!merge <<: *default_service
+        image: ghcr.io/wg-easy/wg-easy:15
+        container_name: wireguard.${SHOGGOTH_DOMAIN}
+        networks:
+            vpn:
+                ipv4_address: 172.20.0.2
+        ports:
+            - "51820:51820/udp"
+            - "51821:51821/tcp"
+        cap_add:
+            - NET_ADMIN
+            - SYS_MODULE
+        sysctls:
+            - net.ipv4.ip_forward=1
+            - net.ipv4.conf.all.src_valid_mark=1
+        devices:
+            - /dev/net/tun:/dev/net/tun
+        volumes:
+            - ./vpn/wireguard/data:/etc/wireguard
+            - ./vpn/wireguard/entrypoint.sh:/entrypoint.sh:ro
+            - /lib/modules:/lib/modules:ro
+        entrypoint: ["/entrypoint.sh"]
+        command: ["/usr/bin/dumb-init", "node", "server/index.mjs"]
+        environment:
+            !!merge <<: *default_environment
+            INIT_ENABLED: "true"
+            INIT_USERNAME: admin
+            INIT_HOST: ${SHOGGOTH_DOMAIN}
+            INIT_PORT: "51820"
+            INIT_PASSWORD: "changeme"
+            INIT_ALLOWED_IPS: "172.20.0.0/24"
+            INIT_DNS: "172.20.0.53"
+            INSECURE: "true"
+            DISABLE_IPV6: "true"
         depends_on:
             bringup:
                 condition: service_completed_successfully
@@ -341,10 +385,9 @@ services:
             GITEA__repository__DEFAULT_PRIVATE: 'private'
             # disabled: ,repo.packages,repo.actions
             GITEA__repository__DEFAULT_REPO_UNITS: 'repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects'
-            # avoid conflict with ssh running on the host system, see web service config as well
-            GITEA__server__START_SSH_SERVER: 'true'
-            GITEA__server__SSH_PORT: "${SHOGGOTH_GIT_SSH_PORT}"
-            GITEA__server__SSH_LISTEN_PORT: "${SHOGGOTH_GIT_SSH_PORT}"
+            GITEA__server__START_SSH_SERVER: 'false'
+            #GITEA__server__SSH_PORT: "22"
+            #GITEA__server__SSH_LISTEN_PORT: "22"
             GITEA__server__HTTP_PORT: "80"
             GITEA__server__ROOT_URL: 'http://git.${SHOGGOTH_DOMAIN}'
             GITEA__server__DOMAIN: 'git.${SHOGGOTH_DOMAIN}'
@@ -363,8 +406,6 @@ services:
             - ./bringup/rendered/secrets/gitea-runner-token:/run/secrets/gitea_runner_token:ro
             - /etc/timezone:/etc/timezone:ro
             - /etc/localtime:/etc/localtime:ro
-        ports:
-            - "${SHOGGOTH_GIT_SSH_PORT}:${SHOGGOTH_GIT_SSH_PORT}"
         depends_on:
             bringup:
                 condition: service_completed_successfully
@@ -661,10 +702,11 @@ services:
         # /var/lib/docker/containers/<id>/ directories (owned by root:root 0700)
         user: "0:0"
         container_name: otelcol.${SHOGGOTH_DOMAIN}
+        networks:
+            shoggoth:
+            vpn:
+                ipv4_address: 172.20.0.60
         volumes:
             - ./monitoring/otelcol/config.yaml:/etc/otelcol-contrib/config.yaml:ro
             - /var/lib/docker/containers:/var/lib/docker/containers:ro
             - /var/run/docker.sock:/var/run/docker.sock:ro
-        ports:
-            - "4317:4317"
-            - "4318:4318"
