@@ -95,11 +95,13 @@ The following services are available:
 | `kestra` | `kestra.<host>` | Kestra workflow orchestration |
 | `redmine` | `redmine.<host>` | Redmine project management server |
 | `grafana` | `grafana.<host>` | Observability dashboard (traces, metrics, logs) |
+| `slave-term` | `slave-term.<host>` | Interactive web terminal (ttyd + tmux + Qwen Code, runs inside slave-dind) |
 
 Internal services:
 
 | Service | Description |
 |----|----|
+| `slave-dind` | Docker-in-Docker host for slave containers |
 | `gitea-runner` | Gitea Actions runner |
 | `mcp-gitea` | Gitea MCP server (proxied via LiteLLM) |
 | `basic-memory` | Basic Memory MCP server (proxied via LiteLLM) |
@@ -108,10 +110,18 @@ Internal services:
 | `victoria-metrics` | Metrics storage backend (Prometheus-compatible) |
 | `node-exporter` | Host-level metrics (CPU, memory, disk, network) |
 | `cadvisor` | Container metrics (per-container resource usage) |
+| `ollama` | Local LLM model server |
 | `otelcol` | OpenTelemetry Collector (Prometheus scrape → OTLP) |
 
+### Service interaction diagram
+<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture" />
 
-<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture overview" />
+### Interaction with the client and external services
+<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/external.svg" alt="external" />
+
+### Bringup order
+<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/bringup.svg" alt="bringup" />
+
 
 Monitoring
 ----------

@@ -1,0 +1,46 @@
+nodes:
+  # ============================================
+  # Client Host Boundary
+  # ============================================
+  - id: ["client", client_host]
+    tags: ["client"]
+    style_notag: hh_diagrams_scope
+    graphviz:
+      fillcolor: "#f0f0f0"
+
+  # Client applications
+  - id: ["apt", client_apt]
+    tags: ["client"]
+    scope: client_host
+    style_notag: hh_diagrams_generic_os_ubuntu
+
+  - id: ["docker", client_docker]
+    tags: ["client"]
+    scope: client_host
+    style_notag: hh_diagrams_onprem_container_docker
+
+  - id: ["ccache/sccache", client_ccache]
+    tags: ["client"]
+    scope: client_host
+    style_notag: hh_diagrams_aws_devtools_codebuild
+
+  - id: ["git", client_git]
+    tags: ["client"]
+    scope: client_host
+    style_notag: hh_diagrams_onprem_vcs_git
+
+  - id: ["AI coding agent", ai_agent]
+    tags: ["client"]
+    scope: client_host
+    style_notag: hh_diagrams_aws_management_chatbot
+
+  - id: ["Browser", client_browser]
+    tags: ["client"]
+    scope: client_host
+    style_notag: hh_diagrams_azure_general_browser
+
+  - id: ["pip", client_pip]
+    tags: ["client"]
+    scope: client_host
+    style_notag: hh_diagrams_programming_language_python
+

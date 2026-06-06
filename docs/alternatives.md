@@ -2,9 +2,95 @@
 
 Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-compose.yml`).
 
-## Web server / reverse proxy
+## Reverse proxy / API gateway
 
 - **[Angie](https://docker.angie.software/angie:latest)** (selected)
+- <https://github.com/apache/apisix> (Apache 2.0)
+  - + full API gateway with dynamic routing, load balancing, circuit breaking, health checks
+  - + ai-proxy plugin for LLM request normalization (8+ providers, Ollama via openai-compatible)
+  - + ai-rate-limiting (token-based), ai-prompt-decorator plugins
+  - + mcp-bridge plugin converts stdio MCP servers to HTTP SSE
+  - + can replace both Angie and LiteLLM as a single service
+  - + Prometheus metrics (with llm_model labels) and OTel tracing
+  - + Docker deployment, no database required (standalone mode)
+  - - LLM proxy less feature-rich than LiteLLM (no virtual keys, no cost tracking, fewer providers)
+  - - MCP bridge is stdio-to-SSE only, not a full MCP gateway (no OAuth2, no OpenAPI-to-MCP conversion)
+  - - ai-proxy only routes to one provider per route (no multi-provider load balancing)
+- <https://github.com/Kong/kong> (Apache 2.0 / Enterprise)
+  - + one of the most mature API gateways, DB-less mode for simple deployments
+  - + ai-proxy plugin for single-provider LLM routing (Enterprise for multi-provider)
+  - + MCP governance features (Enterprise only)
+  - + Prometheus metrics, OTel tracing
+  - - multi-provider load balancing, fallback, and semantic routing require AI Proxy Advanced (Enterprise)
+  - - MCP features are behind Kong Konnect paid tier
+  - - OSS tier provides single-provider-per-route LLM proxy only, not a full LiteLLM replacement
+- <https://github.com/alibaba/higress> (Apache 2.0, CNCF Sandbox)
+  - + unified LLM gateway with multi-model load balancing, token rate limiting, caching
+  - + MCP server hosting via plugin mechanism, openapi-to-mcp conversion tool
+  - + full API gateway built on Istio/Envoy (routing, WAF, service discovery, JWT/OIDC)
+  - + can replace both Angie and LiteLLM as a single service with the most complete feature coverage
+  - + AI observability for LLM and MCP traffic, audit logging for MCP tool calls
+  - + Docker deployment (single all-in-one image)
+  - - primarily oriented toward Chinese market; documentation and community largely Chinese-language
+  - - Istio/Envoy foundation adds operational complexity compared to nginx/APISIX
+- <https://github.com/traefik/traefik> (MIT)
+  - + automatic Docker service discovery, Let's Encrypt TLS, HTTP/3
+  - + lazy DNS resolution (starts fine even if upstreams are down)
+  - - no LLM or MCP capabilities, no static file serving, no WebDAV
+- <https://github.com/caddyserver/caddy> (Apache 2.0)
+  - + automatic HTTPS, static file serving, WebDAV module
+  - + lazy DNS resolution
+  - - no Docker service discovery, no LLM or MCP capabilities
+- <https://github.com/haproxy/haproxy> (GPL-2.0)
+  - + battle-tested L4/L7 proxy, lazy DNS resolution, health checks
+  - - no static file serving, no WebDAV, manual Docker integration
+- <https://github.com/envoyproxy/envoy> (Apache 2.0)
+  - + high-performance L4/L7 proxy, dynamic xDS config, lazy DNS
+  - - extremely complex config, no static serving/WebDAV, overkill for Docker Compose
+
+## LLM proxy
+
+- **[LiteLLM](https://github.com/BerriAI/litellm)** (selected)
+  - OpenAI-compatible gateway for Ollama with Prometheus metrics and OTel tracing
+  - Also serves as MCP gateway for observability on MCP tool calls
+- <https://github.com/Portkey-ai/gateway> (MIT / Enterprise)
+  - + 250+ providers, automatic retries, weighted load balancing, fallbacks
+  - + dedicated MCP gateway with auth, access control, and tool-call observability
+  - + very lightweight (122kb, <1ms latency)
+  - - no general reverse proxy capability (cannot serve Gitea/Redmine)
+  - - no native Prometheus or OTel in OSS tier (enterprise/hosted only)
+- <https://github.com/solo-io/gloo> (Apache 2.0 / Enterprise)
+  - + AI gateway with LLM proxy (multiple providers), prompt guards, model failover
+  - + MCP gateway support (Beta, enterprise only)
+  - + general API gateway built on Envoy (routing, rate limiting, transformations)
+  - - AI and MCP features are enterprise-only (Solo Enterprise subscription)
+  - - primarily designed for Kubernetes, not Docker Compose
+- <https://github.com/Maximhq/bifrost> (Apache 2.0 / Enterprise)
+  - + 23+ providers, fallbacks, load balancing, semantic caching
+  - + Go-based with very low overhead (~11us per request)
+  - + MCP client/server/gateway listed as feature (enterprise-gated)
+  - - no general reverse proxy capability (AI-only gateway)
+  - - MCP gateway is enterprise-only
+
+### nginx/OpenResty LLM Proxy Modules
+
+- <https://github.com/z1o/openbridge> — SSE streaming, round-robin, model aliases, hot-reload config
+- <https://github.com/hannes-sistemica/nginx-llm-proxy> — model routing, per-key token tracking, admin UI, health checks
+- <https://github.com/onewesong/one-api-nginx> — decoupled auth, auto model routing from JSON body, Redis-backed
+- <https://github.com/harryosmar/llm-ratelimit-gateway> — RPM/TPM/USD rate limiting, SSE tail buffer, circuit breaker (OpenResty + Redis)
+- <https://github.com/BMMMM/gateii> — per-user proxy keys, token/cost tracking, provider extensibility (OpenResty)
+
+### MCP Gateways
+
+- <https://github.com/microsoft/mcp-gateway> — session-aware routing, tool gateway, Entra ID auth (C#/ASP.NET Core, K8s-native)
+- <https://github.com/aiguicai/mcp-gateway> — unified MCP gateway, auth, management API (Rust)
+- <https://github.com/loglux/authmcp-gateway> — JWT auth proxy for MCP servers (Python)
+
+## SSO / Identity
+
+- <https://github.com/authelia/authelia> — SSO / 2FA / OIDC provider; works with any reverse proxy via forward-auth
+- <https://github.com/goauthentik/authentik> — full identity management with flows and policies
+- <https://github.com/keycloak/keycloak> — enterprise SSO / IdP (heavy but feature-complete OIDC/SAML)
 
 ## APT cache
 
@@ -48,12 +134,6 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
   - <https://github.com/jameschrisa/Ollama_Tuning_Guide>
   - <https://deepwiki.com/ollama/ollama/4.6-quantization>
 - <https://github.com/mudler/LocalAI>
-
-### LLM proxy
-
-- **[LiteLLM](https://github.com/BerriAI/litellm)** (selected)
-  - OpenAI-compatible gateway for Ollama with Prometheus metrics and OTel tracing
-  - Also serves as MCP gateway for observability on MCP tool calls
 
 ### Memory
 
@@ -176,3 +256,9 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
 ### Telemetry gateway
 
 - **[OpenTelemetry Collector](https://opentelemetry.io/docs/collector/)** (selected)
+
+
+## Terminal access
+
+- **[ttyd](https://github.com/tsl0922/ttyd)** (selected)
+- <https://github.com/gbasin/agentboard>

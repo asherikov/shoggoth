@@ -4,6 +4,10 @@ server:
     http_listen_port: 3200
     log_level: warn
 
+memory:
+    automemlimit_enabled: true
+    automemlimit_ratio: 0.8
+
 distributor:
     receivers:
         otlp:
@@ -18,6 +22,22 @@ storage:
             path: /var/tempo/traces
         wal:
             path: /var/tempo/wal
+
+live_store:
+    wal:
+        path: /var/tempo/live-store/traces
+    max_live_traces_bytes: 100000000
+    complete_block_timeout: 10m
+    shutdown_marker_dir: /var/tempo/live-store/shutdown-marker
+
+backend_scheduler:
+    provider:
+        retention:
+            interval: 1h
+        compaction:
+            compaction:
+                block_retention: 168h
+                compacted_block_retention: 1h
 
 metrics_generator:
     registry:
@@ -39,6 +59,8 @@ metrics_generator:
 
 overrides:
     defaults:
+        global:
+            max_bytes_per_trace: 1000000
         metrics_generator:
             processors: [span-metrics]
             processor:

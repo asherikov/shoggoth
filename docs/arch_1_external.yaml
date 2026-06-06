@@ -1,0 +1,34 @@
+nodes:
+  # ============================================
+  # External Services Group
+  # ============================================
+  - id: ["external", external_services]
+    tags: ["external"]
+    style_notag: hh_diagrams_scope
+    graphviz:
+      fillcolor: honeydew
+
+  - id: ["APT Repositories\n(Ubuntu/Debian)", apt_repos]
+    tags: ["external"]
+    scope: external_services
+    style_notag: hh_diagrams_generic_os_ubuntu
+
+  - id: ["Docker Registries", docker_registries]
+    tags: ["external"]
+    scope: external_services
+    style_notag: hh_diagrams_alibabacloud_compute_container_service
+
+  - id: ["PyPI\n(python packages)", pypi_index]
+    tags: ["external"]
+    scope: external_services
+    style_notag: hh_diagrams_programming_language_python
+
+  - id: ["External DNS", external_dns]
+    tags: ["external"]
+    scope: external_services
+    style_notag: hh_diagrams_alibabacloud_web_dns
+
+  - id: ["Cloud\nOllama", cloud_ollama]
+    tags: ["external"]
+    scope: external_services
+    style_notag: hh_diagrams_azure_aimachinelearning_azure_openai

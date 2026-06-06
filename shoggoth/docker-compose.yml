@@ -482,8 +482,6 @@ services:
         depends_on:
             redmine-db:
                 condition: service_started
-            dns:
-                condition: service_started
             bringup:
                 condition: service_completed_successfully
         command: rails server -b 0.0.0.0 -p 80
@@ -598,6 +596,7 @@ services:
         image: grafana/tempo:latest
         container_name: tempo.${SHOGGOTH_DOMAIN}
         user: "0:0"
+        stop_grace_period: 30s
         deploy:
             resources:
                 limits:

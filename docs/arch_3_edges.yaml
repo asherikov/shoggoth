@@ -1,0 +1,265 @@
+edges:
+  # ============================================
+  # Client -> Shoggoth Services
+  # ============================================
+
+  # APT client flow (via proxy)
+  - link: [client_apt, proxy_apt]
+    style: use_edge
+  - link: [proxy_apt, apt_cache]
+    style: use_edge
+
+  # Docker client flow (direct to docker-cache)
+  - link: [client_docker, docker_cache]
+    style: use_edge
+
+  # Build cache flow (via proxy)
+  - link: [client_ccache, build_cache]
+    style: use_edge
+
+  # Git client flow (direct SSH)
+  - link: [client_git, git_service]
+    style: use_edge
+
+  # AI agent flow (via proxy → LiteLLM MCP gateway)
+  - link: [ai_agent, proxy_ai]
+    style: use_edge
+  - link: [proxy_ai, litellm_service]
+    style: use_edge
+  - link: [litellm_service, ollama_service]
+    style: use_edge
+
+  # Git-pages flow (via proxy)
+  - link: [client_browser, proxy_git_pages]
+    style: use_edge
+  - link: [proxy_git_pages, git_pages_service]
+    style: use_edge
+
+  # Browser flow (via HTTP proxy)
+  - link: [client_browser, proxy_git_http]
+    style: use_edge
+  - link: [proxy_git_http, git_service]
+    style: use_edge
+  - link: [client_browser, home_page]
+    style: use_edge
+  - link: [client_browser, dns_service]
+    style: use_edge
+  - link: [client_browser, proxy_slave_term]
+    style: use_edge
+
+  # Redmine flow (via proxy)
+  - link: [client_browser, proxy_redmine]
+    style: use_edge
+  - link: [proxy_redmine, redmine_service]
+    style: use_edge
+
+  # Proxpi flow (via proxy)
+  - link: [client_pip, proxy_proxpi]
+    style: use_edge
+  - link: [proxy_proxpi, proxpi_service]
+    style: use_edge
+
+  # Kestra flow (via proxy)
+  - link: [client_browser, proxy_kestra]
+    style: use_edge
+  - link: [proxy_kestra, kestra_service]
+    style: use_edge
+
+  # Docker registry flow (via proxy)
+  - link: [client_docker, proxy_docker_registry]
+    style: use_edge
+  - link: [proxy_docker_registry, docker_registry]
+    style: use_edge
+
+  # Monitoring flow (via proxy)
+  - link: [client_browser, proxy_grafana]
+    style: use_edge
+  - link: [proxy_grafana, grafana_service]
+    style: use_edge
+
+  # ============================================
+  # Internal Shoggoth Service Interactions
+  # ============================================
+
+  # Gitea ecosystem
+  - link: [git_service, gitea_runner]
+    style: use_edge
+  - link: [gitea_runner, docker_cache]
+    style: use_edge
+  - link: [gitea_runner, git_pages_service]
+    style: use_edge
+  - link: [mcp_gitea, git_service]
+    style: use_edge
+  - link: [slave, apt_cache]
+    style: use_edge
+  - link: [slave, git_service]
+    style: use_edge
+  - link: [slave, build_cache]
+    style: use_edge
+  - link: [slave, git_pages_service]
+    style: use_edge
+  - link: [slave, proxpi_service]
+    style: use_edge
+  - link: [slave, litellm_service]
+    style: use_edge
+  - link: [gitea_runner, slave_dind]
+    style: use_edge
+  - link: [kestra_service, slave_dind]
+    style: use_edge
+
+  # Slave-dind infrastructure
+  - link: [slave_dind, docker_registry]
+    style: use_edge
+  - link: [slave_dind, git_service]
+    style: use_edge
+  - link: [proxy_slave_term, slave]
+    style: use_edge
+
+  # Bringup config rendering
+  - link: [http, bringup_service]
+    style: bringup_edge
+  - link: [dns_service, bringup_service]
+    style: bringup_edge
+  - link: [litellm_service, bringup_service]
+    style: bringup_edge
+  - link: [gitea_runner, bringup_service]
+    style: bringup_edge
+  - link: [redmine_db, bringup_service]
+    style: bringup_edge
+  - link: [redmine_service, bringup_service]
+    style: bringup_edge
+  - link: [kestra_db, bringup_service]
+    style: bringup_edge
+  - link: [kestra_service, bringup_service]
+    style: bringup_edge
+  - link: [grafana_service, bringup_service]
+    style: bringup_edge
+  - link: [git_service, bringup_service]
+    style: bringup_edge
+  - link: [kestra_service, kestra_init]
+    style: bringup_edge
+
+  # Docker Compose startup dependencies
+  - link: [slave_dind, git_service, bringup_slave-dind_git]
+    style: bringup_edge
+  - link: [slave_dind, docker_registry, bringup_slave-dind_docker-registry]
+    style: bringup_edge
+
+  - link: [http, apt_cache]
+    style: bringup_edge
+  - link: [http, docker_registry]
+    style: bringup_edge
+  - link: [http, ollama_service]
+    style: bringup_edge
+  - link: [http, litellm_service]
+    style: bringup_edge
+  - link: [http, git_service]
+    style: bringup_edge
+  - link: [http, git_pages_service]
+    style: bringup_edge
+  - link: [http, redmine_service]
+    style: bringup_edge
+  - link: [http, proxpi_service]
+    style: bringup_edge
+  - link: [http, kestra_service]
+    style: bringup_edge
+  - link: [http, grafana_service]
+    style: bringup_edge
+
+  - link: [litellm_service, ollama_service, bringup_litellm_ollama]
+    style: bringup_edge
+  - link: [litellm_service, mcp_gitea, bringup_litellm_mcp-gitea]
+    style: bringup_edge
+  - link: [litellm_service, basic_memory_service, bringup_litellm_basic-memory]
+    style: bringup_edge
+
+  - link: [gitea_runner, slave_dind, bringup_gitea-runner_slave-dind]
+    style: bringup_edge
+
+  - link: [redmine_service, redmine_db, bringup_redmine_redmine-db]
+    style: bringup_edge
+
+  - link: [kestra_service, kestra_db, bringup_kestra_kestra-db]
+    style: bringup_edge
+  - link: [kestra_service, slave_dind, bringup_kestra_slave-dind]
+    style: bringup_edge
+
+  # Redmine ecosystem
+
+  # Layout edge: pull redmine group closer to proxy layer
+  - link: [build_cache, redmine_service]
+    style: use_edge
+    graphviz:
+      style: invis
+
+  # Layout edge: pull AI group closer to proxy layer
+  - link: [home_page, litellm_service]
+    style: use_edge
+    graphviz:
+      style: invis
+
+  # Kestra flow triggers
+  - link: [git_service, kestra_service]
+    style: use_edge
+  - link: [redmine_service, kestra_service]
+    style: use_edge
+
+  - link: [kestra_service, kestra_db]
+    style: use_edge
+
+  # basic memory -> litellm (embeddings)
+  - link: [basic_memory_service, litellm_service]
+    style: use_edge
+
+  # litellm -> mcp servers (MCP gateway)
+  - link: [litellm_service, mcp_gitea]
+    style: use_edge
+  - link: [litellm_service, basic_memory_service]
+    style: use_edge
+
+  - link: [ai_agent, otelcol_service]
+    style: use_edge
+
+  # litellm -> otelcol (prometheus metrics + otel tracing)
+  - link: [litellm_service, otelcol_service]
+    style: use_edge
+
+  # git -> otelcol (OTLP gRPC traces)
+  - link: [git_service, otelcol_service]
+    style: use_edge
+
+  # Monitoring internal flows
+  - link: [node_exporter_service, otelcol_service]
+    style: use_edge
+  - link: [cadvisor_service, otelcol_service]
+    style: use_edge
+  - link: [otelcol_service, victoria_metrics_service]
+    style: use_edge
+  - link: [otelcol_service, loki_service]
+    style: use_edge
+  - link: [otelcol_service, tempo_service]
+    style: use_edge
+  - link: [grafana_service, victoria_metrics_service]
+    style: use_edge
+  - link: [grafana_service, loki_service]
+    style: use_edge
+  - link: [grafana_service, tempo_service]
+    style: use_edge
+
+  # Tempo span metrics -> Victoria Metrics
+  - link: [tempo_service, victoria_metrics_service]
+    style: use_edge
+
+  # ============================================
+  # Shoggoth -> External Services
+  # ============================================
+  - link: [apt_cache, apt_repos]
+    style: use_edge
+  - link: [docker_cache, docker_registries]
+    style: use_edge
+  - link: [proxpi_service, pypi_index]
+    style: use_edge
+  - link: [dns_service, external_dns]
+    style: use_edge
+  - link: [ollama_service, cloud_ollama]
+    style: use_edge

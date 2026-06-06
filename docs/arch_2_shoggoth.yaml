@@ -1,0 +1,262 @@
+nodes:
+  # ============================================
+  # Shoggoth Host Boundary
+  # ============================================
+  - id: ["s.local", shoggoth_host]
+    tags: ["shoggoth"]
+    style_notag: hh_diagrams_scope
+    graphviz:
+      fillcolor: "#e8f4f8"
+
+  # Infrastructure layer
+  - id: [":53 DNS", dns_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: shoggoth_host
+    style_notag: hh_diagrams_alibabacloud_web_dns
+
+  - id: [":3128\ndocker\ncaching proxy", docker_cache]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: containers_group
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
+
+  # Proxy layer (Angie reverse proxy + build cache storage)
+  - id: ["http", http]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: shoggoth_host
+    style_notag: hh_diagrams_onprem_network_nginx
+
+  # Home page within web service
+  - id: [":80\nhome page", home_page]
+    tags: ["shoggoth"]
+    scope: http
+    style_notag: hh_diagrams_azure_web_static_apps
+
+  # Proxy services scope
+  - id: ["proxies", proxy_services]
+    tags: ["shoggoth"]
+    scope: http
+    style_notag: hh_diagrams_scope
+
+  - id: ["apt-cache.", proxy_apt]
+    tags: ["shoggoth"]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["slave-term.", proxy_slave_term]
+    tags: ["shoggoth"]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["ai.", proxy_ai]
+    tags: ["shoggoth"]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["git-pages.", proxy_git_pages]
+    tags: ["shoggoth"]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["git.", proxy_git_http]
+    tags: ["shoggoth"]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["redmine.", proxy_redmine]
+    tags: ["shoggoth"]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["proxpi.", proxy_proxpi]
+    tags: ["shoggoth"]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["kestra.", proxy_kestra]
+    tags: ["shoggoth"]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["docker-registry.", proxy_docker_registry]
+    tags: ["shoggoth"]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["grafana.", proxy_grafana]
+    tags: ["shoggoth"]
+    scope: proxy_services
+    style_notag: proxy_style
+
+  - id: ["build-cache.", build_cache]
+    tags: ["shoggoth"]
+    scope: http
+    style_notag: hh_diagrams_aws_storage_storage_gateway_cached_volume
+
+  # Packaging layer
+  - id: ["packaging", packaging_group]
+    tags: ["shoggoth"]
+    scope: shoggoth_host
+    style_notag: docker_service_style
+
+  - id: ["apt-cacher-ng", apt_cache]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: packaging_group
+    style_notag: hh_diagrams_generic_os_ubuntu
+
+  - id: ["proxpi", proxpi_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: packaging_group
+    style_notag: hh_diagrams_programming_language_python
+
+  # Executor layer
+  - id: ["slave\nDinD", slave_dind]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: shoggoth_host
+    style_notag: hh_diagrams_onprem_container_docker
+
+  - id: ["shoggoth\nslave", slave]
+    tags: ["shoggoth"]
+    scope: slave_dind
+    style_notag: hh_diagrams_onprem_ci_github_actions
+
+  # Provisioning
+  - id: ["bringup", bringup_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: shoggoth_host
+    style_notag: hh_diagrams_onprem_iac_ansible
+
+  # Containers layer
+  - id: ["containers", containers_group]
+    tags: ["shoggoth"]
+    scope: shoggoth_host
+    style_notag: docker_service_style
+
+  - id: ["docker registry", docker_registry]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: containers_group
+    style_notag: hh_diagrams_alibabacloud_compute_container_service
+
+  # Development layer - Gitea services
+  - id: ["gitea", gitea_group]
+    tags: ["shoggoth"]
+    scope: shoggoth_host
+    style_notag: docker_service_style
+
+  - id: ["gitea", git_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: gitea_group
+    style_notag: hh_diagrams_onprem_vcs_gitea
+
+  - id: ["actions runner", gitea_runner]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: gitea_group
+    style_notag: hh_diagrams_onprem_ci_github_actions
+
+  # AI layer
+  - id: ["AI", ai_group]
+    tags: ["shoggoth"]
+    scope: shoggoth_host
+    style_notag: docker_service_style
+
+  - id: ["LLM server\n(ollama)", ollama_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: ai_group
+    style_notag: hh_diagrams_azure_aimachinelearning_azure_openai
+
+  - id: ["LLM proxy\n(litellm)", litellm_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: ai_group
+    style_notag: hh_diagrams_azure_aimachinelearning_azure_openai
+
+  - id: ["basic\nmemory", basic_memory_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: ai_group
+    style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
+
+  - id: ["mcp-gitea", mcp_gitea]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: ai_group
+    style_notag: hh_diagrams_azure_aimachinelearning_cognitive_services
+
+  # Workflow layer
+  - id: ["kestra", kestra_group]
+    tags: ["shoggoth"]
+    scope: shoggoth_host
+    style_notag: docker_service_style
+
+  - id: ["kestra", kestra_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: kestra_group
+    style_notag: hh_diagrams_oci_monitoring_workflow
+
+  - id: ["kestra\nbringup", kestra_init]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: kestra_group
+    style_notag: hh_diagrams_oci_monitoring_workflow
+
+  - id: ["kestra db\n(postgres)", kestra_db]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: kestra_group
+    style_notag: hh_diagrams_onprem_database_postgresql
+
+  - id: ["git-pages", git_pages_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: gitea_group
+    style_notag: hh_diagrams_azure_web_static_apps
+
+  # Monitoring layer
+  - id: ["monitoring", monitoring_group]
+    tags: ["shoggoth"]
+    scope: shoggoth_host
+    style_notag: docker_service_style
+
+  - id: ["Grafana", grafana_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_monitoring_grafana
+
+  - id: ["Loki", loki_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_logging_loki
+
+  - id: ["Tempo", tempo_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_tracing_tempo
+
+  - id: ["Victoria\nMetrics", victoria_metrics_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_monitoring_prometheus
+
+  - id: ["OTel\ncollector", otelcol_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_aggregator_fluentd
+
+  - id: ["node\nexporter", node_exporter_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_monitoring_prometheus
+
+  - id: ["cAdvisor", cadvisor_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: monitoring_group
+    style_notag: hh_diagrams_onprem_container_docker
+
+  # Redmine layer
+  - id: ["redmine", redmine_group]
+    tags: ["shoggoth"]
+    scope: shoggoth_host
+    style_notag: docker_service_style
+
+  - id: ["redmine", redmine_service]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: redmine_group
+    style_notag: hh_diagrams_azure_devops_boards
+
+  - id: ["redmine db\n(postgres)", redmine_db]
+    tags: ["shoggoth", "shoggoth_service"]
+    scope: redmine_group
+    style_notag: hh_diagrams_onprem_database_postgresql

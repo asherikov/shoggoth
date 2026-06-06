@@ -1,0 +1,55 @@
+nodes:
+  - id: ["", proxy_style]
+    style_notag: hh_diagrams_scope
+    tags: []
+    graphviz:
+      fillcolor: lightsteelblue
+      fixedsize: true
+      width: 3.5
+      height: 1
+
+  - id: ["", docker_service_style]
+    style_notag: hh_diagrams_scope
+    tags: []
+    graphviz:
+      color: lightsteelblue
+
+edges:
+  - link: [proxy_style, proxy_style, bringup_edge]
+    style: hh_diagrams_link
+    tags: [bringup]
+    graphviz:
+      style: dashed
+      color: auto
+
+  - link: [proxy_style, proxy_style, use_edge]
+    style: hh_diagrams_link
+    graphviz:
+      color: auto
+
+views:
+  - id: external
+    style: hh_diagrams_view
+    tags: ["client", "external"]
+    neighbours: direct_with_parents
+    graphviz:
+      graph:
+        rankdir: LR
+
+  - id: architecture
+    style: hh_diagrams_view
+    tags: ["shoggoth"]
+    graphviz:
+      graph:
+        nodesep: 1.5
+        ranksep: 3
+        rankdir: LR
+
+  - id: bringup
+    style: hh_diagrams_view
+    nodes: [shoggoth_host]
+    tags: ["shoggoth_service"]
+    edge_tags: ["bringup"]
+    graphviz:
+      graph:
+        rankdir: LR
