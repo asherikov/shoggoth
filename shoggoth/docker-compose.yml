@@ -2,9 +2,6 @@ networks:
     shoggoth:
         name: shoggoth
         external: false
-    vpn:
-        name: vpn
-        external: false
         ipam:
             config:
                 - subnet: 172.20.0.0/24
@@ -43,6 +40,9 @@ x-service: &default_service
     networks:
         - shoggoth
     restart: unless-stopped
+    # dns_search appends the domain to bare names (e.g. "git" -> "git.s.local"),
+    # allowing Docker DNS (127.0.0.11) to resolve short container names via their
+    # FQDN container_name values (e.g. container_name: git.s.local)
     dns_search: ${SHOGGOTH_DOMAIN}
     logging:
         driver: json-file
@@ -50,9 +50,6 @@ x-service: &default_service
             max-size: "10m"
             max-file: "3"
             tag: "{{.Name}}"
-    # resolves names to the external host IP, not useful in internal network
-    #dns:
-    #    - 172.20.0.53
 
 x-environment: &default_environment
     OTEL_TRACES_EXPORTER: otlp
@@ -128,37 +125,23 @@ services:
         networks:
             shoggoth:
                 aliases:
-                    - api
-            vpn:
-                ipv4_address: 172.20.0.80
+                    - api.${SHOGGOTH_DOMAIN}
+                    - build-cache.${SHOGGOTH_DOMAIN}
+                    - slave-term.${SHOGGOTH_DOMAIN}
+                    - ${SHOGGOTH_DOMAIN}
         volumes:
             - ./bringup/rendered/angie/angie.conf:/etc/angie/angie.conf:ro
-            - ./angie/proxy-params.conf:/etc/angie/proxy-params.conf:ro
             - ./angie/html:/data/html:ro
             - shoggoth_angie_build_cache:/data/build_cache
             - ./setup-client.sh:/data/setup-client.sh:ro
         depends_on:
             bringup:
                 condition: service_completed_successfully
-            apt-cache:
-                condition: service_started
-            docker-registry:
-                condition: service_started
-            ollama:
-                condition: service_started
-            litellm:
-                condition: service_started
             git:
-                condition: service_started
-            git-pages:
                 condition: service_started
             redmine:
                 condition: service_started
-            proxpi:
-                condition: service_started
-            kestra:
-                condition: service_started
-            grafana:
+            slave-dind:
                 condition: service_started
         post_start:
             # needs to be writable
@@ -173,10 +156,6 @@ services:
         # https://www.dotlinux.net/blog/quick-debian-ubuntu-package-caching-proxy-setup-with-apt-cacher-ng/
         image: sameersbn/apt-cacher-ng:latest
         container_name: apt-cache.${SHOGGOTH_DOMAIN}
-        networks:
-            shoggoth:
-            vpn:
-                ipv4_address: 172.20.0.40
         volumes:
             # Cache storage directory (relative to this compose file location)
             - shoggoth_apt_cache:/var/cache/apt-cacher-ng
@@ -208,10 +187,6 @@ services:
         # https://github.com/rpardini/docker-registry-proxy
         image: rpardini/docker-registry-proxy:0.6.5
         container_name: docker-cache.${SHOGGOTH_DOMAIN}
-        networks:
-            shoggoth:
-            vpn:
-                ipv4_address: 172.20.0.30
         environment:
             !!merge <<: *default_environment
             # Common registries to cache
@@ -260,13 +235,12 @@ services:
         container_name: dns.${SHOGGOTH_DOMAIN}
         volumes:
             - ./bringup/rendered/unbound/unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
-            - ./bringup/rendered/unbound/local-data.conf:/opt/unbound/etc/unbound/local-data.conf:ro
             - ./unbound/dns-zone-blacklist/unbound/unbound.blacklist:/opt/unbound/etc/unbound/unbound.blacklist:ro
             - ./unbound/dns-zone-blacklist/unbound/unbound-nxdomain.blacklist:/opt/unbound/etc/unbound/unbound-nxdomain.blacklist:ro
         environment:
             !!merge <<: *default_environment
         networks:
-            vpn:
+            shoggoth:
                 ipv4_address: 172.20.0.53
         restart: unless-stopped
         depends_on:
@@ -279,9 +253,6 @@ services:
         !!merge <<: *default_service
         image: ghcr.io/wg-easy/wg-easy:15
         container_name: wireguard.${SHOGGOTH_DOMAIN}
-        networks:
-            vpn:
-                ipv4_address: 172.20.0.2
         ports:
             - "51820:51820/udp"
             - "51821:51821/tcp"
@@ -702,10 +673,6 @@ services:
         # /var/lib/docker/containers/<id>/ directories (owned by root:root 0700)
         user: "0:0"
         container_name: otelcol.${SHOGGOTH_DOMAIN}
-        networks:
-            shoggoth:
-            vpn:
-                ipv4_address: 172.20.0.60
         volumes:
             - ./monitoring/otelcol/config.yaml:/etc/otelcol-contrib/config.yaml:ro
             - /var/lib/docker/containers:/var/lib/docker/containers:ro

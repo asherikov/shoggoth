@@ -27,7 +27,6 @@ export REDMINE_TOKEN
 mkdir -p /shoggoth/bringup/rendered/secrets
 
 mkdir -p /shoggoth/bringup/rendered/unbound
-envsubst '${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/unbound_local-data.conf > /shoggoth/bringup/rendered/unbound/local-data.conf
 envsubst '${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/unbound.conf > /shoggoth/bringup/rendered/unbound/unbound.conf
 
 generate_secret /shoggoth/bringup/auto_secrets/kestra-db-password.txt
