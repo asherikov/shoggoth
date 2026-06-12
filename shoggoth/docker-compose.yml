@@ -29,6 +29,8 @@ volumes:
         name: "shoggoth_cdash_db"
     shoggoth_cdash_storage:
         name: "shoggoth_cdash_storage"
+    shoggoth_openbao_data:
+        name: "shoggoth_openbao_data"
 
 secrets:
     gitea_server_token:
@@ -72,6 +74,8 @@ services:
             - ./bringup:/shoggoth/bringup
             # private directory (user-provided tokens and config files)
             - ./private:/shoggoth/private:ro
+            # openbao persistent volume (to read root token after init)
+            - shoggoth_openbao_data:/shoggoth/openbao-data
             # persistent data directories (mkdir + chown for correct ownership)
             - ./git/data:/shoggoth/data/gitea
             - ./git/runner/data:/shoggoth/data/gitea-runner
@@ -87,6 +91,9 @@ services:
             - gitea_server_token
             - redmine_token
         entrypoint: /shoggoth/bringup/bringup.sh
+        depends_on:
+            openbao:
+                condition: service_healthy
 
     slave-dind:
         image: docker:dind
@@ -609,6 +616,26 @@ services:
         depends_on:
             bringup:
                 condition: service_completed_successfully
+
+    openbao:
+        # https://openbao.org/
+        # Secret storage: KV v2 store for shoggoth secrets, web UI for operators
+        !!merge <<: *default_service
+        image: openbao/openbao:latest
+        container_name: openbao.${SHOGGOTH_DOMAIN}
+        volumes:
+            - shoggoth_openbao_data:/openbao/file
+            - ./openbao/config/openbao.hcl:/shoggoth/openbao/openbao.hcl:ro
+        environment:
+            !!merge <<: *default_environment
+            BAO_ADDR: http://openbao:80
+        command: server -config=/shoggoth/openbao/openbao.hcl
+        healthcheck:
+            test: ["CMD-SHELL", "bao status || [ $? -eq 2 ]"]
+            interval: 5s
+            timeout: 3s
+            retries: 30
+            start_period: 10s
 
     grafana:
         # https://grafana.com/

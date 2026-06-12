@@ -364,3 +364,55 @@ own DNS records on start/stop.
   - - different protocol (Noise Protocol Framework), not WireGuard — smaller ecosystem
   - - no automatic enrollment; certificates must be signed and distributed manually
   - - userspace-only (slightly higher latency than kernel WireGuard)
+
+## Secret storage
+
+- **[OpenBao](https://openbao.org/)** (selected)
+  - Vault fork (CNCF sandbox, BSL 1.1 → Apache 2.0 after 5 years); single container, integrated Raft storage, built-in web UI
+  - Bringup generates/reads secrets via KV v2 API (`bao_get_or_generate` pattern: GET first, generate and PUT on 404)
+  - Services continue to consume per-UID bind-mounted rendered files — no HTTP client needed at runtime
+  - Root token stored on persistent volume, single unseal key (1-of-1), auto-unseal on container restart via init container
+  - Web UI at `openbao.s.local:80` for operators to view, rotate, and manually set secrets (no TLS, Docker network only)
+  - ~150MB RAM, single container, no external database
+  - + eliminates opaque `auto_secrets/` directory — secrets are queryable, auditable, and no longer scattered across the host
+  - + idempotent generation: `bao_get_or_generate` returns existing value if present, making bringup safe to re-run
+  - + web UI gives operator visibility into all secrets without host filesystem access
+  - + `jq`-based JSON parsing/construction in bringup handles arbitrary secret values (quotes, backslashes, special chars)
+  - + inject-once pattern with flag file (`shoggoth-injected`) migrates existing `auto_secrets/` and `private/` files into OpenBao on first boot
+  - - seal/unseal ceremony adds operational complexity vs. a plain file store (mitigated by auto-unseal init container)
+  - - root token used directly by bringup (no AppRole/restricted policy yet)
+  - - BSL 1.1 license with delayed Apache 2.0 conversion (5-year wait)
+- <https://github.com/hashicorp/vault> (BSL 1.1 → MPL 2.0 after 5 years)
+  - + original project, largest ecosystem of clients, plugins, and integrations
+  - + same KV v2 engine, same API — bringup scripts would be identical
+  - + dynamic secrets (database credentials, PKI) for future use
+  - - BSL 1.1 license with stricter field-of-use restrictions than OpenBao's BSL
+  - - seal/unseal ceremony with same operational overhead as OpenBao, no lighter
+  - - heavier resource usage (~200-300MB RAM minimum)
+- <https://github.com/Infisical/infisical> (MIT core, Enterprise license)
+  - + purpose-built secret management with native Kubernetes/Docker integration
+  - + web UI, versioning, secret rotation, audit logs, team RBAC
+  - + official CLI for `infisical fetch` in bringup scripts
+  - - 3+ containers required (API, frontend, database) — ~4GB RAM minimum
+  - - features like scanning, PKI, dynamic secrets are unused overhead for shoggoth
+  - - runtime API dependency for service injection still has the HTTP client availability problem
+- <https://github.com/ansible/ansible> (GPL-3.0)
+  - + `ansible-vault` encrypts secrets at rest, simple CLI, no server
+  - + can template per-UID secret files with `template` module
+  - - no web UI, no API, no runtime access — purely a provisioning tool
+  - - `ansible-vault` requires manual password entry or password file on disk
+  - - doesn't solve the "where do generated secrets live" problem — just encrypts existing files
+- Purpose-built secret store (~500 LOC, single binary)
+  - + minimal footprint, exactly shoggoth's needs (generate, get, rotate, web UI)
+  - + SQLite-backed, no external database, single container
+  - + CLI for bringup (`secret-store generate`, `secret-store get`, `secret-store rotate`)
+  - - custom code to maintain, test, and secure — reinventing a subset of what OpenBao provides
+  - - no community, no audits, no security advisories
+  - - feature scope would creep toward what OpenBao already provides (versioning, access control, audit)
+- Per-UID bind mounts only (previous approach, no secret store)
+  - + zero infrastructure — just files on disk with correct ownership
+  - + no runtime dependency, no network calls, debuggable on host filesystem
+  - - `auto_secrets/` directory is opaque — no way to query, audit, or rotate secrets without host access
+  - - shared secrets between different-UID services need separate copies with correct ownership
+  - - each new service requires UID knowledge and mkdir/chown/chmod boilerplate in bringup
+  - - no web UI for operators to view or rotate secrets
