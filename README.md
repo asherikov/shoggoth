@@ -57,6 +57,7 @@ configurable domain, set to `s.local` by default.
   - `kestra.<domain>` — Kestra workflow orchestration.
   - `slave-dind.<domain>` -- Docker-in-Docker service for CI and workflow executors:
     - `slave-term.<domain>` — interactive web terminal (ttyd + tmux + Qwen Code).
+  - `cdash.<domain>` — CDash test result dashboard (CTest/GTest XML submissions).
 - Project management:
   - `redmine.<domain>` — Redmine project management server.
 - LLM and coding agents:

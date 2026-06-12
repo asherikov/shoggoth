@@ -81,6 +81,23 @@ envsubst '${GITEA_SERVER_TOKEN}' < /shoggoth/bringup/templates/litellm_config.ya
 mkdir -p /shoggoth/bringup/rendered/angie
 envsubst '${SHOGGOTH_DOMAIN} ${GITEA_SERVER_TOKEN} ${REDMINE_TOKEN}' < /shoggoth/bringup/templates/angie.conf > /shoggoth/bringup/rendered/angie/angie.conf
 
+generate_secret /shoggoth/bringup/auto_secrets/cdash-db-password.txt
+generate_secret /shoggoth/bringup/auto_secrets/cdash-app-key.txt
+mkdir -p /shoggoth/bringup/rendered/secrets/cdash-db
+rm -rf /shoggoth/bringup/rendered/secrets/cdash-db/password
+cat /shoggoth/bringup/auto_secrets/cdash-db-password.txt > /shoggoth/bringup/rendered/secrets/cdash-db/password
+chown 70:70 /shoggoth/bringup/rendered/secrets/cdash-db/password
+chmod 400 /shoggoth/bringup/rendered/secrets/cdash-db/password
+mkdir -p /shoggoth/bringup/rendered/secrets/cdash
+rm -rf /shoggoth/bringup/rendered/secrets/cdash/app-key
+printf 'base64:%s' "$(cat /shoggoth/bringup/auto_secrets/cdash-app-key.txt | base64 -w0)" > /shoggoth/bringup/rendered/secrets/cdash/app-key
+chown 33:33 /shoggoth/bringup/rendered/secrets/cdash/app-key
+chmod 400 /shoggoth/bringup/rendered/secrets/cdash/app-key
+rm -rf /shoggoth/bringup/rendered/secrets/cdash/db-password
+cat /shoggoth/bringup/auto_secrets/cdash-db-password.txt > /shoggoth/bringup/rendered/secrets/cdash/db-password
+chown 33:33 /shoggoth/bringup/rendered/secrets/cdash/db-password
+chmod 400 /shoggoth/bringup/rendered/secrets/cdash/db-password
+
 mkdir -p /shoggoth/vpn/wireguard/data
 
 find /shoggoth/bringup/rendered -type d -exec chmod a+rx {} +
@@ -94,6 +111,9 @@ chmod 400 /shoggoth/bringup/rendered/secrets/redmine-db/redmine/password
 chmod 400 /shoggoth/bringup/rendered/secrets/grafana/admin-password
 chmod 400 /shoggoth/bringup/rendered/secrets/gitea-runner-token
 chmod 400 /shoggoth/bringup/rendered/secrets/redmine/secret-key-base
+chmod 400 /shoggoth/bringup/rendered/secrets/cdash-db/password
+chmod 400 /shoggoth/bringup/rendered/secrets/cdash/app-key
+chmod 400 /shoggoth/bringup/rendered/secrets/cdash/db-password
 
 mkdir -p /shoggoth/data/gitea
 chown 1000:1000 /shoggoth/data/gitea

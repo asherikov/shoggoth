@@ -25,6 +25,10 @@ volumes:
         name: "shoggoth_redmine_files"
     shoggoth_redmine_bundle_cache:
         name: "shoggoth_redmine_bundle_cache"
+    shoggoth_cdash_db:
+        name: "shoggoth_cdash_db"
+    shoggoth_cdash_storage:
+        name: "shoggoth_cdash_storage"
 
 secrets:
     gitea_server_token:
@@ -556,6 +560,55 @@ services:
                 condition: service_completed_successfully
             slave-dind:
                 condition: service_healthy
+
+    # https://github.com/Kitware/CDash
+    # Test result aggregator: ingests CTest/GTest XML submissions, displays test dashboards
+    # Grafana integration possible via Infinity datasource plugin querying CDash GraphQL API
+    cdash:
+        !!merge <<: *default_service
+        image: kitware/cdash:latest
+        container_name: cdash.${SHOGGOTH_DOMAIN}
+        environment:
+            !!merge <<: *default_environment
+            APP_URL: http://cdash.${SHOGGOTH_DOMAIN}
+            DB_HOST: cdash-db
+            DB_PORT: "5432"
+            DB_DATABASE: cdash
+            DB_USERNAME: cdash
+            QUEUE_CONNECTION: database
+        volumes:
+            - shoggoth_cdash_storage:/cdash/storage
+            - ./cdash/entrypoint.sh:/cdash/entrypoint-wrapper.sh:ro
+            - ./bringup/rendered/secrets/cdash/app-key:/run/secrets/cdash_app_key:ro
+            - ./bringup/rendered/secrets/cdash/db-password:/run/secrets/cdash_db_password:ro
+        entrypoint: [/cdash/entrypoint-wrapper.sh]
+        command: [start-website]
+        depends_on:
+            cdash-db:
+                condition: service_healthy
+            bringup:
+                condition: service_completed_successfully
+
+    cdash-db:
+        !!merge <<: *default_service
+        image: postgres:18-alpine
+        container_name: cdash-db.${SHOGGOTH_DOMAIN}
+        environment:
+            !!merge <<: *default_environment
+            POSTGRES_DB: cdash
+            POSTGRES_USER: cdash
+            POSTGRES_PASSWORD_FILE: /run/secrets/cdash_db_password
+        volumes:
+            - shoggoth_cdash_db:/var/lib/postgresql
+            - ./bringup/rendered/secrets/cdash-db/password:/run/secrets/cdash_db_password:ro
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U cdash"]
+            interval: 1s
+            timeout: 3s
+            retries: 120
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
 
     grafana:
         # https://grafana.com/
