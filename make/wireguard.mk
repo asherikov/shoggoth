@@ -1,5 +1,5 @@
 WG_IF?=wg0
-WG_CONF?=./shoggoth/private/${WG_IF}.conf
+WG_CONF?=./private/${WG_IF}.conf
 
 in:
 	sed -i "s/Endpoint = [0-9.]*:/Endpoint = ${HOST_IP}:/" ${WG_CONF}

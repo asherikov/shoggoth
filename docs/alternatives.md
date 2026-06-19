@@ -92,6 +92,69 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
 - <https://github.com/goauthentik/authentik> — full identity management with flows and policies
 - <https://github.com/keycloak/keycloak> — enterprise SSO / IdP (heavy but feature-complete OIDC/SAML)
 
+## LDAP directory
+
+- **[OpenLDAP](https://www.openldap.org/)** (selected, via [osixia/openldap](https://hub.docker.com/r/osixia/openldap))
+  - Full RFC 4511 LDAPv3 server with overlays (memberof, ppolicy, accesslog, syncprov)
+  - openldap `post_start` script creates OUs, users, and groups via `ldapadd`/`ldapmodify`; passwords as SSHA hashes from OpenBao
+  - `slapo-memberof` overlay provides real (stored) `memberOf` attribute for group-based auth
+  - Config admin (`cn=admin,cn=config`) for overlay and module management via `cn=config` tree
+  - Used as auth source by Gitea (Admin API auth source), CDash (LdapRecord-Laravel env vars), Redmine (manual config), OpenBao (LDAP auth method with group→policy mapping)
+  - + complete LDAP read/write — arbitrary schema, replication (syncrepl), access controls (ACLs), password policies
+  - + largest ecosystem of tools, documentation, and client compatibility — everything works with OpenLDAP
+  - + `slapo-memberof` overlay provides real (stored) `memberOf` attribute, not virtual
+  - + osixia image provides `_FILE` env vars for Docker secrets integration
+  - - no built-in web UI — phpLDAPadmin deployed separately (see phpldapadmin service in docker-compose.yml)
+  - - no REST/GraphQL API — all management via LDAP operations or `cn=config`
+  - - complex configuration: overlay ordering, ACL syntax, index tuning
+  - - ~50–150 MB RAM (smaller than enterprise options, but 3–5× lldap)
+- <https://github.com/lldap/lldap> (Mozilla Public License 2.0)
+  - Lightweight LDAP server in Rust with SQLite backend and built-in web UI
+  - + ~20–50 MB RAM, ~30 MB Docker image (Rust + Alpine + SQLite) — lightest LDAP option by far
+  - + built-in web UI for user/group management — no phpLDAPadmin or desktop client needed
+  - + GraphQL API for scripted user/group operations (Terraform provider available)
+  - + supports `_FILE` env vars for Docker secrets integration
+  - + zero-knowledge proof password storage — password hashes never exposed via LDAP
+  - - intentionally NOT a full LDAP server: no arbitrary schema, no LDAP browsing tools, no Synology compatibility
+  - - group membership cannot be modified via LDAP Modify — must use GraphQL API
+  - - no OAuth/OIDC provider — would need Authelia/Keycloak for SSO flows
+  - - no Samba/Windows AD integration (WIP)
+  - - `memberOf` attribute is virtual (computed at query time), not stored — some clients expect it to be persistent
+  - - not compatible with some services.
+- <https://www.port389.org/> (389 Directory Server, GPL-3.0)
+  - Red Hat's enterprise LDAP server (basis for FreeIPA); multi-master replication, account lockout policies
+  - + full LDAP compliance with replication, chaining, password policies, account policy plugin
+  - + Cockpit web UI plugin available (separate install) for basic management
+  - + `dsconf` CLI for scripted setup and configuration
+  - - no built-in web UI — Cockpit plugin is a separate, heavier installation
+  - - no native REST API
+  - - ~150–400 MB RAM; enterprise-focused configuration complexity
+  - - Docker images exist but setup involves `dscreate`/`dsconf` ceremony
+- <https://directory.apache.org/apacheds/> (Apache License 2.0)
+  - Java-based LDAP server with Kerberos and custom partition support
+  - + Apache Directory Studio desktop client for management (not web-based)
+  - + supports SASL, Kerberos, custom partitions
+  - - Java overhead (~150–300 MB RAM); less actively maintained
+  - - no web UI, no REST API
+  - - weaker performance than native C/Rust implementations
+- <https://github.com/389ds/freeipa> (GPL-3.0)
+  - Full identity management: 389 DS + Kerberos + Dogtag CA + HBAC + sudo rules
+  - + comprehensive web UI, JSON-RPC API, OTP, SSH key management, host-based access control
+  - + full LDAP compliance backed by 389 Directory Server
+  - - ~500 MB–1.5 GB RAM (389 DS + Kerberos + CA + Dogtag)
+  - - not designed for Docker — community images exist but are complex and fragile
+  - - requires FQDN + DNS; designed for enterprise Linux fleets, not self-hosted/homelab
+  - - massive overkill when you only need centralized auth for 4–5 web services
+- <https://github.com/samba-team/samba> (GPL-3.0)
+  - Full Active Directory domain controller (Samba 4 AD DC)
+  - + complete AD compatibility: GPOs, trust relationships, Kerberos, DNS
+  - + full LDAP read/write with AD-compatible schema
+  - - ~200–500 MB RAM; very resource-heavy for simple auth
+  - - not designed for containerization; requires careful DNS/Kerberos setup
+  - - Windows-centric; use RSAT or third-party tools for management (no web UI)
+  - - DNS server requirement conflicts with existing Unbound setup
+  - - overkill unless Windows domain integration is specifically needed
+
 ## APT cache
 
 - **[apt-cacher-ng](https://hub.docker.com/r/sameersbn/apt-cacher-ng)** (selected)

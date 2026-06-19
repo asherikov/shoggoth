@@ -7,26 +7,37 @@ INIT_FLAG="${OPENBAO_DATA}/.shoggoth-initialized"
 UNSEAL_KEY_FILE="${OPENBAO_DATA}/.shoggoth-unseal-key"
 ROOT_TOKEN_FILE="${OPENBAO_DATA}/shoggoth/root-token"
 
+. /shoggoth/bringup/bao_helpers.sh
+
+bao_wait_for_api() {
+    echo "shoggoth: Waiting for OpenBao API..."
+    for i in $(seq 1 60); do
+        local http_code
+        http_code="$(curl -s -o /dev/null -w '%{http_code}' "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null || true)"
+        if [ -n "${http_code}" ] && [ "${http_code}" != "000" ]; then
+            echo "shoggoth: OpenBao is ready (HTTP ${http_code})."
+            return 0
+        fi
+        sleep 1
+    done
+    echo "shoggoth: ERROR: OpenBao API never became available after 60s" >&2
+    return 1
+}
+
 bao_init() {
     if [ -f "${INIT_FLAG}" ]; then
-        echo "OpenBao already initialized (flag file), unsealing..."
+        echo "shoggoth: OpenBao already initialized (flag file), unsealing..."
+        bao_wait_for_api || exit 1
         bao_unseal
         return
     fi
 
-    echo "Waiting for OpenBao API..."
-    for i in $(seq 1 60); do
-        if curl -sf "${OPENBAO_ADDR}/v1/sys/health" > /dev/null 2>&1; then
-            echo "OpenBao is ready."
-            break
-        fi
-        sleep 1
-    done
+    bao_wait_for_api || exit 1
 
     local health
     health="$(curl -s "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null || true)"
     if [ -z "${health}" ]; then
-        echo "ERROR: OpenBao API never became available after 60s" >&2
+        echo "shoggoth: ERROR: OpenBao API never became available after 60s" >&2
         exit 1
     fi
 
@@ -34,16 +45,16 @@ bao_init() {
     initialized="$(printf '%s' "${health}" | jq -r '.initialized // false')"
     if [ "${initialized}" = "true" ]; then
         if [ ! -f "${UNSEAL_KEY_FILE}" ]; then
-            echo "ERROR: OpenBao is initialized but unseal key is missing. Wipe Raft data to reinitialize." >&2
+            echo "shoggoth: ERROR: OpenBao is initialized but unseal key is missing. Wipe Raft data to reinitialize." >&2
             exit 1
         fi
-        echo "OpenBao already initialized, unsealing..."
+        echo "shoggoth: OpenBao already initialized, unsealing..."
         bao_unseal
         touch "${INIT_FLAG}"
         return
     fi
 
-    echo "Initializing OpenBao..."
+    echo "shoggoth: Initializing OpenBao..."
     local init_output
     init_output="$(curl -sf -X PUT "${OPENBAO_ADDR}/v1/sys/init" \
         -H "Content-Type: application/json" \
@@ -54,8 +65,8 @@ bao_init() {
     root_token="$(printf '%s' "${init_output}" | jq -r '.root_token')"
 
     if [ -z "${unseal_key}" ] || [ -z "${root_token}" ]; then
-        echo "ERROR: Failed to parse init output" >&2
-        echo "${init_output}" >&2
+        echo "shoggoth: ERROR: Failed to parse init output" >&2
+        echo "shoggoth: ${init_output}" >&2
         exit 1
     fi
 
@@ -65,74 +76,35 @@ bao_init() {
     printf '%s' "${root_token}" > "${ROOT_TOKEN_FILE}"
     chmod 400 "${ROOT_TOKEN_FILE}"
 
-    echo "Unsealing OpenBao..."
+    echo "shoggoth: Unsealing OpenBao..."
     curl -sf -X PUT "${OPENBAO_ADDR}/v1/sys/unseal" \
         -H "Content-Type: application/json" \
         -d "{\"key\":\"${unseal_key}\"}" > /dev/null
 
-    echo "Enabling KV v2 secrets engine at /secret..."
+    echo "shoggoth: Enabling KV v2 secrets engine at /secret..."
     curl -sf -X POST "${OPENBAO_ADDR}/v1/sys/mounts/secret" \
         -H "X-Vault-Token: ${root_token}" \
         -H "Content-Type: application/json" \
-        -d '{"type":"kv-v2"}' > /dev/null 2>&1 || echo "KV v2 may already be enabled, continuing."
+        -d '{"type":"kv-v2"}' > /dev/null 2>&1 || echo "shoggoth: KV v2 may already be enabled, continuing."
 
     touch "${INIT_FLAG}"
-    echo "OpenBao initialized and unsealed successfully."
+    echo "shoggoth: OpenBao initialized and unsealed successfully."
 }
 
 bao_unseal() {
     local unseal_key
     unseal_key="$(cat "${UNSEAL_KEY_FILE}")"
-    curl -sf -X PUT "${OPENBAO_ADDR}/v1/sys/unseal" \
+    local unseal_response
+    unseal_response="$(curl -sf -X PUT "${OPENBAO_ADDR}/v1/sys/unseal" \
         -H "Content-Type: application/json" \
-        -d "{\"key\":\"${unseal_key}\"}" > /dev/null 2>&1 || true
-}
-
-bao_get_value() {
-    local path="${1}"
-    local response
-    response="$(curl -sf -H "X-Vault-Token: ${OPENBAO_TOKEN}" \
-        "${OPENBAO_ADDR}/v1/secret/data/${path}")"
-    printf '%s' "${response}" | jq -r '.data.data.value // empty'
-}
-
-bao_put() {
-    local path="${1}"
-    local key="${2}"
-    local value="${3}"
-    local payload
-    payload="$(printf '%s' "${value}" | jq -Rs . | jq -c --arg k "${key}" '{"data": {($k): .}}')"
-    curl -sf -H "X-Vault-Token: ${OPENBAO_TOKEN}" \
-        -H "Content-Type: application/json" \
-        -X POST \
-        -d "${payload}" \
-        "${OPENBAO_ADDR}/v1/secret/data/${path}" > /dev/null
-}
-
-bao_get_or_generate() {
-    local path="${1}"
-    local length="${2:-32}"
-    local value
-    value="$(bao_get_value "${path}" 2>/dev/null)" && [ -n "${value}" ] && {
-        printf '%s' "${value}"
-        return
+        -d "{\"key\":\"${unseal_key}\"}")" || {
+        echo "shoggoth: ERROR: OpenBao unseal request failed (API not ready at ${OPENBAO_ADDR})" >&2
+        exit 1
     }
-    value="$(openssl rand -base64 "${length}" | tr -dc 'a-zA-Z0-9' | head -c "${length}")"
-    bao_put "${path}" "value" "${value}"
-    printf '%s' "${value}"
-}
-
-bao_get_or_generate_hex() {
-    local path="${1}"
-    local length="${2:-24}"
-    local value
-    value="$(bao_get_value "${path}" 2>/dev/null)" && [ -n "${value}" ] && {
-        printf '%s' "${value}"
-        return
-    }
-    value="$(openssl rand -hex "${length}")"
-    bao_put "${path}" "value" "${value}"
-    printf '%s' "${value}"
+    if ! printf '%s' "${unseal_response}" | jq -e '.sealed == false' > /dev/null 2>&1; then
+        echo "shoggoth: ERROR: OpenBao unseal failed (still sealed after submitting key)" >&2
+        exit 1
+    fi
 }
 
 render_secret() {
@@ -150,8 +122,8 @@ mkdir -p /shoggoth/bringup/rendered/secrets
 
 bao_init
 
-OPENBAO_TOKEN="$(cat "${ROOT_TOKEN_FILE}")"
-export OPENBAO_TOKEN
+SHOGGOTH_VAULT_TOKEN="$(cat "${ROOT_TOKEN_FILE}")"
+export SHOGGOTH_VAULT_TOKEN
 
 GITEA_SERVER_TOKEN="$(cat /run/secrets/gitea_server_token)"
 bao_put "gitea/server-token" "value" "${GITEA_SERVER_TOKEN}"
@@ -177,9 +149,6 @@ REDMINE_DB_PASSWORD="$(bao_get_or_generate redmine/db-password)"
 render_secret "${REDMINE_DB_PASSWORD}" /shoggoth/bringup/rendered/secrets/redmine-db/redmine-db/password 70 70
 render_secret "${REDMINE_DB_PASSWORD}" /shoggoth/bringup/rendered/secrets/redmine-db/redmine/password 999 999
 
-GRAFANA_ADMIN_PASSWORD="$(bao_get_or_generate grafana/admin-password)"
-render_secret "${GRAFANA_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/grafana/admin-password 472 472
-
 REDMINE_SECRET_KEY_BASE="$(bao_get_or_generate_hex redmine/secret-key-base)"
 render_secret "${REDMINE_SECRET_KEY_BASE}" /shoggoth/bringup/rendered/secrets/redmine/secret-key-base 999 999
 
@@ -196,14 +165,173 @@ envsubst '${SHOGGOTH_DOMAIN} ${GITEA_SERVER_TOKEN} ${REDMINE_TOKEN}' < /shoggoth
 
 CDASH_DB_PASSWORD="$(bao_get_or_generate cdash/db-password)"
 CDASH_APP_KEY="$(bao_get_or_generate cdash/app-key)"
+CDASH_APP_KEY_RENDERED="base64:$(printf '%s' "${CDASH_APP_KEY}" | base64 -w0)"
 render_secret "${CDASH_DB_PASSWORD}" /shoggoth/bringup/rendered/secrets/cdash-db/password 70 70
-render_secret "base64:$(printf '%s' "${CDASH_APP_KEY}" | base64 -w0)" /shoggoth/bringup/rendered/secrets/cdash/app-key 33 33
+render_secret "${CDASH_APP_KEY_RENDERED}" /shoggoth/bringup/rendered/secrets/cdash/app-key 33 33
 render_secret "${CDASH_DB_PASSWORD}" /shoggoth/bringup/rendered/secrets/cdash/db-password 33 33
+
+SHOGGOTH_ADMIN_PASSWORD="$(bao_get_or_generate openldap/admin-password)"
+if [ -f /shoggoth/private/admin-password.txt ]; then
+    SHOGGOTH_ADMIN_PASSWORD="$(tr -d '\n\r' < /shoggoth/private/admin-password.txt)"
+    bao_put "openldap/admin-password" "value" "${SHOGGOTH_ADMIN_PASSWORD}"
+fi
+OPENLDAP_S_LDAPAUTH_PASSWORD="$(bao_get_or_generate openldap/sldapauth-password)"
+OPENLDAP_S_SLAVE_PASSWORD="$(bao_get_or_generate openldap/sslave-password)"
+render_secret "${SHOGGOTH_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/openldap/admin-password 911 911
+OPENLDAP_CONFIG_ADMIN_PASSWORD="$(bao_get_or_generate openldap/config-admin-password)"
+render_secret "${OPENLDAP_CONFIG_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/openldap-config-admin-password 911 911
+render_secret "${SHOGGOTH_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/grafana/admin-password 472 472
+export LDAP_BASE_DN="$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g; s/^/dc=/')"
+export LDAP_BIND_DN="uid=sldapauth,ou=people,${LDAP_BASE_DN}"
+export LDAP_HOST="openldap.${SHOGGOTH_DOMAIN}"
+
+render_ldap_env() {
+    local path="${1}"
+    shift
+    mkdir -p "$(dirname "${path}")"
+    {
+        printf 'LDAP_BASE_DN=%s\n' "${LDAP_BASE_DN}"
+        printf 'LDAP_HOST=%s\n' "${LDAP_HOST}"
+        printf 'LDAP_BIND_DN=%s\n' "${LDAP_BIND_DN}"
+        printf 'LDAP_BIND_PASSWORD=%s\n' "${OPENLDAP_S_LDAPAUTH_PASSWORD}"
+    } > "${path}"
+    printf '%s' "${path}"
+}
+
+render_ldap_env /shoggoth/bringup/rendered/ldap.env
+
+render_ldap_env /shoggoth/bringup/rendered/cdash/cdash.env
+{
+    printf 'APP_KEY=%s\n' "${CDASH_APP_KEY_RENDERED}"
+    printf 'DB_PASSWORD=%s\n' "${CDASH_DB_PASSWORD}"
+    printf 'CDASH_AUTHENTICATION_PROVIDER=ldap\n'
+    printf 'LOGIN_FIELD=Username\n'
+    printf 'LDAP_HOSTS=%s\n' "${LDAP_HOST}"
+    printf 'LDAP_PORT=389\n'
+    printf 'LDAP_PROVIDER=openldap\n'
+    printf 'LDAP_LOCATE_USERS_BY=uid\n'
+    printf 'LDAP_USERNAME=%s\n' "${LDAP_BIND_DN}"
+    printf 'LDAP_PASSWORD=%s\n' "${OPENLDAP_S_LDAPAUTH_PASSWORD}"
+} >> /shoggoth/bringup/rendered/cdash/cdash.env
+
+render_ldap_env /shoggoth/bringup/rendered/redmine/redmine.env
+printf 'SHOGGOTH_ADMIN_PASSWORD=%s\n' "${SHOGGOTH_ADMIN_PASSWORD}" >> /shoggoth/bringup/rendered/redmine/redmine.env
+
+render_ldap_env /shoggoth/bringup/rendered/gitea/gitea.env
+printf 'SHOGGOTH_ADMIN_PASSWORD=%s\n' "${SHOGGOTH_ADMIN_PASSWORD}" >> /shoggoth/bringup/rendered/gitea/gitea.env
+
+mkdir -p /shoggoth/bringup/rendered/phpldapadmin
+{
+    printf 'LDAP_HOST=%s\n' "${LDAP_HOST}"
+    printf 'LDAP_USERNAME=%s\n' "${LDAP_BIND_DN}"
+    printf 'LDAP_PASSWORD=%s\n' "${OPENLDAP_S_LDAPAUTH_PASSWORD}"
+} > /shoggoth/bringup/rendered/phpldapadmin/phpldapadmin.env
+chmod 444 /shoggoth/bringup/rendered/phpldapadmin/phpldapadmin.env
+
+echo "shoggoth: Generating OpenLDAP LDIF files..."
+
+ADMIN_PASS_HASH="$(slappasswd -s "${SHOGGOTH_ADMIN_PASSWORD}")"
+SLDAPAUTH_PASS_HASH="$(slappasswd -s "${OPENLDAP_S_LDAPAUTH_PASSWORD}")"
+SSLAVE_PASS_HASH="$(slappasswd -s "${OPENLDAP_S_SLAVE_PASSWORD}")"
+export ADMIN_PASS_HASH SLDAPAUTH_PASS_HASH SSLAVE_PASS_HASH
+
+MDB_DN="olcDatabase={1}mdb,cn=config"
+export MDB_DN
+
+mkdir -p /shoggoth/bringup/rendered/openldap
+
+envsubst '${LDAP_BASE_DN}' \
+    < /shoggoth/bringup/templates/openldap_config.ldif \
+    > /shoggoth/bringup/rendered/openldap/config.ldif
+
+envsubst '${LDAP_BASE_DN} ${SHOGGOTH_DOMAIN}' \
+    < /shoggoth/bringup/templates/openldap_data.ldif \
+    > /shoggoth/bringup/rendered/openldap/data.ldif
+
+envsubst '${LDAP_BASE_DN} ${ADMIN_PASS_HASH} ${SLDAPAUTH_PASS_HASH} ${SSLAVE_PASS_HASH}' \
+    < /shoggoth/bringup/templates/openldap_passwords.ldif \
+    > /shoggoth/bringup/rendered/openldap/passwords.ldif
+
+envsubst '${MDB_DN}' \
+    < /shoggoth/bringup/templates/openldap_memberof_module.ldif \
+    > /shoggoth/bringup/rendered/openldap/memberof_module.ldif
+
+envsubst '${MDB_DN}' \
+    < /shoggoth/bringup/templates/openldap_memberof_overlay.ldif \
+    > /shoggoth/bringup/rendered/openldap/memberof_overlay.ldif
+
+chmod 400 /shoggoth/bringup/rendered/openldap/config.ldif
+chmod 400 /shoggoth/bringup/rendered/openldap/data.ldif
+chmod 400 /shoggoth/bringup/rendered/openldap/passwords.ldif
+chmod 400 /shoggoth/bringup/rendered/openldap/memberof_module.ldif
+chmod 400 /shoggoth/bringup/rendered/openldap/memberof_overlay.ldif
+
+echo "shoggoth: Configuring OpenBao LDAP auth method..."
+
+LDAP_AUTH_ENABLED="$(curl -sfS -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
+    "${OPENBAO_ADDR}/v1/sys/auth" \
+    | jq -r 'has("ldap/")')"
+
+if [ "${LDAP_AUTH_ENABLED}" != "true" ]; then
+    curl -sfS -X POST "${OPENBAO_ADDR}/v1/sys/auth/ldap" \
+        -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d '{"type":"ldap"}' > /dev/null
+fi
+
+echo "shoggoth: Creating shoggoth-admin policy in OpenBao..."
+POLICY_PAYLOAD="$(jq -n \
+    --arg policy $'path "secret/data/*" { capabilities = ["create", "read", "update", "delete", "list"] }\npath "sys/*" { capabilities = ["read", "list"] }' \
+    '{policy: $policy}')"
+POLICY_FILE="$(mktemp)"
+printf '%s' "${POLICY_PAYLOAD}" > "${POLICY_FILE}"
+chmod 400 "${POLICY_FILE}"
+curl -sfS -X PUT "${OPENBAO_ADDR}/v1/sys/policies/acl/shoggoth-admin" \
+    -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d @"${POLICY_FILE}" > /dev/null
+rm -f "${POLICY_FILE}"
+
+echo "shoggoth: Configuring OpenBao LDAP auth connection..."
+S_LDAPAUTH_DN="uid=sldapauth,ou=people,${LDAP_BASE_DN}"
+LDAP_CONFIG_PAYLOAD="$(jq -n \
+    --arg url "ldap://${LDAP_HOST}:389" \
+    --arg binddn "${S_LDAPAUTH_DN}" \
+    --arg bindpass "${OPENLDAP_S_LDAPAUTH_PASSWORD}" \
+    --arg userdn "ou=people,${LDAP_BASE_DN}" \
+    --arg groupdn "ou=groups,${LDAP_BASE_DN}" \
+    '{url: $url, binddn: $binddn, bindpass: $bindpass, userdn: $userdn, userattr: "uid", groupdn: $groupdn, groupattr: "cn", groupfilter: "(member={{.UserDN}})", insecure_tls: false, starttls: false, deny_null_bind: true, username_as_alias: true}')"
+LDAP_CONFIG_FILE="$(mktemp)"
+printf '%s' "${LDAP_CONFIG_PAYLOAD}" > "${LDAP_CONFIG_FILE}"
+chmod 400 "${LDAP_CONFIG_FILE}"
+curl -sfS -X POST "${OPENBAO_ADDR}/v1/auth/ldap/config" \
+    -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d @"${LDAP_CONFIG_FILE}" > /dev/null
+rm -f "${LDAP_CONFIG_FILE}"
+
+echo "shoggoth: Mapping admins group to shoggoth-admin policy in OpenBao..."
+curl -sfS -X POST "${OPENBAO_ADDR}/v1/auth/ldap/groups/admins" \
+    -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{"policies":"shoggoth-admin"}' > /dev/null
+
+echo "shoggoth: Verifying OpenBao LDAP auth configuration..."
+LDAP_CONFIG_URL="$(curl -sfS -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
+    "${OPENBAO_ADDR}/v1/auth/ldap/config" | jq -r '.data.url // "MISSING"')"
+echo "shoggoth: OpenBao LDAP auth URL: ${LDAP_CONFIG_URL}"
 
 mkdir -p /shoggoth/vpn/wireguard/data
 
 find /shoggoth/bringup/rendered -type d -exec chmod a+rx {} +
-find /shoggoth/bringup/rendered -type f -not -path '*/secrets/*' -not -name 'config.yaml' -not -name '*.sh' -exec chmod a+r {} +
+find /shoggoth/bringup/rendered -type f -not -path '*/secrets/*' -not -name 'config.yaml' -not -name '*.sh' -not -name 'ldap.env' -not -name 'cdash.env' -not -name 'redmine.env' -not -name 'gitea.env' -not -name 'phpldapadmin.env' -not -path '*/openldap/*.ldif' -exec chmod a+r {} +
+chmod 400 /shoggoth/bringup/rendered/ldap.env
+chown 1000:1000 /shoggoth/bringup/rendered/gitea/gitea.env
+chmod 400 /shoggoth/bringup/rendered/gitea/gitea.env
+chown 999:999 /shoggoth/bringup/rendered/redmine/redmine.env
+chmod 400 /shoggoth/bringup/rendered/redmine/redmine.env
+chown 33:33 /shoggoth/bringup/rendered/cdash/cdash.env
+chmod 400 /shoggoth/bringup/rendered/cdash/cdash.env
 chmod 600 /shoggoth/bringup/rendered/litellm/config.yaml
 chmod 600 /shoggoth/bringup/rendered/kestra/config.yaml
 chmod 600 /shoggoth/bringup/rendered/angie/angie.conf

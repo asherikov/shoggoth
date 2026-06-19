@@ -29,6 +29,10 @@ volumes:
         name: "shoggoth_cdash_db"
     shoggoth_cdash_storage:
         name: "shoggoth_cdash_storage"
+    shoggoth_openldap_data:
+        name: "shoggoth_openldap_data"
+    shoggoth_openldap_config:
+        name: "shoggoth_openldap_config"
     shoggoth_openbao_data:
         name: "shoggoth_openbao_data"
 
@@ -77,7 +81,7 @@ services:
             # openbao persistent volume (to read root token after init)
             - shoggoth_openbao_data:/shoggoth/openbao-data
             # persistent data directories (mkdir + chown for correct ownership)
-            - ./git/data:/shoggoth/data/gitea
+            - ./git/gitea/data:/shoggoth/data/gitea
             - ./git/runner/data:/shoggoth/data/gitea-runner
             - shoggoth_redmine_db:/shoggoth/data/redmine-database
             - shoggoth_redmine_files:/shoggoth/data/redmine-files
@@ -231,6 +235,8 @@ services:
         container_name: docker-registry.${SHOGGOTH_DOMAIN}
         volumes:
             - shoggoth_docker_registry:/var/lib/registry
+        ports:
+            - "127.0.0.1:80:80"
         environment:
             !!merge <<: *default_environment
             REGISTRY_LOG_LEVEL: info
@@ -384,13 +390,19 @@ services:
             GITEA__opentelemetry__ENDPOINT: 'http://otelcol:4317'
             GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
         volumes:
-            - ./git/data:/data
+            - ./git/gitea/data:/data
+            - ./git/gitea/init.sh:/shoggoth/git/gitea/init.sh:ro
+            - ./bringup/rendered/gitea/gitea.env:/shoggoth/bringup/rendered/gitea/gitea.env:ro
             - ./bringup/rendered/secrets/gitea-runner-token:/run/secrets/gitea_runner_token:ro
             - /etc/timezone:/etc/timezone:ro
             - /etc/localtime:/etc/localtime:ro
+        post_start:
+            - command: ["/bin/bash", "-c", "/bin/bash /shoggoth/git/gitea/init.sh 2>&1 | tee /var/log/shoggoth-gitea-init.log"]
         depends_on:
             bringup:
                 condition: service_completed_successfully
+            openldap:
+                condition: service_healthy
 
     gitea-runner:
         !!merge <<: *default_service
@@ -477,6 +489,11 @@ services:
         volumes:
             - shoggoth_redmine_db:/var/lib/postgresql
             - ./bringup/rendered/secrets/redmine-db/redmine-db/password:/run/secrets/redmine_db_password:ro
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U redmine"]
+            interval: 1s
+            timeout: 3s
+            retries: 120
         depends_on:
             bringup:
                 condition: service_completed_successfully
@@ -499,15 +516,22 @@ services:
         volumes:
             - shoggoth_redmine_files:/usr/src/redmine/files
             - ./redmine/plugins:/usr/src/redmine/plugins
+            - ./redmine/init.sh:/shoggoth/redmine/init.sh:ro
+            - ./bringup/rendered/redmine/redmine.env:/shoggoth/bringup/rendered/redmine/redmine.env:ro
             - shoggoth_redmine_bundle_cache:/usr/local/bundle/cache/
             - ./bringup/rendered/secrets/redmine-db/redmine/password:/run/secrets/redmine_db_password:ro
             - ./bringup/rendered/secrets/redmine/secret-key-base:/run/secrets/redmine_secret_key_base:ro
+        command: rails server -b 0.0.0.0 -p 80
+        post_start:
+            # docker exec redmine.s.local cat /var/log/shoggoth-redmine-init.log
+            - command: ["/bin/bash", "-c", "/bin/bash /shoggoth/redmine/init.sh 2>&1 | tee /var/log/shoggoth-redmine-init.log"]
         depends_on:
             redmine-db:
-                condition: service_started
+                condition: service_healthy
             bringup:
                 condition: service_completed_successfully
-        command: rails server -b 0.0.0.0 -p 80
+            openldap:
+                condition: service_healthy
 
     kestra-db:
         !!merge <<: *default_service
@@ -586,15 +610,16 @@ services:
         volumes:
             - shoggoth_cdash_storage:/cdash/storage
             - ./cdash/entrypoint.sh:/cdash/entrypoint-wrapper.sh:ro
-            - ./bringup/rendered/secrets/cdash/app-key:/run/secrets/cdash_app_key:ro
-            - ./bringup/rendered/secrets/cdash/db-password:/run/secrets/cdash_db_password:ro
+            - ./bringup/rendered/cdash/cdash.env:/shoggoth/bringup/rendered/cdash/cdash.env:ro
         entrypoint: [/cdash/entrypoint-wrapper.sh]
-        command: [start-website]
+        command: ["start-website"]
         depends_on:
             cdash-db:
                 condition: service_healthy
             bringup:
                 condition: service_completed_successfully
+            openldap:
+                condition: service_healthy
 
     cdash-db:
         !!merge <<: *default_service
@@ -625,7 +650,7 @@ services:
         container_name: openbao.${SHOGGOTH_DOMAIN}
         volumes:
             - shoggoth_openbao_data:/openbao/file
-            - ./openbao/config/openbao.hcl:/shoggoth/openbao/openbao.hcl:ro
+            - ./auth/openbao/config/openbao.hcl:/shoggoth/openbao/openbao.hcl:ro
         environment:
             !!merge <<: *default_environment
             BAO_ADDR: http://openbao:80
@@ -636,6 +661,60 @@ services:
             timeout: 3s
             retries: 30
             start_period: 10s
+
+    openldap:
+        # https://github.com/osixia/docker-openldap
+        # OpenLDAP server: user/group directory for authentication
+        # TODO: LDAP_TLS is currently false; all LDAP traffic is unencrypted on the Docker network.
+        # TODO: migrate to v2
+        # Enable StartTLS or LDAPS once PKI/cert-manager infrastructure is in place.
+        !!merge <<: *default_service
+        image: osixia/openldap:1.5.0
+        container_name: openldap.${SHOGGOTH_DOMAIN}
+        volumes:
+            - shoggoth_openldap_data:/var/lib/ldap
+            - shoggoth_openldap_config:/etc/ldap/slapd.d
+            - ./bringup/rendered/secrets/openldap/admin-password:/run/secrets/openldap_admin_password:ro
+            - ./bringup/rendered/secrets/openldap-config-admin-password:/run/secrets/openldap_config_admin_password:ro
+            - ./auth/openldap/init.sh:/shoggoth/openldap-init.sh:ro
+            - ./bringup/rendered/openldap:/shoggoth/openldap:ro
+        environment:
+            !!merge <<: *default_environment
+            LDAP_DOMAIN: ${SHOGGOTH_DOMAIN}
+            LDAP_ADMIN_PASSWORD_FILE: /run/secrets/openldap_admin_password
+            LDAP_CONFIG_PASSWORD_FILE: /run/secrets/openldap_config_admin_password
+            LDAP_LOG_LEVEL: "256"
+            LDAP_TLS: "false"
+            LDAP_REMOVE_CONFIG_AFTER_SETUP: "false"
+        post_start:
+            # docker exec openldap.s.local cat /var/log/shoggoth-openldap-init.log
+            - command: ["/bin/bash", "-c", "/bin/bash /shoggoth/openldap-init.sh 2>&1 | tee /var/log/shoggoth-openldap-init.log"]
+        healthcheck:
+            test: ["CMD-SHELL", "test -f /run/shoggoth-ldap-init-done"]
+            interval: 5s
+            timeout: 3s
+            retries: 30
+            start_period: 30s
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
+
+    phpldapadmin:
+        # https://github.com/leenooks/phpLDAPadmin
+        # Web UI for browsing/managing the OpenLDAP directory
+        !!merge <<: *default_service
+        image: phpldapadmin/phpldapadmin:latest
+        container_name: phpldapadmin.${SHOGGOTH_DOMAIN}
+        environment:
+            !!merge <<: *default_environment
+            SERVER_NAME: ":80"
+        volumes:
+            - ./bringup/rendered/phpldapadmin/phpldapadmin.env:/shoggoth/bringup/rendered/phpldapadmin/phpldapadmin.env:ro
+            - ./auth/phpldapadmin/entrypoint.sh:/shoggoth/entrypoint.sh:ro
+        entrypoint: ["/bin/bash", "/shoggoth/entrypoint.sh"]
+        depends_on:
+            openldap:
+                condition: service_healthy
 
     grafana:
         # https://grafana.com/
@@ -651,16 +730,20 @@ services:
         environment:
             !!merge <<: *default_environment
             GF_SECURITY_ADMIN_USER: admin
-            GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+            GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/admin_password
             GF_SERVER_HTTP_PORT: "80"
             GF_AUTH_ANONYMOUS_ENABLED: "true"
             GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-            GF_LOG_LEVEL: warn
+            GF_AUTH_LDAP_ENABLED: "false"
+            GF_LOG_LEVEL: info
             GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/shoggoth.json
         volumes:
             - ./monitoring/grafana/data:/var/lib/grafana
             - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-            - ./bringup/rendered/secrets/grafana/admin-password:/run/secrets/grafana_admin_password:ro
+            - ./bringup/rendered/secrets/grafana/admin-password:/run/secrets/admin_password:ro
+        post_start:
+            # docker exec grafana.s.local cat /var/log/shoggoth-grafana-init.log
+            - command: ["/bin/bash", "-c", "grafana cli --homepath /usr/share/grafana admin reset-admin-password \"$(tr -d '\\n\\r' < /run/secrets/admin_password)\" 2>&1 | tee /var/log/shoggoth-grafana-init.log"]
         depends_on:
             bringup:
                 condition: service_completed_successfully

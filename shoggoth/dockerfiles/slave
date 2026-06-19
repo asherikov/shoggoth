@@ -24,11 +24,12 @@ RUN \
     && usermod -aG docker ccws
 
 # nodejs is needed for some actions, e.g., actions/checkout@v5
+# ldap-utils is needed for LDAP provisioning; slapd provides slappasswd for hash generation
 RUN \
 --mount=type=cache,target=/var/cache/apt,sharing=locked \
 --mount=type=cache,target=/var/lib/apt/lists/,sharing=locked \
 --mount=type=cache,target=/cache/pip,sharing=locked \
-    ${APT_INSTALL} nodejs
+    ${APT_INSTALL} nodejs ldap-utils slapd
 
 RUN curl -fsSL https://dl.gitea.io/tea/main/tea-main-linux-`dpkg --print-architecture` -o /usr/bin/tea \
     && chmod +x /usr/bin/tea

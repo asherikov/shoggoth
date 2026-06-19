@@ -4,19 +4,19 @@
   - [Disclaimer](#disclaimer)
 - [Architecture](#architecture)
   - [Service interaction diagram](#service-interaction-diagram)
-  - [Interaction with the client and external services](#interaction-with-the-client-and-external-services)
+  - [Interaction with the client and external
+    services](#interaction-with-the-client-and-external-services)
   - [Bringup order](#bringup-order)
-  - [Internal services](#internal-services)
   - [Monitoring](#monitoring)
   - [Shoggoth slave container](#shoggoth-slave-container)
-  - [Domain Name Resolution](#domain-name-resolution)
-  - [VPN](#vpn)
+  - [Authentication](#authentication)
 - [Client Configuration](#client-configuration)
   - [Caveats](#caveats)
   - [Service Usage Examples](#service-usage-examples)
   - [Server Management](#server-management)
 - [Troubleshooting](#troubleshooting)
 - [References](#references)
+  - [Agentic coding](#agentic-coding)
 
 Introduction
 ============
@@ -44,7 +44,8 @@ configurable domain, set to `s.local` by default.
     (wg-easy), most services are available only through VPN connection
   - `dns.<domain>` — Unbound DNS resolver with blacklisting support.
 - Caching:
-  - `apt-cache.<domain>` — Debian/Ubuntu package caching proxy (`apt-cacher-ng`).
+  - `apt-cache.<domain>` — Debian/Ubuntu package caching proxy
+    (`apt-cacher-ng`).
   - `docker-cache.<domain>` — Docker registry caching proxy.
   - `proxpi.<domain>` — Python package caching proxy.
   - `build-cache.<domain>` — build cache server for ccache/sccache.
@@ -55,9 +56,12 @@ configurable domain, set to `s.local` by default.
     - `git-pages.<domain>` — Git Pages static site hosting.
     - `gitea-runner` — Gitea Actions runner.
   - `kestra.<domain>` — Kestra workflow orchestration.
-  - `slave-dind.<domain>` -- Docker-in-Docker service for CI and workflow executors:
-    - `slave-term.<domain>` — interactive web terminal (ttyd + tmux + Qwen Code).
-  - `cdash.<domain>` — CDash test result dashboard (CTest/GTest XML submissions).
+  - `slave-dind.<domain>` – Docker-in-Docker service for CI and workflow
+    executors:
+    - `slave-term.<domain>` — interactive web terminal (ttyd + tmux + Qwen
+      Code).
+  - `cdash.<domain>` — CDash test result dashboard (CTest/GTest XML
+    submissions).
 - Project management:
   - `redmine.<domain>` — Redmine project management server.
 - LLM and coding agents:
@@ -69,13 +73,18 @@ configurable domain, set to `s.local` by default.
   - `grafana.<domain>` — observability dashboard (traces, metrics, logs).
   - `loki.<domain>` — log aggregation backend.
   - `tempo.<domain>` — trace storage backend.
-  - `victoria-metrics.<domain>` — metrics storage backend (Prometheus-compatible).
+  - `victoria-metrics.<domain>` — metrics storage backend
+    (Prometheus-compatible).
   - `cadvisor.<domain>` — container metrics (per-container resource usage).
   - `node-exporter.<domain>` — host-level metrics (CPU, memory, disk, network).
   - `otelcol.<domain>` — OpenTelemetry Collector (Prometheus scrape → OTLP).
+- User and secret management:
+  - `openldap.<domain>` — OpenLDAP directory for centralized authentication.
+  - `phpldapadmin.<domain>` — OpenLDAP web interface.
+  - `openbao.<domain>` — secret management.
 - Web:
   - `<domain>` — welcome home page.
-  - `api.<domain>` — single entry point for other services' API.
+  - `api.<domain>` — single entry point for other services’ API.
 
 Disclaimer
 ----------
@@ -104,20 +113,19 @@ The main use-case is to run the services on a dedicated headless server and use
 or control them from multiple client computers.
 
 Service interaction diagram
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+---------------------------
 
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture" />
 
 Interaction with the client and external services
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-------------------------------------------------
 
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/external.svg" alt="external" />
 
 Bringup order
-~~~~~~~~~~~~~
+-------------
 
 <img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/bringup.svg" alt="bringup" />
-
 
 Monitoring
 ----------
@@ -148,6 +156,62 @@ The slave container is intended to be used in three different ways:
 - non-interactive agentic flows, e.g., coding or reviews;
 - interactive development with or without a coding agent.
 
+Authentication
+--------------
+
+Shoggoth uses [OpenLDAP](https://www.openldap.org/) (via
+[osixia/openldap](https://hub.docker.com/r/osixia/openldap)) as a centralized
+LDAP directory for user authentication across services that support it.
+
+### Accounts
+
+Three LDAP accounts exist, each serving a distinct role:
+
+| Account | Purpose | Consumed by |
+|----|----|----|
+| `admin` | OpenLDAP administrator (`cn=admin`); used for LDAP management and as Grafana's local admin login | openldap post_start, Grafana |
+| `sldapauth` | Service bind account — services that authenticate users via LDAP bind as this account | Gitea, Redmine, CDash, OpenBao |
+| `sslave` | CI/automation account — reserved for slave containers and workflows | *(not yet consumed)* |
+
+### Password management
+
+[OpenBao](https://openbao.org/) is the single source of truth for all account
+passwords. The `bringup` container generates SSHA password hashes and writes
+LDIF files; the openldap `post_start` script applies them on every container
+start.
+
+Account passwords are auto-generated on first run and stored in OpenBao. The
+admin password is resolved in order of priority:
+
+1.  Existing value in OpenBao (`secret/data/openldap/admin-password`)
+2.  File at `private/admin-password.txt` (first-run only; not used for rotation)
+3.  Auto-generated random password (stored in OpenBao for subsequent starts)
+
+### Group memberships
+
+Two groups are used to control access:
+
+- **admins** — members are granted the `shoggoth-admin` policy in OpenBao,
+  giving full access to the secret store. The `cn=admin` directory admin is the
+  initial member. Add human admin users to this group.
+- **shoggoth-auth** — service bind accounts that authenticate users on behalf of
+  applications. `sldapauth` is the initial member. This group has no OpenBao
+  policy mapping.
+
+### OpenBao integration
+
+Members of the `admins` group are mapped to the `shoggoth-admin` policy,
+granting full access to OpenBao’s secret store. This allows human operators in
+`admins` to log in to OpenBao using their LDAP credentials.
+
+### Services
+
+| Service | Auth method | Notes |
+|----|----|----|
+| Gitea | LDAP (bind as `sldapauth`) | On-the-fly account creation; `admins` group members become Gitea admins |
+| Redmine | LDAP (bind as `sldapauth`) | On-the-fly account creation; auto-configured via entrypoint |
+| CDash | LDAP (bind as `sldapauth`) | Configured in entrypoint |
+| OpenBao | LDAP (bind as `sldapauth`) | `admins` → `shoggoth-admin` policy |
 
 Client Configuration
 ====================
@@ -267,9 +331,7 @@ Access the Redmine web interface:
 # Open Redmine in browser
 firefox http://redmine.s.local
 
-# Default credentials (change after first login)
-# Username: admin
-# Password: admin
+# Default credentials: admin / admin (change on first login)
 ```
 
 Install plugins by cloning them into the `shoggoth/redmine/plugins` directory

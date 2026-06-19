@@ -15,10 +15,10 @@ help:
 	@grep -v "^	" Makefile make/*.mk | grep -v "^ " | grep -v "^$$" | grep -v "^\." | grep -v ".mk:$$"
 
 -include make/*.mk
--include shoggoth/private/*.mk
+-include private/*.mk
 
 sync:
-	rsync -r shoggoth ${USER}@${HOST_IP}:${REMOTE_PATH} || true
+	rsync -e "ssh ${SSH_COMMON_ARGS}" -r shoggoth ${USER}@${HOST_IP}:${REMOTE_PATH} || true
 
 sync_restart:
 	-${MAKE} down
