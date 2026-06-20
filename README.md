@@ -1,7 +1,8 @@
 - [Introduction](#introduction)
   - [Goals](#goals)
-  - [Features](#features)
   - [Disclaimer](#disclaimer)
+  - [Comparison](#comparison)
+- [Features](#features)
 - [Architecture](#architecture)
   - [Service interaction diagram](#service-interaction-diagram)
   - [Interaction with the client and external
@@ -33,70 +34,110 @@ Goals
 - All components of the system should be open source, self-hostable, and
   replaceable by similar software.
 
-Features
---------
-
-Shoogoth includes a number of containerized services that are available under
-configurable domain, set to `s.local` by default.
-
-- Networking:
-  - `wireguard.<domain>` — WireGuard VPN server with web management UI
-    (wg-easy), most services are available only through VPN connection
-  - `dns.<domain>` — Unbound DNS resolver with blacklisting support.
-- Caching:
-  - `apt-cache.<domain>` — Debian/Ubuntu package caching proxy
-    (`apt-cacher-ng`).
-  - `docker-cache.<domain>` — Docker registry caching proxy.
-  - `proxpi.<domain>` — Python package caching proxy.
-  - `build-cache.<domain>` — build cache server for ccache/sccache.
-- Development:
-  - `docker-registry.<domain>` — private Docker registry.
-  - Gitea development suite:
-    - `git.<domain>` — Gitea Git server.
-    - `git-pages.<domain>` — Git Pages static site hosting.
-    - `gitea-runner` — Gitea Actions runner.
-  - `kestra.<domain>` — Kestra workflow orchestration.
-  - `slave-dind.<domain>` – Docker-in-Docker service for CI and workflow
-    executors:
-    - `slave-term.<domain>` — interactive web terminal (ttyd + tmux + Qwen
-      Code).
-  - `cdash.<domain>` — CDash test result dashboard (CTest/GTest XML
-    submissions).
-- Project management:
-  - `redmine.<domain>` — Redmine project management server.
-- LLM and coding agents:
-  - `litellm.<domain>` — LLM proxy (LiteLLM) with MCP gateway.
-    - Gitea MCP server for AI coding agent integration.
-    - `ollama.<domain>` — local LLM model server.
-    - `basic-memory.<domain>` — Basic Memory MCP server.
-- Grafana monitoring suite:
-  - `grafana.<domain>` — observability dashboard (traces, metrics, logs).
-  - `loki.<domain>` — log aggregation backend.
-  - `tempo.<domain>` — trace storage backend.
-  - `victoria-metrics.<domain>` — metrics storage backend
-    (Prometheus-compatible).
-  - `cadvisor.<domain>` — container metrics (per-container resource usage).
-  - `node-exporter.<domain>` — host-level metrics (CPU, memory, disk, network).
-  - `otelcol.<domain>` — OpenTelemetry Collector (Prometheus scrape → OTLP).
-- User and secret management:
-  - `openldap.<domain>` — OpenLDAP directory for centralized authentication.
-  - `phpldapadmin.<domain>` — OpenLDAP web interface.
-  - `openbao.<domain>` — secret management.
-- Web:
-  - `<domain>` — welcome home page.
-  - `api.<domain>` — single entry point for other services’ API.
-
 Disclaimer
 ----------
 
 - This is an experimental project in an early development stage, do not expect
   it to work out of the box.
 
-- Security is non-existent: it is not a priority atm and shoggoth is supposed to
-  be running in a local network only.
+- Security is non-existent: it is currently not a priority and shoggoth is
+  supposed to be running in a local network only.
 
 - The project is tailored for my primary stack (Ubuntu/C++/python) and working
-  style (no IDE, no GUI, everything-as-code).
+  style (no IDE, everything-as-code).
+
+Comparison
+----------
+
+### Task management
+
+- `shoggoth` differs from most of kanban tools for agentic coding in its focus
+  on integration of 3rd-party components rather than from-scratch development
+  and covers wider range of functionality: source code hosting, VPN, caching,
+  agent containerization, etc. At the same time agentic workflows currently are
+  not as advanced as those provided by other projects:
+
+  - <https://github.com/BloopAI/vibe-kanban> (discontinued) and forks, e.g.,
+    <https://github.com/dexloom/vibe-kanban-indie>.
+  - <https://github.com/multica-ai/multica>
+  - <https://github.com/kdlbs/kandev/>
+
+- `shoggoth` is not intended for local desktop usage like
+  <https://github.com/antopolskiy/kanban-md>.
+
+### Agentic workflow engines
+
+- `shoggoth` relies on general purpose workflow engine for automation, which, in
+  my opinion provides more flexibility than a purpose built engine, e.g.,
+  <https://github.com/AgentWrapper/agent-orchestrator>,
+  <https://github.com/coleam00/Archon>,
+  <https://github.com/catlog22/maestro-flow>.
+
+Features
+========
+
+Shoogoth includes a number of containerized services that are available under
+configurable domain, set to `s.local` by default.
+
+- Networking:
+  - `wireguard.` — WireGuard VPN server with web management UI
+    (<https://github.com/wg-easy/wg-easy>), most services are available only
+    through VPN connection
+  - `dns.` — Unbound DNS resolver <https://github.com/NLnetLabs/unbound> with
+    blacklisting support <https://github.com/iYUYUE/dns-zone-blacklist>.
+- Caching:
+  - `apt-cache.` — Debian/Ubuntu package caching proxy
+    <https://github.com/sameersbn/docker-apt-cacher-ng>.
+  - `docker-cache.` — Docker registry caching proxy
+    <https://github.com/rpardini/docker-registry-proxy>.
+  - `proxpi.` — Python package caching proxy
+    <https://github.com/EpicWink/proxpi>.
+  - `build-cache.` — build cache server for ccache/sccache, served by
+    <https://en.angie.software/angie/>.
+- Development:
+  - `docker-registry.` — private Docker registry
+    <https://github.com/distribution/distribution>.
+  - Gitea development suite:
+    - `git.` — Gitea Git server <https://about.gitea.com/>.
+    - `git-pages.` — Git Pages static site hosting <https://git-pages.org/>.
+    - `gitea-runner` — Gitea Actions runner
+      <https://docs.gitea.com/next/usage/actions/act-runner>.
+  - `kestra.` — Kestra workflow orchestration <https://kestra.io/>.
+  - `slave-dind.` – Docker-in-Docker service for CI and workflow executors:
+    - `slave-term.` — interactive web terminal:
+      <https://github.com/tsl0922/ttyd> + tmux + Qwen Code. Runs inside
+      `slave-dind.`
+  - `cdash.` — CDash test result dashboard <https://github.com/Kitware/CDash>.
+- Project management:
+  - `redmine.` — Redmine project management server <https://www.redmine.org/>.
+- LLM and coding agents:
+  - `litellm.` — LLM proxy (<https://github.com/BerriAI/litellm>) with MCP
+    gateway.
+    - `ollama.` — local LLM model server <https://github.com/ollama/ollama>.
+    - `mcp-gitea.` – Gitea MCP server <https://gitea.com/gitea/gitea-mcp>.
+    - `basic-memory.` — Basic Memory MCP server <https://basicmemory.com>.
+- Grafana monitoring suite:
+  - `grafana.` — observability dashboard (traces, metrics, logs)
+    <https://grafana.com/>.
+  - `loki.` — log aggregation backend <https://github.com/grafana/loki>.
+  - `tempo.` — trace storage backend <https://github.com/grafana/tempo>.
+  - `victoria-metrics.` — metrics storage backend
+    <https://github.com/VictoriaMetrics/VictoriaMetrics>.
+  - `cadvisor.` — container metrics (per-container resource usage)
+    <https://github.com/google/cadvisor>.
+  - `node-exporter.` — host-level metrics (CPU, memory, disk, network)
+    <https://github.com/prometheus/node_exporter>.
+  - `otelcol.` — OpenTelemetry Collector (Prometheus scrape → OTLP)
+    <https://opentelemetry.io/docs/collector/>.
+- User and secret management:
+  - `openldap.` — OpenLDAP directory for centralized authentication
+    <https://github.com/osixia/docker-openldap>.
+  - `phpldapadmin.` — OpenLDAP web interface
+    <https://github.com/leenooks/phpLDAPadmin>.
+  - `openbao.` — secret management <https://openbao.org/>.
+- Web:
+  - `<domain>` — static welcome home page, served by `angie`.
+  - `api.` — single entry point for other services’ API, served by `angie`.
 
 Architecture
 ============
@@ -111,6 +152,8 @@ The system consists of three parts:
 
 The main use-case is to run the services on a dedicated headless server and use
 or control them from multiple client computers.
+
+Most services are available only when connected to VPN.
 
 Service interaction diagram
 ---------------------------
@@ -169,7 +212,7 @@ Three LDAP accounts exist, each serving a distinct role:
 
 | Account | Purpose | Consumed by |
 |----|----|----|
-| `admin` | OpenLDAP administrator (`cn=admin`); used for LDAP management and as Grafana's local admin login | openldap post_start, Grafana |
+| `admin` | OpenLDAP administrator (`cn=admin`); used for LDAP management and as Grafana’s local admin login | openldap post_start, Grafana |
 | `sldapauth` | Service bind account — services that authenticate users via LDAP bind as this account | Gitea, Redmine, CDash, OpenBao |
 | `sslave` | CI/automation account — reserved for slave containers and workflows | *(not yet consumed)* |
 
@@ -418,3 +461,4 @@ Agentic coding
 - <https://github.com/punkpeye/awesome-mcp-servers>
 - <https://github.com/mahdin75/gis-mcp>
 - <https://github.com/jjsantos01/qgis_mcp>
+- <https://github.com/awesome-opencode/awesome-opencode>
