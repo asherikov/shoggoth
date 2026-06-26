@@ -14,6 +14,9 @@ down:
 	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose down ${SERVICE}'
 	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose down'
 
+status:
+	${MAKE} ssh_exec CMD='docker container ls'
+
 restart:
 	${MAKE} down
 	${MAKE} up

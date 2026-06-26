@@ -70,6 +70,7 @@ x-service: &default_service
             tag: "{{.Name}}"
 
 x-environment: &default_environment
+    SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
     OTEL_TRACES_EXPORTER: otlp
     OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
 
@@ -95,13 +96,10 @@ services:
             - ./git/runner/data:/shoggoth/data/gitea-runner
             - shoggoth_redmine_db:/shoggoth/data/redmine-database
             - shoggoth_redmine_files:/shoggoth/data/redmine-files
-            - ./redmine/plugins:/shoggoth/data/redmine-plugins
             - shoggoth_redmine_bundle_cache:/shoggoth/data/redmine-bundle-cache
             - ./ai/litellm/data:/shoggoth/data/litellm
         environment:
             !!merge <<: *default_environment
-            SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
-            SHOGGOTH_IP: ${SHOGGOTH_IP:-}
         secrets:
             - gitea_server_token
             - redmine_token
@@ -125,7 +123,6 @@ services:
             - ./setup-client.sh:/host_volumes/setup-client.sh:ro
         environment:
             !!merge <<: *default_environment
-            SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
             DOCKER_HOST: unix:///dind/docker.sock
         secrets:
             - gitea_server_token
@@ -405,7 +402,6 @@ services:
             GITEA__actions__DEFAULT_ACTIONS_URL: 'github'
             GITEA__opentelemetry__ENABLED: 'true'
             GITEA__opentelemetry__ENDPOINT: 'http://otelcol:4317'
-            GITEA_RUNNER_REGISTRATION_TOKEN_FILE: '/run/secrets/gitea_runner_token'
         volumes:
             - ./git/gitea/data:/data
             - ./git/gitea/init.sh:/shoggoth/git/gitea/init.sh:ro

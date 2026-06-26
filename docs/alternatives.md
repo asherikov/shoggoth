@@ -323,6 +323,27 @@ own DNS records on start/stop.
   - <https://hub.docker.com/_/redmine>
   - <https://github.com/topics/redmine-plugin>
 
+### Task management
+
+- **[Redmine](https://www.redmine.org/)** (selected)
+  - issue tracking with subtasks, parent-child relationships, time tracking, custom fields, workflows
+  - + hierarchical task decomposition (subtasks with arbitrary depth)
+  - + cross-project task relations, issue dependencies (blocks/blocked-by via relations)
+  - + REST API for integration with Kestra workflows and MCP servers
+  - + mature plugin ecosystem (agile boards, Gantt charts, burndown charts)
+  - + LDAP authentication via `AuthSourceLdap` (configured in entrypoint)
+- [Gitea project boards](https://docs.gitea.com/usage/project-boards/)
+  - built-in kanban boards in Gitea, no additional service required
+  - + zero infrastructure cost — already deployed as part of the forge
+  - + tight integration with issues and pull requests
+  - - only flat task structure is supported — no subtask decomposition, no
+    parent-child hierarchies, no task dependencies
+  - - no time tracking, no custom fields, no cross-project task relations
+  - - limited workflow customization (no status transitions, no role-based
+    field permissions)
+  - - no REST API for board operations (only issue API); Kestra/MCP
+    integration would require workarounds
+
 ### Redmine webhook plugins
 
 - planned for the next major release -> <https://www.redmine.org/issues/29664>

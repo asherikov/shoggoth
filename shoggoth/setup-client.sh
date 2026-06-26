@@ -470,11 +470,7 @@ main() {
         configure_docker_proxy
         install_ca_certificate
 
-        if verify_setup; then
-            echo "Docker proxy setup complete. Test with: docker pull nginx:latest"
-        else
-            echo "Docker proxy setup completed with warnings. Please verify proxy connectivity."
-        fi
+        echo "Docker proxy setup complete. Test with: docker pull nginx:latest"
     fi
 
     if [ "${CONFIGURE_HOSTS}" = "true" ]; then

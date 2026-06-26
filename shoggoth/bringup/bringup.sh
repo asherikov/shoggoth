@@ -187,9 +187,6 @@ if [ ! -f "${CERT_DIR}/shoggoth.key" ] || [ ! -f "${CERT_DIR}/shoggoth.crt" ]; t
         -out "${CERT_DIR}/shoggoth.csr" \
         -subj "/CN=*.${SHOGGOTH_DOMAIN}" || { echo "shoggoth: FATAL: CSR generation failed" >&2; exit 1; }
     SAN_ENTRIES="DNS:*.${SHOGGOTH_DOMAIN},DNS:${SHOGGOTH_DOMAIN}"
-    if [ -n "${SHOGGOTH_IP}" ]; then
-        SAN_ENTRIES="${SAN_ENTRIES},IP:${SHOGGOTH_IP}"
-    fi
     openssl x509 -req -days 3650 -sha256 \
         -in "${CERT_DIR}/shoggoth.csr" \
         -CA "${CERT_DIR}/shoggoth-ca.crt" \
@@ -247,8 +244,6 @@ render_ldap_env() {
     } > "${path}"
     printf '%s' "${path}"
 }
-
-render_ldap_env /shoggoth/bringup/rendered/ldap.env
 
 render_ldap_env /shoggoth/bringup/rendered/cdash/cdash.env
 {
@@ -343,10 +338,9 @@ curl -sfS -X PUT "${OPENBAO_ADDR}/v1/sys/policies/acl/shoggoth-admin" \
 rm -f "${POLICY_FILE}"
 
 echo "shoggoth: Configuring OpenBao LDAP auth connection..."
-S_LDAPAUTH_DN="uid=sldapauth,ou=people,${LDAP_BASE_DN}"
 LDAP_CONFIG_PAYLOAD="$(jq -n \
     --arg url "ldap://${LDAP_HOST}:389" \
-    --arg binddn "${S_LDAPAUTH_DN}" \
+    --arg binddn "${LDAP_BIND_DN}" \
     --arg bindpass "${OPENLDAP_S_LDAPAUTH_PASSWORD}" \
     --arg userdn "ou=people,${LDAP_BASE_DN}" \
     --arg groupdn "ou=groups,${LDAP_BASE_DN}" \
@@ -374,8 +368,7 @@ echo "shoggoth: OpenBao LDAP auth URL: ${LDAP_CONFIG_URL}"
 mkdir -p /shoggoth/vpn/wireguard/data
 
 find /shoggoth/bringup/rendered -type d -exec chmod a+rx {} +
-find /shoggoth/bringup/rendered -type f -not -path '*/secrets/*' -not -path '*/certs/*' -not -name 'config.yaml' -not -name '*.sh' -not -name 'ldap.env' -not -name 'cdash.env' -not -name 'redmine.env' -not -name 'gitea.env' -not -name 'phpldapadmin.env' -not -path '*/openldap/*.ldif' -exec chmod a+r {} +
-chmod 400 /shoggoth/bringup/rendered/ldap.env
+find /shoggoth/bringup/rendered -type f -not -path '*/secrets/*' -not -path '*/certs/*' -not -name 'config.yaml' -not -name '*.sh' -not -name 'cdash.env' -not -name 'redmine.env' -not -name 'gitea.env' -not -name 'phpldapadmin.env' -not -path '*/openldap/*.ldif' -exec chmod a+r {} +
 chown 1000:1000 /shoggoth/bringup/rendered/gitea/gitea.env
 chmod 400 /shoggoth/bringup/rendered/gitea/gitea.env
 chown 999:999 /shoggoth/bringup/rendered/redmine/redmine.env
@@ -395,8 +388,8 @@ chown 1000:1000 /shoggoth/data/gitea-runner
 mkdir -p /shoggoth/data/redmine-database
 chown 70:70 /shoggoth/data/redmine-database
 
-mkdir -p /shoggoth/data/redmine-files /shoggoth/data/redmine-plugins /shoggoth/data/redmine-bundle-cache
-chown 999:999 /shoggoth/data/redmine-files /shoggoth/data/redmine-plugins /shoggoth/data/redmine-bundle-cache
+mkdir -p /shoggoth/data/redmine-files /shoggoth/data/redmine-bundle-cache
+chown 999:999 /shoggoth/data/redmine-files /shoggoth/data/redmine-bundle-cache
 
 mkdir -p /shoggoth/data/litellm
 chown 1000:1000 /shoggoth/data/litellm
