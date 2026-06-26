@@ -13,6 +13,8 @@ nodes:
     tags: []
     graphviz:
       color: lightsteelblue
+      margin: 10
+      height: 1
 
 edges:
   - link: [proxy_style, proxy_style, bringup_edge]
@@ -28,26 +30,37 @@ edges:
       color: auto
 
 views:
+  - id: novpn
+    style: hh_diagrams_view
+    tags: ["novpn"]
+    edge_tags: ["novpn"]
+    neighbours: direct_with_parents
+    graphviz:
+      graph:
+        rankdir: TD
+
   - id: external
     style: hh_diagrams_view
     tags: ["client", "external"]
     neighbours: direct_with_parents
     graphviz:
       graph:
-        rankdir: LR
+        nodesep: 0.5
+        ranksep: 4.0
+        rankdir: TD
 
   - id: architecture
     style: hh_diagrams_view
     tags: ["shoggoth"]
     graphviz:
       graph:
-        nodesep: 1.5
-        ranksep: 3
+        nodesep: 0.5
+        ranksep: 3.0
         rankdir: LR
 
   - id: bringup
     style: hh_diagrams_view
-    nodes: [shoggoth_host]
+    nodes: [shoggoth_services]
     tags: ["shoggoth_service"]
     edge_tags: ["bringup"]
     graphviz:

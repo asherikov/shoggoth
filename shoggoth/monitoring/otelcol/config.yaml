@@ -23,6 +23,7 @@ receivers:
                     container.id: '`container_id`'
                     container.name: '`name`'
                     container.image.name: '`image`'
+                    compose.service: '`labels["com.docker.compose.service"]`'
                 config:
                     include:
                         - /var/lib/docker/containers/`container_id`/`container_id`-json.log
@@ -42,48 +43,39 @@ receivers:
             com.docker.compose.service: compose_service
         env_vars_to_metric_labels:
             SHOGGOTH_DOMAIN: shoggoth_domain
+        metrics:
+            container.restarts:
+                enabled: true
+            container.uptime:
+                enabled: true
+            container.memory.rss:
+                enabled: true
+            container.memory.cache:
+                enabled: true
+
+    hostmetrics:
+        root_path: /host
+        collection_interval: 15s
+        scrapers:
+            cpu:
+            load:
+            memory:
+                metrics:
+                    system.linux.memory.available:
+                        enabled: true
+                    system.memory.limit:
+                        enabled: true
+            disk:
+            filesystem:
+                metrics:
+                    system.filesystem.utilization:
+                        enabled: true
+            network:
+            processes:
 
     prometheus:
         config:
             scrape_configs:
-                - job_name: node-exporter
-                  scrape_interval: 15s
-                  static_configs:
-                      - targets:
-                            - node-exporter:9100
-                  metric_relabel_configs:
-                      - source_labels: [instance]
-                        target_label: instance_name
-                        regex: "(.+)"
-                      - source_labels: [instance]
-                        target_label: hostname
-                        regex: "([^:]+):.*"
-                      - source_labels: [job]
-                        target_label: job_name
-                        regex: "(.+)"
-                - job_name: cadvisor
-                  scrape_interval: 15s
-                  static_configs:
-                      - targets:
-                            - cadvisor:8080
-                  metric_relabel_configs:
-                      - source_labels: [name]
-                        target_label: container
-                        regex: "(.+)"
-                      - source_labels: [container_label_compose_service]
-                        target_label: compose_service
-                        regex: "(.+)"
-                      - source_labels: [instance]
-                        target_label: instance_name
-                        regex: "(.+)"
-                      - source_labels: [instance]
-                        target_label: hostname
-                        regex: "([^:]+):.*"
-                      - source_labels: [job]
-                        target_label: job_name
-                        regex: "(.+)"
-                      - regex: "container_label_.+"
-                        action: labeldrop
                 - job_name: git-pages
                   scrape_interval: 15s
                   static_configs:
@@ -147,11 +139,11 @@ exporters:
             insecure: true
         resource_to_telemetry_conversion:
             enabled: true
-    otlphttp/tempo:
+    otlp_http/tempo:
         endpoint: http://tempo:4318
         tls:
             insecure: true
-    otlphttp/loki:
+    otlp_http/loki:
         endpoint: http://loki:3100/otlp
         tls:
             insecure: true
@@ -177,7 +169,7 @@ service:
                 - memory_limiter
                 - batch
             exporters:
-                - otlphttp/tempo
+                - otlp_http/tempo
         logs:
             receivers:
                 - receiver_creator/docker-logs
@@ -188,14 +180,16 @@ service:
                 - transform/docker-meta
                 - batch
             exporters:
-                - otlphttp/loki
+                - otlp_http/loki
         metrics:
             receivers:
                 - docker_stats
+                - hostmetrics
                 - otlp
                 - prometheus
             processors:
                 - memory_limiter
+                - resourcedetection
                 - batch
             exporters:
                 - prometheusremotewrite

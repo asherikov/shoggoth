@@ -1,10 +1,16 @@
 #!/bin/sh
 set -eu
 
+DOCKERD_PID=""
+CRED_CACHE_PID=""
+LOGS_PIDS=""
+
 export DOCKER_HOST=unix:///dind/docker.sock
 
 mkdir -p /etc/docker/
 printf '{"insecure-registries":["docker-registry.%s"]}\n' "${SHOGGOTH_DOMAIN}" > /etc/docker/daemon.json
+
+rm -f /var/run/docker.pid
 
 cleanup() {
     echo "shoggoth: Shutting down..." >&2
@@ -12,10 +18,10 @@ cleanup() {
         kill "${PID}" 2>/dev/null || true
     done
     docker compose -f /shoggoth/compose/docker-compose.yml down 2>/dev/null || true
-    kill "${DOCKERD_PID}" 2>/dev/null || true
-    kill "${CRED_CACHE_PID}" 2>/dev/null || true
+    [ -n "${DOCKERD_PID}" ] && kill "${DOCKERD_PID}" 2>/dev/null || true
+    [ -n "${CRED_CACHE_PID}" ] && kill "${CRED_CACHE_PID}" 2>/dev/null || true
     ssh-agent -k 2>/dev/null || true
-    wait "${DOCKERD_PID}" 2>/dev/null || true
+    [ -n "${DOCKERD_PID}" ] && wait "${DOCKERD_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT
 

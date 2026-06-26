@@ -7,7 +7,7 @@ bao_get_value() {
     local path="${1}"
     local tmp response http_code
     tmp="$(mktemp)"
-    http_code="$(curl -s -w '%{http_code}' -o "${tmp}" \
+    http_code="$(curl -sL -w '%{http_code}' -o "${tmp}" \
         -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
         "${OPENBAO_ADDR}/v1/secret/data/${path}" 2>/dev/null || echo "000")"
     response="$(cat "${tmp}" 2>/dev/null || true)"
@@ -32,7 +32,7 @@ bao_put() {
     local value="${3}"
     local payload http_code
     payload="$(printf '%s' "${value}" | jq -Rs . | jq -c --arg k "${key}" '{"data": {($k): .}}')"
-    http_code="$(curl -s -w '%{http_code}' -o /dev/null \
+    http_code="$(curl -sL -w '%{http_code}' -o /dev/null \
         -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" -H "Content-Type: application/json" \
         -X POST \
         -d "${payload}" \

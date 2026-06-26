@@ -13,7 +13,7 @@
             "type": "timeseries",
             "gridPos": {"h": 9, "w": 6, "x": 0, "y": 0},
             "datasource": {"uid": "vm"},
-            "targets": [{"expr": "100 - (avg by(hostname)(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", "legendFormat": "{{hostname}}", "refId": "A"}],
+            "targets": [{"expr": "100 - (avg by(host_name)(rate(system_cpu_time_seconds_total{state=\"idle\"}[5m])) * 100)", "legendFormat": "{{host_name}}", "refId": "A"}],
             "fieldConfig": {
                 "defaults": {
                     "unit": "percent",
@@ -29,7 +29,7 @@
             "type": "timeseries",
             "gridPos": {"h": 9, "w": 6, "x": 6, "y": 0},
             "datasource": {"uid": "vm"},
-            "targets": [{"expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100", "legendFormat": "{{hostname}}", "refId": "A"}],
+            "targets": [{"expr": "(1 - system_linux_memory_available_bytes / system_memory_limit_bytes) * 100", "legendFormat": "{{host_name}}", "refId": "A"}],
             "fieldConfig": {
                 "defaults": {
                     "unit": "percent",
@@ -45,7 +45,7 @@
             "type": "timeseries",
             "gridPos": {"h": 9, "w": 6, "x": 12, "y": 0},
             "datasource": {"uid": "vm"},
-            "targets": [{"expr": "(1 - node_filesystem_avail_bytes{fstype!~\"tmpfs|squashfs|overlay\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|squashfs|overlay\"}) * 100", "legendFormat": "{{mountpoint}}", "refId": "A"}],
+            "targets": [{"expr": "system_filesystem_utilization_ratio{type!~\"tmpfs|squashfs|overlay\"} * 100", "legendFormat": "{{mountpoint}}", "refId": "A"}],
             "fieldConfig": {
                 "defaults": {
                     "unit": "percent",
@@ -62,8 +62,8 @@
             "gridPos": {"h": 9, "w": 6, "x": 18, "y": 0},
             "datasource": {"uid": "vm"},
             "targets": [
-                {"expr": "rate(node_network_receive_bytes_total{device=~\"eth.*|wlan.*|enp.*\"}[5m])", "legendFormat": "↓ {{device}}", "refId": "A"},
-                {"expr": "rate(node_network_transmit_bytes_total{device=~\"eth.*|wlan.*|enp.*\"}[5m])", "legendFormat": "↑ {{device}}", "refId": "B"}
+                {"expr": "rate(system_network_io_bytes_total{direction=\"receive\",device=~\"eth.*|wlan.*|enp.*\"}[5m])", "legendFormat": "↓ {{device}}", "refId": "A"},
+                {"expr": "rate(system_network_io_bytes_total{direction=\"transmit\",device=~\"eth.*|wlan.*|enp.*\"}[5m])", "legendFormat": "↑ {{device}}", "refId": "B"}
             ],
             "fieldConfig": {
                 "defaults": {
@@ -79,9 +79,9 @@
             "gridPos": {"h": 9, "w": 12, "x": 0, "y": 10},
             "datasource": {"uid": "vm"},
             "targets": [
-                {"expr": "node_load1", "legendFormat": "load 1m", "refId": "A"},
-                {"expr": "node_load5", "legendFormat": "load 5m", "refId": "B"},
-                {"expr": "node_load15", "legendFormat": "load 15m", "refId": "C"}
+                {"expr": "system_cpu_load_average_1m", "legendFormat": "load 1m", "refId": "A"},
+                {"expr": "system_cpu_load_average_5m", "legendFormat": "load 5m", "refId": "B"},
+                {"expr": "system_cpu_load_average_15m", "legendFormat": "load 15m", "refId": "C"}
             ],
             "fieldConfig": {
                 "defaults": {
@@ -91,15 +91,59 @@
             }
         },
         {
-            "title": "System Uptime",
-            "type": "stat",
+            "title": "Process Count by Status",
+            "type": "timeseries",
             "gridPos": {"h": 9, "w": 12, "x": 12, "y": 10},
             "datasource": {"uid": "vm"},
-            "targets": [{"expr": "node_time_seconds - node_boot_time_seconds", "legendFormat": "{{hostname}}", "refId": "A"}],
+            "targets": [{"expr": "system_processes_count", "legendFormat": "{{host_name}} {{status}}", "refId": "A"}],
             "fieldConfig": {
                 "defaults": {
-                    "unit": "s",
-                    "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+                    "unit": "none",
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Container CPU Usage",
+            "type": "timeseries",
+            "gridPos": {"h": 9, "w": 12, "x": 0, "y": 19},
+            "datasource": {"uid": "vm"},
+            "targets": [{"expr": "max by(compose_service) (rate(container_cpu_usage_nanoseconds_total{compose_service=~\".+\"}[5m])) / 1e9", "legendFormat": "{{compose_service}}", "refId": "A"}],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "none",
+                    "min": 0,
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Container Memory Usage",
+            "type": "timeseries",
+            "gridPos": {"h": 9, "w": 12, "x": 12, "y": 19},
+            "datasource": {"uid": "vm"},
+            "targets": [{"expr": "max by(compose_service) (container_memory_usage_total_bytes{compose_service=~\".+\"})", "legendFormat": "{{compose_service}}", "refId": "A"}],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "bytes",
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Container Log Rate",
+            "type": "timeseries",
+            "gridPos": {"h": 9, "w": 24, "x": 0, "y": 28},
+            "datasource": {"uid": "loki"},
+            "targets": [{"expr": "sum by (compose_service) (rate({compose_service=~\".+\"}[5m]))", "legendFormat": "{{compose_service}}", "refId": "A"}],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "lops",
+                    "min": 0,
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
                 },
                 "overrides": []
             }
@@ -107,17 +151,17 @@
         {
             "title": "Error Logs",
             "type": "logs",
-            "gridPos": {"h": 18, "w": 24, "x": 0, "y": 20},
+            "gridPos": {"h": 18, "w": 24, "x": 0, "y": 37},
             "datasource": {"uid": "loki"},
             "targets": [
-                {"expr": "{service_name=~\".+\"} |~ \"(?i)(error|fatal|panic|critical|fail|FATAL|CRIT)|ERR\" !~ \"(?i)trace\" | line_format \"{{.service_name}} {{__line__}}\"", "refId": "A"}
+                {"expr": "{compose_service=~\".+\"} |~ \"(?i)(error|fatal|panic|critical|fail|FATAL|CRIT)|ERR\" !~ \"(?i)trace\" | line_format \"{{.compose_service}} {{__line__}}\"", "refId": "A"}
             ],
             "options": {"showLabels": false, "showTime": true, "sortOrder": "Descending", "enableLogDetails": true, "wrapLogMessage": true, "prettifyLogMessage": true}
         },
         {
             "title": "Trace Rate",
             "type": "timeseries",
-            "gridPos": {"h": 9, "w": 12, "x": 0, "y": 39},
+            "gridPos": {"h": 9, "w": 12, "x": 0, "y": 56},
             "datasource": {"uid": "vm"},
             "targets": [
                 {"expr": "sum(rate(traces_spanmetrics_calls_total[5m]))", "legendFormat": "traces/s", "refId": "A"},
@@ -139,7 +183,7 @@
         {
             "title": "Trace Duration (p50 / p95 / p99)",
             "type": "timeseries",
-            "gridPos": {"h": 9, "w": 12, "x": 12, "y": 39},
+            "gridPos": {"h": 9, "w": 12, "x": 12, "y": 56},
             "datasource": {"uid": "vm"},
             "targets": [
                 {"expr": "histogram_quantile(0.5, sum(rate(traces_spanmetrics_latency_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A"},
@@ -157,7 +201,7 @@
         {
             "title": "Traces",
             "type": "table",
-            "gridPos": {"h": 12, "w": 24, "x": 0, "y": 49},
+            "gridPos": {"h": 12, "w": 24, "x": 0, "y": 66},
             "datasource": {"type": "tempo", "uid": "tempo"},
             "targets": [
                 {"refId": "A", "datasource": {"type": "tempo", "uid": "tempo"}, "query": "{}", "queryType": "traceql", "tableType": "traces", "limit": 20}

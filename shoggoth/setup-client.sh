@@ -145,31 +145,37 @@ detect_os() {
 install_ca_certificate() {
     local os_id
     os_id=$(detect_os)
+    local ca_url="https://${HOST_IP}/ca.crt"
+
+    if [ "${HOST_IP}" = "127.0.0.1" ] && [ "${CONFIGURE_DOCKER}" = "true" ]; then
+        echo "Warning: HOST_IP is 127.0.0.1 (default). CA certificate download will fail on remote clients." >&2
+        echo "Use --host-ip <SERVER_IP> to specify the server address." >&2
+    fi
 
     case "$os_id" in
         ubuntu|debian)
-            curl -s "${PROXY_URL}/ca.crt" -o /tmp/docker_registry_proxy.crt
+            curl -sk "${ca_url}" -o /tmp/docker_registry_proxy.crt
             run_priv_cmd "cp /tmp/docker_registry_proxy.crt /usr/share/ca-certificates/docker_registry_proxy.crt"
             echo "docker_registry_proxy.crt" | run_priv_cmd "tee -a /etc/ca-certificates.conf" >/dev/null
             run_priv_cmd "update-ca-certificates --fresh"
             ;;
         centos|rhel|rocky|almalinux|fedora)
-            curl -s "${PROXY_URL}/ca.crt" -o /tmp/docker_registry_proxy.crt
+            curl -sk "${ca_url}" -o /tmp/docker_registry_proxy.crt
             run_priv_cmd "cp /tmp/docker_registry_proxy.crt /etc/pki/ca-trust/source/anchors/docker_registry_proxy.crt"
             run_priv_cmd "update-ca-trust"
             ;;
         alpine)
-            curl -s "${PROXY_URL}/ca.crt" -o /tmp/docker_registry_proxy.crt
+            curl -sk "${ca_url}" -o /tmp/docker_registry_proxy.crt
             run_priv_cmd "cp /tmp/docker_registry_proxy.crt /usr/local/share/ca-certificates/docker_registry_proxy.crt"
             run_priv_cmd "update-ca-certificates"
             ;;
         nixos)
-            curl -s "${PROXY_URL}/ca.crt" -o /tmp/docker_registry_proxy.crt
+            curl -sk "${ca_url}" -o /tmp/docker_registry_proxy.crt
             run_priv_cmd "cp /tmp/docker_registry_proxy.crt /etc/ssl/certs/docker_registry_proxy.crt"
             ;;
         *)
             echo "Warning: Unsupported OS '$os_id'. Please install CA certificate manually."
-            echo "Download from: ${PROXY_URL}/ca.crt"
+            echo "Download from: ${ca_url}"
             ;;
     esac
 }
@@ -219,7 +225,7 @@ EOF"
 }
 
 update_hosts() {
-    services="kestra dns apt-cache docker-cache litellm git build-cache git-pages redmine proxpi docker-registry grafana otelcol api slave-term"
+    services="kestra dns apt-cache docker-cache litellm git build-cache git-pages redmine python-cache docker-registry grafana otelcol api slave-term"
     hosts_entries="${HOST_IP} ${DOMAIN}
 "
 
@@ -265,7 +271,7 @@ generate_shoggoth_conf() {
 # Load with: set -a; source ${ENV_FILE}; set +a
 # See: https://gist.github.com/mihow/9c7f559807069a03e302605691f85572
 
-# LLM (LiteLLM → Ollama)
+# LLM (LiteLLM → LocalAI)
 OPENAI_API_KEY=${CONFIGURE_AI_TOKEN}
 OPENAI_BASE_URL=http://litellm.${DOMAIN}/v1/
 OPENAI_MODEL=glm-5.1:cloud
@@ -276,9 +282,9 @@ BM_MCP_URL=http://litellm.${DOMAIN}/mcp
 CCACHE_REMOTE_STORAGE=http://build-cache.${DOMAIN}
 CCACHE_REMOTE_ONLY=true
 
-# Proxpi (PyPI caching proxy)
-PIP_INDEX_URL=http://proxpi.${DOMAIN}/index/
-PIP_TRUSTED_HOST=proxpi.${DOMAIN}
+# Python cache (PyPI caching proxy)
+PIP_INDEX_URL=http://python-cache.${DOMAIN}/index/
+PIP_TRUSTED_HOST=python-cache.${DOMAIN}
 
 # Kestra
 KESTRA_HOST=kestra.${DOMAIN}

@@ -83,6 +83,9 @@ configurable domain, set to `s.local` by default.
   - `wireguard.` — WireGuard VPN server with web management UI
     (<https://github.com/wg-easy/wg-easy>), most services are available only
     through VPN connection
+  - `web-external.` — TLS-terminating reverse proxy
+    (<https://en.angie.software/angie/>) that provides HTTPS access to the
+    WireGuard web UI from outside the VPN, by server IP address
   - `dns.` — Unbound DNS resolver <https://github.com/NLnetLabs/unbound> with
     blacklisting support <https://github.com/iYUYUE/dns-zone-blacklist>.
 - Caching:
@@ -90,8 +93,8 @@ configurable domain, set to `s.local` by default.
     <https://github.com/sameersbn/docker-apt-cacher-ng>.
   - `docker-cache.` — Docker registry caching proxy
     <https://github.com/rpardini/docker-registry-proxy>.
-  - `proxpi.` — Python package caching proxy
-    <https://github.com/EpicWink/proxpi>.
+  - `python-cache.` — Python package caching proxy, served by
+    <https://en.angie.software/angie/> (proxy_cache to pypi.org).
   - `build-cache.` — build cache server for ccache/sccache, served by
     <https://en.angie.software/angie/>.
 - Development:
@@ -113,7 +116,7 @@ configurable domain, set to `s.local` by default.
 - LLM and coding agents:
   - `litellm.` — LLM proxy (<https://github.com/BerriAI/litellm>) with MCP
     gateway.
-    - `ollama.` — local LLM model server <https://github.com/ollama/ollama>.
+    - `localai.` — local LLM model server <https://github.com/mudler/LocalAI>.
     - `mcp-gitea.` – Gitea MCP server <https://gitea.com/gitea/gitea-mcp>.
     - `basic-memory.` — Basic Memory MCP server <https://basicmemory.com>.
 - Grafana monitoring suite:
@@ -123,11 +126,7 @@ configurable domain, set to `s.local` by default.
   - `tempo.` — trace storage backend <https://github.com/grafana/tempo>.
   - `victoria-metrics.` — metrics storage backend
     <https://github.com/VictoriaMetrics/VictoriaMetrics>.
-  - `cadvisor.` — container metrics (per-container resource usage)
-    <https://github.com/google/cadvisor>.
-  - `node-exporter.` — host-level metrics (CPU, memory, disk, network)
-    <https://github.com/prometheus/node_exporter>.
-  - `otelcol.` — OpenTelemetry Collector (Prometheus scrape → OTLP)
+  - `otelcol.` — OpenTelemetry Collector (hostmetrics + docker_stats → OTLP)
     <https://opentelemetry.io/docs/collector/>.
 - User and secret management:
   - `openldap.` — OpenLDAP directory for centralized authentication
@@ -135,9 +134,9 @@ configurable domain, set to `s.local` by default.
   - `phpldapadmin.` — OpenLDAP web interface
     <https://github.com/leenooks/phpLDAPadmin>.
   - `openbao.` — secret management <https://openbao.org/>.
-- Web:
+- Web (internal):
   - `<domain>` — static welcome home page, served by `angie`.
-  - `api.` — single entry point for other services’ API, served by `angie`.
+  - `api.` — single entry point for other services' API, served by `angie`.
 
 Architecture
 ============
@@ -154,6 +153,11 @@ The main use-case is to run the services on a dedicated headless server and use
 or control them from multiple client computers.
 
 Most services are available only when connected to VPN.
+
+Services outside of VPN
+-----------------------
+
+<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/novpn.svg" alt="novpn" />
 
 Service interaction diagram
 ---------------------------
@@ -288,7 +292,7 @@ The script generates the following files when `--client-conf` is used:
 
 | File | Description |
 |----|----|
-| `env` | Environment variables for all services (ai, ccache, proxpi, gitea, redmine) |
+| `env` | Environment variables for all services |
 | `apt-cache.conf` | APT cache configuration |
 | `resolv.conf` | DNS resolver configuration |
 | `qwen/settings.json` | Qwen Code configuration |
@@ -412,7 +416,7 @@ make up
 make down
 
 # View logs
-make log SERVICE=ollama
+make log SERVICE=localai
 
 # SSH to server
 make ssh
@@ -462,3 +466,6 @@ Agentic coding
 - <https://github.com/mahdin75/gis-mcp>
 - <https://github.com/jjsantos01/qgis_mcp>
 - <https://github.com/awesome-opencode/awesome-opencode>
+- <https://github.com/shanraisshan/claude-code-best-practice#%EF%B8%8F-development-workflows>
+- <https://github.com/ai-boost/awesome-harness-engineering>
+- <https://github.com/alibaba/open-code-review>

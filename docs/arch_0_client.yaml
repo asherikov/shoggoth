@@ -44,3 +44,8 @@ nodes:
     scope: client_host
     style_notag: hh_diagrams_programming_language_python
 
+  - id: ["WireGuard\nVPN client", client_vpn]
+    tags: ["client"]
+    scope: client_host
+    style_notag: hh_diagrams_generic_network_vpn
+

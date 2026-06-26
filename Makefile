@@ -42,7 +42,9 @@ ssh_exec:
 	ssh ${SSH_COMMON_ARGS} -t ${USER}@${HOST_IP} 'cd ${REMOTE_PATH}/shoggoth && ${CMD}'
 
 
-shutdown: down
+shutdown:
+	-${MAKE} out
+	${MAKE} down
 	${MAKE} ssh_exec CMD='exec su -l -c "shutdown -P now"'
 
 hosts:
@@ -78,8 +80,9 @@ test:
 	@echo ">>>>>>>>>>>> api gateway /redmine/"
 	curl -s -o /dev/null -w '%{http_code}' http://${API_HOST}/redmine/ | grep -q '^200' && echo "OK" || echo "FAIL"
 	@echo "======================================================="
-	@echo ">>>>>>>>>>>> ollama"
-	${MAKE} ollama_tags
+	@echo ">>>>>>>>>>>> localai"
+	${MAKE} ai_embed
+	${MAKE} ai_models
 	@echo ""
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> apt-proxy"

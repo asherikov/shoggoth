@@ -15,8 +15,8 @@ volumes:
         name: "shoggoth_angie_build_cache"
     shoggoth_apt_cache:
         name: "shoggoth_apt_cache"
-    shoggoth_proxpi_cache:
-        name: "shoggoth_proxpi_cache"
+    shoggoth_python_cache:
+        name: "shoggoth_python_cache"
     shoggoth_docker_cache:
         name: "shoggoth_docker_cache"
     shoggoth_docker_registry:
@@ -35,6 +35,12 @@ volumes:
         name: "shoggoth_openldap_config"
     shoggoth_openbao_data:
         name: "shoggoth_openbao_data"
+    shoggoth_localai_models:
+        name: "shoggoth_localai_models"
+    shoggoth_localai_backends:
+        name: "shoggoth_localai_backends"
+    shoggoth_localai_data:
+        name: "shoggoth_localai_data"
 
 secrets:
     gitea_server_token:
@@ -45,6 +51,8 @@ secrets:
         file: ./private/ssh/id_rsa
     gitea_user:
         file: ./private/gitea-user.txt
+    ollama_cloud_token:
+        file: ./private/ollama-cloud-token.txt
 
 x-service: &default_service
     networks:
@@ -80,6 +88,8 @@ services:
             - ./private:/shoggoth/private:ro
             # openbao persistent volume (to read root token after init)
             - shoggoth_openbao_data:/shoggoth/openbao-data
+            # docker-cache CA certificate directory (pre-seed shared CA)
+            - ./docker/cache/certs:/shoggoth/docker/cache/certs
             # persistent data directories (mkdir + chown for correct ownership)
             - ./git/gitea/data:/shoggoth/data/gitea
             - ./git/runner/data:/shoggoth/data/gitea-runner
@@ -91,9 +101,11 @@ services:
         environment:
             !!merge <<: *default_environment
             SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
+            SHOGGOTH_IP: ${SHOGGOTH_IP:-}
         secrets:
             - gitea_server_token
             - redmine_token
+            - ollama_cloud_token
         entrypoint: /shoggoth/bringup/bringup.sh
         depends_on:
             openbao:
@@ -132,23 +144,24 @@ services:
             retries: 30
             start_period: 120s
 
-    web:
+    web-internal:
         !!merge <<: *default_service
-        # https://github.com/ccache/ccache/wiki/HTTP-storage
+        # https://github.com/cccache/ccache/wiki/HTTP-storage
         image: docker.angie.software/angie:latest
-        container_name: web.${SHOGGOTH_DOMAIN}
+        container_name: web-internal.${SHOGGOTH_DOMAIN}
         networks:
             shoggoth:
                 aliases:
                     - api.${SHOGGOTH_DOMAIN}
                     - build-cache.${SHOGGOTH_DOMAIN}
                     - slave-term.${SHOGGOTH_DOMAIN}
+                    - python-cache.${SHOGGOTH_DOMAIN}
                     - ${SHOGGOTH_DOMAIN}
         volumes:
-            - ./bringup/rendered/angie/angie.conf:/etc/angie/angie.conf:ro
+            - ./bringup/rendered/web-internal/web-internal.conf:/etc/angie/angie.conf:ro
             - ./angie/html:/data/html:ro
             - shoggoth_angie_build_cache:/data/build_cache
-            - ./setup-client.sh:/data/setup-client.sh:ro
+            - shoggoth_python_cache:/data/python_cache
         depends_on:
             bringup:
                 condition: service_completed_successfully
@@ -160,8 +173,24 @@ services:
                 condition: service_started
         post_start:
             # needs to be writable
-            - command: chown -R angie:angie /data/build_cache
+            - command: chown -R angie:angie /data/build_cache /data/python_cache
               user: root
+
+    web-external:
+        !!merge <<: *default_service
+        image: docker.angie.software/angie:latest
+        container_name: web-external.${SHOGGOTH_DOMAIN}
+        ports:
+            - "443:443"
+        volumes:
+            - ./bringup/rendered/web-external/web-external.conf:/etc/angie/angie.conf:ro
+            - ./bringup/rendered/certs:/data/certs:ro
+            - ./setup-client.sh:/data/setup-client.sh:ro
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
+            wireguard:
+                condition: service_started
 
     apt-cache:
         !!merge <<: *default_service
@@ -182,20 +211,6 @@ services:
             # needs to be writable
             - command: chown -R apt-cacher-ng:apt-cacher-ng /var/cache/apt-cacher-ng /var/log/apt-cacher-ng
               user: root
-
-    proxpi:
-        !!merge <<: *default_service
-        # https://github.com/EpicWink/proxpi
-        # https://hub.docker.com/r/epicwink/proxpi
-        image: epicwink/proxpi:latest
-        container_name: proxpi.${SHOGGOTH_DOMAIN}
-        volumes:
-            - shoggoth_proxpi_cache:/var/cache/proxpi
-        environment:
-            !!merge <<: *default_environment
-            PROXPI_CACHE_DIR: /var/cache/proxpi
-        # override default args to use port 80 instead of 5000
-        command: --bind 0.0.0.0:80 --threads 2
 
     docker-cache:
         !!merge <<: *default_service
@@ -219,12 +234,15 @@ services:
             DISABLE_IPV6: true
             ALLOW_PUSH: true
         ports:
-            - "3128:3128"
+            - "127.0.0.1:3128:3128"
         volumes:
             # Cache storage directory (relative to this compose file location)
             - shoggoth_docker_cache:/docker_mirror_cache
             # CA certificate storage
             - ./docker/cache/certs:/ca
+        depends_on:
+            bringup:
+                condition: service_completed_successfully
 
     docker-registry:
         # gitea has registry too, but there are naming contraints
@@ -272,7 +290,6 @@ services:
         container_name: wireguard.${SHOGGOTH_DOMAIN}
         ports:
             - "51820:51820/udp"
-            - "51821:51821/tcp"
         cap_add:
             - NET_ADMIN
             - SYS_MODULE
@@ -285,6 +302,7 @@ services:
             - ./vpn/wireguard/data:/etc/wireguard
             - ./vpn/wireguard/entrypoint.sh:/entrypoint.sh:ro
             - /lib/modules:/lib/modules:ro
+            - ./bringup/rendered/secrets/wireguard/admin-password:/run/secrets/admin_password:ro
         entrypoint: ["/entrypoint.sh"]
         command: ["/usr/bin/dumb-init", "node", "server/index.mjs"]
         environment:
@@ -298,43 +316,44 @@ services:
             INIT_DNS: "172.20.0.53"
             INSECURE: "true"
             DISABLE_IPV6: "true"
+            PORT: "80"
+        # TODO: re-enable admin password sync via post_start once wg-easy CLI is fixed
+        #       or migrate to reset-admin.mjs approach (see vpn/wireguard/reset-admin.mjs)
         depends_on:
             bringup:
                 condition: service_completed_successfully
 
-    ollama:
+    localai:
         !!merge <<: *default_service
-        # https://hub.docker.com/r/ollama/ollama
-        # https://github.com/jameschrisa/Ollama_Tuning_Guide
-        # https://deepwiki.com/ollama/ollama/4.6-quantization
-        image: ollama/ollama:latest
-        container_name: ollama.${SHOGGOTH_DOMAIN}
+        # https://github.com/mudler/LocalAI
+        # Vulkan image includes CPU backends; LocalAI auto-detects GPU
+        # availability and downloads matching backends from the backend gallery.
+        image: localai/localai:latest-gpu-vulkan
+        container_name: localai.${SHOGGOTH_DOMAIN}
         volumes:
-            - ./ai/ollama/:/root/.ollama
+            - shoggoth_localai_models:/models
+            - shoggoth_localai_backends:/backends
+            - shoggoth_localai_data:/data
+            - ./ai/localai/preload-models.yaml:/models/preload-models.yaml:ro
         devices:
             - /dev/dri:/dev/dri
             - /dev/kfd:/dev/kfd
         environment:
             !!merge <<: *default_environment
-            OLLAMA_HOST: "0.0.0.0:80"
-            # 2 to log prompts
-            OLLAMA_DEBUG: 1
-            # https://docs.ollama.com/context-length
-            OLLAMA_CONTEXT_LENGTH: 256000
-            # may help?
-            OLLAMA_FLASH_ATTENTION: 1
-            #OLLAMA_LLM_LIBRARY: "cpu_avx2"
-            OLLAMA_MAX_LOADED_MODELS: 1
-            OLLAMA_NUM_PARALLEL: 1
-            #OLLAMA_NO_CLOUD: 1
-            OLLAMA_KEEP_ALIVE: 30m
-            # amd igpu
-            OLLAMA_VULKAN: 1
-            OLLAMA_GPU_OVERHEAD: 25769803776 # limit vram
+            ADDRESS: "0.0.0.0:80"
+            MODELS_PATH: /models
+            DEBUG: "false"
+            CONTEXT_SIZE: 256000
+            THREADS: 4
+            MAX_ACTIVE_BACKENDS: 1
+            SINGLE_ACTIVE_BACKEND: "true"
+            # delays startip even if backend is already installed
+            #LOCALAI_EXTERNAL_BACKENDS: "llama-cpp"
+            #PRELOAD_MODELS_CONFIG: "/models/preload-models.yaml"
 
     litellm:
         # https://github.com/BerriAI/litellm
-        # LLM proxy: OpenAI-compatible gateway for Ollama with Prometheus metrics and OTel tracing
+        # LLM proxy: OpenAI-compatible gateway for LocalAI with Prometheus metrics and OTel tracing
         # Also serves as MCP gateway for observability on MCP tool calls
         !!merge <<: *default_service
         image: ghcr.io/berriai/litellm:main-stable
@@ -348,11 +367,9 @@ services:
             - ./bringup/rendered/litellm/config.yaml:/app/config.yaml:ro
             - ./ai/litellm/data:/app/litellm
         depends_on:
-            ollama:
+            localai:
                 condition: service_started
             mcp-gitea:
-                condition: service_started
-            basic-memory:
                 condition: service_started
             bringup:
                 condition: service_completed_successfully
@@ -458,7 +475,7 @@ services:
             BASIC_MEMORY_PROJECT_ROOT: /app/data
             BASIC_MEMORY_SEMANTIC_EMBEDDING_PROVIDER: openai
             BASIC_MEMORY_SEMANTIC_EMBEDDING_MODEL: nomic-embed-text
-            OPENAI_API_KEY: ollama
+            OPENAI_API_KEY: localai
             OPENAI_BASE_URL: http://litellm/v1
             OTEL_SERVICE_NAME: basic-memory
         command: ["basic-memory", "mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "80"]
@@ -735,7 +752,7 @@ services:
             GF_AUTH_ANONYMOUS_ENABLED: "true"
             GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
             GF_AUTH_LDAP_ENABLED: "false"
-            GF_LOG_LEVEL: info
+            GF_LOG_LEVEL: warn
             GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/shoggoth.json
         volumes:
             - ./monitoring/grafana/data:/var/lib/grafana
@@ -798,38 +815,10 @@ services:
             - "-selfScrapeInterval=15s"
             - "-httpListenAddr=:80"
 
-    node-exporter:
-        # https://github.com/prometheus/node_exporter
-        # Host-level metrics: CPU, memory, disk, network, filesystem
-        !!merge <<: *default_service
-        image: prom/node-exporter:latest
-        container_name: node-exporter.${SHOGGOTH_DOMAIN}
-        pid: host
-        volumes:
-            - /proc:/host/proc:ro
-            - /sys:/host/sys:ro
-            - /:/rootfs:ro
-        command:
-            - "--path.procfs=/host/proc"
-            - "--path.sysfs=/host/sys"
-            - "--path.rootfs=/rootfs"
-
-    cadvisor:
-        # https://github.com/google/cadvisor
-        # Container metrics: CPU, memory, filesystem, network usage per container
-        !!merge <<: *default_service
-        image: ghcr.io/google/cadvisor:latest
-        container_name: cadvisor.${SHOGGOTH_DOMAIN}
-        volumes:
-            - /:/rootfs:ro
-            - /var/run/docker.sock:/var/run/docker.sock:ro
-            - /var/lib/docker/:/var/lib/docker:ro
-            - /sys:/sys:ro
-            - /dev/disk:/dev/disk:ro
-
     otelcol:
         # https://opentelemetry.io/docs/collector/
-        # Central telemetry gateway: file_log for container logs, OTLP for traces/metrics, forwards to LGTM stack
+        # Central telemetry gateway: hostmetrics + docker_stats for metrics,
+        # file_log for container logs, OTLP for traces/metrics, forwards to LGTM stack
         !!merge <<: *default_service
         image: otel/opentelemetry-collector-contrib:latest
         # runs as non-root UID 10001 by default, which cannot traverse
@@ -840,3 +829,6 @@ services:
             - ./monitoring/otelcol/config.yaml:/etc/otelcol-contrib/config.yaml:ro
             - /var/lib/docker/containers:/var/lib/docker/containers:ro
             - /var/run/docker.sock:/var/run/docker.sock:ro
+            - /:/host:ro
+            - /proc:/host/proc:ro
+            - /sys:/host/sys:ro

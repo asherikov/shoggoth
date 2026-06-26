@@ -7,7 +7,7 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
 - **[Angie](https://docker.angie.software/angie:latest)** (selected)
 - <https://github.com/apache/apisix> (Apache 2.0)
   - + full API gateway with dynamic routing, load balancing, circuit breaking, health checks
-  - + ai-proxy plugin for LLM request normalization (8+ providers, Ollama via openai-compatible)
+  - + ai-proxy plugin for LLM request normalization (8+ providers, LocalAI via openai-compatible)
   - + ai-rate-limiting (token-based), ai-prompt-decorator plugins
   - + mcp-bridge plugin converts stdio MCP servers to HTTP SSE
   - + can replace both Angie and LiteLLM as a single service
@@ -51,7 +51,7 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
 ## LLM proxy
 
 - **[LiteLLM](https://github.com/BerriAI/litellm)** (selected)
-  - OpenAI-compatible gateway for Ollama with Prometheus metrics and OTel tracing
+  - OpenAI-compatible gateway for LocalAI with Prometheus metrics and OTel tracing
   - Also serves as MCP gateway for observability on MCP tool calls
 - <https://github.com/Portkey-ai/gateway> (MIT / Enterprise)
   - + 250+ providers, automatic retries, weighted load balancing, fallbacks
@@ -163,8 +163,38 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
 
 ## PyPI cache
 
-- **[proxpi](https://github.com/EpicWink/proxpi)** (selected)
+- ~~**[proxpi](https://github.com/EpicWink/proxpi)**~~ (replaced with Angie proxy_cache)
   - <https://hub.docker.com/r/epicwink/proxpi>
+  - Periodically got stuck, required manual restart; no healthcheck or watchdog
+- <https://github.com/EpicWink/proxpi#alternatives> — alternatives list maintained by proxpi author:
+  - <https://github.com/your-tools/simpleindex> — URL router to multiple indices; no caching without custom plugins; no official Docker image
+  - <https://github.com/pypa/bandersnatch> — full PyPI mirror (manual sync, not on-demand proxy); no official Docker image; disk-heavy (entire PyPI mirror)
+  - <https://github.com/devpi/devpi> — full index server with on-demand mirroring, caching, user indexes, replication; heavyweight (DB backend); no official Docker image (30+ fragmented community images); overkill for simple cache
+  - <https://github.com/pypiserver/pypiserver> — serves local packages, redirects to PyPI for missing packages (pip fetches directly — no bandwidth savings); actively maintained (v2.4.1, Feb 2026); official Docker image `pypiserver/pypiserver`; no caching of proxied packages
+  - <https://github.com/anthraxx/dumb-pypi> — static site generator for package index; no proxy, no caching, no server; not applicable
+  - <https://pypi.org/project/pypi-cloud/> — hosted/managed service; private index is paid; no clear proxying support; not self-hostable
+  - <https://github.com/whoatemybutter/pypiprivate> — serves local/S3 packages only; no proxy to PyPI; not applicable
+  - <https://github.com/pulp/pulpcore> — generic content repository (RPM/deb/Python/etc.); proxying but no caching; requires Redis + Postgres + API + workers; massively overkill
+  - <https://github.com/wolever/pip2pi> — manual sync of specific packages; no proxy; not applicable
+  - <https://github.com/danihodovic/nginx_pypi_cache> — nginx proxy_cache for PyPI; lightweight; repo appears defunct (404); approach is sound and can be implemented as custom nginx/Angie config
+  - <https://github.com/jcsalterego/flask-pypi-proxy> — explicitly unmaintained; no cache size limit; not applicable
+  - <https://docs.python.org/3/library/http.server.html> — stdlib static file server; no proxy; not applicable
+  - Apache with mod_rewrite + mod_cache_disk — would work but adds Apache to the stack (not currently used)
+  - <https://gemfury.com> — hosted/managed; private index is paid; unclear proxy support; not self-hostable
+  - **[Angie proxy_cache](https://en.angie.software/angie/)** (selected) — reused existing Angie `web-internal` container with `proxy_cache` to pypi.org; eliminates proxpi container; nginx proxy_cache is battle-tested with no Python process to hang; `python-cache.${SHOGGOTH_DOMAIN}` network alias on `web-internal` service; `/index/` proxies to `https://pypi.org/simple/` with `sub_filter` rewriting file URLs to `/files/`; `/files/` proxies to `https://files.pythonhosted.org/` with 30-day cache; PEP 691 JSON content types handled via `sub_filter_types`
+- Additional alternatives found via broader search (not on proxpi's list):
+  - <https://github.com/SENYSENYSENY16/PROKKI> — lightweight PyPI reverse proxy cache written in Haskell; Docker image `ghcr.io/senysenyseny16/prokki`; actively maintained (v0.2.15, Jan 2026); BSD-3-Clause; config via `config.toml` (host, port, cache dir, multiple upstream indexes); 16 stars; 0 open issues; purpose-built for the exact use case (caching proxy between pip/uv/poetry and PyPI); supports multiple upstream indexes simultaneously (PyPI, PyTorch CUDA wheels, etc.); pip connects via `PIP_INDEX_URL=http://<host>:<port>/<index_name>/simple`
+  - <https://github.com/LIVEHL/AIMIRROR> — multi-source download accelerator (PyPI, Docker Hub, CRAN, HuggingFace); Docker image `ghcr.io/livehl/aimirror:latest`; actively maintained (v0.3.4, Mar 2026); MIT; 212 stars; LRU cache eviction with configurable max size (default 100 GB); parallel chunked downloading for large files; content rewriting for transparent proxying; FastAPI-based (Python); more complex than needed for pure PyPI caching; `/stats` endpoint for cache monitoring
+  - <https://github.com/sonatype/nexus-public> (Nexus Repository CE) — enterprise artifact repository manager; official Docker image `sonatype/nexus3` (100M+ pulls); supports PyPI proxy repository with caching; free Community Edition; actively maintained; heavyweight (2-3 min startup, multi-format: Maven, npm, Docker, PyPI, NuGet, etc.); overkill for PyPI-only caching but viable if multi-format artifact management is desired
+  - <https://jfrog.com/artifactory> (Artifactory OSS) — enterprise binary repository manager; official Docker image `releases-docker.jfrog.io/jfrog/artifactory-oss`; supports PyPI remote repository with caching; free OSS edition (limited features); actively maintained; heavyweight; overkill for PyPI-only caching
+  - <https://inedo.com/proget> (ProGet) — multi-format package manager with PyPI proxy feed; Docker installation supported; actively maintained by Inedo; commercial licensing required (no free edition); overkill for PyPI-only caching
+  - <https://github.com/mardiros/pyshop> — Pyramid-based PyPI caching proxy; Docker image `mardiros/pyshop`; requires PostgreSQL/MySQL; archived (Dec 2021); unmaintained; not viable
+  - <https://github.com/NATHANVAUGHN/MYPYPI> — lightweight pull-through PyPI cache; includes Dockerfile but no pre-built image; archived (May 2023); unmaintained; not viable
+  - <https://github.com/marksholund/pynexus> — FastAPI-based PyPI caching proxy with metadata TTL and ETag support; no Docker image; 0 stars; unproven; not viable
+  - <https://github.com/timreynolds/vouch> — multi-format registry proxy (PyPI, npm, Maven, RubyGems, crates.io, Go); supports file/memory/S3/GCS/Azure cache backends; no pre-built Docker image; 3 commits total; extremely early stage; not production-ready
+  - <https://github.com/GUYSKK/WEBSITE-MIRROR> — nginx-based PyPI/npm mirror with proxy_cache; Docker image `guyskk/pypi-mirror:latest-amd64`; 7 commits, 1 star; only amd64; very low activity; essentially same approach as nginx_pypi_cache / custom Angie config
+  - <https://github.com/PEDIA/REPOCACHE> — universal caching repository (PyPI, Maven, npm, yum, rustup); no Docker image; last release Feb 2021; inactive; not viable
+  - <https://github.com/Daneb255/pkggate> — supply-chain security proxy for PyPI (PEP 691); Docker image `ghcr.io/daneb255/pkggate`; does NOT cache package files — only caches threat intelligence; not a caching proxy; not applicable
 
 ## Docker
 
@@ -242,10 +272,11 @@ own DNS records on start/stop.
 
 ### Model server
 
-- **[Ollama](https://hub.docker.com/r/ollama/ollama)** (selected)
+- **[LocalAI](https://github.com/mudler/LocalAI)** (selected)
+  - <https://hub.docker.com/r/localai/localai>
+- <https://hub.docker.com/r/ollama/ollama>
   - <https://github.com/jameschrisa/Ollama_Tuning_Guide>
   - <https://deepwiki.com/ollama/ollama/4.6-quantization>
-- <https://github.com/mudler/LocalAI>
 
 ### Memory
 
@@ -359,11 +390,11 @@ own DNS records on start/stop.
 
 ### Host metrics
 
-- **[node_exporter](https://github.com/prometheus/node_exporter)** (selected)
+Collected by the OpenTelemetry Collector's [hostmetricsreceiver](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/hostmetricsreceiver) — no dedicated service needed.
 
 ### Container metrics
 
-- **[cAdvisor](https://github.com/google/cadvisor)** (selected)
+Collected by the OpenTelemetry Collector's [dockerstatsreceiver](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/dockerstatsreceiver) — no dedicated service needed.
 
 ### Telemetry gateway
 

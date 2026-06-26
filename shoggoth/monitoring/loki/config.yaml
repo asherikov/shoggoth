@@ -50,6 +50,7 @@ distributor:
             - container.name
             - deployment.environment.name
             - session.id
+            - compose.service
 
 limits_config:
     retention_period: 8760h

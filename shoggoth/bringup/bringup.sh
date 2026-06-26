@@ -133,6 +133,10 @@ REDMINE_TOKEN="$(cat /run/secrets/redmine_token)"
 bao_put "redmine/api-token" "value" "${REDMINE_TOKEN}"
 export REDMINE_TOKEN
 
+OLLAMA_CLOUD_TOKEN="$(cat /run/secrets/ollama_cloud_token)"
+bao_put "ollama/cloud-token" "value" "${OLLAMA_CLOUD_TOKEN}"
+export OLLAMA_CLOUD_TOKEN
+
 mkdir -p /shoggoth/bringup/rendered/unbound
 envsubst '${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/unbound.conf > /shoggoth/bringup/rendered/unbound/unbound.conf
 
@@ -158,10 +162,55 @@ envsubst '${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/gitea-runner_config.
 render_secret "${GITEA_RUNNER_TOKEN}" /shoggoth/bringup/rendered/secrets/gitea-runner-token 1000 1000
 
 mkdir -p /shoggoth/bringup/rendered/litellm
-envsubst '${GITEA_SERVER_TOKEN}' < /shoggoth/bringup/templates/litellm_config.yaml > /shoggoth/bringup/rendered/litellm/config.yaml
+envsubst '${GITEA_SERVER_TOKEN} ${OLLAMA_CLOUD_TOKEN}' < /shoggoth/bringup/templates/litellm_config.yaml > /shoggoth/bringup/rendered/litellm/config.yaml
 
-mkdir -p /shoggoth/bringup/rendered/angie
-envsubst '${SHOGGOTH_DOMAIN} ${GITEA_SERVER_TOKEN} ${REDMINE_TOKEN}' < /shoggoth/bringup/templates/angie.conf > /shoggoth/bringup/rendered/angie/angie.conf
+mkdir -p /shoggoth/bringup/rendered/web-internal
+envsubst '${SHOGGOTH_DOMAIN} ${GITEA_SERVER_TOKEN} ${REDMINE_TOKEN}' < /shoggoth/bringup/templates/web-internal.conf > /shoggoth/bringup/rendered/web-internal/web-internal.conf
+
+echo "shoggoth: Generating shared CA and TLS certificate..."
+CERT_DIR="/shoggoth/bringup/rendered/certs"
+DOCKER_CACHE_CA_DIR="/shoggoth/docker/cache/certs"
+mkdir -p "${CERT_DIR}" "${DOCKER_CACHE_CA_DIR}"
+CA_PASS="$(bao_get_or_generate ca/passphrase)"
+if [ ! -f "${CERT_DIR}/shoggoth-ca.key" ] || [ ! -f "${CERT_DIR}/shoggoth-ca.crt" ]; then
+    openssl genrsa -des3 -passout "pass:${CA_PASS}" -out "${CERT_DIR}/shoggoth-ca.key" 4096 || { echo "shoggoth: FATAL: CA key generation failed" >&2; exit 1; }
+    openssl req -new -x509 -days 3650 -sha256 \
+        -key "${CERT_DIR}/shoggoth-ca.key" -passin "pass:${CA_PASS}" \
+        -out "${CERT_DIR}/shoggoth-ca.crt" \
+        -subj "/CN=shoggoth CA" \
+        -extensions v3_ca \
+        -config <(printf '[req]\ndistinguished_name=dn\n[dn]\n[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,digitalSignature,cRLSign,keyCertSign\nsubjectKeyIdentifier=hash\n') || { echo "shoggoth: FATAL: CA certificate generation failed" >&2; exit 1; }
+fi
+if [ ! -f "${CERT_DIR}/shoggoth.key" ] || [ ! -f "${CERT_DIR}/shoggoth.crt" ]; then
+    openssl genrsa -out "${CERT_DIR}/shoggoth.key" 2048 || { echo "shoggoth: FATAL: server key generation failed" >&2; exit 1; }
+    openssl req -new -key "${CERT_DIR}/shoggoth.key" \
+        -out "${CERT_DIR}/shoggoth.csr" \
+        -subj "/CN=*.${SHOGGOTH_DOMAIN}" || { echo "shoggoth: FATAL: CSR generation failed" >&2; exit 1; }
+    SAN_ENTRIES="DNS:*.${SHOGGOTH_DOMAIN},DNS:${SHOGGOTH_DOMAIN}"
+    if [ -n "${SHOGGOTH_IP}" ]; then
+        SAN_ENTRIES="${SAN_ENTRIES},IP:${SHOGGOTH_IP}"
+    fi
+    openssl x509 -req -days 3650 -sha256 \
+        -in "${CERT_DIR}/shoggoth.csr" \
+        -CA "${CERT_DIR}/shoggoth-ca.crt" \
+        -CAkey "${CERT_DIR}/shoggoth-ca.key" \
+        -passin "pass:${CA_PASS}" \
+        -out "${CERT_DIR}/shoggoth.crt" \
+        -extfile <(printf "subjectAltName=${SAN_ENTRIES}\n") || { echo "shoggoth: FATAL: server certificate generation failed" >&2; exit 1; }
+    rm -f "${CERT_DIR}/shoggoth.csr"
+fi
+if [ ! -f "${DOCKER_CACHE_CA_DIR}/ca.key" ] || [ ! -f "${DOCKER_CACHE_CA_DIR}/ca.crt" ]; then
+    openssl rsa -in "${CERT_DIR}/shoggoth-ca.key" -passin "pass:${CA_PASS}" -des3 -passout "pass:foobar" -out "${DOCKER_CACHE_CA_DIR}/ca.key" || { echo "shoggoth: FATAL: docker-cache CA key re-encryption failed" >&2; exit 1; }
+    cp "${CERT_DIR}/shoggoth-ca.crt" "${DOCKER_CACHE_CA_DIR}/ca.crt"
+    echo "01" > "${DOCKER_CACHE_CA_DIR}/ca.srl"
+    chmod 600 "${DOCKER_CACHE_CA_DIR}/ca.key"
+    chmod 644 "${DOCKER_CACHE_CA_DIR}/ca.crt" "${DOCKER_CACHE_CA_DIR}/ca.srl"
+fi
+chmod 600 "${CERT_DIR}/shoggoth-ca.key" "${CERT_DIR}/shoggoth.key"
+chmod 644 "${CERT_DIR}/shoggoth-ca.crt" "${CERT_DIR}/shoggoth.crt"
+mkdir -p /shoggoth/bringup/rendered/web-external
+cp /shoggoth/bringup/templates/web-external.conf /shoggoth/bringup/rendered/web-external/web-external.conf
+chmod 644 /shoggoth/bringup/rendered/web-external/web-external.conf
 
 CDASH_DB_PASSWORD="$(bao_get_or_generate cdash/db-password)"
 CDASH_APP_KEY="$(bao_get_or_generate cdash/app-key)"
@@ -181,6 +230,7 @@ render_secret "${SHOGGOTH_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/op
 OPENLDAP_CONFIG_ADMIN_PASSWORD="$(bao_get_or_generate openldap/config-admin-password)"
 render_secret "${OPENLDAP_CONFIG_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/openldap-config-admin-password 911 911
 render_secret "${SHOGGOTH_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/grafana/admin-password 472 472
+render_secret "${SHOGGOTH_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/wireguard/admin-password 0 0
 export LDAP_BASE_DN="$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g; s/^/dc=/')"
 export LDAP_BIND_DN="uid=sldapauth,ou=people,${LDAP_BASE_DN}"
 export LDAP_HOST="openldap.${SHOGGOTH_DOMAIN}"
@@ -324,7 +374,7 @@ echo "shoggoth: OpenBao LDAP auth URL: ${LDAP_CONFIG_URL}"
 mkdir -p /shoggoth/vpn/wireguard/data
 
 find /shoggoth/bringup/rendered -type d -exec chmod a+rx {} +
-find /shoggoth/bringup/rendered -type f -not -path '*/secrets/*' -not -name 'config.yaml' -not -name '*.sh' -not -name 'ldap.env' -not -name 'cdash.env' -not -name 'redmine.env' -not -name 'gitea.env' -not -name 'phpldapadmin.env' -not -path '*/openldap/*.ldif' -exec chmod a+r {} +
+find /shoggoth/bringup/rendered -type f -not -path '*/secrets/*' -not -path '*/certs/*' -not -name 'config.yaml' -not -name '*.sh' -not -name 'ldap.env' -not -name 'cdash.env' -not -name 'redmine.env' -not -name 'gitea.env' -not -name 'phpldapadmin.env' -not -path '*/openldap/*.ldif' -exec chmod a+r {} +
 chmod 400 /shoggoth/bringup/rendered/ldap.env
 chown 1000:1000 /shoggoth/bringup/rendered/gitea/gitea.env
 chmod 400 /shoggoth/bringup/rendered/gitea/gitea.env
@@ -334,7 +384,7 @@ chown 33:33 /shoggoth/bringup/rendered/cdash/cdash.env
 chmod 400 /shoggoth/bringup/rendered/cdash/cdash.env
 chmod 600 /shoggoth/bringup/rendered/litellm/config.yaml
 chmod 600 /shoggoth/bringup/rendered/kestra/config.yaml
-chmod 600 /shoggoth/bringup/rendered/angie/angie.conf
+chmod 600 /shoggoth/bringup/rendered/web-internal/web-internal.conf
 
 mkdir -p /shoggoth/data/gitea
 chown 1000:1000 /shoggoth/data/gitea

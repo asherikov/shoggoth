@@ -35,10 +35,10 @@
         <li><a href="http://redmine.s.local/">redmine</a> - Redmine issue tracker</li>
         <li><a href="http://kestra.s.local/">kestra</a> - Kestra workflow orchestration</li>
         <li><a href="http://docker-registry.s.local/v2/_catalog">docker-registry</a> - Docker image registry</li>
-        <li><a href="http://proxpi.s.local/">proxpi</a> - PyPI cache proxy</li>
+        <li><a href="http://python-cache.s.local/">python-cache</a> - PyPI cache proxy</li>
         <li><a href="http://apt-cache.s.local/">apt-cache</a> - APT package cache
             <a href="http://apt-cache.s.local/acng-report.html">Usage statistics.</a></li>
-        <li><a href="http://litellm.s.local/">ai</a> - LLM proxy (LiteLLM → Ollama)</li>
+        <li><a href="http://litellm.s.local/">ai</a> - LLM proxy (LiteLLM → LocalAI)</li>
         <li><a href="http://git-pages.s.local/">git-pages</a> - Static site hosting</li>
         <li><a href="http://grafana.s.local/">grafana</a> - Observability dashboard (traces, metrics, logs)</li>
         <li><a href="http://slave-term.s.local/">slave-term</a> - Interactive web terminal (ttyd + tmux + Qwen Code)</li>
@@ -48,10 +48,10 @@
     <div class="download">
         <h2>Client Setup</h2>
         <p>Download and run the setup script to configure your client:</p>
-        <pre><code>curl -O http://s.local/setup-client.sh
+        <pre><code>curl -kO https://s.local/setup-client.sh
 chmod +x setup-client.sh
 ./setup-client.sh --all</code></pre>
-        <p>Or download directly: <a href="/setup-client.sh">setup-client.sh</a></p>
+        <p>Or download directly: <a href="https://s.local/setup-client.sh">setup-client.sh</a> (use <code>-k</code> if CA certificate is not installed yet)</p>
     </div>
 </body>
 </html>

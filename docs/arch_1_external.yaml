@@ -28,7 +28,7 @@ nodes:
     scope: external_services
     style_notag: hh_diagrams_alibabacloud_web_dns
 
-  - id: ["Cloud\nOllama", cloud_ollama]
+  - id: ["Cloud\nLocalAI", cloud_localai]
     tags: ["external"]
     scope: external_services
     style_notag: hh_diagrams_azure_aimachinelearning_azure_openai
