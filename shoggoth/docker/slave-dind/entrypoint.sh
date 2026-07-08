@@ -3,6 +3,7 @@ set -eu
 
 DOCKERD_PID=""
 CRED_CACHE_PID=""
+SSH_AGENT_PID=""
 LOGS_PIDS=""
 
 export DOCKER_HOST=unix:///dind/docker.sock
@@ -20,7 +21,7 @@ cleanup() {
     docker compose -f /shoggoth/compose/docker-compose.yml down 2>/dev/null || true
     [ -n "${DOCKERD_PID}" ] && kill "${DOCKERD_PID}" 2>/dev/null || true
     [ -n "${CRED_CACHE_PID}" ] && kill "${CRED_CACHE_PID}" 2>/dev/null || true
-    ssh-agent -k 2>/dev/null || true
+    [ -n "${SSH_AGENT_PID}" ] && kill "${SSH_AGENT_PID}" 2>/dev/null || true
     [ -n "${DOCKERD_PID}" ] && wait "${DOCKERD_PID}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -75,7 +76,6 @@ echo "shoggoth: Generating client configuration..." >&2
     --api-gateway \
     --gitea-user "$(cat /run/secrets/gitea_user)" \
     --ai-token litellm
-mv "${BUILD_DIR}/workflow/qwen.json" "${BUILD_DIR}/workflow/qwen-settings.json"
 cp -r /host_volumes/workflow-scripts/* "${BUILD_DIR}/scripts/"
 
 DOCKERFILE="${BUILD_DIR}/Dockerfile"
@@ -94,10 +94,11 @@ USER root
 RUN mkdir -p /root/.qwen \
     && chown -R ccws /home/ccws/.qwen \
     && git config --system credential.helper 'cache --socket=/shoggoth/git-cred/git_credential_sock' \
+    && git config --system user.email 'slave@__SHOGGOTH_DOMAIN__' \
+    && git config --system user.name 'shoggoth' \
     && printf 'Host *\n  UserKnownHostsFile /shoggoth/git-cred/known_hosts\n' > /etc/ssh/ssh_config.d/shoggoth.conf
 
 COPY workflow/apt-cache.conf /etc/apt/apt.conf.d/00-shoggoth-apt-cache
-COPY workflow/qwen-settings.json /root/.qwen/settings.json
 COPY scripts/ /shoggoth/workflow/scripts/
 
 USER ccws
@@ -126,6 +127,8 @@ KNOWN_HOSTS="/shoggoth/git-cred/known_hosts"
 echo "shoggoth: Preparing git-cred directory..." >&2
 mkdir -p /shoggoth/git-cred
 chmod 0700 /shoggoth/git-cred
+chown 1000:1000 /shoggoth/git-cred
+adduser -D -u 1000 -H -s /bin/sh ccws 2>/dev/null || true
 
 echo "shoggoth: Cleaning up stale sockets..." >&2
 rm -f "${SSH_AUTH_SOCK}" "${GIT_CREDENTIAL_SOCK}"
@@ -149,14 +152,19 @@ if [ ! -s "${KNOWN_HOSTS}" ]; then
 fi
 
 echo "shoggoth: Starting SSH agent at ${SSH_AUTH_SOCK}..." >&2
-eval "$(ssh-agent -a "${SSH_AUTH_SOCK}")"
+eval "$(su ccws -c "ssh-agent -a '${SSH_AUTH_SOCK}'")"
+SSH_AGENT_PID="$(echo "${SSH_AGENT_PID}" | head -1)"
 chmod 600 "${SSH_AUTH_SOCK}"
 
 echo "shoggoth: Adding SSH identity..." >&2
-ssh-add -v /run/secrets/ssh_id_rsa
+cp /run/secrets/ssh_id_rsa "${SSH_AUTH_SOCK}.key"
+chmod 400 "${SSH_AUTH_SOCK}.key"
+chown 1000:1000 "${SSH_AUTH_SOCK}.key"
+su ccws -c "ssh-add -v '${SSH_AUTH_SOCK}.key'"
+rm -f "${SSH_AUTH_SOCK}.key"
 
 echo "shoggoth: Listing SSH agent identities:" >&2
-ssh-add -l >&2
+su ccws -c "SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' ssh-add -l" >&2
 
 echo "shoggoth: Starting git credential cache daemon at ${GIT_CREDENTIAL_SOCK}..." >&2
 git credential-cache--daemon "${GIT_CREDENTIAL_SOCK}" &
@@ -169,6 +177,8 @@ GITEA_SERVER_TOKEN="$(cat /run/secrets/gitea_server_token)"
 printf 'protocol=http\nhost=git.%s\nusername=token\npassword=%s\n' \
     "${SHOGGOTH_DOMAIN}" "${GITEA_SERVER_TOKEN}" \
     | git credential-cache --socket "${GIT_CREDENTIAL_SOCK}" --timeout "${CREDENTIAL_TIMEOUT}" store
+
+chown -R 1000:1000 /shoggoth/git-cred
 
 echo "shoggoth: slave-dind setup complete" >&2
 
@@ -187,7 +197,7 @@ services:
         volumes:
             - /shoggoth/git-cred:/shoggoth/git-cred
             - /shoggoth/ci_cache:/cache
-        command: ttyd --max-clients 1 --port 80 --writable -t disableReconnect=true --once tmux -u new-session qwen
+        command: ttyd --max-clients 1 --port 80 --writable -t disableReconnect=true --once tmux -u new-session bash
 EOF
 
 docker compose -f "${COMPOSE_DIR}/docker-compose.yml" up -d --build

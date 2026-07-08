@@ -1,8 +1,7 @@
-ARG BASE_IMAGE=asherikov/ccws_qwen_noble:latest
+ARG BASE_IMAGE=asherikov/ccws_qwen:noble
 FROM ${BASE_IMAGE}
 
-ARG SHOGGOTH_SKILL_DIR=/ccws/skills/
-ENV SHOGGOTH_SKILL_DIR=${SHOGGOTH_SKILL_DIR}
+ARG SHOGGOTH_DOMAIN=
 
 USER root
 
@@ -31,12 +30,16 @@ RUN \
 --mount=type=cache,target=/cache/pip,sharing=locked \
     ${APT_INSTALL} nodejs ldap-utils slapd
 
-RUN curl -fsSL https://dl.gitea.io/tea/main/tea-main-linux-`dpkg --print-architecture` -o /usr/bin/tea \
-    && chmod +x /usr/bin/tea
-
 RUN curl -fsSL \
         "https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg --print-architecture`.tar.gz" \
     | tar -xz -C /usr/bin
+
+RUN mkdir -p /tmp/codebase \
+    && curl -fsSL \
+        "https://github.com/DeusData/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-linux-`dpkg --print-architecture`-portable.tar.gz" \
+        | tar -xz -C /tmp/codebase/ \
+    && mv /tmp/codebase/codebase-memory-mcp /usr/bin \
+    && rm -rf /tmp/codebase
 
 USER ccws
 
@@ -44,51 +47,10 @@ USER ccws
 RUN \
     mkdir -p /home/ccws/.qwen/
 
+ARG PYTHON_PKG=mcp opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 RUN \
 --mount=type=cache,target=/cache/pip,sharing=locked \
-    pip install mcp opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/gitea-tea \
-    && curl -fsSL \
-        https://raw.githubusercontent.com/beshkenadze/claude-skills-marketplace/main/skills/development/gitea-tea/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/gitea-tea/SKILL.md
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/redmine-cli \
-    && curl -fsSL https://raw.githubusercontent.com/aarondpn/redmine-cli/main/skills/redmine-cli/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/redmine-cli/SKILL.md
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/kestra-flow \
-    && curl -fsSL https://raw.githubusercontent.com/kestra-io/agent-skills/main/skills/kestra-flow/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/kestra-flow/SKILL.md
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-notes \
-    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-notes/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/memory-notes/SKILL.md
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-reflect \
-    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-reflect/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/memory-reflect/SKILL.md
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-schema \
-    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-schema/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/memory-schema/SKILL.md
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-defrag \
-    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-defrag/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/memory-defrag/SKILL.md
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-lifecycle \
-    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-lifecycle/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/memory-lifecycle/SKILL.md
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-ingest \
-    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-ingest/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/memory-ingest/SKILL.md
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/memory-metadata-search \
-    && curl -fsSL https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-metadata-search/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/memory-metadata-search/SKILL.md
-
-RUN mkdir -p ${SHOGGOTH_SKILL_DIR}/caveman \
-    && curl -fsSL https://raw.githubusercontent.com/JuliusBrussee/caveman/main/skills/caveman/SKILL.md \
-        -o ${SHOGGOTH_SKILL_DIR}/caveman/SKILL.md
+    (test -z "${SHOGGOTH_DOMAIN}" && pip install ${PYTHON_PKG}) \
+    || (test -n "${SHOGGOTH_DOMAIN}" && \
+        env PIP_INDEX_URL=http://python-cache.${SHOGGOTH_DOMAIN}/index/ PIP_TRUSTED_HOST=python-cache.${SHOGGOTH_DOMAIN} \
+        pip install ${PYTHON_PKG})

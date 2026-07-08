@@ -141,12 +141,7 @@ mkdir -p /shoggoth/bringup/rendered/unbound
 envsubst '${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/unbound.conf > /shoggoth/bringup/rendered/unbound/unbound.conf
 
 KESTRA_DB_PASSWORD="$(bao_get_or_generate kestra/db-password)"
-KESTRA_BASIC_AUTH_PASSWORD="$(bao_get_or_generate kestra/basic-auth-password)"
 export KESTRA_DATASOURCES_POSTGRES_PASSWORD="${KESTRA_DB_PASSWORD}"
-export KESTRA_BASIC_AUTH_PASSWORD
-mkdir -p /shoggoth/bringup/rendered/kestra
-envsubst '${KESTRA_DATASOURCES_POSTGRES_PASSWORD} ${KESTRA_BASIC_AUTH_PASSWORD} ${SHOGGOTH_DOMAIN}' \
-    < /shoggoth/bringup/templates/kestra_config.yaml > /shoggoth/bringup/rendered/kestra/config.yaml
 render_secret "${KESTRA_DB_PASSWORD}" /shoggoth/bringup/rendered/secrets/kestra-db/password 70 70
 
 REDMINE_DB_PASSWORD="$(bao_get_or_generate redmine/db-password)"
@@ -228,6 +223,10 @@ OPENLDAP_CONFIG_ADMIN_PASSWORD="$(bao_get_or_generate openldap/config-admin-pass
 render_secret "${OPENLDAP_CONFIG_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/openldap-config-admin-password 911 911
 render_secret "${SHOGGOTH_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/grafana/admin-password 472 472
 render_secret "${SHOGGOTH_ADMIN_PASSWORD}" /shoggoth/bringup/rendered/secrets/wireguard/admin-password 0 0
+export SHOGGOTH_ADMIN_PASSWORD
+mkdir -p /shoggoth/bringup/rendered/kestra
+envsubst '${KESTRA_DATASOURCES_POSTGRES_PASSWORD} ${SHOGGOTH_ADMIN_PASSWORD} ${SHOGGOTH_DOMAIN}' \
+    < /shoggoth/bringup/templates/kestra_config.yaml > /shoggoth/bringup/rendered/kestra/config.yaml
 export LDAP_BASE_DN="$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g; s/^/dc=/')"
 export LDAP_BIND_DN="uid=sldapauth,ou=people,${LDAP_BASE_DN}"
 export LDAP_HOST="openldap.${SHOGGOTH_DOMAIN}"
@@ -378,6 +377,16 @@ chmod 400 /shoggoth/bringup/rendered/cdash/cdash.env
 chmod 600 /shoggoth/bringup/rendered/litellm/config.yaml
 chmod 600 /shoggoth/bringup/rendered/kestra/config.yaml
 chmod 600 /shoggoth/bringup/rendered/web-internal/web-internal.conf
+
+echo "shoggoth: Creating Qwen Code plugin archive..."
+mkdir -p /shoggoth/bringup/rendered/plugin
+PLUGIN_STAGE="$(mktemp -d)"
+cp -a /shoggoth/ai/plugin/. "${PLUGIN_STAGE}/"
+envsubst '${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/qwen-extension.json > "${PLUGIN_STAGE}/qwen-extension.json"
+rm -f /shoggoth/bringup/rendered/plugin.tar.gz
+tar -czf /shoggoth/bringup/rendered/plugin.tar.gz -C "${PLUGIN_STAGE}" .
+rm -rf "${PLUGIN_STAGE}"
+chmod a+r /shoggoth/bringup/rendered/plugin.tar.gz
 
 mkdir -p /shoggoth/data/gitea
 chown 1000:1000 /shoggoth/data/gitea

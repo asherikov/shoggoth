@@ -34,5 +34,5 @@ tasks:
         wait: true
         transmitFailed: true
         inputs:
-          script: "redmine_task_processor.sh"
-          task_id: "{{ taskrun.value }}"
+          script: "shoggoth_workflow.py"
+          task_id: "task {{ taskrun.value }}"

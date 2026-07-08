@@ -274,7 +274,7 @@ generate_shoggoth_conf() {
 # LLM (LiteLLM → LocalAI)
 OPENAI_API_KEY=${CONFIGURE_AI_TOKEN}
 OPENAI_BASE_URL=http://litellm.${DOMAIN}/v1/
-OPENAI_MODEL=glm-5.1:cloud
+OPENAI_MODEL=glm-5.2:cloud
 #qwen3-coder-next:cloud, qwen3-coder:30b, qwen3-coder:480b-cloud
 BM_MCP_URL=http://litellm.${DOMAIN}/mcp
 
@@ -285,6 +285,9 @@ CCACHE_REMOTE_ONLY=true
 # Python cache (PyPI caching proxy)
 PIP_INDEX_URL=http://python-cache.${DOMAIN}/index/
 PIP_TRUSTED_HOST=python-cache.${DOMAIN}
+
+# Shoggoth
+SHOGGOTH_DOMAIN=${DOMAIN}
 
 # Kestra
 KESTRA_HOST=kestra.${DOMAIN}
@@ -403,15 +406,9 @@ EOF
     echo "Generated SSH config for ${GIT_HOST} with known hosts in ${CLIENT_CONF_DIR}"
 }
 
-generate_qwen_conf() {
-    cat > "${CLIENT_CONF_DIR}/qwen.json" <<EOF
+generate_qwen_settings() {
+    cat > "${CLIENT_CONF_DIR}/qwen-settings.json" <<EOF
 {
-  "mcpServers": {
-    "shoggoth-mcp": {
-      "httpUrl": "http://litellm.${DOMAIN}/mcp",
-      "timeout": 5000
-    }
-  },
   "telemetry": {
     "enabled": true,
     "target": "local",
@@ -422,8 +419,10 @@ generate_qwen_conf() {
   }
 }
 EOF
-    chmod 600 "${CLIENT_CONF_DIR}/qwen.json"
-    echo "Generated ${CLIENT_CONF_DIR}/qwen.json"
+    chmod 600 "${CLIENT_CONF_DIR}/qwen-settings.json"
+    echo "Generated ${CLIENT_CONF_DIR}/qwen-settings.json"
+    echo "MCP server configuration is provided by the shoggoth Qwen Code plugin"
+    echo "Install with: qwen extensions install http://${DOMAIN}/plugin --consent"
     echo "Telemetry exports to Grafana (LGTM stack) via otelcol at http://otelcol.${DOMAIN}:4317"
     echo "Dashboard: http://grafana.${DOMAIN} (admin)"
 }
@@ -494,7 +493,7 @@ main() {
     fi
 
     if [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
-        generate_qwen_conf
+        generate_qwen_settings
     fi
 
     if [ "${CONFIGURE_SSH_CONFIG}" = "true" ]; then

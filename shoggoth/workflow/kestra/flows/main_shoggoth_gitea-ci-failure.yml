@@ -23,6 +23,6 @@ tasks:
     wait: true
     transmitFailed: true
     inputs:
-      script: "gitea_event.sh"
+      script: "shoggoth_workflow.py"
       task_id: "ci-failure"
       payload: "{{ trigger.body | json }}"

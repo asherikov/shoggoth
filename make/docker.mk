@@ -31,6 +31,7 @@ docker_build:
 	cd shoggoth \
 		&& docker build \
 			--build-arg BASE_IMAGE=${BASE_IMAGE} \
+			--build-arg SHOGGOTH_DOMAIN=${DOMAIN} \
 			-f dockerfiles/${IMAGE} \
 			-t docker-registry.${DOMAIN}/${IMAGE}${DOCKER_TAG_SUFFIX}:latest \
 			--progress plain \

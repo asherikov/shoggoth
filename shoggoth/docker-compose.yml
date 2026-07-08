@@ -98,6 +98,7 @@ services:
             - shoggoth_redmine_files:/shoggoth/data/redmine-files
             - shoggoth_redmine_bundle_cache:/shoggoth/data/redmine-bundle-cache
             - ./ai/litellm/data:/shoggoth/data/litellm
+            - ./ai/plugin:/shoggoth/ai/plugin:ro
         environment:
             !!merge <<: *default_environment
         secrets:
@@ -157,6 +158,7 @@ services:
         volumes:
             - ./bringup/rendered/web-internal/web-internal.conf:/etc/angie/angie.conf:ro
             - ./angie/html:/data/html:ro
+            - ./bringup/rendered/plugin.tar.gz:/data/plugin.tar.gz:ro
             - shoggoth_angie_build_cache:/data/build_cache
             - shoggoth_python_cache:/data/python_cache
         depends_on:

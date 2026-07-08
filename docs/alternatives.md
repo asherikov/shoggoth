@@ -531,3 +531,21 @@ Collected by the OpenTelemetry Collector's [dockerstatsreceiver](https://github.
   - - shared secrets between different-UID services need separate copies with correct ownership
   - - each new service requires UID knowledge and mkdir/chown/chmod boilerplate in bringup
   - - no web UI for operators to view or rotate secrets
+
+# Agentic Workflows
+
+## Code indexing
+
+- **<https://github.com/DeusData/codebase-memory-mcp>** [selected]
+  - - lacks transparency
+- <https://github.com/safishamsi/graphify>
+  - - wants LLM
+- <https://github.com/vitali87/code-graph-rag>
+  - - lacks in language support
+- <https://github.com/tirth8205/code-review-graph>
+  - + embeddings
+  - - lacks in language support
+  - - broken visualization
+- LSP
+  - - compile commands are needed for C++
+

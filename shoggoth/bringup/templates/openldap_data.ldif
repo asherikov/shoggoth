@@ -14,7 +14,7 @@ objectClass: inetOrgPerson
 objectClass: posixAccount
 uid: admin
 cn: Admin
-sn: Admin
+sn: Shoggoth
 uidNumber: 10000
 gidNumber: 10000
 homeDirectory: /home/admin
@@ -25,8 +25,8 @@ changetype: add
 objectClass: inetOrgPerson
 objectClass: posixAccount
 uid: sldapauth
-cn: Service LDAP Auth
-sn: LDAP Auth
+cn: LDAP Auth
+sn: Shoogoth
 uidNumber: 10001
 gidNumber: 10001
 homeDirectory: /home/sldapauth
@@ -37,8 +37,8 @@ changetype: add
 objectClass: inetOrgPerson
 objectClass: posixAccount
 uid: sslave
-cn: Service Slave
-sn: CI/CD
+cn: Slave
+sn: Shoggoth
 uidNumber: 10002
 gidNumber: 10002
 homeDirectory: /home/sslave

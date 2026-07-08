@@ -29,6 +29,6 @@ tasks:
     wait: true
     transmitFailed: true
     inputs:
-      script: "gitea_event.sh"
+      script: "shoggoth_workflow.py"
       task_id: "pr-update"
       payload: "{{ trigger.body | json }}"

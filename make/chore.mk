@@ -1,4 +1,5 @@
 DIAGRAMS_RESOURCES=$(shell find ${HOME} ${PIPX_HOME} ${PIPX_GLOBAL_HOME} -ipath "*/resources/alibabacloud" | head -1 | xargs -I {} dirname {})
+SKILL_DIR?=shoggoth/ai/plugin/skills/
 
 graph:
 	rm -f docs/*.svg docs/*.gv docs/*.png
@@ -44,3 +45,23 @@ ghpages_action:
 yamlfmt:
 	# https://github.com/google/yamlfmt/blob/main/docs/config-file.md#basic-formatter
 	yamlfmt -formatter indent=4,retain_line_breaks=true shoggoth/docker-compose.yml
+
+
+get_skill:
+	mkdir -p ${SKILL_DIR}/${NAME}
+	curl -fsSL ${URL}/SKILL.md -o ${SKILL_DIR}/${NAME}/SKILL.md
+
+skills:
+	# https://code.claude.com/docs/en/plugin-marketplaces
+	# https://deepwiki.com/QwenLM/qwen-code/9.4-creating-extensions
+	# https://qwenlm.github.io/qwen-code-docs/en/users/extension/introduction
+	${MAKE} get_skill NAME=redmine-cli 		URL=https://raw.githubusercontent.com/aarondpn/redmine-cli/main/skills/redmine-cli/
+	${MAKE} get_skill NAME=kestra-flow 		URL=https://raw.githubusercontent.com/kestra-io/agent-skills/main/skills/kestra-flow/
+	${MAKE} get_skill NAME=caveman			URL=https://raw.githubusercontent.com/JuliusBrussee/caveman/main/skills/caveman/
+	${MAKE} get_skill NAME=memory-notes 	URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-notes/
+	${MAKE} get_skill NAME=memory-reflect 	URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-reflect/
+	${MAKE} get_skill NAME=memory-schema 	URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-schema/
+	${MAKE} get_skill NAME=memory-defrag 	URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-defrag/
+	${MAKE} get_skill NAME=memory-lifecycle	URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-lifecycle/
+	${MAKE} get_skill NAME=memory-ingest	URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-ingest/
+	${MAKE} get_skill NAME=memory-metadata-search URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-metadata-search/

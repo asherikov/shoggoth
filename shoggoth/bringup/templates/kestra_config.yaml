@@ -40,7 +40,7 @@ kestra:
   server:
     basic-auth:
       username: admin@${SHOGGOTH_DOMAIN}
-      password: "${KESTRA_BASIC_AUTH_PASSWORD}"
+      password: "${SHOGGOTH_ADMIN_PASSWORD}"
       open-urls:
         - "/api/v1/executions/webhook/"
         - "/api/v1/main/executions/webhook/"
