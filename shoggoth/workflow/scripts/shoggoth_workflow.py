@@ -48,6 +48,27 @@ def die(msg):
     sys.exit(1)
 
 
+WSHANDLER_BIN = "/ccws/ccws/tools/bin/wshandler"
+
+
+def wsh(repo_dir, args, log_output=False, **kwargs):
+    cmd = [WSHANDLER_BIN, "-r", repo_dir] + args
+    result = run(cmd, **kwargs)
+    if log_output:
+        if result.stdout:
+            print(result.stdout, file=sys.stderr, flush=True)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, flush=True)
+    return result
+
+
+def wsh_status(repo_dir, quiet=False):
+    args = ["status"]
+    if quiet:
+        args = ["-q"] + args
+    return wsh(repo_dir, args, log_output=True)
+
+
 def normalize_for_branch(text):
     text = text.lower()
     text = re.sub(r"[^a-z0-9]", "-", text)
@@ -256,6 +277,16 @@ class Gitea:
             return "main"
         return data.get("default_branch", "main")
 
+    def repo_exists(self, repo_full):
+        data = self.get(f"repos/{repo_full}")
+        return data is not None
+
+    def get_ssh_url(self, repo_full):
+        data = self.get(f"repos/{repo_full}")
+        if data is None:
+            return None
+        return data.get("ssh_url")
+
     def ensure_pull_requests_enabled(self, repo_full):
         data = self.get(f"repos/{repo_full}")
         if data is None:
@@ -418,6 +449,7 @@ class Shoggoth:
         self.clone_url = None
         self.repo_dir = None
         self.task_subject = None
+        self.gitea = gitea
 
         self.identify_project(redmine, gitea, args)
         self.identify_project_repo(redmine, gitea)
@@ -497,6 +529,10 @@ class Shoggoth:
         if self.working_branch:
             result = run(["git", "clone", "--depth", "1", "--branch", self.working_branch,
                           self.clone_url, workspace_dir], check=False)
+            if result.returncode != 0 and self.type == "ccws":
+                log(f"checkout: branch {self.working_branch} not found, cloning default branch")
+                result = run(["git", "clone", "--depth", "1",
+                              self.clone_url, workspace_dir], check=False)
         else:
             result = run(["git", "clone", "--depth", "1",
                           self.clone_url, workspace_dir], check=False)
@@ -505,13 +541,30 @@ class Shoggoth:
             die(f"git clone failed for {self.clone_url}: {result.stderr}")
 
         if self.type == "ccws":
-            wshandler = "/ccws/ccws/tools/bin/wshandler"
-            wsh_args = [wshandler, "-r", workspace_dir, "-p", "shallow"]
+            wsh_args = ["-s", f"s|https://github.com|http://git.{self.domain}|g",
+                        "-p", "shallow"]
             if self.working_branch:
                 wsh_args += ["-P", self.working_branch]
             wsh_args.append("update")
-            log(f"checkout: running wshandler: {' '.join(wsh_args)}")
-            run(wsh_args)
+            log(f"checkout: running wshandler: {WSHANDLER_BIN} -r {workspace_dir} {' '.join(wsh_args)}")
+            wsh(workspace_dir, wsh_args)
+
+            log("checkout: post-update repository list:")
+            wsh_status(workspace_dir, quiet=True)
+
+            log("checkout: running apt update")
+            apt_update = run(["sudo", "-S", "apt", "update"], check=False, input="ccws\n")
+            if apt_update.stdout:
+                print(apt_update.stdout, file=sys.stderr, flush=True)
+            if apt_update.stderr:
+                print(apt_update.stderr, file=sys.stderr, flush=True)
+
+            log("checkout: running make dep_install")
+            dep_install = run(["sudo", "-S", "make", "dep_install"], cwd="/ccws", input="ccws\n")
+            if dep_install.stdout:
+                print(dep_install.stdout, file=sys.stderr, flush=True)
+            if dep_install.stderr:
+                print(dep_install.stderr, file=sys.stderr, flush=True)
 
         self.repo_dir = workspace_dir
 
@@ -672,7 +725,7 @@ class TaskCommand(CommandBase):
             "base": base,
             "head": branch,
             "title": title,
-            "body": f"Implements Redmine issue #{task_id}",
+            "body": f"Task#{task_id}: {title}",
         })
         if result is None:
             print(f"WARNING: failed to create pull request for {repo} "
@@ -699,7 +752,7 @@ class TaskCommand(CommandBase):
 
         sanitized_subject = self._sanitize_subject(task_subject)
         commit = run(["git", "-C", repo_dir, "commit",
-                      "-m", f"Implement Redmine issue #{task_id}: {sanitized_subject}"], check=False)
+                      "-m", f"Task#{task_id}: {sanitized_subject}"], check=False)
         if commit.returncode != 0:
             die(f"git commit failed: {commit.stderr}")
 
@@ -715,29 +768,54 @@ class TaskCommand(CommandBase):
         return True, ([pr_url] if pr_url else [])
 
     def commit_push_and_create_mr_ccws(self, branch, task_id, task_subject):
-        wshandler = "/ccws/ccws/tools/bin/wshandler"
         repo_dir = self.shoggoth.repo_dir
-        status = run([wshandler, "-r", repo_dir, "status"])
+        log("commit_push: pre-commit repository status:")
+        status = wsh_status(repo_dir)
         if not status.stdout.strip():
             print("No local changes, skipping commit and push")
             return False, []
 
-        sanitized_subject = self._sanitize_subject(task_subject)
-        commit_msg = f"Implement Redmine issue #{task_id}: {sanitized_subject}"
+        modified_repos = []
+        for line in status.stdout.strip().splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            repo_name = parts[0]
+            flags = parts[3]
+            if "M" in flags:
+                modified_repos.append(repo_name)
+        if not modified_repos:
+            print("No local changes, skipping commit and push")
+            return False, []
 
-        run([wshandler, "-r", repo_dir, "branch", "new", branch])
-        run([wshandler, "-r", repo_dir, "commit", commit_msg])
-        push = run([wshandler, "-r", repo_dir, "push"], check=False)
+        sanitized_subject = self._sanitize_subject(task_subject)
+        commit_msg = f"Task#{task_id}: {sanitized_subject}"
+
+        wsh(repo_dir, ["branch", "new", branch])
+
+        for repo_name in modified_repos:
+            repo_path = os.path.join(repo_dir, repo_name)
+            run(["git", "-C", repo_path, "add", "-A"], check=False)
+
+        wsh(repo_dir, ["commit", commit_msg])
+        push = wsh(repo_dir, ["-p", "version", "push"] + modified_repos, check=False)
         if push.returncode != 0:
             die(f"failed to push branches: {push.stderr}")
 
-        status = run([wshandler, "-r", repo_dir, "status"])
-        pr_urls = []
+        log("commit_push: post-push repository status:")
+        status = wsh_status(repo_dir)
+        repo_urls = {}
         for line in status.stdout.strip().splitlines():
             parts = line.split()
-            if len(parts) < 4:
+            if len(parts) < 5:
                 continue
-            repo_url = parts[-1]
+            repo_urls[parts[0]] = parts[-1]
+
+        pr_urls = []
+        for repo_name in modified_repos:
+            repo_url = repo_urls.get(repo_name)
+            if not repo_url:
+                continue
             parsed = urlparse(repo_url)
             path = parsed.path.strip("/")
             if path.endswith(".git"):
@@ -794,9 +872,6 @@ class TaskCommand(CommandBase):
 
         rc = self.agent.prompt(prompt)
         if rc != 0:
-            self.redmine.update_issue(self.task_id,
-                 "--status", "Feedback",
-                 "--note", f"qwen agent exited with code {rc}")
             die(f"qwen agent exited with code {rc}")
 
         self.agent.stop_session()
@@ -812,11 +887,10 @@ class TaskCommand(CommandBase):
             for url in pr_urls:
                 print(f"Pull request created: {url}")
         elif pushed:
-            redmine_update_args = ["--status", "Feedback",
-                                   "--note", f"Changes pushed to branch {shoggoth_branch} but MR creation failed"]
+            redmine_update_args = ["--note",
+                                   f"Changes pushed to branch {shoggoth_branch} but MR creation failed"]
         else:
-            redmine_update_args = ["--status", "Feedback",
-                                   "--note", "No changes produced by agent"]
+            redmine_update_args = ["--note", "No changes produced by agent"]
 
         self.redmine.update_issue(self.task_id, *redmine_update_args)
 
@@ -930,6 +1004,13 @@ class PrUpdateCommand(CommandBase):
 
         self.agent.stop_session()
 
+        redmine_task_id = self._resolve_task(self.shoggoth.working_branch)
+        log(f"pr-review: redmine_task_id={redmine_task_id}")
+        if redmine_task_id:
+            self.redmine.update_issue(redmine_task_id,
+                 "--status", "Feedback",
+                 "--note", f"PR review completed for {pr_url}")
+
     def _resolve_task(self, branch):
         issues = self.redmine.list_issues(self.shoggoth.project)
         if issues is None:
@@ -955,6 +1036,10 @@ class PrUpdateCommand(CommandBase):
         if not unresolved:
             print("No unresolved review comments")
             return
+
+        repo_dir = self.shoggoth.repo_dir
+        head_before = run(["git", "-C", repo_dir, "rev-parse", "HEAD"], check=False)
+        head_before_sha = head_before.stdout.strip() if head_before.returncode == 0 else ""
 
         self.agent.start_session("pr-comment")
 
@@ -1002,6 +1087,12 @@ class PrUpdateCommand(CommandBase):
             if rc != 0:
                 die(f"qwen agent exited with code {rc}")
 
+        self.agent.stop_session()
+
+        head_after = run(["git", "-C", repo_dir, "rev-parse", "HEAD"], check=False)
+        head_after_sha = head_after.stdout.strip() if head_after.returncode == 0 else ""
+        changes_produced = head_before_sha != head_after_sha
+
         for comment in unresolved:
             comment_id = comment.get("id")
             if comment_id is not None:
@@ -1009,12 +1100,15 @@ class PrUpdateCommand(CommandBase):
                 log(f"pr-comment: resolved comment {comment_id}")
 
         redmine_task_id = self._resolve_task(pr_branch)
-        log(f"pr-comment: redmine_task_id={redmine_task_id}")
+        log(f"pr-comment: redmine_task_id={redmine_task_id} changes_produced={changes_produced}")
         if redmine_task_id:
-            self.redmine.update_issue(redmine_task_id,
-                 "--note", f"Review comments on {pr_url} have been addressed.")
-
-        self.agent.stop_session()
+            if changes_produced:
+                self.redmine.update_issue(redmine_task_id,
+                     "--status", "Resolved",
+                     "--note", f"Review comments on {pr_url} have been addressed.")
+            else:
+                self.redmine.update_issue(redmine_task_id,
+                     "--note", f"Review comments on {pr_url} have been addressed.")
 
 
 def main():

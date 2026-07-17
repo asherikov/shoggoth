@@ -274,7 +274,7 @@ generate_shoggoth_conf() {
 # LLM (LiteLLM → LocalAI)
 OPENAI_API_KEY=${CONFIGURE_AI_TOKEN}
 OPENAI_BASE_URL=http://litellm.${DOMAIN}/v1/
-OPENAI_MODEL=glm-5.2:cloud
+OPENAI_MODEL=shoggoth-default
 #qwen3-coder-next:cloud, qwen3-coder:30b, qwen3-coder:480b-cloud
 BM_MCP_URL=http://litellm.${DOMAIN}/mcp
 

@@ -24,6 +24,7 @@ sync_restart:
 	-${MAKE} down
 	${MAKE} sync
 	${MAKE} up
+	date
 
 mount:
 	mkdir -p mountpoint

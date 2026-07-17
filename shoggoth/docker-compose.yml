@@ -387,8 +387,10 @@ services:
             #GITEA__repository__DISABLE_HTTP_GIT: 'true'
             GITEA__repository__DEFAULT_BRANCH: 'main'
             GITEA__repository__DEFAULT_PRIVATE: 'private'
+            GITEA__repository__DEFAULT_MERGE_STYLE: 'fast-forward-only'
+            GITEA__repository__DEFAULT_DELETE_BRANCH_AFTER_MERGE: 'true'
             # disabled: ,repo.packages,repo.actions
-            GITEA__repository__DEFAULT_REPO_UNITS: 'repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects'
+            GITEA__repository__DEFAULT_REPO_UNITS: 'repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects,repo.actions'
             GITEA__server__START_SSH_SERVER: 'false'
             #GITEA__server__SSH_PORT: "22"
             #GITEA__server__SSH_LISTEN_PORT: "22"
@@ -596,6 +598,7 @@ services:
             - shoggoth_slave-dind_socket:/dind
         environment:
             !!merge <<: *default_environment
+            FLOWENV_SHOGGOTH_GITHUB_ORG: ${SHOGGOTH_GITHUB_ORG}
         command: server standalone --config /shoggoth_kestra.yaml --flow-path /app/flows
         depends_on:
             kestra-db:

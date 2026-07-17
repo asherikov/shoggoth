@@ -24,8 +24,8 @@ tasks:
     message: "{{ outputs.list_tasks }}"
 
   - id: process_tasks
-    type: io.kestra.plugin.core.flow.EachParallel
-    value: "{{ outputs.list_tasks.exitCode == 0 ? outputs.list_tasks.vars.task_ids : [] }}"
+    type: io.kestra.plugin.core.flow.ForEach
+    values: "{{ outputs.list_tasks.exitCode == 0 ? outputs.list_tasks.vars.task_ids : [] }}"
     tasks:
       - id: process_task
         type: io.kestra.plugin.core.flow.Subflow

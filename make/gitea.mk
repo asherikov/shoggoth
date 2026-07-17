@@ -179,6 +179,59 @@ gitea_make_repos_public:
 		fi; \
 	done
 
+gitea_enable_actions:
+	@echo "Enabling Actions for all repositories in Gitea project ${GITEA_PROJECT}"
+	@page=1; \
+	while true; do \
+		repos=$$(curl -s \
+			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=$${page}&limit=50" \
+			-H "accept: application/json" \
+			-H "Authorization: token ${GITEA_TOKEN}"); \
+		if [ -z "$$repos" ] || echo "$$repos" | jq -e 'length == 0' >/dev/null; then break; fi; \
+		echo "$$repos" | jq -r '.[].name' | while read -r name; do \
+			echo "Enabling Actions for ${GITEA_PROJECT}/$$name"; \
+			curl -sfS -X PATCH \
+				"${GITEA_API}/repos/${GITEA_PROJECT}/$$name" \
+				-H "accept: application/json" \
+				-H "Authorization: token ${GITEA_TOKEN}" \
+				-H "Content-Type: application/json" \
+				-d '{"has_actions": true}' > /dev/null; \
+		done; \
+		if echo "$$repos" | jq 'length' | grep -qE "^50$$"; then \
+			page=$$((page + 1)); \
+		else \
+			break; \
+		fi; \
+	done
+
+gitea_unmirror_repos:
+	@echo "Converting all mirror repositories to normal in Gitea project ${GITEA_PROJECT}"
+	@page=1; \
+	while true; do \
+		repos=$$(curl -s \
+			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=$${page}&limit=50" \
+			-H "accept: application/json" \
+			-H "Authorization: token ${GITEA_TOKEN}"); \
+		if [ -z "$$repos" ] || echo "$$repos" | jq -e 'length == 0' >/dev/null; then break; fi; \
+		echo "$$repos" | jq -r '.[] | select(.mirror == true) | .name' | while read -r name; do \
+			${MAKE} gitea_unmirror_repo REPO_NAME="$$name" GITEA_PROJECT=${GITEA_PROJECT}; \
+		done; \
+		if echo "$$repos" | jq 'length' | grep -qE "^50$$"; then \
+			page=$$((page + 1)); \
+		else \
+			break; \
+		fi; \
+	done
+
+gitea_unmirror_repo:
+	@echo "Converting mirror repository to normal: ${GITEA_PROJECT}/${REPO_NAME}"
+	@curl -sfS -X PATCH \
+		"${GITEA_API}/repos/${GITEA_PROJECT}/${REPO_NAME}" \
+		-H "accept: application/json" \
+		-H "Authorization: token ${GITEA_TOKEN}" \
+		-H "Content-Type: application/json" \
+		-d '{"mirror": false}' > /dev/null
+
 gitea_remove_project:
 	@echo "Removing Gitea project ${GITEA_PROJECT} with all repositories"
 	${MAKE} gitea_delete_repos

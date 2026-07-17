@@ -13,6 +13,14 @@ model_list:
       model_info:
           supports_function_calling: true
 
+    - model_name: "shoggoth-default"
+      litellm_params:
+          model: "openai/glm-5.2:cloud"
+          api_base: https://ollama.com/v1
+          api_key: "${OLLAMA_CLOUD_TOKEN}"
+      model_info:
+          supports_function_calling: true
+
     - model_name: "*"
       litellm_params:
           model: "openai/*"
