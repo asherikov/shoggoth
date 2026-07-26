@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
 HTTP_TIMEOUT = 30
+AGENT_TIMEOUT = 1200
 VERBOSE = False
 
 
@@ -145,6 +146,26 @@ def http_patch_json(url, payload, headers=None):
         return None
 
 
+def http_delete_json(url, payload, headers=None):
+    data = json.dumps(payload).encode()
+    hdrs = {"Content-Type": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    req = Request(url, data=data, headers=hdrs, method="DELETE")
+    try:
+        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            resp.read()
+            log(f"DELETE {url} -> {resp.status}")
+            return True
+    except HTTPError as e:
+        body = e.read().decode(errors="replace")[:500]
+        print(f"WARNING: HTTP DELETE {url} failed: {e.code} {e.reason}: {body}", file=sys.stderr)
+        return None
+    except (URLError, OSError) as e:
+        print(f"WARNING: HTTP DELETE {url} failed: {e}", file=sys.stderr)
+        return None
+
+
 def _paginate(fetch_page, limit=50):
     results = []
     page = 1
@@ -162,7 +183,7 @@ def _paginate(fetch_page, limit=50):
 class Gitea:
     def __init__(self):
         self.api_url = os.environ["GITEA_SERVER_URL"] + "/api/v1"
-        self.token = os.environ["GITEA_SERVER_TOKEN"]
+        self.token = os.environ["GITEA_SLAVE_TOKEN"]
 
         self._payload = None
 
@@ -186,6 +207,24 @@ class Gitea:
 
     def has_review(self):
         return "review" in self._payload
+
+    def is_review_by_slave_user(self):
+        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        review = self._payload.get("review", {})
+        if review.get("user", {}).get("login") == slave_user:
+            return True
+        sender = self._payload.get("sender", {})
+        if sender.get("login") == slave_user:
+            return True
+        return False
+
+    def is_slave_user_reviewer(self):
+        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        pr = self._payload.get("pull_request", {})
+        requested = pr.get("requested_reviewers", [])
+        if any(r.get("login") == slave_user for r in requested):
+            return True
+        return False
 
     def get_ci_conclusion(self):
         return self._payload.get("workflow_run", {}).get("conclusion", "")
@@ -238,6 +277,10 @@ class Gitea:
     def patch(self, path, payload):
         headers = {"Authorization": f"token {self.token}"}
         return http_patch_json(f"{self.api_url}/{path}", payload, headers=headers)
+
+    def delete(self, path, payload):
+        headers = {"Authorization": f"token {self.token}"}
+        return http_delete_json(f"{self.api_url}/{path}", payload, headers=headers)
 
     def get_file(self, repo, filepath, ref=None):
         params = {}
@@ -297,6 +340,7 @@ class Gitea:
         self.patch(f"repos/{repo_full}", {"has_pull_requests": True})
 
     def get_unresolved_review_comments(self, repo, pr_number):
+        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
         all_reviews = _paginate(lambda page, limit: self.get(
             f"repos/{repo}/pulls/{pr_number}/reviews",
             params={"page": page, "limit": limit}))
@@ -311,14 +355,46 @@ class Gitea:
                 params={"page": page, "limit": limit}))
             all_comments.extend(comments)
 
-        return [
-            {"id": c.get("id"), "path": c.get("path"), "line": c.get("line"), "body": c.get("body")}
-            for c in all_comments
-            if not c.get("resolver")
-        ]
+        unresolved = [c for c in all_comments if not c.get("resolver")]
+
+        threads = {}
+        for c in unresolved:
+            path = c.get("path", "unknown")
+            line = c.get("line")
+            thread_key = (path, line)
+            threads.setdefault(thread_key, []).append(c)
+
+        result = []
+        for thread_key, thread_comments in threads.items():
+            path, line = thread_key
+            has_non_slave = any(
+                c.get("user", {}).get("login") != slave_user
+                for c in thread_comments)
+            if not has_non_slave:
+                continue
+
+            thread_comments.sort(key=lambda c: c.get("id", 0))
+            combined_body = "\n\n".join(
+                f"[{c.get('user', {}).get('login', 'unknown')}]: {c.get('body', '')}"
+                for c in thread_comments)
+            root_comment = thread_comments[0]
+            result.append({
+                "id": root_comment.get("id"),
+                "review_id": root_comment.get("review_id"),
+                "path": path,
+                "line": line if line is not None else "unknown",
+                "body": combined_body,
+            })
+
+        return result
 
     def resolve_comment(self, repo, comment_id):
         self.post(f"repos/{repo}/pulls/comments/{comment_id}/resolve", {})
+
+    def reply_to_comment(self, repo, pr_number, comment_id, body):
+        return self.post(
+            f"repos/{repo}/pulls/{pr_number}/comments/{comment_id}/replies",
+            {"body": body})
 
     def get_pr(self, repo, pr_number):
         return self.get(f"repos/{repo}/pulls/{pr_number}")
@@ -332,6 +408,45 @@ class Gitea:
         return _paginate(lambda page, limit: self.get(
             f"repos/{repo}/pulls/{pr_number}/commits",
             params={"page": page, "limit": limit}))
+
+    def post_pr_review(self, repo, pr_number, body, event="COMMENT"):
+        return self.post(f"repos/{repo}/pulls/{pr_number}/reviews", {
+            "body": body,
+            "event": event,
+        })
+
+    def remove_requested_reviewer(self, repo, pr_number, username):
+        return self.delete(
+            f"repos/{repo}/pulls/{pr_number}/requested_reviewers",
+            {"reviewers": [username]})
+
+    def post_pr_review_chunked(self, repo, pr_number, body, event="COMMENT",
+                               chunk_size=60000):
+        if len(body) <= chunk_size:
+            return self.post_pr_review(repo, pr_number, body, event)
+        parts = []
+        remaining = body
+        while remaining:
+            if len(remaining) <= chunk_size:
+                parts.append(remaining)
+                break
+            cut = remaining.rfind("\n\n", 0, chunk_size)
+            if cut == -1:
+                cut = remaining.rfind("\n", 0, chunk_size)
+            if cut == -1:
+                cut = chunk_size
+            parts.append(remaining[:cut])
+            remaining = remaining[cut:].lstrip("\n")
+        total = len(parts)
+        for i, part in enumerate(parts):
+            prefix = f"**Part {i+1}/{total}**\n\n" if total > 1 else ""
+            evt = event if i == 0 else "COMMENT"
+            log(f"pr-review: posting review part {i+1}/{total} "
+                f"(length={len(part)})")
+            result = self.post_pr_review(repo, pr_number, prefix + part, evt)
+            if result is None:
+                return None
+        return True
 
 
 class Redmine:
@@ -575,6 +690,8 @@ class OtlpLogger:
         self.session_id = None
         self.service_name = None
         self.log_thread = None
+        self.last_result = None
+        self.assistant_text = []
 
     def _push_line(self, line):
         ts = str(time.time_ns())
@@ -603,6 +720,8 @@ class OtlpLogger:
     def start_session(self, event_type):
         self.session_id = str(uuid.uuid4())
         self.service_name = f"qwen-{event_type}"
+        self.last_result = None
+        self.assistant_text = []
         log(f"otlp: start_session session_id={self.session_id}")
 
     def stop_session(self):
@@ -618,8 +737,31 @@ class OtlpLogger:
                 line = line.decode(errors="replace").rstrip("\n")
                 if line:
                     self._push_line(line)
+                    self._capture_stream_json(line)
         except Exception as e:
             print(f"WARNING: otlp forward thread crashed: {e}", file=sys.stderr)
+
+    def _capture_stream_json(self, line):
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            return
+        etype = event.get("type")
+        if etype == "assistant":
+            content = event.get("message", {}).get("content", [])
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text = part.get("text", "")
+                    if text:
+                        self.assistant_text.append(text)
+        elif etype == "result":
+            if not event.get("is_error"):
+                self.last_result = event.get("result", "")
+
+    def get_review_text(self):
+        if self.last_result:
+            return self.last_result
+        return "\n\n".join(self.assistant_text) if self.assistant_text else ""
 
     def start_forwarding(self, stream):
         self.log_thread = threading.Thread(
@@ -639,8 +781,14 @@ class Agent:
         log(f"start_session: event_type={event_type}")
         self.otlp.start_session(event_type)
 
+        SECRET_ENV_KEYS = frozenset([
+            "GITEA_ADMIN_TOKEN", "GITEA_SLAVE_TOKEN",
+            "SHOGGOTH_VAULT_TOKEN", "REDMINE_TOKEN",
+            "OPENBAO_ADDR", "OLLAMA_CLOUD_TOKEN",
+            "GITHUB_TOKEN", "REDMINE_WEBHOOK_SECRET",
+        ])
         self.qwen_env = {k: v for k, v in os.environ.items()
-                         if k != "GITEA_SERVER_TOKEN"}
+                         if k not in SECRET_ENV_KEYS}
 
         plugin_url = f"http://{self.shoggoth.domain}/plugin.tar.gz"
         log(f"start_session: downloading plugin from {plugin_url}")
@@ -665,7 +813,7 @@ class Agent:
             print(f"WARNING: codebase-memory-mcp indexing failed: "
                   f"{index_result.stderr.strip()}", file=sys.stderr)
 
-    def prompt(self, text, resume=False):
+    def prompt(self, text, resume=False, timeout=None):
         if self.shoggoth.type == "ccws":
             os.chdir("/ccws")
         else:
@@ -678,7 +826,7 @@ class Agent:
             cmd.extend(["--session-id", self.otlp.session_id])
         cmd.extend(["--prompt", text])
 
-        log(f"prompt: resume={resume} session={self.otlp.session_id}")
+        log(f"prompt: resume={resume} session={self.otlp.session_id} timeout={timeout}")
         log(f"prompt: cmd={' '.join(cmd[:6])}... (prompt length={len(text)})")
         log("prompt: starting qwen subprocess")
 
@@ -689,10 +837,20 @@ class Agent:
             env=self.qwen_env,
         )
         self.otlp.start_forwarding(qwen.stdout)
-        stderr = qwen.communicate()[1]
+        timed_out = False
+        try:
+            stderr = qwen.communicate(timeout=timeout)[1]
+        except subprocess.TimeoutExpired:
+            log(f"prompt: TIMEOUT after {timeout}s, killing qwen")
+            qwen.kill()
+            timed_out = True
+            stderr = qwen.communicate()[1]
         self.otlp.log_thread.join(timeout=10)
         if stderr:
             print(f"qwen stderr: {stderr.decode(errors='replace')}", file=sys.stderr)
+        if timed_out:
+            log("prompt: qwen killed due to timeout")
+            return 124
         log(f"prompt: qwen exited with code {qwen.returncode}")
         return qwen.returncode
 
@@ -721,11 +879,15 @@ class TaskCommand(CommandBase):
 
     def create_pull_request(self, repo, branch, task_id, title, base="main"):
         self.gitea.ensure_pull_requests_enabled(repo)
+        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        review_user = os.environ.get("SHOGGOTH_REVIEW_USER", "admin")
         result = self.gitea.post(f"repos/{repo}/pulls", {
             "base": base,
             "head": branch,
             "title": title,
             "body": f"Task#{task_id}: {title}",
+            "assignees": [slave_user],
+            "reviewers": [review_user],
         })
         if result is None:
             print(f"WARNING: failed to create pull request for {repo} "
@@ -797,7 +959,7 @@ class TaskCommand(CommandBase):
             repo_path = os.path.join(repo_dir, repo_name)
             run(["git", "-C", repo_path, "add", "-A"], check=False)
 
-        wsh(repo_dir, ["commit", commit_msg])
+        wsh(repo_dir, ["commit", commit_msg], check=False)
         push = wsh(repo_dir, ["-p", "version", "push"] + modified_repos, check=False)
         if push.returncode != 0:
             die(f"failed to push branches: {push.stderr}")
@@ -850,6 +1012,9 @@ class TaskCommand(CommandBase):
             normalized_subject = f"task-{self.task_id}"
         shoggoth_branch = f"{self.shoggoth.project}/{normalized_subject}"
         log(f"task: branch={shoggoth_branch} subject={task_subject}")
+        print(f"=== TASK IMPLEMENTATION: task #{self.task_id} "
+              f"project={self.shoggoth.project} subject={task_subject} ===",
+              flush=True)
 
         self.agent.start_session("task")
 
@@ -913,6 +1078,8 @@ class CiFailureCommand(CommandBase):
         ci_workflow = self.gitea.get_ci_workflow_name()
         ci_run_id = self.gitea.get_ci_run_id()
         log(f"ci-failure: repo={ci_repo} sha={ci_sha} branch={ci_branch} workflow={ci_workflow} run_id={ci_run_id}")
+        print(f"=== CI FAILURE FIX: repo={ci_repo} workflow={ci_workflow} "
+              f"branch={ci_branch} sha={ci_sha} ===", flush=True)
 
         ci_logs = self.gitea.get_ci_logs(ci_repo, ci_run_id)
 
@@ -942,15 +1109,26 @@ class PrUpdateCommand(CommandBase):
     def execute(self):
         action = self.gitea.get_pr_action()
         log(f"pr-update: action={action}")
-        if action == "deleted":
+        if action in ("deleted", "review_request_removed"):
             return
 
         pr_url = self.gitea.get_pr_url()
         log(f"pr-update: pr_url={pr_url}")
 
-        if action == "opened" and not self.gitea.has_review():
+        if self.gitea.has_review():
+            if self.gitea.is_review_by_slave_user():
+                log("pr-update: review is by slave user, skipping")
+            else:
+                print(f"=== PR COMMENT ADDRESSING: pr={pr_url} "
+                      f"repo={self.shoggoth.working_repo} ===", flush=True)
+                self._pr_comment(self.gitea.get_pr_number(), pr_url)
+        elif action == "review_requested" and self.gitea.is_slave_user_reviewer():
+            print(f"=== PR REVIEW: pr={pr_url} "
+                  f"repo={self.shoggoth.working_repo} ===", flush=True)
             self._pr_review(pr_url)
         else:
+            print(f"=== PR COMMENT CHECK: pr={pr_url} "
+                  f"repo={self.shoggoth.working_repo} ===", flush=True)
             self._pr_comment(self.gitea.get_pr_number(), pr_url)
 
     def _pr_review(self, pr_url):
@@ -1002,14 +1180,20 @@ class PrUpdateCommand(CommandBase):
         if rc != 0:
             die(f"qwen agent exited with code {rc}")
 
+        review_text = self.agent.otlp.get_review_text()
         self.agent.stop_session()
 
-        redmine_task_id = self._resolve_task(self.shoggoth.working_branch)
-        log(f"pr-review: redmine_task_id={redmine_task_id}")
-        if redmine_task_id:
-            self.redmine.update_issue(redmine_task_id,
-                 "--status", "Feedback",
-                 "--note", f"PR review completed for {pr_url}")
+        if review_text:
+            log(f"pr-review: posting review to gitea (length={len(review_text)})")
+            result = self.gitea.post_pr_review_chunked(pr_repo, pr_number, review_text)
+            if result is None:
+                die("pr-review: failed to post review to gitea")
+        else:
+            log("pr-review: no review text captured from agent")
+
+        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        log(f"pr-review: removing requested reviewer {slave_user}")
+        self.gitea.remove_requested_reviewer(pr_repo, pr_number, slave_user)
 
     def _resolve_task(self, branch):
         issues = self.redmine.list_issues(self.shoggoth.project)
@@ -1024,6 +1208,72 @@ class PrUpdateCommand(CommandBase):
                 return issue.get("id")
         return None
 
+    def _commit_and_push_standalone(self, repo_dir, branch, commit_msg):
+        status = run(["git", "-C", repo_dir, "status", "--porcelain"], check=False)
+        if status.returncode != 0:
+            die(f"git status failed in {repo_dir}: {status.stderr}")
+        if not status.stdout.strip():
+            return False
+
+        run(["git", "-C", repo_dir, "add", "-A"], check=False)
+        staged = run(["git", "-C", repo_dir, "diff", "--cached", "--name-only"], check=False)
+        if not staged.stdout.strip():
+            return False
+
+        commit = run(["git", "-C", repo_dir, "commit", "-m", commit_msg], check=False)
+        if commit.returncode != 0:
+            die(f"git commit failed: {commit.stderr}")
+
+        push = run(["git", "-C", repo_dir, "push", "origin", branch], check=False)
+        if push.returncode != 0:
+            die(f"failed to push branch '{branch}': {push.stderr}")
+        return True
+
+    def _commit_and_push_ccws(self, repo_dir, branch, commit_msg):
+        status = wsh_status(repo_dir, quiet=True)
+        if not status.stdout.strip():
+            return False
+
+        modified_repos = []
+        for line in status.stdout.strip().splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            repo_name = parts[0]
+            flags = parts[3]
+            if "M" in flags:
+                modified_repos.append(repo_name)
+        if not modified_repos:
+            return False
+
+        for repo_name in modified_repos:
+            repo_path = os.path.join(repo_dir, repo_name)
+            run(["git", "-C", repo_path, "add", "-A"], check=False)
+
+        wsh(repo_dir, ["commit", commit_msg], check=False)
+        push = wsh(repo_dir, ["-p", "version", "push"] + modified_repos, check=False)
+        if push.returncode != 0:
+            die(f"failed to push branches: {push.stderr}")
+        return True
+
+    def _commit_and_push(self, commit_msg=None):
+        repo_dir = self.shoggoth.repo_dir
+        pr_branch = self.shoggoth.working_branch
+        if commit_msg is None:
+            commit_msg = f"Address review comments on PR#{self.gitea.get_pr_number()}"
+
+        if self.shoggoth.type == "ccws":
+            return self._commit_and_push_ccws(repo_dir, pr_branch, commit_msg)
+        return self._commit_and_push_standalone(repo_dir, pr_branch, commit_msg)
+
+    def _push_pending_commits(self):
+        repo_dir = self.shoggoth.repo_dir
+        pr_branch = self.shoggoth.working_branch
+        if self.shoggoth.type == "ccws":
+            wsh(repo_dir, ["-p", "version", "push"], check=False)
+        else:
+            run(["git", "-C", repo_dir, "push", "origin", pr_branch], check=False)
+
     def _pr_comment(self, pr_number, pr_url):
         pr_repo = self.shoggoth.working_repo
         pr_branch = self.shoggoth.working_branch
@@ -1036,10 +1286,6 @@ class PrUpdateCommand(CommandBase):
         if not unresolved:
             print("No unresolved review comments")
             return
-
-        repo_dir = self.shoggoth.repo_dir
-        head_before = run(["git", "-C", repo_dir, "rev-parse", "HEAD"], check=False)
-        head_before_sha = head_before.stdout.strip() if head_before.returncode == 0 else ""
 
         self.agent.start_session("pr-comment")
 
@@ -1057,6 +1303,7 @@ class PrUpdateCommand(CommandBase):
             if rc != 0:
                 die(f"qwen agent exited with code {rc}")
 
+        resolved_comments = []
         for comment in unresolved:
             c_path = comment.get("path", "unknown")
             c_line = comment.get("line", "unknown")
@@ -1067,37 +1314,53 @@ class PrUpdateCommand(CommandBase):
                 f"{c_body}. Use the codebase-memory-mcp MCP tools "
                 f"(search_graph, get_code_snippet, trace_path) to understand "
                 f"the code context around the comment. "
-                f"Commit implemented changes in the repository."
+                f"Leave all changes uncommitted in the working tree."
             )
-            rc = self.agent.prompt(prompt, resume=True)
+            rc = self.agent.prompt(prompt, resume=True, timeout=AGENT_TIMEOUT)
+            if rc == 124:
+                self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
             if rc != 0:
                 die(f"qwen agent exited with code {rc}")
 
+            comment_id = comment.get("id")
+            commit_msg = (
+                f"Address review comment on PR#{pr_number} "
+                f"({c_path}:{c_line})"
+            )
+            pushed = self._commit_and_push(commit_msg)
+            if pushed:
+                resolved_comments.append(comment)
+                if comment_id is not None:
+                    self.gitea.resolve_comment(pr_repo, comment_id)
+                    log(f"pr-comment: resolved comment {comment_id}")
+            elif comment_id is not None:
+                self.gitea.reply_to_comment(
+                    pr_repo, pr_number, comment_id,
+                    "No changes produced for this comment.")
+                log(f"pr-comment: no changes for comment {comment_id}, posted note")
+
         rc = self.agent.prompt(
             f"Finalize all remaining work. Update basic memory with any new information "
-            f"learned about the project {self.shoggoth.project}. Then commit any remaining "
-            f"changes and push.", resume=True)
+            f"learned about the project {self.shoggoth.project}.",
+            resume=True, timeout=AGENT_TIMEOUT)
+        if rc == 124:
+            self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
         if rc != 0:
             die(f"qwen agent exited with code {rc}")
 
         if task_subject:
             rc = self.agent.prompt(
                 f"Update basic memory with any new information learned about "
-                f"the task \"{task_subject}\".", resume=True)
+                f"the task \"{task_subject}\".", resume=True, timeout=AGENT_TIMEOUT)
+            if rc == 124:
+                self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
             if rc != 0:
                 die(f"qwen agent exited with code {rc}")
 
         self.agent.stop_session()
 
-        head_after = run(["git", "-C", repo_dir, "rev-parse", "HEAD"], check=False)
-        head_after_sha = head_after.stdout.strip() if head_after.returncode == 0 else ""
-        changes_produced = head_before_sha != head_after_sha
-
-        for comment in unresolved:
-            comment_id = comment.get("id")
-            if comment_id is not None:
-                self.gitea.resolve_comment(pr_repo, comment_id)
-                log(f"pr-comment: resolved comment {comment_id}")
+        changes_produced = len(resolved_comments) > 0
+        log(f"pr-comment: resolved_comments={len(resolved_comments)}")
 
         redmine_task_id = self._resolve_task(pr_branch)
         log(f"pr-comment: redmine_task_id={redmine_task_id} changes_produced={changes_produced}")
@@ -1109,6 +1372,19 @@ class PrUpdateCommand(CommandBase):
             else:
                 self.redmine.update_issue(redmine_task_id,
                      "--note", f"Review comments on {pr_url} have been addressed.")
+
+    def _handle_timeout(self, pr_repo, pr_number, pr_url, resolved_comments):
+        log(f"pr-comment: handling timeout, resolved so far={len(resolved_comments)}")
+        self._push_pending_commits()
+        self.agent.stop_session()
+        resolved_count = len(resolved_comments)
+        timeout_msg = (
+            f"Agent timed out after {AGENT_TIMEOUT // 60} minutes. "
+            f"Addressed {resolved_count} comment(s) before timeout. "
+            f"Committed changes have been pushed."
+        )
+        self.gitea.post_pr_review_chunked(pr_repo, pr_number, timeout_msg)
+        die(timeout_msg)
 
 
 def main():
