@@ -47,8 +47,6 @@ secrets:
         file: ./private/gitea-server-token.txt
     redmine_token:
         file: ./private/redmine-token.txt
-    ssh_id_rsa:
-        file: ./private/ssh/id_rsa
     gitea_user:
         file: ./private/gitea-user.txt
     ollama_cloud_token:
@@ -122,15 +120,17 @@ services:
             - ./workflow/scripts:/host_volumes/workflow-scripts:ro
             - ./docker/slave-dind/entrypoint.sh:/dind_entrypoint.sh:ro
             - ./setup-client.sh:/host_volumes/setup-client.sh:ro
+            - ./bringup/rendered/secrets/gitea-slave-token:/run/secrets/gitea_slave_token:ro
+            - ./bringup/rendered/secrets/ssh-id-rsa:/run/secrets/ssh_id_rsa:ro
         environment:
             !!merge <<: *default_environment
             DOCKER_HOST: unix:///dind/docker.sock
         secrets:
-            - gitea_server_token
-            - ssh_id_rsa
             - gitea_user
         entrypoint: /dind_entrypoint.sh
         depends_on:
+            bringup:
+                condition: service_completed_successfully
             git:
                 condition: service_started
             docker-registry:
@@ -341,14 +341,17 @@ services:
             !!merge <<: *default_environment
             ADDRESS: "0.0.0.0:80"
             MODELS_PATH: /models
-            DEBUG: "false"
-            CONTEXT_SIZE: 256000
+            #DEBUG: "true"
+            #CONTEXT_SIZE: 2048
             THREADS: 4
             MAX_ACTIVE_BACKENDS: 1
             SINGLE_ACTIVE_BACKEND: "true"
-            # delays startip even if backend is already installed
+            # delays startup even if backend is already installed
             #LOCALAI_EXTERNAL_BACKENDS: "llama-cpp"
-            #PRELOAD_MODELS_CONFIG: "/models/preload-models.yaml"
+            PRELOAD_MODELS_CONFIG: "/models/preload-models.yaml"
+        post_start:
+            - command: chown -R ubuntu:users /backends
+              user: root
 
     litellm:
         # https://github.com/BerriAI/litellm
@@ -595,11 +598,16 @@ services:
             - ./workflow/kestra/flows:/app/flows
             - ./workflow/kestra/plugins:/app/plugins
             - ./bringup/rendered/kestra/config.yaml:/shoggoth_kestra.yaml:ro
+            - ./bringup/rendered/kestra/env:/shoggoth_kestra_env:ro
+            - ./workflow/kestra/entrypoint.sh:/shoggoth_kestra_entrypoint.sh:ro
             - shoggoth_slave-dind_socket:/dind
         environment:
             !!merge <<: *default_environment
             FLOWENV_SHOGGOTH_GITHUB_ORG: ${SHOGGOTH_GITHUB_ORG}
-        command: server standalone --config /shoggoth_kestra.yaml --flow-path /app/flows
+            FLOWENV_SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
+            OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4317
+        entrypoint: ["/bin/sh", "/shoggoth_kestra_entrypoint.sh"]
+        command: ["server", "standalone", "--config", "/shoggoth_kestra.yaml", "--flow-path", "/app/flows"]
         depends_on:
             kestra-db:
                 condition: service_started
@@ -628,9 +636,13 @@ services:
         volumes:
             - shoggoth_cdash_storage:/cdash/storage
             - ./cdash/entrypoint.sh:/cdash/entrypoint-wrapper.sh:ro
+            - ./cdash/init.sh:/shoggoth/cdash/init.sh:ro
             - ./bringup/rendered/cdash/cdash.env:/shoggoth/bringup/rendered/cdash/cdash.env:ro
         entrypoint: [/cdash/entrypoint-wrapper.sh]
         command: ["start-website"]
+        post_start:
+            # docker exec cdash.s.local cat /cdash/storage/logs/shoggoth-cdash-init.log
+            - command: ["/bin/bash", "-c", "set -o pipefail; /bin/bash /shoggoth/cdash/init.sh 2>&1 | tee /cdash/storage/logs/shoggoth-cdash-init.log"]
         depends_on:
             cdash-db:
                 condition: service_healthy

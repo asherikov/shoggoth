@@ -115,6 +115,8 @@ while IFS='=' read -r key value; do
     printf 'ENV %s="%s"\n' "${key}" "${value}" >> "${DOCKERFILE}"
 done < "${BUILD_DIR}/workflow/env"
 
+GITEA_SLAVE_TOKEN="$(cat /run/secrets/gitea_slave_token)"
+
 echo "shoggoth: Creating ci_cache directory..." >&2
 mkdir -p /shoggoth/ci_cache
 chown -R 1000:1000 /shoggoth/ci_cache
@@ -173,9 +175,8 @@ sleep 1
 chmod 600 "${GIT_CREDENTIAL_SOCK}"
 
 echo "shoggoth: Storing Gitea HTTP credentials..." >&2
-GITEA_SERVER_TOKEN="$(cat /run/secrets/gitea_server_token)"
 printf 'protocol=http\nhost=git.%s\nusername=token\npassword=%s\n' \
-    "${SHOGGOTH_DOMAIN}" "${GITEA_SERVER_TOKEN}" \
+    "${SHOGGOTH_DOMAIN}" "${GITEA_SLAVE_TOKEN}" \
     | git credential-cache --socket "${GIT_CREDENTIAL_SOCK}" --timeout "${CREDENTIAL_TIMEOUT}" store
 
 chown -R 1000:1000 /shoggoth/git-cred

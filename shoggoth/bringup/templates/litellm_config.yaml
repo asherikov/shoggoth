@@ -44,7 +44,7 @@ mcp_servers:
         transport: "http"
         description: "Gitea MCP server"
         auth_type: "bearer_token"
-        auth_value: "${GITEA_SERVER_TOKEN}"
+        auth_value: "${GITEA_SLAVE_TOKEN}"
         allow_all_keys: true
 
     basic_memory:

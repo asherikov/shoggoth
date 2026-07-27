@@ -225,12 +225,29 @@ gitea_unmirror_repos:
 
 gitea_unmirror_repo:
 	@echo "Converting mirror repository to normal: ${GITEA_PROJECT}/${REPO_NAME}"
-	@curl -sfS -X PATCH \
-		"${GITEA_API}/repos/${GITEA_PROJECT}/${REPO_NAME}" \
-		-H "accept: application/json" \
+	@TMP_PASS="$$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 20)"; \
+	trap 'rm -f "$${cookiefile}"; \
+		curl -sfS -X PATCH "${GITEA_API}/admin/users/admin" \
+			-H "Authorization: token ${GITEA_TOKEN}" \
+			-H "Content-Type: application/json" \
+			-d "{\"source_id\":0,\"login_name\":\"admin\",\"password\":\"${GITEA_TOKEN}\"}" > /dev/null' EXIT; \
+	curl -sfS -X PATCH \
+		"${GITEA_API}/admin/users/admin" \
 		-H "Authorization: token ${GITEA_TOKEN}" \
 		-H "Content-Type: application/json" \
-		-d '{"mirror": false}' > /dev/null
+		-d "{\"source_id\":0,\"login_name\":\"admin\",\"password\":\"$${TMP_PASS}\"}" > /dev/null; \
+	cookiefile="$$(mktemp)"; \
+	curl -s -c "$${cookiefile}" "${GITEA_URL}/user/login" > /dev/null; \
+	curl -s -b "$${cookiefile}" -c "$${cookiefile}" \
+		-X POST "${GITEA_URL}/user/login" \
+		-H "Content-Type: application/x-www-form-urlencoded" \
+		-d "user_name=admin&password=$${TMP_PASS}" \
+		-o /dev/null -w "%{http_code}" | grep -q "303" || { echo "Login failed"; exit 1; }; \
+	curl -sfS -b "$${cookiefile}" \
+		-X POST "${GITEA_URL}/${GITEA_PROJECT}/${REPO_NAME}/settings" \
+		-H "Content-Type: application/x-www-form-urlencoded" \
+		-d "action=convert&repo_name=${REPO_NAME}" \
+		-o /dev/null -w "%{http_code}" | grep -qE "303|200" || { echo "Convert failed"; exit 1; }
 
 gitea_remove_project:
 	@echo "Removing Gitea project ${GITEA_PROJECT} with all repositories"

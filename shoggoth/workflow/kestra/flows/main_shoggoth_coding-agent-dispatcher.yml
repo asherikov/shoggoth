@@ -24,6 +24,10 @@ concurrency:
   behavior: QUEUE
 
 tasks:
+  - id: log_start
+    type: io.kestra.plugin.core.log.Log
+    message: "Dispatching coding-agent: script={{ inputs.script }} task_id={{ inputs.task_id }}"
+
   - id: run_script
     type: io.kestra.plugin.scripts.shell.Commands
     taskRunner:
@@ -38,4 +42,8 @@ tasks:
       - "export PATH=\"/shoggoth/workflow/scripts:${PATH}\" && {{ inputs.script }} --verbose {{ inputs.task_id }}"
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
+      GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
+      SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"
+      SHOGGOTH_SLAVE_USER: "sslave"
+      GITEA_SLAVE_TOKEN: "{{ envs.gitea_slave_token }}"
       GITEA_PAYLOAD: "{{ inputs.payload }}"

@@ -150,6 +150,7 @@ install_ca_certificate() {
     if [ "${HOST_IP}" = "127.0.0.1" ] && [ "${CONFIGURE_DOCKER}" = "true" ]; then
         echo "Warning: HOST_IP is 127.0.0.1 (default). CA certificate download will fail on remote clients." >&2
         echo "Use --host-ip <SERVER_IP> to specify the server address." >&2
+        exit 1
     fi
 
     case "$os_id" in

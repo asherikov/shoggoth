@@ -184,6 +184,13 @@
                     "unit": "none"
                 },
                 "overrides": []
+            },
+            "options": {
+                "reduceOptions": {
+                    "calcs": ["lastNotNull"],
+                    "fields": "",
+                    "values": false
+                }
             }
         },
         {
@@ -737,6 +744,122 @@
             },
             "options": {
                 "showHeader": true
+            }
+        },
+        {
+            "title": "Token Usage Over Week",
+            "type": "timeseries",
+            "timeFrom": "now-7d",
+            "maxDataPoints": 168,
+            "gridPos": {
+                "h": 18,
+                "w": 12,
+                "x": 0,
+                "y": 72
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum by (requested_model) (increase(litellm_input_tokens_metric_total[1h]))",
+                    "legendFormat": "input {{requested_model}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum by (requested_model) (increase(litellm_output_tokens_metric_total[1h]))",
+                    "legendFormat": "output {{requested_model}}",
+                    "refId": "B"
+                }
+            ],
+            "description": "Cumulative token usage over the past 7 days by model",
+            "transformations": [
+                {
+                    "id": "calculateField",
+                    "options": {
+                        "mode": "cumulativeFunctions",
+                        "reducer": "sum"
+                    }
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "calcs": ["lastNotNull"]
+                }
+            }
+        },
+        {
+            "title": "Token Usage Over Month",
+            "type": "timeseries",
+            "timeFrom": "now-30d",
+            "maxDataPoints": 120,
+            "gridPos": {
+                "h": 18,
+                "w": 12,
+                "x": 12,
+                "y": 72
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum by (requested_model) (increase(litellm_input_tokens_metric_total[6h]))",
+                    "legendFormat": "input {{requested_model}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum by (requested_model) (increase(litellm_output_tokens_metric_total[6h]))",
+                    "legendFormat": "output {{requested_model}}",
+                    "refId": "B"
+                }
+            ],
+            "description": "Cumulative token usage over the past 30 days by model",
+            "transformations": [
+                {
+                    "id": "calculateField",
+                    "options": {
+                        "mode": "cumulativeFunctions",
+                        "reducer": "sum"
+                    }
+                }
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "short",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true,
+                    "calcs": ["lastNotNull"]
+                }
             }
         }
     ],

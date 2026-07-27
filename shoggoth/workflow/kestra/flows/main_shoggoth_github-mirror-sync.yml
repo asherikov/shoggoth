@@ -15,6 +15,9 @@ tasks:
       networkMode: host
     containerImage: docker-registry.s.local/slave_noble:dind
     commands:
-      - 'export PATH="/shoggoth/workflow/scripts:${PATH}" && rc=0; for org in $(echo "{{ envs.shoggoth_github_org }}" | tr "," " "); do github_mirror_sync.sh "$org" || rc=1; done; exit ${rc}'
+      - 'python3 /shoggoth/workflow/scripts/shoggoth_gitea.py github-mirror-sync $(echo "{{ envs.shoggoth_github_org }}" | tr "," " ")'
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
+      GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
+      GITEA_ADMIN_TOKEN: "{{ envs.gitea_admin_token }}"
+      SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"

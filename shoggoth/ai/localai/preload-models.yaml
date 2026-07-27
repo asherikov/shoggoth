@@ -1,17 +1,8 @@
 ---
-name: "nomic-embed-text-v1.5"
-description: |
-    Nomic Embed v1.5 embedding model in GGUF format.
-license: "Apache 2.0"
-config_file: |
-    backend: llama-cpp
-    embeddings: true
-    parameters:
-      model: nomic-embed-text-v1.5.f16.gguf
-    gpu_layers: 99999999
-    options:
-      - gpu
-files:
-    - filename: "nomic-embed-text-v1.5.f16.gguf"
-      uri: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf"
+- id: "nomic-embed-text-v1.5"
+  overrides:
+      embeddings: true
+      gpu_layers: 99999999
+      options:
+          - gpu
 ---

@@ -214,11 +214,11 @@ LDAP directory for user authentication across services that support it.
 
 Three LDAP accounts exist, each serving a distinct role:
 
-| Account | Purpose | Consumed by |
+| Account | Purpose |
 |----|----|----|
-| `admin` | OpenLDAP administrator (`cn=admin`); used for LDAP management and as Grafana’s local admin login | openldap post_start, Grafana |
-| `sldapauth` | Service bind account — services that authenticate users via LDAP bind as this account | Gitea, Redmine, CDash, OpenBao |
-| `sslave` | CI/automation account — reserved for slave containers and workflows | *(not yet consumed)* |
+| `admin` | OpenLDAP administrator (`cn=admin`); used for LDAP management and as Grafana’s local admin login |
+| `sldapauth` | Service bind account — services that authenticate users via LDAP bind as this account |
+| `sslave` | CI/automation account — reserved for slave containers and workflows |
 
 ### Password management
 

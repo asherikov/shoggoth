@@ -113,7 +113,7 @@ render_secret() {
     local uid="${3}"
     local gid="${4}"
     mkdir -p "$(dirname "${path}")"
-    printf '%s' "${content}" > "${path}"
+    printf '%s\n' "${content}" > "${path}"
     chown "${uid}:${gid}" "${path}"
     chmod 400 "${path}"
 }
@@ -125,9 +125,32 @@ bao_init
 SHOGGOTH_VAULT_TOKEN="$(cat "${ROOT_TOKEN_FILE}")"
 export SHOGGOTH_VAULT_TOKEN
 
-GITEA_SERVER_TOKEN="$(cat /run/secrets/gitea_server_token)"
-bao_put "gitea/server-token" "value" "${GITEA_SERVER_TOKEN}"
-export GITEA_SERVER_TOKEN
+GITEA_ADMIN_TOKEN="$(cat /run/secrets/gitea_server_token)"
+bao_put "gitea/server-token" "value" "${GITEA_ADMIN_TOKEN}"
+export GITEA_ADMIN_TOKEN
+
+GITEA_SLAVE_TOKEN="$(bao_get_value "gitea/slave-token")"
+if [ -z "${GITEA_SLAVE_TOKEN}" ]; then
+    echo "shoggoth: Slave token not found in OpenBao, falling back to admin token for bootstrap"
+    GITEA_SLAVE_TOKEN="${GITEA_ADMIN_TOKEN}"
+fi
+export GITEA_SLAVE_TOKEN
+render_secret "${GITEA_SLAVE_TOKEN}" /shoggoth/bringup/rendered/secrets/gitea-slave-token 0 0
+
+SSH_PRIVATE_KEY="$(bao_get_value "ssh/slave-private-key")"
+if [ -z "${SSH_PRIVATE_KEY}" ]; then
+    echo "shoggoth: SSH key not found in OpenBao, generating ED25519 key pair..."
+    SSH_KEY_DIR="$(mktemp -d)"
+    ssh-keygen -t ed25519 -N "" -C "shoggoth-slave" -f "${SSH_KEY_DIR}/id_ed25519" >/dev/null 2>&1
+    SSH_PRIVATE_KEY="$(cat "${SSH_KEY_DIR}/id_ed25519")"
+    SSH_PUBLIC_KEY="$(cat "${SSH_KEY_DIR}/id_ed25519.pub")"
+    rm -rf "${SSH_KEY_DIR}"
+    bao_put "ssh/slave-private-key" "value" "${SSH_PRIVATE_KEY}"
+    bao_put "ssh/slave-public-key" "value" "${SSH_PUBLIC_KEY}"
+else
+    SSH_PUBLIC_KEY="$(bao_get_value "ssh/slave-public-key")"
+fi
+render_secret "${SSH_PRIVATE_KEY}" /shoggoth/bringup/rendered/secrets/ssh-id-rsa 0 0
 
 REDMINE_TOKEN="$(cat /run/secrets/redmine_token)"
 bao_put "redmine/api-token" "value" "${REDMINE_TOKEN}"
@@ -157,10 +180,10 @@ envsubst '${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/gitea-runner_config.
 render_secret "${GITEA_RUNNER_TOKEN}" /shoggoth/bringup/rendered/secrets/gitea-runner-token 1000 1000
 
 mkdir -p /shoggoth/bringup/rendered/litellm
-envsubst '${GITEA_SERVER_TOKEN} ${OLLAMA_CLOUD_TOKEN}' < /shoggoth/bringup/templates/litellm_config.yaml > /shoggoth/bringup/rendered/litellm/config.yaml
+envsubst '${GITEA_SLAVE_TOKEN} ${OLLAMA_CLOUD_TOKEN}' < /shoggoth/bringup/templates/litellm_config.yaml > /shoggoth/bringup/rendered/litellm/config.yaml
 
 mkdir -p /shoggoth/bringup/rendered/web-internal
-envsubst '${SHOGGOTH_DOMAIN} ${GITEA_SERVER_TOKEN} ${REDMINE_TOKEN}' < /shoggoth/bringup/templates/web-internal.conf > /shoggoth/bringup/rendered/web-internal/web-internal.conf
+envsubst '${SHOGGOTH_DOMAIN} ${GITEA_SLAVE_TOKEN} ${REDMINE_TOKEN} ${CDASH_API_TOKEN}' < /shoggoth/bringup/templates/web-internal.conf > /shoggoth/bringup/rendered/web-internal/web-internal.conf
 
 echo "shoggoth: Generating shared CA and TLS certificate..."
 CERT_DIR="/shoggoth/bringup/rendered/certs"
@@ -227,6 +250,10 @@ export SHOGGOTH_ADMIN_PASSWORD
 mkdir -p /shoggoth/bringup/rendered/kestra
 envsubst '${KESTRA_DATASOURCES_POSTGRES_PASSWORD} ${SHOGGOTH_ADMIN_PASSWORD} ${SHOGGOTH_DOMAIN}' \
     < /shoggoth/bringup/templates/kestra_config.yaml > /shoggoth/bringup/rendered/kestra/config.yaml
+printf 'FLOWENV_SHOGGOTH_VAULT_TOKEN=%s\n' "${SHOGGOTH_VAULT_TOKEN}" > /shoggoth/bringup/rendered/kestra/env
+printf 'FLOWENV_GITEA_ADMIN_TOKEN=%s\n' "${GITEA_ADMIN_TOKEN}" >> /shoggoth/bringup/rendered/kestra/env
+printf 'FLOWENV_GITEA_SLAVE_TOKEN=%s\n' "${GITEA_SLAVE_TOKEN}" >> /shoggoth/bringup/rendered/kestra/env
+chmod 400 /shoggoth/bringup/rendered/kestra/env
 export LDAP_BASE_DN="$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g; s/^/dc=/')"
 export LDAP_BIND_DN="uid=sldapauth,ou=people,${LDAP_BASE_DN}"
 export LDAP_HOST="openldap.${SHOGGOTH_DOMAIN}"
@@ -245,6 +272,8 @@ render_ldap_env() {
 }
 
 render_ldap_env /shoggoth/bringup/rendered/cdash/cdash.env
+CDASH_API_TOKEN="$(bao_get_value "cdash/api-token")"
+export CDASH_API_TOKEN
 {
     printf 'APP_KEY=%s\n' "${CDASH_APP_KEY_RENDERED}"
     printf 'DB_PASSWORD=%s\n' "${CDASH_DB_PASSWORD}"
@@ -256,6 +285,11 @@ render_ldap_env /shoggoth/bringup/rendered/cdash/cdash.env
     printf 'LDAP_LOCATE_USERS_BY=uid\n'
     printf 'LDAP_USERNAME=%s\n' "${LDAP_BIND_DN}"
     printf 'LDAP_PASSWORD=%s\n' "${OPENLDAP_S_LDAPAUTH_PASSWORD}"
+    printf 'USER_CREATE_PROJECTS=true\n'
+    printf 'TOKEN_DURATION=0\n'
+    printf 'OPENLDAP_S_SLAVE_PASSWORD=%s\n' "${OPENLDAP_S_SLAVE_PASSWORD}"
+    printf 'SHOGGOTH_VAULT_TOKEN=%s\n' "${SHOGGOTH_VAULT_TOKEN}"
+    printf 'OPENBAO_ADDR=%s\n' "${OPENBAO_ADDR}"
 } >> /shoggoth/bringup/rendered/cdash/cdash.env
 
 render_ldap_env /shoggoth/bringup/rendered/redmine/redmine.env
