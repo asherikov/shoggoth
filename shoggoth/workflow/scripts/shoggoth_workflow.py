@@ -357,20 +357,28 @@ class Gitea:
 
         unresolved = [c for c in all_comments if not c.get("resolver")]
 
+        trusted_users = set(
+            os.environ.get("SHOGGOTH_TRUSTED_REVIEWERS", "admin").split(","))
+        trusted_users.discard(slave_user)
+
         threads = {}
         for c in unresolved:
             path = c.get("path", "unknown")
-            line = c.get("line")
-            thread_key = (path, line)
+            line = c.get("position")  # Gitea API uses "position", not "line"
+            if line is not None:
+                thread_key = (path, line)
+            else:
+                thread_key = (path, None, c.get("id"))
             threads.setdefault(thread_key, []).append(c)
 
         result = []
         for thread_key, thread_comments in threads.items():
-            path, line = thread_key
-            has_non_slave = any(
-                c.get("user", {}).get("login") != slave_user
+            path = thread_key[0]
+            line = thread_key[1] if len(thread_key) == 2 else None
+            has_trusted = any(
+                c.get("user", {}).get("login") in trusted_users
                 for c in thread_comments)
-            if not has_non_slave:
+            if not has_trusted:
                 continue
 
             thread_comments.sort(key=lambda c: c.get("id", 0))
@@ -382,7 +390,7 @@ class Gitea:
                 "id": root_comment.get("id"),
                 "review_id": root_comment.get("review_id"),
                 "path": path,
-                "line": line if line is not None else "unknown",
+                "line": line,
                 "body": combined_body,
             })
 
@@ -393,7 +401,7 @@ class Gitea:
 
     def reply_to_comment(self, repo, pr_number, comment_id, body):
         return self.post(
-            f"repos/{repo}/pulls/{pr_number}/comments/{comment_id}/replies",
+            f"repos/{repo}/issues/{pr_number}/comments",
             {"body": body})
 
     def get_pr(self, repo, pr_number):
@@ -720,9 +728,12 @@ class OtlpLogger:
     def start_session(self, event_type):
         self.session_id = str(uuid.uuid4())
         self.service_name = f"qwen-{event_type}"
+        self.reset()
+        log(f"otlp: start_session session_id={self.session_id}")
+
+    def reset(self):
         self.last_result = None
         self.assistant_text = []
-        log(f"otlp: start_session session_id={self.session_id}")
 
     def stop_session(self):
         if self.log_thread is not None:
@@ -760,7 +771,7 @@ class OtlpLogger:
 
     def get_review_text(self):
         if self.last_result:
-            return self.last_result
+            return str(self.last_result)
         return "\n\n".join(self.assistant_text) if self.assistant_text else ""
 
     def start_forwarding(self, stream):
@@ -830,6 +841,7 @@ class Agent:
         log(f"prompt: cmd={' '.join(cmd[:6])}... (prompt length={len(text)})")
         log("prompt: starting qwen subprocess")
 
+        self.otlp.reset()
         qwen = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -1109,7 +1121,7 @@ class PrUpdateCommand(CommandBase):
     def execute(self):
         action = self.gitea.get_pr_action()
         log(f"pr-update: action={action}")
-        if action in ("deleted", "review_request_removed"):
+        if action in ("deleted", "review_request_removed", "synchronize"):
             return
 
         pr_url = self.gitea.get_pr_url()
@@ -1137,43 +1149,25 @@ class PrUpdateCommand(CommandBase):
         log(f"pr-review: repo={pr_repo} pr={pr_number}")
 
         pr_data = self.gitea.get_pr(pr_repo, pr_number)
-        pr_files = self.gitea.get_pr_files(pr_repo, pr_number)
-        pr_commits = self.gitea.get_pr_commits(pr_repo, pr_number)
-
         pr_title = pr_data.get("title", "") if pr_data else ""
-        pr_body = pr_data.get("body", "") if pr_data else ""
         pr_base = pr_data.get("base", {}).get("ref", "") if pr_data else ""
-        pr_head = pr_data.get("head", {}).get("ref", "") if pr_data else ""
 
-        files_summary = []
-        if pr_files:
-            for f in pr_files:
-                files_summary.append(
-                    f"  {f.get('status', '?')}: {f.get('filename', '?')} "
-                    f"(+{f.get('additions', 0)} -{f.get('deletions', 0)})")
-        files_text = "\n".join(files_summary) if files_summary else "N/A"
-
-        commits_summary = []
-        if pr_commits:
-            for c in pr_commits:
-                sha = c.get("sha", "?")[:8]
-                msg = c.get("commit", {}).get("message", "").split("\n")[0]
-                commits_summary.append(f"  {sha} {msg}")
-        commits_text = "\n".join(commits_summary) if commits_summary else "N/A"
+        repo_dir = self.shoggoth.repo_dir
+        if pr_base:
+            log(f"pr-review: resetting to base '{pr_base}' to produce local diff")
+            run(["git", "-C", repo_dir, "fetch", "origin", pr_base], check=False)
+            run(["git", "-C", repo_dir, "reset", "--soft", f"origin/{pr_base}"], check=False)
 
         self.agent.start_session("pr-review")
 
         prompt = (
-            f"Review the pull request at {pr_url}.\n\n"
-            f"Title: {pr_title}\n"
-            f"Branch: {pr_head} -> {pr_base}\n"
-            f"Description: {pr_body}\n\n"
-            f"Changed files:\n{files_text}\n\n"
-            f"Commits:\n{commits_text}\n\n"
-            f"Use the codebase-memory-mcp MCP tools (search_graph, "
-            f"get_code_snippet, trace_path) to understand the code context "
-            f"and trace the impact of the changes. "
-            f"Provide feedback on correctness, potential bugs, and design issues."
+            f"/review {repo_dir} --effort low\n\n"
+            f"PR: {pr_url}\n"
+            f"Title: {pr_title}\n\n"
+            f"Use the codebase-memory-mcp MCP tools (search_graph, get_code_snippet, "
+            f"trace_path) to understand the code context and cross-references. "
+            f"Use the basic_memory MCP tools (search, read_note) to consult any "
+            f"relevant project notes and prior decisions."
         )
 
         rc = self.agent.prompt(prompt)
@@ -1227,7 +1221,8 @@ class PrUpdateCommand(CommandBase):
         push = run(["git", "-C", repo_dir, "push", "origin", branch], check=False)
         if push.returncode != 0:
             die(f"failed to push branch '{branch}': {push.stderr}")
-        return True
+        sha = run(["git", "-C", repo_dir, "rev-parse", "HEAD"], check=False)
+        return sha.stdout.strip() if sha.returncode == 0 else True
 
     def _commit_and_push_ccws(self, repo_dir, branch, commit_msg):
         status = wsh_status(repo_dir, quiet=True)
@@ -1254,7 +1249,13 @@ class PrUpdateCommand(CommandBase):
         push = wsh(repo_dir, ["-p", "version", "push"] + modified_repos, check=False)
         if push.returncode != 0:
             die(f"failed to push branches: {push.stderr}")
-        return True
+        shas = {}
+        for repo_name in modified_repos:
+            repo_path = os.path.join(repo_dir, repo_name)
+            sha = run(["git", "-C", repo_path, "rev-parse", "HEAD"], check=False)
+            if sha.returncode == 0:
+                shas[repo_name] = sha.stdout.strip()
+        return shas if shas else True
 
     def _commit_and_push(self, commit_msg=None):
         repo_dir = self.shoggoth.repo_dir
@@ -1304,17 +1305,31 @@ class PrUpdateCommand(CommandBase):
                 die(f"qwen agent exited with code {rc}")
 
         resolved_comments = []
+        commit_links = []
+        no_change_comments = []
         for comment in unresolved:
             c_path = comment.get("path", "unknown")
-            c_line = comment.get("line", "unknown")
+            c_line = comment.get("line")
             c_body = comment.get("body", "")
+            comment_id = comment.get("id")
+            if not c_body:
+                if comment_id is not None:
+                    r = self.gitea.resolve_comment(pr_repo, comment_id)
+                    if r is None:
+                        log(f"pr-comment: WARNING resolve failed for comment {comment_id}")
+                    else:
+                        log(f"pr-comment: resolved empty comment {comment_id}")
+                resolved_comments.append(comment)
+                continue
+            location = f"{c_path}:{c_line}" if c_line is not None else c_path
             prompt = (
                 f"Address the following review comment on PR {pr_url} "
-                f"(file: {c_path}, line: {c_line}): "
+                f"(file: {location}): "
                 f"{c_body}. Use the codebase-memory-mcp MCP tools "
                 f"(search_graph, get_code_snippet, trace_path) to understand "
                 f"the code context around the comment. "
-                f"Leave all changes uncommitted in the working tree."
+                f"Leave all changes uncommitted in the working tree. "
+                f"Do not post comments, reviews, or replies via Gitea MCP tools."
             )
             rc = self.agent.prompt(prompt, resume=True, timeout=AGENT_TIMEOUT)
             if rc == 124:
@@ -1322,22 +1337,57 @@ class PrUpdateCommand(CommandBase):
             if rc != 0:
                 die(f"qwen agent exited with code {rc}")
 
-            comment_id = comment.get("id")
-            commit_msg = (
-                f"Address review comment on PR#{pr_number} "
-                f"({c_path}:{c_line})"
-            )
+            summary = self.agent.otlp.get_review_text().strip()
+            summary_lines = summary.split("\n") if summary else []
+            body_first_line = c_body.split("\n")[0].strip()
+            commit_subject = body_first_line[:72]
+            comment_link = f"{pr_url}#issuecomment-{comment_id}" if comment_id is not None else pr_url
+            if summary_lines:
+                commit_body = summary[-1000:]
+                if len(summary) > 1000:
+                    commit_body = "... (truncated)\n" + commit_body
+                commit_msg = f"{commit_subject}\n\n{comment_link}\n\n{commit_body}"
+            else:
+                commit_msg = f"{commit_subject}\n\n{comment_link}"
             pushed = self._commit_and_push(commit_msg)
             if pushed:
                 resolved_comments.append(comment)
+                commit_url = None
+                if isinstance(pushed, str):
+                    commit_url = pr_url.rsplit("/pulls/", 1)[0] + f"/commit/{pushed}"
+                elif isinstance(pushed, dict):
+                    first_sha = next(iter(pushed.values()))
+                    commit_url = pr_url.rsplit("/pulls/", 1)[0] + f"/commit/{first_sha}"
+                if commit_url and comment_id is not None:
+                    commit_links.append((comment_link, commit_url, body_first_line))
                 if comment_id is not None:
-                    self.gitea.resolve_comment(pr_repo, comment_id)
-                    log(f"pr-comment: resolved comment {comment_id}")
+                    r = self.gitea.resolve_comment(pr_repo, comment_id)
+                    if r is None:
+                        log(f"pr-comment: WARNING resolve failed for comment {comment_id}")
+                    else:
+                        log(f"pr-comment: resolved comment {comment_id}")
             elif comment_id is not None:
-                self.gitea.reply_to_comment(
-                    pr_repo, pr_number, comment_id,
-                    "No changes produced for this comment.")
-                log(f"pr-comment: no changes for comment {comment_id}, posted note")
+                no_change_comments.append(comment_id)
+
+        if commit_links:
+            reply_body = "\n".join(
+                f"- {clink} → {curl}\n  {first_line}"
+                for clink, curl, first_line in commit_links)
+            r = self.gitea.reply_to_comment(
+                pr_repo, pr_number, None, reply_body)
+            if r is None:
+                log("pr-comment: WARNING bulk reply failed")
+            else:
+                log(f"pr-comment: posted bulk reply with {len(commit_links)} commit links")
+
+        for cid in no_change_comments:
+            r = self.gitea.reply_to_comment(
+                pr_repo, pr_number, cid,
+                "No changes produced for this comment.")
+            if r is None:
+                log(f"pr-comment: WARNING reply failed for comment {cid}")
+            else:
+                log(f"pr-comment: no changes for comment {cid}, posted note")
 
         rc = self.agent.prompt(
             f"Finalize all remaining work. Update basic memory with any new information "

@@ -442,7 +442,7 @@ class SetupKestraWebhooks:
 
         webhooks = [
             (f"http://{self.kestra_host}/api/v1/main/executions/webhook/shoggoth/gitea-pr-update/key",
-             ["pull_request", "pull_request_review"]),
+             ["pull_request_review", "pull_request_review_request", "pull_request_comment"]),
             (f"http://{self.kestra_host}/api/v1/main/executions/webhook/shoggoth/gitea-ci-failure/key",
              ["workflow_run"]),
         ]
