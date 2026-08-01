@@ -193,7 +193,7 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
   - <https://github.com/marksholund/pynexus> — FastAPI-based PyPI caching proxy with metadata TTL and ETag support; no Docker image; 0 stars; unproven; not viable
   - <https://github.com/timreynolds/vouch> — multi-format registry proxy (PyPI, npm, Maven, RubyGems, crates.io, Go); supports file/memory/S3/GCS/Azure cache backends; no pre-built Docker image; 3 commits total; extremely early stage; not production-ready
   - <https://github.com/GUYSKK/WEBSITE-MIRROR> — nginx-based PyPI/npm mirror with proxy_cache; Docker image `guyskk/pypi-mirror:latest-amd64`; 7 commits, 1 star; only amd64; very low activity; essentially same approach as nginx_pypi_cache / custom Angie config
-  - <https://github.com/PEDIA/REPOCACHE> — universal caching repository (PyPI, Maven, npm, yum, rustup); no Docker image; last release Feb 2021; inactive; not viable
+ - <https://github.com/PEDIA/REPOCACHE> — universal caching repository (PyPI, Maven, npm, yum, rustup); no Docker image; last release Feb 2021; inactive; not viable
   - <https://github.com/Daneb255/pkggate> — supply-chain security proxy for PyPI (PEP 691); Docker image `ghcr.io/daneb255/pkggate`; does NOT cache package files — only caches threat intelligence; not a caching proxy; not applicable
 
 ## Docker
@@ -549,3 +549,104 @@ Collected by the OpenTelemetry Collector's [dockerstatsreceiver](https://github.
 - LSP
   - - compile commands are needed for C++
 
+## Container orchestration
+
+- **[Docker Compose](https://docs.docker.com/compose/)** (selected, current)
+
+### Lightweight Kubernetes / container orchestration platforms
+
+Motivation: simplify initial deployment, automate service grouping and isolation
+via namespaces and network policies, leverage k8s-native tooling for monitoring
+(Prometheus Operator, OTel k8s receivers), inspection (kubectl, k9s), updates
+(GitOps, Helm), and control (declarative manifests, rolling updates). The
+existing OTel/Grafana/Loki/Tempo/VictoriaMetrics stack and OpenBao are already
+k8s-compatible and would transition cleanly.
+
+- <https://github.com/k3s-io/k3s/> (Apache 2.0) — **recommended**
+  - Single binary (<100 MB), fully CNCF-conformant Kubernetes; SQLite default datastore (embedded etcd for HA)
+  - Batteries-included: Traefik ingress, CoreDNS, local-path-provisioner, Klipper load balancer, Metrics Server, Helm controller — all bundled and swappable
+  - One-line install: `curl -sfL https://get.k3s.io | sh -`; auto-deploys manifests from `/var/lib/rancher/k3s/server/manifests/`
+  - Seamless single-node to multi-node: add workers with `curl -sfL https://get.k3s.io | K3S_URL=https://server:6443 K3S_TOKEN=xxx sh -`
+  - ~512 MB RAM footprint; x86_64, arm64, armhf, s390x
+  - 33K+ stars, Apache 2.0, backed by Rancher/SUSE; largest community of any lightweight k8s — most troubleshooting answers exist
+  - Helm controller deploys charts as CRDs (`HelmChart` custom resources) — no separate Helm installation needed
+  - + Traefik ingress replaces Angie for HTTP routing/TLS; CoreDNS replaces Unbound for in-cluster DNS
+  - + local-path-provisioner provides dynamic PVCs from host directories — replaces Docker named volumes
+  - + namespaces provide natural service grouping (infra, monitoring, ci, ai, pm, auth)
+  - + network policies (Kube-router) enable isolation between service groups
+  - + native secret management via K8s secrets + External Secrets Operator for OpenBao integration
+  - + OTel collector runs as a DaemonSet with k8sclusterreceiver + kubeletstatsreceiver — replaces Docker-specific receivers
+  - + Helm charts exist for Grafana, Loki, Tempo, VictoriaMetrics, Gitea, Redmine, PostgreSQL, OpenBao — reduces custom manifests
+  - + GitOps (Argo CD, Flux) for automated sync from Git to cluster — replaces rsync + compose up
+  - + rolling updates and health-based rollout are native — no more `pull && up -d` restarts everything
+  - + k9s, kubectl, lens provide rich inspection and control of running workloads
+  - - Traefik ingress has different config model than Angie — web-internal API gateway logic (token injection, WebDAV, PyPI cache) needs migration to Ingress annotations + Traefik middleware or a sidecar
+  - - slave-dind needs rethinking: buildkit for image builds, or DinD as a privileged pod with emptyDir
+  - - wg-easy needs host-network pod or NodePort; VPN-to-cluster-DNS routing requires CoreDNS NodeLocal cache or externalDNS
+  - - docker-cache and docker-registry become less useful with k8s-native image pulling (but still valuable for build cache)
+  - - bringup container → k8s Job or Helm hook; init ordering via Jobs with `ttlSecondsAfterFinished`
+  - - 32 containers on a single node is well within k3s capacity, but resource requests/limits need careful tuning
+
+- <https://github.com/k0sproject/k0s> (Apache 2.0-based, NOASSERTION license)
+  - Single zero-dependency binary; CNCF certified; Konnectivity for controller-worker tunnel
+  - Intentionally minimal: CoreDNS + Metrics Server + Kube-Router CNI only; no bundled ingress, storage, or LB
+  - k0sctl provides one-command multi-node deploy, upgrade, backup, restore
+  - 1 GB RAM minimum; x86-64, ARM64, ARMv7, RISC-V
+  - 6.4K stars; active community with office hours
+  - + cleanest k8s base — full control over every component, no surprise bundled addons
+  - + k0sctl is the best multi-node lifecycle tool among all options
+  - + Konnectivity means workers don't need exposed API server ports — good for VPN-only setups
+  - + control plane isolation by default (separate from workload pods)
+  - - no bundled ingress or storage provisioner — must install Traefik/NGINX + local-path manually
+  - - more upfront work than k3s for equivalent functionality
+  - - smaller community means fewer troubleshooting resources for edge cases
+  - - NOASSERTION license should be reviewed before adoption (appears Apache 2.0-based with modifications)
+  - - no Helm controller — Helm must be installed separately
+
+- <https://github.com/canonical/microk8s> (Apache 2.0)
+  - Snap-packaged Kubernetes; 30+ curated addons (DNS, ingress, storage, dashboard, Prometheus, Grafana, MetalLB, cert-manager, GPU, Helm, registry, Istio, Linkerd, Knative)
+  - One-line install: `sudo snap install microk8s --classic`; addons via `microk8s enable <name>`
+  - ~500–800 MB RAM (snap overhead); primarily Ubuntu/x86_64
+  - 9.3K stars; backed by Canonical
+  - + richest addon ecosystem — monitoring stack (Prometheus + Grafana) and dashboard in two commands
+  - + GPU addon for NVIDIA operator — relevant for LocalAI Vulkan/GPU workloads
+  - + registry addon for private Docker registry — replaces standalone docker-registry service
+  - + automatic snap updates (can be disabled)
+  - - snap dependency: not available on all distributions, adds overhead, auto-updates can be disruptive
+  - - snap is Ubuntu-centric; on non-Ubuntu hosts requires snapd installation
+  - - multi-node clustering via addon is less seamless than k3s or k0s
+  - - snap auto-updates can break cluster compatibility with add-on versions
+  - - snap confinement may interfere with host path mounts for persistent storage
+
+- <https://github.com/hashicorp/nomad> (BUSL-1.1)
+  - Single binary scheduler for containers, VMs, and raw executables; embedded BoltDB state store
+  - Built-in web UI for job/allocation/node inspection; Prometheus-compatible metrics
+  - First-class Vault integration for secrets (template blocks, dynamic secrets, lease renewal)
+  - Scales to 10K+ nodes; multi-region, multi-cloud federation
+  - 16.8K stars; created 2015; actively maintained
+  - + built-in web UI — no separate dashboard installation needed
+  - + handles mixed workloads (containers + VMs + raw binaries) — most flexible orchestrator
+  - + native Vault/OpenBao integration via `vault` blocks in job specs — cleanest secret injection model
+  - + optimistically concurrent scheduler — high throughput for batch workloads (CI, Kestra flows)
+  - - HCL job format is a completely different paradigm from Kubernetes YAML/Helm — significant learning curve
+  - - no bundled DNS, ingress, storage, or load balancer — requires Consul + Fabio or external components
+  - - full stack (Nomad + Consul + Vault) adds complexity and resource overhead
+  - - BUSL-1.1 license restricts competitive use — not OSI-approved open source
+  - - smaller ecosystem of Helm charts and community manifests compared to k8s
+  - - shoggoth's existing tools (OTel, Grafana, VictoriaMetrics) have first-class k8s support but Nomad integration is less documented
+  - - migrating from Nomad back to k8s (or vice versa) is harder than between k8s distributions
+
+- <https://github.com/portainer/kubesolo> (MIT)
+  - Ultra-lightweight single-node Kubernetes; <200 MB RAM; SQLite via Kine; custom NodeSetter scheduler (no standard scheduler)
+  - Docker-compatible API (d2k) translates Docker API calls to Kubernetes — potential migration bridge
+  - One-line install; ARM, ARM64, x86_64, RISC-V; local-path storage built-in
+  - 531 stars; created May 2025; backed by Portainer
+  - + lowest RAM footprint of any k8s distribution — suitable for resource-constrained hosts
+  - + d2k Docker-compatible API could ease migration from Docker Compose
+  - + Portainer Edge integration for remote management
+  - - strictly single-node — no HA, no multi-node scaling path
+  - - very young project (2 months old at time of writing) — limited production track record
+  - - no bundled ingress controller or monitoring stack
+  - - small community — limited troubleshooting resources
+  - - no Helm addon catalog; standard Helm works but no curated charts
+  - - custom NodeSetter scheduler replaces standard scheduler — some k8s features may behave differently
