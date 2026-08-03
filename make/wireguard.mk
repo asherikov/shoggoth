@@ -2,7 +2,7 @@ WG_IF?=wg0
 WG_CONF?=./private/${WG_IF}.conf
 
 in:
-	sed -i "s/Endpoint = [0-9.]*:/Endpoint = ${HOST_IP}:/" ${WG_CONF}
+	sed -i "s/Endpoint = [a-z0-9.]*:/Endpoint = ${HOST_IP}:/" ${WG_CONF}
 	(command -v sudo && sudo wg-quick up ${WG_CONF}) || su -c "wg-quick up ${WG_CONF}"
 
 out:
