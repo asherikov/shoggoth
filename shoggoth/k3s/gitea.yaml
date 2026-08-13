@@ -109,7 +109,7 @@ spec:
     spec:
       initContainers:
         - name: wait-bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -139,11 +139,11 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: SHOGGOTH_DOMAIN
-              value: "s.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: OTEL_TRACES_EXPORTER
               value: "otlp"
             - name: GITEA__overall__APP_NAME
-              value: "git.s.local"
+              value: "git.${SHOGGOTH_DOMAIN}"
             - name: GITEA__repository__FORCE_PRIVATE
               value: "false"
             - name: GITEA__repository__USE_COMPAT_SSH_URI
@@ -163,13 +163,13 @@ spec:
             - name: GITEA__server__HTTP_PORT
               value: "80"
             - name: GITEA__server__ROOT_URL
-              value: "http://git.s.local"
+              value: "http://git.${SHOGGOTH_DOMAIN}"
             - name: GITEA__server__DOMAIN
-              value: "git.s.local"
+              value: "git.${SHOGGOTH_DOMAIN}"
             - name: GITEA__server__SSH_DOMAIN
-              value: "git.s.local"
+              value: "git.${SHOGGOTH_DOMAIN}"
             - name: GITEA__service__NO_REPLY_ADDRESS
-              value: "noreply.git.s.local"
+              value: "noreply.git.${SHOGGOTH_DOMAIN}"
             - name: GITEA__webhook__ALLOWED_HOST_LIST
               value: "private"
             - name: GITEA__admin__USER_DISABLED_FEATURES
@@ -264,7 +264,7 @@ spec:
     spec:
       initContainers:
         - name: wait-bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -294,13 +294,13 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: SHOGGOTH_DOMAIN
-              value: "s.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: OTEL_TRACES_EXPORTER
               value: "otlp"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://otelcol:4318"
             - name: GITEA_INSTANCE_URL
-              value: "http://git.s.local"
+              value: "http://git.${SHOGGOTH_DOMAIN}"
             - name: GITEA_RUNNER_NAME
               value: "shoggoth-runner"
             - name: GITEA_RUNNER_LABELS

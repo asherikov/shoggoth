@@ -8,7 +8,7 @@
 { config, pkgs, ... }:
 
 let
-  domain = "s.local";
+  domain = "${SHOGGOTH_DOMAIN}";
   dockerProxyPort = "3128";
   k3sRegistries = pkgs.writeText "registries.yaml" ''
     mirrors:

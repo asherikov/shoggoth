@@ -61,7 +61,7 @@ spec:
     spec:
       initContainers:
         - name: wait-bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -91,7 +91,7 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: SHOGGOTH_DOMAIN
-              value: "s.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: OTEL_TRACES_EXPORTER
               value: "otlp"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -169,7 +169,7 @@ spec:
     spec:
       initContainers:
         - name: wait-bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -194,7 +194,7 @@ spec:
               mountPath: /shoggoth/rendered
               readOnly: true
         - name: fix-plugins-perms
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
@@ -225,11 +225,11 @@ spec:
             runAsUser: 0
           env:
             - name: SHOGGOTH_DOMAIN
-              value: "s.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: OTEL_TRACES_EXPORTER
               value: "otlp"
             - name: FLOWENV_SHOGGOTH_DOMAIN
-              value: "s.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: FLOWENV_SHOGGOTH_GITHUB_ORG
               value: "asherikov"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT

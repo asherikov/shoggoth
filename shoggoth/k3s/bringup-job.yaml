@@ -101,8 +101,8 @@ data:
     RENDERED_LDAP_DIR="${RENDERED_DIR}/openldap"
     PRIVATE_DIR="/shoggoth/private"
 
-    LDAP_BASE_DN="dc=shoggoth,dc=local"
-    SHOGGOTH_DOMAIN="${SHOGGOTH_DOMAIN:-s.local}"
+    : "${SHOGGOTH_DOMAIN:?SHOGGOTH_DOMAIN is required}"
+    LDAP_BASE_DN="$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g; s/^/dc=/')"
 
     trap 'echo "FATAL: bringup.sh exited with code $? at line ${LINENO}"' ERR
 
@@ -421,7 +421,7 @@ data:
     KESTRA_DATASOURCES_POSTGRES_PASSWORD=$(cat "${SECRETS_DIR}/kestra-db-password")
     export KESTRA_DATASOURCES_POSTGRES_PASSWORD
 
-    for tmpl in unbound.conf gitea-runner_config.yaml litellm_config.yaml \
+    for tmpl in gitea-runner_config.yaml litellm_config.yaml \
                 web-internal.conf web-external.conf kestra_config.yaml; do
         if [ -f "${TEMPLATES_DIR}/${tmpl}" ]; then
             OUT_NAME=$(echo "${tmpl}" | sed 's/_/-/g')
@@ -961,25 +961,6 @@ data:
             transport: "http"
             description: "Basic Memory MCP server"
             allow_all_keys: true
-  unbound.conf: |
-    server:
-      verbosity: 2
-      interface: 0.0.0.0
-      access-control: 0.0.0.0/0 allow
-      do-ip4: yes
-      do-ip6: no
-      do-udp: yes
-      do-tcp: yes
-      do-not-query-localhost: no
-      hide-identity: yes
-      hide-version: yes
-
-    include: /opt/unbound/etc/unbound/unbound-nxdomain.blacklist
-
-    forward-zone:
-      name: "${SHOGGOTH_DOMAIN}."
-      forward-addr: 127.0.0.11
-      forward-no-cache: yes
   web-internal.conf: |
     load_module modules/ngx_otel_module.so;
 
@@ -1222,7 +1203,7 @@ data:
     CONFIGURE_AI_TOKEN="${CONFIGURE_AI_TOKEN:-ai}"
     CONFIGURE_API_GATEWAY="${CONFIGURE_API_GATEWAY:-}"
     CONFIGURE_SSH_CONFIG="${CONFIGURE_SSH_CONFIG:-}"
-    DOMAIN="${DOMAIN:-s.local}"
+    DOMAIN="${SHOGGOTH_DOMAIN:?SHOGGOTH_DOMAIN is required}"
     HOST_IP="${HOST_IP:-127.0.0.1}"
     CLIENT_CONF_DIR="${CLIENT_CONF_DIR:-${HOME}/.config/shoggoth}"
 
@@ -1257,7 +1238,7 @@ data:
     Set up Docker client to use shoggoth proxy and generate configuration files.
 
     Options:
-        --domain DOMAIN         Domain name for service URLs and hosts entries (default: s.local)
+        --domain DOMAIN         Domain name for service URLs and hosts entries (required)
         --host-ip IP            IP address for /etc/hosts entries (default: 127.0.0.1)
         --docker [PORT]         Configure Docker proxy, optionally with a port (default: 3128)
         --update-hosts          Append generated hosts file to /etc/hosts
@@ -3477,7 +3458,7 @@ spec:
       serviceAccountName: bringup
       initContainers:
         - name: wait-openbao
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -3499,7 +3480,7 @@ spec:
               memory: "64Mi"
               cpu: "200m"
         - name: fix-permissions
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -3518,7 +3499,7 @@ spec:
               mountPath: /shoggoth/rendered
       containers:
         - name: bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           workingDir: /shoggoth/bringup
           command: ["bash", "-c"]
@@ -3528,7 +3509,7 @@ spec:
             runAsUser: 0
           env:
             - name: SHOGGOTH_DOMAIN
-              value: "s.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: OPENBAO_ADDR
               value: "http://openbao:80"
           resources:

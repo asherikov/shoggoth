@@ -5,13 +5,9 @@ metadata:
   name: coredns-custom
   namespace: kube-system
 data:
-  shoggoth.server: |
-    s.local:53 {
-      errors
-
-      rewrite name exact s.local web-internal.shoggoth.svc.cluster.local
-      rewrite name regex ^([^.]+)\.s\.local\. {1}.shoggoth.svc.cluster.local
-
-      forward cluster.local 127.0.0.1
-      cache 5
+  shoggoth.override: |
+    rewrite stop name exact ${SHOGGOTH_DOMAIN} web-internal.shoggoth.svc.cluster.local
+    rewrite stop {
+      name suffix ${SHOGGOTH_DOMAIN} shoggoth.svc.cluster.local
+      answer auto
     }

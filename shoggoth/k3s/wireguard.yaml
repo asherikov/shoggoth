@@ -55,7 +55,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       initContainers:
         - name: wait-bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -94,7 +94,7 @@ spec:
             - name: INIT_USERNAME
               value: "admin"
             - name: INIT_HOST
-              value: "s.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: INIT_PORT
               value: "51820"
             - name: INIT_PASSWORD
@@ -106,7 +106,7 @@ spec:
             - name: INIT_ALLOWED_IPS
               value: "10.43.0.0/16"
             - name: INIT_DNS
-              value: "10.43.0.10"
+              value: "10.43.0.53"
             - name: INSECURE
               value: "true"
             - name: DISABLE_IPV6

@@ -275,7 +275,7 @@ spec:
     spec:
       initContainers:
         - name: wait-bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -307,7 +307,7 @@ spec:
             privileged: true
           env:
             - name: SHOGGOTH_DOMAIN
-              value: "s.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: OTEL_TRACES_EXPORTER
               value: "otlp"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -332,7 +332,7 @@ spec:
               command:
                 - "sh"
                 - "-c"
-                - "docker info > /dev/null 2>&1 && docker image inspect docker-registry.s.local/slave_noble:dind > /dev/null 2>&1 && test -S /shoggoth/git-cred/ssh_auth_sock"
+                - "docker info > /dev/null 2>&1 && docker image inspect docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:dind > /dev/null 2>&1 && test -S /shoggoth/git-cred/ssh_auth_sock"
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 30

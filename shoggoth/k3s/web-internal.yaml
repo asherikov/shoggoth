@@ -395,7 +395,7 @@ spec:
     spec:
       initContainers:
         - name: wait-bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -420,21 +420,21 @@ spec:
               mountPath: /shoggoth/rendered
               readOnly: true
         - name: render-config
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
             - |
-              export SHOGGOTH_DOMAIN="${SHOGGOTH_DOMAIN}"
-              envsubst '${SHOGGOTH_DOMAIN}' < /tmpl/angie.conf.tmpl > /rendered/angie.conf
-              envsubst '${SHOGGOTH_DOMAIN}' < /tmpl-html/index.html > /rendered/index.html
+              VARS="$(printf '${%s}' SHOGGOTH_DOMAIN)"
+              envsubst "$VARS" < /tmpl/angie.conf.tmpl > /rendered/angie.conf
+              envsubst "$VARS" < /tmpl-html/index.html > /rendered/index.html
               sed -e "s|\${GITEA_SLAVE_TOKEN}|${GITEA_SLAVE_TOKEN}|g" \
                   -e "s|\${REDMINE_TOKEN}|${REDMINE_TOKEN}|g" \
                   -e "s|\${CDASH_API_TOKEN}|${CDASH_API_TOKEN}|g" \
                   -i /rendered/angie.conf
           env:
             - name: SHOGGOTH_DOMAIN
-              value: "s.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: GITEA_SLAVE_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -470,7 +470,7 @@ spec:
             - name: rendered-config
               mountPath: /rendered
         - name: fix-permissions
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c", "chown -R 100:101 /data/build_cache /data/python_cache"]
           securityContext:

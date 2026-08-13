@@ -19,7 +19,10 @@ K3S_DNS_NAMES := $(filter-out %-db,$(K3S_APP_LABELS))
 k3s_host_install_nixos:
 	@echo "Installing K3s on ${HOST} via NixOS..."
 	${MAKE} sync
-	${K3S_SCP_BASE} shoggoth/shoggoth.nix ${USER}@${HOST_IP}:/tmp/shoggoth.nix
+	@mkdir -p ${K3S_TMP_DIR}
+	@export SHOGGOTH_DOMAIN="${DOMAIN}"; \
+	envsubst '$${SHOGGOTH_DOMAIN}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix
+	${K3S_SCP_BASE} ${K3S_TMP_DIR}/shoggoth.nix ${USER}@${HOST_IP}:/tmp/shoggoth.nix
 	${K3S_SSH} 'sudo cp /tmp/shoggoth.nix /etc/nixos/shoggoth.nix && rm /tmp/shoggoth.nix'
 	${K3S_SSH} 'grep -q "shoggoth.nix" /etc/nixos/configuration.nix || { \
 		echo ""; echo "Add this line to /etc/nixos/configuration.nix:"; \
@@ -111,9 +114,12 @@ k3s_stop: k3s_tunnel_up
 # Start all shoggoth K3s services.
 k3s_start: k3s_tunnel_up k3s_client_namespaces
 	@echo "=== Starting all shoggoth K3s services ==="
-	@for f in ${K3S_ALL_MANIFESTS}; do \
-		${K3S_KUBECTL} apply -f $$f || exit 1; \
+	@export SHOGGOTH_DOMAIN="${DOMAIN}"; \
+	for f in ${K3S_ALL_MANIFESTS}; do \
+		envsubst '$${SHOGGOTH_DOMAIN}' < $$f | ${K3S_KUBECTL} apply -f - || exit 1; \
 	done
+	@echo "=== Restarting CoreDNS to pick up custom ConfigMap ==="
+	@${K3S_KUBECTL} -n kube-system rollout restart deployment coredns 2>/dev/null || true
 
 # Stop a single service by name: make k3s_stop_service SERVICE=web-external
 # Deletes deployment, statefulset, and job with matching name, plus its service.
@@ -144,14 +150,15 @@ k3s_start_service: k3s_tunnel_up
 		exit 1; \
 	fi
 	@echo "=== Starting service: ${SERVICE} ==="
-	@MANIFESTS="$$(grep -rl "app: ${SERVICE}" ${K3S_MANIFESTS} --include='*.yaml' | sort); \
+	@export SHOGGOTH_DOMAIN="${DOMAIN}"; \
+	MANIFESTS="$$(grep -rl "app: ${SERVICE}" ${K3S_MANIFESTS} --include='*.yaml' | sort)"; \
 	if [ -z "$$MANIFESTS" ]; then \
 		echo "No manifest file found for service '${SERVICE}'"; \
 		exit 1; \
 	fi; \
 	for f in $$MANIFESTS; do \
 		echo "Applying $$f..."; \
-		${K3S_KUBECTL} apply -f $$f || exit 1; \
+		envsubst '$${SHOGGOTH_DOMAIN}' < $$f | ${K3S_KUBECTL} apply -f - || exit 1; \
 	done
 
 # Restart a single service: make k3s_restart_service SERVICE=kestra
@@ -166,8 +173,12 @@ K3S_HOST_PATHS := redmine-plugins:redmine/plugins workflow-scripts:workflow/scri
 
 k3s_sync_host_paths:
 	@echo "=== Syncing private secrets to host ==="
-	${K3S_SCP_BASE} -r private ${USER}@${HOST_IP}:/tmp/shoggoth-private
+	${K3S_SCP_BASE} -r shoggoth/private ${USER}@${HOST_IP}:/tmp/shoggoth-private
 	${K3S_SSH} 'sudo mkdir -p /var/lib/rancher/k3s/storage/shoggoth/private && sudo cp -a /tmp/shoggoth-private/. /var/lib/rancher/k3s/storage/shoggoth/private/ && rm -rf /tmp/shoggoth-private'
+	@echo "=== Syncing Unbound blacklist ==="
+	${K3S_SSH} 'sudo mkdir -p /var/lib/rancher/k3s/storage/shoggoth/unbound-blacklists'
+	${K3S_SCP_BASE} shoggoth/unbound/dns-zone-blacklist/unbound/unbound-nxdomain.blacklist ${USER}@${HOST_IP}:/tmp/shoggoth-unbound-nxdomain.blacklist
+	${K3S_SSH} 'sudo cp /tmp/shoggoth-unbound-nxdomain.blacklist /var/lib/rancher/k3s/storage/shoggoth/unbound-blacklists/unbound-nxdomain.blacklist && rm /tmp/shoggoth-unbound-nxdomain.blacklist'
 	@echo "=== Syncing hostPath content ==="
 	@cmds=""; \
 	for entry in ${K3S_HOST_PATHS}; do \

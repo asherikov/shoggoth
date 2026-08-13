@@ -230,7 +230,7 @@ spec:
     spec:
       initContainers:
         - name: wait-bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -333,7 +333,7 @@ spec:
     spec:
       initContainers:
         - name: wait-bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -365,7 +365,7 @@ spec:
           args: ["start-website"]
           env:
             - name: APP_URL
-              value: http://cdash.s.local
+              value: http://cdash.${SHOGGOTH_DOMAIN}
             - name: DB_HOST
               value: cdash-db
             - name: DB_PORT

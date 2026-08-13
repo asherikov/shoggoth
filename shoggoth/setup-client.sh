@@ -11,7 +11,7 @@ CONFIGURE_GITEA_USER="${CONFIGURE_GITEA_USER:-}"
 CONFIGURE_AI_TOKEN="${CONFIGURE_AI_TOKEN:-ai}"
 CONFIGURE_API_GATEWAY="${CONFIGURE_API_GATEWAY:-}"
 CONFIGURE_SSH_CONFIG="${CONFIGURE_SSH_CONFIG:-}"
-DOMAIN="${DOMAIN:-s.local}"
+DOMAIN="${DOMAIN:?DOMAIN is required -- pass --domain or set DOMAIN env var}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
 CLIENT_CONF_DIR="${CLIENT_CONF_DIR:-${HOME}/.config/shoggoth}"
 
@@ -46,7 +46,7 @@ Usage: $0 [OPTIONS]
 Set up Docker client to use shoggoth proxy and generate configuration files.
 
 Options:
-    --domain DOMAIN         Domain name for service URLs and hosts entries (default: s.local)
+    --domain DOMAIN         Domain name for service URLs and hosts entries (required)
     --host-ip IP            IP address for /etc/hosts entries (default: 127.0.0.1)
     --docker [PORT]         Configure Docker proxy, optionally with a port (default: 3128)
     --update-hosts          Append generated hosts file to /etc/hosts

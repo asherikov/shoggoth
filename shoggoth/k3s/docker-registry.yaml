@@ -42,7 +42,7 @@ spec:
     spec:
       initContainers:
         - name: wait-bringup
-          image: docker-registry.s.local/slave_noble:latest
+          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -72,7 +72,7 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - name: SHOGGOTH_DOMAIN
-              value: "s.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: OTEL_TRACES_EXPORTER
               value: "otlp"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -80,7 +80,7 @@ spec:
             - name: REGISTRY_LOG_LEVEL
               value: "info"
             - name: REGISTRY_HTTP_HOST
-              value: "docker-registry.s.local"
+              value: "docker-registry.${SHOGGOTH_DOMAIN}"
             - name: REGISTRY_HTTP_ADDR
               value: ":80"
             - name: REGISTRY_HTTP_DEBUG_ADDR
