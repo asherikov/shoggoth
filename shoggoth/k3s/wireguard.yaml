@@ -1,0 +1,176 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wireguard-entrypoint
+  namespace: shoggoth
+data:
+  entrypoint.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    ln -sf /usr/sbin/iptables-nft /etc/alternatives/iptables
+    ln -sf /usr/sbin/iptables-nft-restore /etc/alternatives/iptables-restore
+    ln -sf /usr/sbin/iptables-nft-save /etc/alternatives/iptables-save
+    ln -sf /usr/sbin/ip6tables-nft /etc/alternatives/ip6tables
+    ln -sf /usr/sbin/ip6tables-nft-restore /etc/alternatives/ip6tables-restore
+    ln -sf /usr/sbin/ip6tables-nft-save /etc/alternatives/ip6tables-save
+
+    sysctl -w net.ipv4.ip_forward=1
+    sysctl -w net.ipv4.conf.all.src_valid_mark=1
+
+    exec "$@"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wireguard
+  namespace: shoggoth
+spec:
+  selector:
+    app: wireguard
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wireguard
+  namespace: shoggoth
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: wireguard
+  template:
+    metadata:
+      labels:
+        app: wireguard
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: wireguard
+          image: ghcr.io/wg-easy/wg-easy:15
+          ports:
+            - containerPort: 51820
+              protocol: UDP
+              name: wireguard
+            - containerPort: 80
+              name: http
+          env:
+            - name: INIT_ENABLED
+              value: "true"
+            - name: INIT_USERNAME
+              value: "admin"
+            - name: INIT_HOST
+              value: "s.local"
+            - name: INIT_PORT
+              value: "51820"
+            - name: INIT_PASSWORD
+              value: "shoggoth1234"
+#              valueFrom:
+#                secretKeyRef:
+#                  name: wireguard-admin-password
+#                  key: admin-password
+            - name: INIT_ALLOWED_IPS
+              value: "10.43.0.0/16"
+            - name: INIT_DNS
+              value: "10.43.0.10"
+            - name: INSECURE
+              value: "true"
+            - name: DISABLE_IPV6
+              value: "true"
+            - name: PORT
+              value: "80"
+          securityContext:
+            capabilities:
+              add: ["NET_ADMIN", "SYS_MODULE"]
+            privileged: true
+          volumeMounts:
+            - name: data
+              mountPath: /etc/wireguard
+            - name: entrypoint
+              mountPath: /entrypoint.sh
+              subPath: entrypoint.sh
+              readOnly: true
+            - name: modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: admin-password
+              mountPath: /run/secrets/admin_password
+              subPath: admin-password
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          command: ["/entrypoint.sh"]
+          args: ["/usr/bin/dumb-init", "node", "server/index.mjs"]
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/wireguard-data
+            type: DirectoryOrCreate
+        - name: entrypoint
+          configMap:
+            name: wireguard-entrypoint
+            defaultMode: 0755
+        - name: modules
+          hostPath:
+            path: /lib/modules
+            type: Directory
+        - name: admin-password
+          secret:
+            secretName: wireguard-admin-password
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate

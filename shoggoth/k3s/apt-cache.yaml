@@ -1,0 +1,125 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: apt-cache
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apt-cache
+  namespace: shoggoth
+spec:
+  selector:
+    app: apt-cache
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3142
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apt-cache
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: apt-cache
+  template:
+    metadata:
+      labels:
+        app: apt-cache
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: apt-cache
+          image: sameersbn/apt-cacher-ng:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SHOGGOTH_DOMAIN
+              value: "s.local"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+          ports:
+            - containerPort: 3142
+              name: http
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          readinessProbe:
+            tcpSocket:
+              port: 3142
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: 3142
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - "/bin/sh"
+                  - "-c"
+                  - "chown -R apt-cacher-ng:apt-cacher-ng /var/cache/apt-cacher-ng /var/log/apt-cacher-ng"
+          volumeMounts:
+            - name: cache
+              mountPath: /var/cache/apt-cacher-ng
+            - name: logs
+              mountPath: /var/log/apt-cacher-ng
+      volumes:
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: cache
+          persistentVolumeClaim:
+            claimName: apt-cache
+        - name: logs
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/apt-cache-logs
+            type: DirectoryOrCreate

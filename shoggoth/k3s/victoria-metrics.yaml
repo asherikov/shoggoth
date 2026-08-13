@@ -1,0 +1,111 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoria-metrics
+  namespace: shoggoth
+spec:
+  selector:
+    app: victoria-metrics
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: victoria-metrics-data
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victoria-metrics
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: victoria-metrics
+  template:
+    metadata:
+      labels:
+        app: victoria-metrics
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: victoria-metrics
+          image: victoriametrics/victoria-metrics:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-retentionPeriod=1y"
+            - "-selfScrapeInterval=15s"
+            - "-httpListenAddr=:80"
+          ports:
+            - containerPort: 80
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /victoria-metrics-data
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: victoria-metrics-data
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate

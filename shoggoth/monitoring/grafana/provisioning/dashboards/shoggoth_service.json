@@ -14,7 +14,7 @@
             "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
             "datasource": {"uid": "vm"},
             "targets": [
-                {"expr": "max by(compose_service) (rate(container_cpu_usage_nanoseconds_total{compose_service=\"$service\"}[5m])) / 1e9", "legendFormat": "CPU cores", "refId": "A"}
+                {"expr": "max by(service) (rate(container_cpu_time_seconds_total{service=\"$service\"}[5m]))", "legendFormat": "CPU cores", "refId": "A"}
             ],
             "fieldConfig": {
                 "defaults": {
@@ -31,8 +31,8 @@
             "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
             "datasource": {"uid": "vm"},
             "targets": [
-                {"expr": "max by(compose_service) (container_memory_usage_total_bytes{compose_service=\"$service\"})", "legendFormat": "Working set", "refId": "A"},
-                {"expr": "max by(compose_service) (container_memory_usage_limit_bytes{compose_service=\"$service\"})", "legendFormat": "Limit", "refId": "B"}
+                {"expr": "max by(service) (container_memory_usage_bytes{service=\"$service\"})", "legendFormat": "Memory usage", "refId": "A"},
+                {"expr": "max by(service) (container_spec_memory_limit_bytes{service=\"$service\"})", "legendFormat": "Limit", "refId": "B"}
             ],
             "fieldConfig": {
                 "defaults": {
@@ -48,8 +48,8 @@
             "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
             "datasource": {"uid": "vm"},
             "targets": [
-                {"expr": "sum by(compose_service) (rate(container_network_io_usage_rx_bytes_total{compose_service=\"$service\"}[5m]))", "legendFormat": "↓ Receive", "refId": "A"},
-                {"expr": "sum by(compose_service) (rate(container_network_io_usage_tx_bytes_total{compose_service=\"$service\"}[5m]))", "legendFormat": "↑ Transmit", "refId": "B"}
+                {"expr": "sum by(service) (rate(k8s_pod_network_io_bytes_total{service=\"$service\",direction=\"receive\"}[5m]))", "legendFormat": "↓ Receive", "refId": "A"},
+                {"expr": "sum by(service) (rate(k8s_pod_network_io_bytes_total{service=\"$service\",direction=\"transmit\"}[5m]))", "legendFormat": "↑ Transmit", "refId": "B"}
             ],
             "fieldConfig": {
                 "defaults": {
@@ -60,17 +60,17 @@
             }
         },
         {
-            "title": "Restart Count",
+            "title": "Working Set",
             "type": "stat",
             "gridPos": {"h": 4, "w": 12, "x": 0, "y": 16},
             "datasource": {"uid": "vm"},
             "targets": [
-                {"expr": "max(container_restarts_total{compose_service=\"$service\"}) or on() vector(0)", "legendFormat": "", "refId": "A"}
+                {"expr": "max(container_memory_working_set_bytes{service=\"$service\"})", "legendFormat": "", "refId": "A"}
             ],
             "fieldConfig": {
                 "defaults": {
-                    "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]},
-                    "color": {"mode": "thresholds"}
+                    "unit": "bytes",
+                    "color": {"mode": "value"}
                 },
                 "overrides": []
             }
@@ -81,7 +81,7 @@
             "gridPos": {"h": 4, "w": 12, "x": 12, "y": 16},
             "datasource": {"uid": "vm"},
             "targets": [
-                {"expr": "max by(compose_service) (container_uptime_seconds{compose_service=\"$service\"})", "legendFormat": "", "refId": "A"}
+                {"expr": "max by(service) (container_uptime_seconds_total{service=\"$service\"})", "legendFormat": "", "refId": "A"}
             ],
             "fieldConfig": {
                 "defaults": {
@@ -98,7 +98,7 @@
             "gridPos": {"h": 12, "w": 24, "x": 0, "y": 20},
             "datasource": {"uid": "loki"},
             "targets": [
-                {"expr": "{compose_service=\"$service\"}", "refId": "A"}
+                {"expr": "{service=\"$service\"}", "refId": "A"}
             ],
             "options": {"showLabels": false, "showTime": true, "sortOrder": "Descending", "enableLogDetails": true, "wrapLogMessage": true, "prettifyLogMessage": true}
         }
@@ -110,14 +110,14 @@
         "list": [
             {
                 "current": {"text": "", "value": ""},
-                "definition": "label_values(container_cpu_usage_nanoseconds_total{compose_service=~\".+\"}, compose_service)",
+                "definition": "label_values(container_cpu_time_seconds_total{service=~\".+\"}, service)",
                 "hide": 0,
                 "includeAll": false,
                 "label": "Service",
                 "multi": false,
                 "name": "service",
                 "options": [],
-                "query": {"qryType": 1, "query": "label_values(container_cpu_usage_nanoseconds_total{compose_service=~\".+\"}, compose_service)", "refId": "VariableQuery-0"},
+                "query": {"qryType": 1, "query": "label_values(container_cpu_time_seconds_total{service=~\".+\"}, service)", "refId": "VariableQuery-0"},
                 "refresh": 2,
                 "sort": 1,
                 "type": "query",
@@ -129,5 +129,5 @@
     "title": "Shoggoth Service",
     "description": "Per-service observability: CPU, memory, network, disk, and logs for a single selected container",
     "uid": "shoggoth-service",
-    "version": 2
+    "version": 3
 }

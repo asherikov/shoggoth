@@ -186,16 +186,8 @@ configure_docker_proxy() {
     os_id=$(detect_os)
 
     if [ "$os_id" = "nixos" ]; then
-        echo "For NixOS, add the following to your configuration.nix:"
-        echo "  virtualisation.docker.daemon.settings = {"
-        echo "    \"insecure-registries\" = [\"docker-registry.${DOMAIN}\"];"
-        echo "    proxies = {"
-        echo "      \"http-proxy\" = \"http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\";"
-        echo "      \"https-proxy\" = \"http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\";"
-        echo "      \"no-proxy\" = \"*.${DOMAIN}\";"
-        echo "    };"
-        echo "  };"
-        echo "Then run: nixos-rebuild switch"
+        echo "NixOS is configured via shoggoth.nix — nothing to do here."
+        echo "Ensure shoggoth.nix is imported in configuration.nix and run nixos-rebuild switch."
         return
     fi
 

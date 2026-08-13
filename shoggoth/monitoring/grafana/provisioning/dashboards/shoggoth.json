@@ -109,7 +109,7 @@
             "type": "timeseries",
             "gridPos": {"h": 9, "w": 12, "x": 0, "y": 19},
             "datasource": {"uid": "vm"},
-            "targets": [{"expr": "max by(compose_service) (rate(container_cpu_usage_nanoseconds_total{compose_service=~\".+\"}[5m])) / 1e9", "legendFormat": "{{compose_service}}", "refId": "A"}],
+            "targets": [{"expr": "max by(service) (rate(container_cpu_time_seconds_total{service=~\".+\"}[5m]))", "legendFormat": "{{service}}", "refId": "A"}],
             "fieldConfig": {
                 "defaults": {
                     "unit": "none",
@@ -124,7 +124,7 @@
             "type": "timeseries",
             "gridPos": {"h": 9, "w": 12, "x": 12, "y": 19},
             "datasource": {"uid": "vm"},
-            "targets": [{"expr": "max by(compose_service) (container_memory_usage_total_bytes{compose_service=~\".+\"})", "legendFormat": "{{compose_service}}", "refId": "A"}],
+            "targets": [{"expr": "max by(service) (container_memory_usage_bytes{service=~\".+\"})", "legendFormat": "{{service}}", "refId": "A"}],
             "fieldConfig": {
                 "defaults": {
                     "unit": "bytes",
@@ -138,7 +138,7 @@
             "type": "timeseries",
             "gridPos": {"h": 9, "w": 24, "x": 0, "y": 28},
             "datasource": {"uid": "loki"},
-            "targets": [{"expr": "sum by (compose_service) (rate({compose_service=~\".+\"}[5m]))", "legendFormat": "{{compose_service}}", "refId": "A"}],
+            "targets": [{"expr": "sum by (service) (rate({service=~\".+\"}[5m]))", "legendFormat": "{{service}}", "refId": "A"}],
             "fieldConfig": {
                 "defaults": {
                     "unit": "lops",
@@ -154,7 +154,7 @@
             "gridPos": {"h": 18, "w": 24, "x": 0, "y": 37},
             "datasource": {"uid": "loki"},
             "targets": [
-                {"expr": "{compose_service=~\".+\"} |~ \"(?i)(error|fatal|panic|critical|fail|FATAL|CRIT)|ERR\" !~ \"(?i)trace\" | line_format \"{{.compose_service}} {{__line__}}\"", "refId": "A"}
+                {"expr": "{service=~\".+\"} |~ \"(?i)(error|fatal|panic|critical|fail|FATAL|CRIT)|ERR\" !~ \"(?i)trace\" | line_format \"{{.service}} {{__line__}}\"", "refId": "A"}
             ],
             "options": {"showLabels": false, "showTime": true, "sortOrder": "Descending", "enableLogDetails": true, "wrapLogMessage": true, "prettifyLogMessage": true}
         },
@@ -225,5 +225,5 @@
     "title": "Shoggoth",
     "description": "Shoggoth infrastructure overview: host metrics and traces",
     "uid": "shoggoth",
-    "version": 1
+    "version": 2
 }

@@ -1,0 +1,201 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: localai-models
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: localai-backends
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: localai-data
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: localai-preload
+  namespace: shoggoth
+data:
+  preload-models.yaml: |
+    ---
+    - id: "nomic-embed-text-v1.5"
+      overrides:
+          embeddings: true
+          gpu_layers: 99999999
+          options:
+              - gpu
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localai
+  namespace: shoggoth
+spec:
+  selector:
+    app: localai
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localai
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: localai
+  template:
+    metadata:
+      labels:
+        app: localai
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: localai
+          image: localai/localai:latest-gpu-vulkan
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ADDRESS
+              value: "0.0.0.0:80"
+            - name: MODELS_PATH
+              value: /models
+            - name: THREADS
+              value: "4"
+            - name: MAX_ACTIVE_BACKENDS
+              value: "1"
+            - name: SINGLE_ACTIVE_BACKEND
+              value: "true"
+            - name: PRELOAD_MODELS_CONFIG
+              value: /models/preload-models.yaml
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            - name: backends
+              mountPath: /backends
+            - name: data
+              mountPath: /data
+            - name: preload-config
+              mountPath: /models/preload-models.yaml
+              subPath: preload-models.yaml
+              readOnly: true
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+            - name: dri
+              mountPath: /dev/dri
+            - name: kfd
+              mountPath: /dev/kfd
+          securityContext:
+            privileged: true
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - chown
+                  - -R
+                  - ubuntu:users
+                  - /backends
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "8Gi"
+              cpu: "4000m"
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /v1/models
+              port: 80
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 6
+      volumes:
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: models
+          persistentVolumeClaim:
+            claimName: localai-models
+        - name: backends
+          persistentVolumeClaim:
+            claimName: localai-backends
+        - name: data
+          persistentVolumeClaim:
+            claimName: localai-data
+        - name: preload-config
+          configMap:
+            name: localai-preload
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+        - name: kfd
+          hostPath:
+            path: /dev/kfd
+            type: CharDevice

@@ -17,7 +17,7 @@ receivers:
     receiver_creator/docker-logs:
         watch_observers: [docker_observer]
         receivers:
-            filelog/per-container:
+            file_log/per-container:
                 rule: type == "container"
                 resource_attributes:
                     container.id: '`container_id`'
@@ -53,7 +53,7 @@ receivers:
             container.memory.cache:
                 enabled: true
 
-    hostmetrics:
+    host_metrics:
         root_path: /host
         collection_interval: 15s
         scrapers:
@@ -184,7 +184,7 @@ service:
         metrics:
             receivers:
                 - docker_stats
-                - hostmetrics
+                - host_metrics
                 - otlp
                 - prometheus
             processors:

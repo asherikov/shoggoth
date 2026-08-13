@@ -1,0 +1,17 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  shoggoth.server: |
+    s.local:53 {
+      errors
+
+      rewrite name exact s.local web-internal.shoggoth.svc.cluster.local
+      rewrite name regex ^([^.]+)\.s\.local\. {1}.shoggoth.svc.cluster.local
+
+      forward cluster.local 127.0.0.1
+      cache 5
+    }

@@ -1,0 +1,203 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: loki-config
+  namespace: shoggoth
+data:
+  config.yaml: |
+    auth_enabled: false
+
+    server:
+        http_listen_port: 3100
+        grpc_listen_port: 9096
+        log_level: warn
+
+    common:
+        instance_addr: 127.0.0.1
+        path_prefix: /loki
+        storage:
+            filesystem:
+                chunks_directory: /loki/chunks
+                rules_directory: /loki/rules
+        replication_factor: 1
+        ring:
+            kvstore:
+                store: inmemory
+
+    query_range:
+        results_cache:
+            cache:
+                embedded_cache:
+                    enabled: true
+                    max_size_mb: 100
+
+    schema_config:
+        configs:
+            - from: 2020-10-24
+              store: tsdb
+              object_store: filesystem
+              schema: v13
+              index:
+                  prefix: index_
+                  period: 24h
+
+    storage_config:
+        filesystem:
+            directory: /loki/storage
+        tsdb_shipper:
+            active_index_directory: /loki/tsdb-index
+            cache_location: /loki/tsdb-cache
+
+    distributor:
+        otlp_config:
+            default_resource_attributes_as_index_labels:
+                - service.name
+                - service.namespace
+                - service.instance.id
+                - container.name
+                - deployment.environment.name
+                - session.id
+                - service
+                - k8s.namespace.name
+                - k8s.pod.name
+                - k8s.container.name
+
+    limits_config:
+        retention_period: 8760h
+        reject_old_samples: true
+        reject_old_samples_max_age: 168h
+        max_query_length: 721h
+
+    compactor:
+        working_directory: /loki/compactor
+        compaction_interval: 10m
+        retention_enabled: true
+        retention_delete_delay: 2h
+        delete_request_store: filesystem
+
+    analytics:
+        reporting_enabled: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: shoggoth
+spec:
+  selector:
+    app: loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+    - name: grpc
+      port: 9096
+      targetPort: 9096
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-data
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: loki
+          image: grafana/loki:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          args:
+            - "-config.file=/etc/loki/config.yaml"
+          ports:
+            - containerPort: 3100
+              name: http
+            - containerPort: 9096
+              name: grpc
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: data
+              mountPath: /loki
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: loki-data
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate

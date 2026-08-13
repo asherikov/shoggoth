@@ -239,7 +239,7 @@
             "gridPos": {"h": 12, "w": 24, "x": 0, "y": 36},
             "datasource": {"uid": "loki"},
             "targets": [
-                {"expr": "{service_name=~\"kestra.*\"}", "refId": "A"}
+                {"expr": "{service=~\"kestra.*\"}", "refId": "A"}
             ],
             "options": {"showLabels": false, "showTime": true, "sortOrder": "Descending", "enableLogDetails": true, "wrapLogMessage": true, "prettifyLogMessage": true}
         },
@@ -270,5 +270,5 @@
     "title": "Shoggoth Kestra",
     "description": "Kestra workflow engine metrics: executions, tasks, scheduler, queue, and logs",
     "uid": "shoggoth-kestra",
-    "version": 1
+    "version": 2
 }

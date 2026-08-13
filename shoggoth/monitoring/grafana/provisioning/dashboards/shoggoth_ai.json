@@ -585,8 +585,8 @@
             },
             "targets": [
                 {
-                    "expr": "sum(rate({service_name=~\"qwen-.*\"}[5m])) by (service_name)",
-                    "legendFormat": "{{service_name}}",
+                    "expr": "sum(rate({service=~\"qwen-.*\"}[5m])) by (service)",
+                    "legendFormat": "{{service}}",
                     "refId": "A"
                 }
             ],
@@ -619,8 +619,8 @@
             },
             "targets": [
                 {
-                    "expr": "count(count_over_time({service_name=~\"qwen-.*\"}[5m])) by (service_name)",
-                    "legendFormat": "{{service_name}}",
+                    "expr": "count(count_over_time({service=~\"qwen-.*\"}[5m])) by (service)",
+                    "legendFormat": "{{service}}",
                     "refId": "A"
                 }
             ],
@@ -657,8 +657,8 @@
             },
             "targets": [
                 {
-                    "expr": "sum(rate({service_name=~\"qwen-.*\"} |~ \"(?i)error|fail|exception|timeout\"[5m])) by (service_name)",
-                    "legendFormat": "{{service_name}}",
+                    "expr": "sum(rate({service=~\"qwen-.*\"} |~ \"(?i)error|fail|exception|timeout\"[5m])) by (service)",
+                    "legendFormat": "{{service}}",
                     "refId": "A"
                 }
             ],
@@ -695,7 +695,7 @@
             },
             "targets": [
                 {
-                    "expr": "{service_name=~\"qwen-.*\"}",
+                    "expr": "{service=~\"qwen-.*\"}",
                     "refId": "A"
                 }
             ],
@@ -879,5 +879,5 @@
     "title": "Shoggoth AI",
     "description": "LLM proxy metrics, LiteLLM trace observability, direct MCP client telemetry, and coding agent session logs",
     "uid": "shoggoth-ai",
-    "version": 1
+    "version": 2
 }

@@ -1,0 +1,198 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tempo-config
+  namespace: shoggoth
+data:
+  config.yaml: |
+    stream_over_http_enabled: true
+
+    server:
+        http_listen_port: 3200
+        log_level: warn
+
+    memory:
+        automemlimit_enabled: true
+        automemlimit_ratio: 0.8
+
+    distributor:
+        receivers:
+            otlp:
+                protocols:
+                    http:
+                        endpoint: 0.0.0.0:4318
+
+    storage:
+        trace:
+            backend: local
+            local:
+                path: /var/tempo/traces
+            wal:
+                path: /var/tempo/wal
+
+    live_store:
+        wal:
+            path: /var/tempo/live-store/traces
+        max_live_traces_bytes: 100000000
+        complete_block_timeout: 10m
+        shutdown_marker_dir: /var/tempo/live-store/shutdown-marker
+
+    backend_scheduler:
+        provider:
+            retention:
+                interval: 1h
+            compaction:
+                compaction:
+                    block_retention: 168h
+                    compacted_block_retention: 1h
+
+    metrics_generator:
+        registry:
+            external_labels:
+                source: tempo
+        storage:
+            path: /var/tempo/generator/wal
+            remote_write:
+                - url: http://victoria-metrics:80/api/v1/write
+                  send_exemplars: true
+        processor:
+            span_metrics:
+                dimensions:
+                    - span_name
+
+    overrides:
+        defaults:
+            global:
+                max_bytes_per_trace: 1000000
+            metrics_generator:
+                processors: [span-metrics]
+                processor:
+                    span_metrics:
+                        dimensions:
+                            - span_name
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tempo
+  namespace: shoggoth
+spec:
+  selector:
+    app: tempo
+  ports:
+    - name: http
+      port: 3200
+      targetPort: 3200
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tempo-data
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tempo
+  namespace: shoggoth
+spec:
+  serviceName: tempo
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tempo
+  template:
+    metadata:
+      labels:
+        app: tempo
+    spec:
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: tempo
+          image: grafana/tempo:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          args:
+            - "-config.file=/etc/tempo/config.yaml"
+          ports:
+            - containerPort: 3200
+              name: http
+            - containerPort: 4318
+              name: otlp-http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: data
+              mountPath: /var/tempo
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 3200
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: config
+          configMap:
+            name: tempo-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: tempo-data
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate

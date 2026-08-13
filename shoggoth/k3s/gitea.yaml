@@ -1,0 +1,347 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gitea-data
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gitea-init
+  namespace: shoggoth
+data:
+  init.sh: |
+    #!/bin/sh
+    set -eu
+
+    . /shoggoth/rendered/gitea/gitea.env
+
+    for i in $(seq 1 30); do
+        if AUTH_CHECK="$(su-exec git gitea admin auth list 2>&1)"; then
+            break
+        fi
+        if [ "${i}" -eq 30 ]; then
+            echo "shoggoth: ERROR: Gitea never became ready: ${AUTH_CHECK}" >&2
+            exit 1
+        fi
+        echo "shoggoth: Waiting for Gitea to be ready (attempt ${i}/30): ${AUTH_CHECK}"
+        sleep 2
+    done
+
+    EXISTING="$(su-exec git gitea admin auth list 2>/dev/null \
+        | awk -v name="openldap" '$2 == name {print $1; exit}')"
+
+    if [ -z "${EXISTING}" ]; then
+        su-exec git gitea admin auth add-ldap \
+            -name openldap \
+            -security-protocol unencrypted \
+            -host "${LDAP_HOST}" \
+            -port 389 \
+            -bind-dn "${LDAP_BIND_DN}" \
+            -bind-password "${LDAP_BIND_PASSWORD}" \
+            -user-search-base "ou=people,${LDAP_BASE_DN}" \
+            -user-filter "(&(objectClass=inetOrgPerson)(|(uid=%[1]s)(mail=%[1]s)))" \
+            -admin-filter "(memberOf=cn=admins,ou=groups,${LDAP_BASE_DN})" \
+            -username-attribute uid \
+            -firstname-attribute cn \
+            -surname-attribute sn \
+            -email-attribute mail \
+            -synchronize-users
+    else
+        su-exec git gitea admin auth update-ldap --id "${EXISTING}" \
+            -name openldap \
+            -security-protocol unencrypted \
+            -host "${LDAP_HOST}" \
+            -port 389 \
+            -bind-dn "${LDAP_BIND_DN}" \
+            -bind-password "${LDAP_BIND_PASSWORD}" \
+            -user-search-base "ou=people,${LDAP_BASE_DN}" \
+            -user-filter "(&(objectClass=inetOrgPerson)(|(uid=%[1]s)(mail=%[1]s)))" \
+            -admin-filter "(memberOf=cn=admins,ou=groups,${LDAP_BASE_DN})" \
+            -username-attribute uid \
+            -firstname-attribute cn \
+            -surname-attribute sn \
+            -email-attribute mail \
+            -synchronize-users
+    fi
+
+    echo "shoggoth: === gitea ldap init complete ==="
+
+    echo "shoggoth: Setting local admin password"
+    su-exec git gitea admin user change-password --username admin --password "${SHOGGOTH_ADMIN_PASSWORD}" --must-change-password=false 2>/dev/null \
+        || echo "shoggoth: admin user not found yet (will be created on first web login)"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: git
+  namespace: shoggoth
+spec:
+  selector:
+    app: gitea
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea
+  template:
+    metadata:
+      labels:
+        app: gitea
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: gitea
+          image: gitea/gitea:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SHOGGOTH_DOMAIN
+              value: "s.local"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: GITEA__overall__APP_NAME
+              value: "git.s.local"
+            - name: GITEA__repository__FORCE_PRIVATE
+              value: "false"
+            - name: GITEA__repository__USE_COMPAT_SSH_URI
+              value: "false"
+            - name: GITEA__repository__DEFAULT_BRANCH
+              value: "main"
+            - name: GITEA__repository__DEFAULT_PRIVATE
+              value: "private"
+            - name: GITEA__repository__DEFAULT_MERGE_STYLE
+              value: "fast-forward-only"
+            - name: GITEA__repository__DEFAULT_DELETE_BRANCH_AFTER_MERGE
+              value: "true"
+            - name: GITEA__repository__DEFAULT_REPO_UNITS
+              value: "repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects,repo.actions"
+            - name: GITEA__server__START_SSH_SERVER
+              value: "false"
+            - name: GITEA__server__HTTP_PORT
+              value: "80"
+            - name: GITEA__server__ROOT_URL
+              value: "http://git.s.local"
+            - name: GITEA__server__DOMAIN
+              value: "git.s.local"
+            - name: GITEA__server__SSH_DOMAIN
+              value: "git.s.local"
+            - name: GITEA__service__NO_REPLY_ADDRESS
+              value: "noreply.git.s.local"
+            - name: GITEA__webhook__ALLOWED_HOST_LIST
+              value: "private"
+            - name: GITEA__admin__USER_DISABLED_FEATURES
+              value: "deletion"
+            - name: GITEA__actions__DEFAULT_ACTIONS_URL
+              value: "github"
+            - name: GITEA__opentelemetry__ENABLED
+              value: "true"
+            - name: GITEA__opentelemetry__ENDPOINT
+              value: "http://otelcol:4317"
+          ports:
+            - containerPort: 80
+              name: http
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    /bin/sh /shoggoth/git/gitea/init.sh >/proc/1/fd/1 2>/proc/1/fd/2
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+            - name: gitea-init
+              mountPath: /shoggoth/git/gitea
+              readOnly: true
+      volumes:
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: gitea-init
+          configMap:
+            name: gitea-init
+            defaultMode: 0755
+        - name: data
+          persistentVolumeClaim:
+            claimName: gitea-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea-runner
+  namespace: shoggoth
+spec:
+  selector:
+    app: gitea-runner
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea-runner
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea-runner
+  template:
+    metadata:
+      labels:
+        app: gitea-runner
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: runner
+          image: gitea/act_runner:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SHOGGOTH_DOMAIN
+              value: "s.local"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: GITEA_INSTANCE_URL
+              value: "http://git.s.local"
+            - name: GITEA_RUNNER_NAME
+              value: "shoggoth-runner"
+            - name: GITEA_RUNNER_LABELS
+              value: "ubuntu-latest,ubuntu-24.04"
+            - name: GITEA_RUNNER_REGISTRATION_TOKEN_FILE
+              value: "/run/secrets/gitea_runner_token"
+            - name: CONFIG_FILE
+              value: "/config.yaml"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+            - name: config
+              mountPath: /config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: dind-socket
+              mountPath: /dind
+            - name: runner-token
+              mountPath: /run/secrets/gitea_runner_token
+              subPath: token
+              readOnly: true
+      volumes:
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: config
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered/gitea-runner
+            type: DirectoryOrCreate
+        - name: data
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/gitea-runner-data
+            type: DirectoryOrCreate
+        - name: dind-socket
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/dind-socket
+            type: DirectoryOrCreate
+        - name: runner-token
+          secret:
+            secretName: gitea-runner-token

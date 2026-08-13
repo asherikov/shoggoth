@@ -35,5 +35,5 @@ datasources:
               filterByTraceID: true
               filterBySpanID: true
               tags:
-                  - key: service_name
-                    value: service_name
+                  - key: service
+                    value: service

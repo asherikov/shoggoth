@@ -1,0 +1,1776 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-config
+  namespace: shoggoth
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    
+    datasources:
+        - name: VictoriaMetrics
+          type: prometheus
+          access: proxy
+          uid: vm
+          url: http://victoria-metrics:80
+          isDefault: true
+          editable: false
+        - name: Loki
+          type: loki
+          access: proxy
+          uid: loki
+          url: http://loki:3100
+          editable: false
+        - name: Tempo
+          type: tempo
+          access: proxy
+          uid: tempo
+          url: http://tempo:3200
+          editable: false
+          jsonData:
+              search:
+                  hide: false
+              tracesToMetrics:
+                  datasourceUid: vm
+                  tags:
+                      - key: service
+                        value: service
+                      - key: span_name
+                        value: span_name
+              tracesToLogs:
+                  datasourceUid: loki
+                  filterByTraceID: true
+                  filterBySpanID: true
+                  tags:
+                      - key: service
+                        value: service
+  dashboards.yaml: |
+    apiVersion: 1
+    
+    providers:
+        - name: default
+          orgId: 1
+          folder: ""
+          type: file
+          disableDeletion: true
+          editable: true
+          options:
+              path: /etc/grafana/provisioning/dashboards
+              foldersFromFilesStructure: false
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-shoggoth
+  namespace: shoggoth
+data:
+  shoggoth.json: |
+    {
+        "annotations": {
+            "list": []
+        },
+        "editable": true,
+        "fiscalYearStartMonth": 0,
+        "graphTooltip": 1,
+        "id": null,
+        "links": [],
+        "panels": [
+            {
+                "title": "Host CPU Utilization",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 6, "x": 0, "y": 0},
+                "datasource": {"uid": "vm"},
+                "targets": [{"expr": "100 - (avg by(host_name)(rate(system_cpu_time_seconds_total{state=\"idle\"}[5m])) * 100)", "legendFormat": "{{host_name}}", "refId": "A"}],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "percent",
+                        "min": 0,
+                        "max": 100,
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Host Memory Usage",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 6, "x": 6, "y": 0},
+                "datasource": {"uid": "vm"},
+                "targets": [{"expr": "(1 - system_linux_memory_available_bytes / system_memory_limit_bytes) * 100", "legendFormat": "{{host_name}}", "refId": "A"}],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "percent",
+                        "min": 0,
+                        "max": 100,
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Host Disk Usage",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 6, "x": 12, "y": 0},
+                "datasource": {"uid": "vm"},
+                "targets": [{"expr": "system_filesystem_utilization_ratio{type!~\"tmpfs|squashfs|overlay\"} * 100", "legendFormat": "{{mountpoint}}", "refId": "A"}],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "percent",
+                        "min": 0,
+                        "max": 100,
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Network Throughput",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 6, "x": 18, "y": 0},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "rate(system_network_io_bytes_total{direction=\"receive\",device=~\"eth.*|wlan.*|enp.*\"}[5m])", "legendFormat": "↓ {{device}}", "refId": "A"},
+                    {"expr": "rate(system_network_io_bytes_total{direction=\"transmit\",device=~\"eth.*|wlan.*|enp.*\"}[5m])", "legendFormat": "↑ {{device}}", "refId": "B"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "Bps",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Load Average (1m / 5m / 15m)",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 12, "x": 0, "y": 10},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "system_cpu_load_average_1m", "legendFormat": "load 1m", "refId": "A"},
+                    {"expr": "system_cpu_load_average_5m", "legendFormat": "load 5m", "refId": "B"},
+                    {"expr": "system_cpu_load_average_15m", "legendFormat": "load 15m", "refId": "C"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Process Count by Status",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 12, "x": 12, "y": 10},
+                "datasource": {"uid": "vm"},
+                "targets": [{"expr": "system_processes_count", "legendFormat": "{{host_name}} {{status}}", "refId": "A"}],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "none",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Container CPU Usage",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 12, "x": 0, "y": 19},
+                "datasource": {"uid": "vm"},
+                "targets": [{"expr": "max by(service) (rate(container_cpu_time_seconds_total{service=~\".+\"}[5m]))", "legendFormat": "{{service}}", "refId": "A"}],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "none",
+                        "min": 0,
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Container Memory Usage",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 12, "x": 12, "y": 19},
+                "datasource": {"uid": "vm"},
+                "targets": [{"expr": "max by(service) (container_memory_usage_bytes{service=~\".+\"})", "legendFormat": "{{service}}", "refId": "A"}],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "bytes",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Container Log Rate",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 24, "x": 0, "y": 28},
+                "datasource": {"uid": "loki"},
+                "targets": [{"expr": "sum by (service) (rate({service=~\".+\"}[5m]))", "legendFormat": "{{service}}", "refId": "A"}],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "lops",
+                        "min": 0,
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Error Logs",
+                "type": "logs",
+                "gridPos": {"h": 18, "w": 24, "x": 0, "y": 37},
+                "datasource": {"uid": "loki"},
+                "targets": [
+                    {"expr": "{service=~\".+\"} |~ \"(?i)(error|fatal|panic|critical|fail|FATAL|CRIT)|ERR\" !~ \"(?i)trace\" | line_format \"{{.service}} {{__line__}}\"", "refId": "A"}
+                ],
+                "options": {"showLabels": false, "showTime": true, "sortOrder": "Descending", "enableLogDetails": true, "wrapLogMessage": true, "prettifyLogMessage": true}
+            },
+            {
+                "title": "Trace Rate",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 12, "x": 0, "y": 56},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum(rate(traces_spanmetrics_calls_total[5m]))", "legendFormat": "traces/s", "refId": "A"},
+                    {"expr": "sum(rate(traces_spanmetrics_calls_total{status_code=\"ERROR\"}[5m]))", "legendFormat": "errors/s", "refId": "B"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": [
+                        {
+                            "matcher": {"id": "byName", "options": "errors/s"},
+                            "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]
+                        }
+                    ]
+                }
+            },
+            {
+                "title": "Trace Duration (p50 / p95 / p99)",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 12, "x": 12, "y": 56},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "histogram_quantile(0.5, sum(rate(traces_spanmetrics_latency_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A"},
+                    {"expr": "histogram_quantile(0.95, sum(rate(traces_spanmetrics_latency_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B"},
+                    {"expr": "histogram_quantile(0.99, sum(rate(traces_spanmetrics_latency_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "C"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Traces",
+                "type": "table",
+                "gridPos": {"h": 12, "w": 24, "x": 0, "y": 66},
+                "datasource": {"type": "tempo", "uid": "tempo"},
+                "targets": [
+                    {"refId": "A", "datasource": {"type": "tempo", "uid": "tempo"}, "query": "{}", "queryType": "traceql", "tableType": "traces", "limit": 20}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "custom": {"cellOptions": {"type": "auto"}}
+                    },
+                    "overrides": []
+                },
+                "options": {"showHeader": true}
+            }
+        ],
+        "refresh": "30s",
+        "schemaVersion": 40,
+        "tags": ["shoggoth"],
+        "templating": {
+            "list": []
+        },
+        "time": {"from": "now-1h", "to": "now"},
+        "title": "Shoggoth",
+        "description": "Shoggoth infrastructure overview: host metrics and traces",
+        "uid": "shoggoth",
+        "version": 2
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-shoggoth-service
+  namespace: shoggoth
+data:
+  shoggoth_service.json: |
+    {
+        "annotations": {
+            "list": []
+        },
+        "editable": true,
+        "fiscalYearStartMonth": 0,
+        "graphTooltip": 1,
+        "id": null,
+        "links": [],
+        "panels": [
+            {
+                "title": "CPU Usage",
+                "type": "timeseries",
+                "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "max by(service) (rate(container_cpu_time_seconds_total{service=\"$service\"}[5m]))", "legendFormat": "CPU cores", "refId": "A"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "none",
+                        "min": 0,
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Memory Usage",
+                "type": "timeseries",
+                "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "max by(service) (container_memory_usage_bytes{service=\"$service\"})", "legendFormat": "Memory usage", "refId": "A"},
+                    {"expr": "max by(service) (container_spec_memory_limit_bytes{service=\"$service\"})", "legendFormat": "Limit", "refId": "B"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "bytes",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Network I/O",
+                "type": "timeseries",
+                "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum by(service) (rate(k8s_pod_network_io_bytes_total{service=\"$service\",direction=\"receive\"}[5m]))", "legendFormat": "↓ Receive", "refId": "A"},
+                    {"expr": "sum by(service) (rate(k8s_pod_network_io_bytes_total{service=\"$service\",direction=\"transmit\"}[5m]))", "legendFormat": "↑ Transmit", "refId": "B"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "Bps",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Working Set",
+                "type": "stat",
+                "gridPos": {"h": 4, "w": 12, "x": 0, "y": 16},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "max(container_memory_working_set_bytes{service=\"$service\"})", "legendFormat": "", "refId": "A"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "bytes",
+                        "color": {"mode": "value"}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Uptime",
+                "type": "stat",
+                "gridPos": {"h": 4, "w": 12, "x": 12, "y": 16},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "max by(service) (container_uptime_seconds_total{service=\"$service\"})", "legendFormat": "", "refId": "A"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+                        "color": {"mode": "thresholds"}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Service Logs",
+                "type": "logs",
+                "gridPos": {"h": 12, "w": 24, "x": 0, "y": 20},
+                "datasource": {"uid": "loki"},
+                "targets": [
+                    {"expr": "{service=\"$service\"}", "refId": "A"}
+                ],
+                "options": {"showLabels": false, "showTime": true, "sortOrder": "Descending", "enableLogDetails": true, "wrapLogMessage": true, "prettifyLogMessage": true}
+            }
+        ],
+        "refresh": "30s",
+        "schemaVersion": 40,
+        "tags": ["shoggoth", "service"],
+        "templating": {
+            "list": [
+                {
+                    "current": {"text": "", "value": ""},
+                    "definition": "label_values(container_cpu_time_seconds_total{service=~\".+\"}, service)",
+                    "hide": 0,
+                    "includeAll": false,
+                    "label": "Service",
+                    "multi": false,
+                    "name": "service",
+                    "options": [],
+                    "query": {"qryType": 1, "query": "label_values(container_cpu_time_seconds_total{service=~\".+\"}, service)", "refId": "VariableQuery-0"},
+                    "refresh": 2,
+                    "sort": 1,
+                    "type": "query",
+                    "datasource": {"uid": "vm"}
+                }
+            ]
+        },
+        "time": {"from": "now-1h", "to": "now"},
+        "title": "Shoggoth Service",
+        "description": "Per-service observability: CPU, memory, network, disk, and logs for a single selected container",
+        "uid": "shoggoth-service",
+        "version": 3
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-shoggoth-kestra
+  namespace: shoggoth
+data:
+  shoggoth_kestra.json: |
+    {
+        "annotations": {
+            "list": []
+        },
+        "editable": true,
+        "fiscalYearStartMonth": 0,
+        "graphTooltip": 1,
+        "id": null,
+        "links": [],
+        "panels": [
+            {
+                "title": "Execution Rate",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 8, "x": 0, "y": 0},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum(rate(kestra_executor_execution_started_count_total[5m]))", "legendFormat": "started/s", "refId": "A"},
+                    {"expr": "sum(rate(kestra_executor_execution_end_count_total[5m]))", "legendFormat": "ended/s", "refId": "B"},
+                    {"expr": "sum(rate(kestra_executor_execution_queued_count_total[5m]))", "legendFormat": "queued/s", "refId": "C"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Task Run Rate",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 8, "x": 8, "y": 0},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum(rate(kestra_worker_started_count_total[5m]))", "legendFormat": "started/s", "refId": "A"},
+                    {"expr": "sum(rate(kestra_worker_ended_count_total[5m]))", "legendFormat": "ended/s", "refId": "B"},
+                    {"expr": "sum(rate(kestra_worker_timeout_count_total[5m]))", "legendFormat": "timed out/s", "refId": "C"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": [
+                        {
+                            "matcher": {"id": "byRegexp", "options": ".*timed out.*"},
+                            "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]
+                        }
+                    ]
+                }
+            },
+            {
+                "title": "Running Tasks",
+                "type": "stat",
+                "gridPos": {"h": 9, "w": 4, "x": 16, "y": 0},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum(kestra_worker_running_count)", "legendFormat": "running", "refId": "A"},
+                    {"expr": "sum(kestra_controller_job_inflight)", "legendFormat": "inflight", "refId": "B"},
+                    {"expr": "sum(kestra_worker_pending_count)", "legendFormat": "pending", "refId": "C"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10}]},
+                        "color": {"mode": "thresholds"}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Worker Threads",
+                "type": "stat",
+                "gridPos": {"h": 9, "w": 4, "x": 20, "y": 0},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum(kestra_worker_job_thread)", "legendFormat": "threads", "refId": "A"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]},
+                        "color": {"mode": "thresholds"}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Execution Duration (p50 / p95 / p99)",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 12, "x": 0, "y": 9},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "histogram_quantile(0.5, sum(rate(kestra_executor_execution_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A"},
+                    {"expr": "histogram_quantile(0.95, sum(rate(kestra_executor_execution_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B"},
+                    {"expr": "histogram_quantile(0.99, sum(rate(kestra_executor_execution_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "C"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Task Duration (p50 / p95 / p99)",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 12, "x": 12, "y": 9},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "histogram_quantile(0.5, sum(rate(kestra_worker_ended_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A"},
+                    {"expr": "histogram_quantile(0.95, sum(rate(kestra_worker_ended_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B"},
+                    {"expr": "histogram_quantile(0.99, sum(rate(kestra_worker_ended_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "C"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Indexer Rate",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 8, "x": 0, "y": 18},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum(rate(kestra_indexer_request_count_total[5m]))", "legendFormat": "requests/s", "refId": "A"},
+                    {"expr": "sum(rate(kestra_indexer_message_in_count_total[5m]))", "legendFormat": "messages in/s", "refId": "B"},
+                    {"expr": "sum(rate(kestra_indexer_message_out_count_total[5m]))", "legendFormat": "messages out/s", "refId": "C"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Indexer Duration (p50 / p99)",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 8, "x": 8, "y": 18},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "histogram_quantile(0.5, sum(rate(kestra_indexer_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A"},
+                    {"expr": "histogram_quantile(0.99, sum(rate(kestra_indexer_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "B"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Queue Rate",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 8, "x": 16, "y": 18},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum(rate(kestra_queue_message_emitted_total_total[5m]))", "legendFormat": "emitted/s", "refId": "A"},
+                    {"expr": "sum(rate(kestra_queue_message_big_total_total[5m]))", "legendFormat": "big messages/s", "refId": "B"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": [
+                        {
+                            "matcher": {"id": "byRegexp", "options": ".*big messages.*"},
+                            "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]
+                        }
+                    ]
+                }
+            },
+            {
+                "title": "Scheduler Activity",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 8, "x": 0, "y": 27},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum(rate(kestra_scheduler_trigger_count_total[5m]))", "legendFormat": "triggers/s", "refId": "A"},
+                    {"expr": "sum(kestra_worker_trigger_running_count)", "legendFormat": "triggers running", "refId": "B"},
+                    {"expr": "sum(rate(kestra_executor_taskrun_created_count_total[5m]))", "legendFormat": "taskruns created/s", "refId": "C"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": [
+                        {
+                            "matcher": {"id": "byName", "options": "triggers running"},
+                            "properties": [{"id": "custom.drawStyle", "value": "bars"}]
+                        }
+                    ]
+                }
+            },
+            {
+                "title": "Queue Consume Duration (p50 / p99)",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 8, "x": 8, "y": 27},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "histogram_quantile(0.5, sum(rate(kestra_queue_consume_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A"},
+                    {"expr": "histogram_quantile(0.99, sum(rate(kestra_queue_consume_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99", "refId": "B"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Executor Task Results",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 8, "x": 16, "y": 27},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum(rate(kestra_executor_taskrun_ended_count_total[5m]))", "legendFormat": "taskrun ended/s", "refId": "A"},
+                    {"expr": "sum(kestra_executor_thread_count)", "legendFormat": "executor threads", "refId": "B"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Kestra Logs",
+                "type": "logs",
+                "gridPos": {"h": 12, "w": 24, "x": 0, "y": 36},
+                "datasource": {"uid": "loki"},
+                "targets": [
+                    {"expr": "{service=~\"kestra.*\"}", "refId": "A"}
+                ],
+                "options": {"showLabels": false, "showTime": true, "sortOrder": "Descending", "enableLogDetails": true, "wrapLogMessage": true, "prettifyLogMessage": true}
+            },
+            {
+                "title": "Kestra Traces",
+                "type": "table",
+                "gridPos": {"h": 12, "w": 24, "x": 0, "y": 48},
+                "datasource": {"type": "tempo", "uid": "tempo"},
+                "targets": [
+                    {"refId": "A", "datasource": {"type": "tempo", "uid": "tempo"}, "query": "{ resource.service.name = \"kestra\" }", "queryType": "traceql", "tableType": "traces"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "custom": {"cellOptions": {"type": "auto"}}
+                    },
+                    "overrides": []
+                },
+                "options": {"showHeader": true}
+            }
+        ],
+        "refresh": "30s",
+        "schemaVersion": 40,
+        "tags": ["shoggoth", "kestra"],
+        "templating": {
+            "list": []
+        },
+        "time": {"from": "now-1h", "to": "now"},
+        "title": "Shoggoth Kestra",
+        "description": "Kestra workflow engine metrics: executions, tasks, scheduler, queue, and logs",
+        "uid": "shoggoth-kestra",
+        "version": 2
+    }
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-shoggoth-ai
+  namespace: shoggoth
+data:
+  shoggoth_ai.json: |
+    {
+        "annotations": {
+            "list": []
+        },
+        "editable": true,
+        "fiscalYearStartMonth": 0,
+        "graphTooltip": 1,
+        "id": null,
+        "links": [],
+        "panels": [
+            {
+                "title": "LLM Request Rate",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 0,
+                    "y": 0
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(rate(litellm_request_total_latency_metric_count[5m])) by (requested_model)",
+                        "legendFormat": "{{requested_model}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum(rate(litellm_deployment_failure_responses_total[5m])) by (requested_model)",
+                        "legendFormat": "{{requested_model}} errors",
+                        "refId": "B"
+                    }
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": [
+                        {
+                            "matcher": {
+                                "id": "byRegexp",
+                                "options": ".*errors"
+                            },
+                            "properties": [
+                                {
+                                    "id": "color",
+                                    "value": {
+                                        "fixedColor": "red",
+                                        "mode": "fixed"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "title": "LLM Request Latency",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 8,
+                    "y": 0
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "histogram_quantile(0.5, sum(rate(litellm_request_total_latency_metric_bucket[5m])) by (le, requested_model))",
+                        "legendFormat": "p50 {{requested_model}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.95, sum(rate(litellm_request_total_latency_metric_bucket[5m])) by (le, requested_model))",
+                        "legendFormat": "p95 {{requested_model}}",
+                        "refId": "B"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.99, sum(rate(litellm_request_total_latency_metric_bucket[5m])) by (le, requested_model))",
+                        "legendFormat": "p99 {{requested_model}}",
+                        "refId": "C"
+                    }
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "LLM Token Throughput",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 16,
+                    "y": 0
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(rate(litellm_input_tokens_metric_total[5m])) by (requested_model)",
+                        "legendFormat": "input {{requested_model}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum(rate(litellm_output_tokens_metric_total[5m])) by (requested_model)",
+                        "legendFormat": "output {{requested_model}}",
+                        "refId": "B"
+                    }
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "tok/s",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Token Counters",
+                "type": "stat",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 0,
+                    "y": 9
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(litellm_input_tokens_metric_total)",
+                        "legendFormat": "Input Tokens",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum(litellm_output_tokens_metric_total)",
+                        "legendFormat": "Output Tokens",
+                        "refId": "B"
+                    }
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "thresholds": {
+                            "mode": "absolute",
+                            "steps": [
+                                {
+                                    "color": "green",
+                                    "value": null
+                                }
+                            ]
+                        },
+                        "color": {
+                            "mode": "thresholds"
+                        },
+                        "unit": "none"
+                    },
+                    "overrides": []
+                },
+                "options": {
+                    "reduceOptions": {
+                        "calcs": ["lastNotNull"],
+                        "fields": "",
+                        "values": false
+                    }
+                }
+            },
+            {
+                "title": "LLM In-Flight Requests",
+                "type": "stat",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 8,
+                    "y": 9
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "litellm_in_flight_requests",
+                        "legendFormat": "in-flight",
+                        "refId": "A"
+                    }
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "thresholds": {
+                            "mode": "absolute",
+                            "steps": [
+                                {
+                                    "color": "green",
+                                    "value": null
+                                },
+                                {
+                                    "color": "yellow",
+                                    "value": 10
+                                },
+                                {
+                                    "color": "red",
+                                    "value": 50
+                                }
+                            ]
+                        },
+                        "color": {
+                            "mode": "thresholds"
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "LLM Deployment Latency per Output Token",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 16,
+                    "y": 9
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "histogram_quantile(0.5, sum(rate(litellm_deployment_latency_per_output_token_bucket[5m])) by (le, litellm_model_name))",
+                        "legendFormat": "p50 {{litellm_model_name}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.99, sum(rate(litellm_deployment_latency_per_output_token_bucket[5m])) by (le, litellm_model_name))",
+                        "legendFormat": "p99 {{litellm_model_name}}",
+                        "refId": "B"
+                    }
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "LiteLLM Trace Rate",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 0,
+                    "y": 18
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"litellm\"}[5m])) by (span_name)",
+                        "legendFormat": "{{span_name}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"litellm\", status_code=\"ERROR\"}[5m])) by (span_name)",
+                        "legendFormat": "{{span_name}} errors",
+                        "refId": "B"
+                    }
+                ],
+                "description": "All LiteLLM spans by operation. LLM proxy and MCP gateway calls share the same span names and cannot be separated in span-metrics; use AI Traces below to inspect individual requests.",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": [
+                        {
+                            "matcher": {
+                                "id": "byRegexp",
+                                "options": ".*errors"
+                            },
+                            "properties": [
+                                {
+                                    "id": "color",
+                                    "value": {
+                                        "fixedColor": "red",
+                                        "mode": "fixed"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "title": "LiteLLM Trace Duration (p50 / p95 / p99)",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 8,
+                    "y": 18
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "histogram_quantile(0.5, sum(rate(traces_spanmetrics_latency_bucket{service=\"litellm\"}[5m])) by (le, span_name))",
+                        "legendFormat": "p50 {{span_name}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.95, sum(rate(traces_spanmetrics_latency_bucket{service=\"litellm\"}[5m])) by (le, span_name))",
+                        "legendFormat": "p95 {{span_name}}",
+                        "refId": "B"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.99, sum(rate(traces_spanmetrics_latency_bucket{service=\"litellm\"}[5m])) by (le, span_name))",
+                        "legendFormat": "p99 {{span_name}}",
+                        "refId": "C"
+                    }
+                ],
+                "description": "All LiteLLM span duration by operation",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Tokens per Request",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 16,
+                    "y": 18
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum by (requested_model) (rate(litellm_input_tokens_metric_total[5m]) + rate(litellm_output_tokens_metric_total[5m])) / sum by (requested_model) (rate(litellm_request_total_latency_metric_count[5m]))",
+                        "legendFormat": "{{requested_model}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum by (requested_model) (rate(litellm_input_tokens_metric_total[1d]) + rate(litellm_output_tokens_metric_total[1d])) / sum by (requested_model) (rate(litellm_request_total_latency_metric_count[1d]))",
+                        "legendFormat": "daily avg {{requested_model}}",
+                        "refId": "B"
+                    }
+                ],
+                "description": "Average token consumption per request by model (input + output). Daily average uses a 1d rate window.",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "none",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": [
+                        {
+                            "matcher": {
+                                "id": "byRegexp",
+                                "options": "daily avg.*"
+                            },
+                            "properties": [
+                                {
+                                    "id": "custom.lineStyle",
+                                    "value": {
+                                        "dash": [
+                                            10,
+                                            10
+                                        ],
+                                        "fill": "dash"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "title": "MCP Client Call Rate",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 12,
+                    "w": 8,
+                    "x": 0,
+                    "y": 27
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\"}[5m])) by (span_name)",
+                        "legendFormat": "{{span_name}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\", status_code=\"ERROR\"}[5m])) by (span_name)",
+                        "legendFormat": "{{span_name}} errors",
+                        "refId": "B"
+                    }
+                ],
+                "description": "MCP client hooks: span rate by operation",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": [
+                        {
+                            "matcher": {
+                                "id": "byRegexp",
+                                "options": ".*errors"
+                            },
+                            "properties": [
+                                {
+                                    "id": "color",
+                                    "value": {
+                                        "fixedColor": "red",
+                                        "mode": "fixed"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+            {
+                "title": "MCP Client Duration (p50 / p95 / p99)",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 12,
+                    "w": 8,
+                    "x": 8,
+                    "y": 27
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "histogram_quantile(0.5, sum(rate(traces_spanmetrics_latency_bucket{service=\"basic-memory-mcp-client\"}[5m])) by (le, span_name))",
+                        "legendFormat": "p50 {{span_name}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.95, sum(rate(traces_spanmetrics_latency_bucket{service=\"basic-memory-mcp-client\"}[5m])) by (le, span_name))",
+                        "legendFormat": "p95 {{span_name}}",
+                        "refId": "B"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.99, sum(rate(traces_spanmetrics_latency_bucket{service=\"basic-memory-mcp-client\"}[5m])) by (le, span_name))",
+                        "legendFormat": "p99 {{span_name}}",
+                        "refId": "C"
+                    }
+                ],
+                "description": "MCP client hooks: duration percentiles by operation",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "MCP Client Hook Activity",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 12,
+                    "w": 8,
+                    "x": 16,
+                    "y": 27
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\", span_name=~\"hook\\\\..+\"}[5m])) by (span_name)",
+                        "legendFormat": "{{span_name}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\", span_name=~\"mcp\\\\.call_tool\\\\..+\"}[5m])) by (span_name)",
+                        "legendFormat": "{{span_name}}",
+                        "refId": "B"
+                    }
+                ],
+                "description": "MCP client hooks and tool call activity",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Agent Session Rate",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 0,
+                    "y": 39
+                },
+                "datasource": {
+                    "uid": "loki"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(rate({service=~\"qwen-.*\"}[5m])) by (service)",
+                        "legendFormat": "{{service}}",
+                        "refId": "A"
+                    }
+                ],
+                "description": "Coding agent session log event rate by event type",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "ops",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Agent Active Sessions",
+                "type": "stat",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 8,
+                    "y": 39
+                },
+                "datasource": {
+                    "uid": "loki"
+                },
+                "targets": [
+                    {
+                        "expr": "count(count_over_time({service=~\"qwen-.*\"}[5m])) by (service)",
+                        "legendFormat": "{{service}}",
+                        "refId": "A"
+                    }
+                ],
+                "description": "Distinct agent sessions with log activity in the last 5 minutes",
+                "fieldConfig": {
+                    "defaults": {
+                        "thresholds": {
+                            "mode": "absolute",
+                            "steps": [
+                                {
+                                    "color": "green",
+                                    "value": null
+                                }
+                            ]
+                        },
+                        "color": {
+                            "mode": "thresholds"
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Agent Session Errors",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 16,
+                    "y": 39
+                },
+                "datasource": {
+                    "uid": "loki"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(rate({service=~\"qwen-.*\"} |~ \"(?i)error|fail|exception|timeout\"[5m])) by (service)",
+                        "legendFormat": "{{service}}",
+                        "refId": "A"
+                    }
+                ],
+                "description": "Agent log lines matching error patterns",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "ops",
+                        "color": {
+                            "fixedColor": "red",
+                            "mode": "fixed"
+                        },
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Agent Logs",
+                "type": "logs",
+                "gridPos": {
+                    "h": 12,
+                    "w": 24,
+                    "x": 0,
+                    "y": 48
+                },
+                "datasource": {
+                    "uid": "loki"
+                },
+                "targets": [
+                    {
+                        "expr": "{service=~\"qwen-.*\"}",
+                        "refId": "A"
+                    }
+                ],
+                "options": {
+                    "showTime": true,
+                    "showLabels": true,
+                    "sortOrder": "Descending",
+                    "enableLogDetails": true,
+                    "wrapLogMessage": true
+                }
+            },
+            {
+                "title": "AI Traces",
+                "type": "table",
+                "gridPos": {
+                    "h": 12,
+                    "w": 24,
+                    "x": 0,
+                    "y": 60
+                },
+                "datasource": {
+                    "type": "tempo",
+                    "uid": "tempo"
+                },
+                "targets": [
+                    {
+                        "refId": "A",
+                        "datasource": {
+                            "type": "tempo",
+                            "uid": "tempo"
+                        },
+                        "query": "{ resource.service.name =~ \"litellm|basic-memory.*|mcp-gitea\" }",
+                        "queryType": "traceql",
+                        "tableType": "traces"
+                    }
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "custom": {
+                            "cellOptions": {
+                                "type": "auto"
+                            }
+                        }
+                    },
+                    "overrides": []
+                },
+                "options": {
+                    "showHeader": true
+                }
+            },
+            {
+                "title": "Token Usage Over Week",
+                "type": "timeseries",
+                "timeFrom": "now-7d",
+                "maxDataPoints": 168,
+                "gridPos": {
+                    "h": 18,
+                    "w": 12,
+                    "x": 0,
+                    "y": 72
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum by (requested_model) (increase(litellm_input_tokens_metric_total[1h]))",
+                        "legendFormat": "input {{requested_model}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum by (requested_model) (increase(litellm_output_tokens_metric_total[1h]))",
+                        "legendFormat": "output {{requested_model}}",
+                        "refId": "B"
+                    }
+                ],
+                "description": "Cumulative token usage over the past 7 days by model",
+                "transformations": [
+                    {
+                        "id": "calculateField",
+                        "options": {
+                            "mode": "cumulativeFunctions",
+                            "reducer": "sum"
+                        }
+                    }
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "short",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                },
+                "options": {
+                    "legend": {
+                        "displayMode": "table",
+                        "placement": "bottom",
+                        "showLegend": true,
+                        "calcs": ["lastNotNull"]
+                    }
+                }
+            },
+            {
+                "title": "Token Usage Over Month",
+                "type": "timeseries",
+                "timeFrom": "now-30d",
+                "maxDataPoints": 120,
+                "gridPos": {
+                    "h": 18,
+                    "w": 12,
+                    "x": 12,
+                    "y": 72
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum by (requested_model) (increase(litellm_input_tokens_metric_total[6h]))",
+                        "legendFormat": "input {{requested_model}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum by (requested_model) (increase(litellm_output_tokens_metric_total[6h]))",
+                        "legendFormat": "output {{requested_model}}",
+                        "refId": "B"
+                    }
+                ],
+                "description": "Cumulative token usage over the past 30 days by model",
+                "transformations": [
+                    {
+                        "id": "calculateField",
+                        "options": {
+                            "mode": "cumulativeFunctions",
+                            "reducer": "sum"
+                        }
+                    }
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "short",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                },
+                "options": {
+                    "legend": {
+                        "displayMode": "table",
+                        "placement": "bottom",
+                        "showLegend": true,
+                        "calcs": ["lastNotNull"]
+                    }
+                }
+            }
+        ],
+        "refresh": "30s",
+        "schemaVersion": 40,
+        "tags": [
+            "shoggoth",
+            "ai"
+        ],
+        "templating": {
+            "list": []
+        },
+        "time": {
+            "from": "now-1h",
+            "to": "now"
+        },
+        "title": "Shoggoth AI",
+        "description": "LLM proxy metrics, LiteLLM trace observability, direct MCP client telemetry, and coding agent session logs",
+        "uid": "shoggoth-ai",
+        "version": 2
+    }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: shoggoth
+spec:
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-data
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: grafana
+          image: grafana/grafana:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD__FILE
+              value: /run/secrets/admin_password
+            - name: GF_SERVER_HTTP_PORT
+              value: "80"
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Viewer
+            - name: GF_AUTH_LDAP_ENABLED
+              value: "false"
+            - name: GF_LOG_LEVEL
+              value: warn
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: /etc/grafana/provisioning/dashboards/shoggoth.json
+          ports:
+            - containerPort: 80
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/grafana
+            - name: provisioning
+              mountPath: /etc/grafana/provisioning/datasources/datasources.yaml
+              subPath: datasources.yaml
+              readOnly: true
+            - name: dashboards
+              mountPath: /etc/grafana/provisioning/dashboards
+              readOnly: true
+            - name: admin-password
+              mountPath: /run/secrets/admin_password
+              subPath: admin-password
+              readOnly: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: grafana-data
+        - name: provisioning
+          configMap:
+            name: grafana-config
+        - name: dashboards
+          projected:
+            sources:
+              - configMap:
+                  name: grafana-config
+                  items:
+                    - key: dashboards.yaml
+                      path: dashboards.yaml
+              - configMap:
+                  name: grafana-dashboard-shoggoth
+              - configMap:
+                  name: grafana-dashboard-shoggoth-service
+              - configMap:
+                  name: grafana-dashboard-shoggoth-kestra
+              - configMap:
+                  name: grafana-dashboard-shoggoth-ai
+        - name: admin-password
+          secret:
+            secretName: grafana-admin-password
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate

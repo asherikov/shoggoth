@@ -1,0 +1,457 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otelcol-config
+  namespace: shoggoth
+data:
+  config.yaml: |
+    receivers:
+        otlp:
+            protocols:
+                grpc:
+                    endpoint: 0.0.0.0:4317
+                http:
+                    endpoint: 0.0.0.0:4318
+
+        kubelet_stats:
+            collection_interval: 15s
+            auth_type: serviceAccount
+            endpoint: https://${env:NODE_IP}:10250
+            insecure_skip_verify: true
+            metrics:
+                container.cpu.time:
+                    enabled: true
+                container.cpu.usage:
+                    enabled: true
+                container.uptime:
+                    enabled: true
+                container.memory.rss:
+                    enabled: true
+                container.memory.usage:
+                    enabled: true
+                container.memory.available:
+                    enabled: true
+                container.memory.working_set:
+                    enabled: true
+                k8s.pod.network.io:
+                    enabled: true
+                k8s.pod.cpu.usage:
+                    enabled: true
+                k8s.pod.memory.usage:
+                    enabled: true
+
+        k8s_cluster:
+            collection_interval: 15s
+            node_conditions_to_report:
+                - Ready
+                - MemoryPressure
+                - DiskPressure
+                - PIDPressure
+                - NetworkUnavailable
+            allocatable_types_to_report:
+                - cpu
+                - memory
+                - pods
+
+        host_metrics:
+            root_path: /host
+            collection_interval: 15s
+            scrapers:
+                cpu:
+                load:
+                memory:
+                    metrics:
+                        system.linux.memory.available:
+                            enabled: true
+                        system.memory.limit:
+                            enabled: true
+                disk:
+                filesystem:
+                    metrics:
+                        system.filesystem.utilization:
+                            enabled: true
+                network:
+                processes:
+
+        file_log/k8s:
+            include:
+                - /var/log/pods/*/*/*.log
+            include_file_path: true
+            include_file_name: false
+            start_at: end
+            poll_interval: 200ms
+            operators:
+                - id: extract-metadata
+                  type: regex_parser
+                  regex: '^/var/log/pods/(?P<namespace>[^_]+)_(?P<pod>[^_]+)_(?P<uid>[a-f0-9\-]+)/(?P<container>[^/]+)/'
+                  parse_from: attributes["log.file.path"]
+                  if: 'attributes["log.file.path"] != nil'
+                  on_error: send
+                - id: set-pod-name
+                  type: move
+                  from: attributes.pod
+                  to: resource["k8s.pod.name"]
+                - id: set-namespace
+                  type: move
+                  from: attributes.namespace
+                  to: resource["k8s.namespace.name"]
+                - id: set-pod-uid
+                  type: move
+                  from: attributes.uid
+                  to: resource["k8s.pod.uid"]
+                - id: set-container-name
+                  type: move
+                  from: attributes.container
+                  to: resource["k8s.container.name"]
+                - id: container-parser
+                  type: container
+
+        prometheus:
+            config:
+                scrape_configs:
+                    - job_name: otelcol
+                      scrape_interval: 15s
+                      static_configs:
+                          - targets:
+                                - otelcol:8888
+                      metric_relabel_configs:
+                          - source_labels: [job]
+                            target_label: job_name
+                            regex: "(.+)"
+                    - job_name: litellm
+                      scrape_interval: 15s
+                      metrics_path: /metrics/
+                      static_configs:
+                          - targets:
+                                - litellm:80
+                      metric_relabel_configs:
+                          - source_labels: [job]
+                            target_label: job_name
+                            regex: "(.+)"
+                    - job_name: git-pages
+                      scrape_interval: 15s
+                      static_configs:
+                          - targets:
+                                - git-pages:9253
+                      metric_relabel_configs:
+                          - source_labels: [instance]
+                            target_label: instance_name
+                            regex: "(.+)"
+                          - source_labels: [instance]
+                            target_label: hostname
+                            regex: "([^:]+):.*"
+                          - source_labels: [job]
+                            target_label: job_name
+                            regex: "(.+)"
+
+    processors:
+        memory_limiter:
+            check_interval: 1s
+            limit_percentage: 75
+            spike_limit_percentage: 15
+        resourcedetection:
+            detectors: [env, system]
+            timeout: 5s
+            system:
+                hostname_sources: [os]
+        k8s_attributes:
+            auth_type: serviceAccount
+            pod_association:
+                - sources:
+                    - from: resource_attribute
+                      name: k8s.pod.uid
+                - sources:
+                    - from: resource_attribute
+                      name: k8s.pod.name
+                    - from: resource_attribute
+                      name: k8s.namespace.name
+            extract:
+                metadata:
+                    - k8s.pod.name
+                    - k8s.pod.uid
+                    - k8s.pod.start_time
+                    - k8s.deployment.name
+                    - k8s.daemonset.name
+                    - k8s.statefulset.name
+                    - k8s.namespace.name
+                    - k8s.node.name
+                    - k8s.container.name
+                labels:
+                    - tag_name: service
+                      key: app
+                      from: pod
+        transform/service:
+            metric_statements:
+                - context: resource
+                  statements:
+                      - set(attributes["service"], attributes["k8s.deployment.name"]) where attributes["service"] == nil and attributes["k8s.deployment.name"] != nil
+                      - set(attributes["service"], attributes["k8s.daemonset.name"]) where attributes["service"] == nil and attributes["k8s.daemonset.name"] != nil
+                      - set(attributes["service"], attributes["k8s.statefulset.name"]) where attributes["service"] == nil and attributes["k8s.statefulset.name"] != nil
+                      - set(attributes["service"], attributes["k8s.pod.name"]) where attributes["service"] == nil and attributes["k8s.pod.name"] != nil
+                      - replace_pattern(attributes["service"], "(?:-[a-z0-9]{5,}-[a-z0-9]{5,}|-[a-z0-9]{5}|-[0-9]+)$", "") where attributes["service"] != nil
+            log_statements:
+                - context: resource
+                  statements:
+                      - set(attributes["service"], attributes["k8s.deployment.name"]) where attributes["service"] == nil and attributes["k8s.deployment.name"] != nil
+                      - set(attributes["service"], attributes["k8s.daemonset.name"]) where attributes["service"] == nil and attributes["k8s.daemonset.name"] != nil
+                      - set(attributes["service"], attributes["k8s.statefulset.name"]) where attributes["service"] == nil and attributes["k8s.statefulset.name"] != nil
+                      - set(attributes["service"], attributes["k8s.pod.name"]) where attributes["service"] == nil and attributes["k8s.pod.name"] != nil
+                      - replace_pattern(attributes["service"], "(?:-[a-z0-9]{5,}-[a-z0-9]{5,}|-[a-z0-9]{5}|-[0-9]+)$", "") where attributes["service"] != nil
+            trace_statements:
+                - context: resource
+                  statements:
+                      - set(attributes["service"], attributes["k8s.deployment.name"]) where attributes["service"] == nil and attributes["k8s.deployment.name"] != nil
+                      - set(attributes["service"], attributes["k8s.daemonset.name"]) where attributes["service"] == nil and attributes["k8s.daemonset.name"] != nil
+                      - set(attributes["service"], attributes["k8s.statefulset.name"]) where attributes["service"] == nil and attributes["k8s.statefulset.name"] != nil
+                      - set(attributes["service"], attributes["k8s.pod.name"]) where attributes["service"] == nil and attributes["k8s.pod.name"] != nil
+                      - replace_pattern(attributes["service"], "(?:-[a-z0-9]{5,}-[a-z0-9]{5,}|-[a-z0-9]{5}|-[0-9]+)$", "") where attributes["service"] != nil
+        batch:
+            send_batch_size: 1024
+            send_batch_max_size: 2048
+            timeout: 10s
+
+    exporters:
+        prometheusremotewrite:
+            endpoint: http://victoria-metrics:80/api/v1/write
+            tls:
+                insecure: true
+            resource_to_telemetry_conversion:
+                enabled: true
+        otlp_http/tempo:
+            endpoint: http://tempo:4318
+            tls:
+                insecure: true
+        otlp_http/loki:
+            endpoint: http://loki:3100/otlp
+            tls:
+                insecure: true
+
+    service:
+        telemetry:
+            logs:
+                level: warn
+            metrics:
+                level: detailed
+                readers:
+                    - pull:
+                        exporter:
+                            prometheus:
+                                host: '0.0.0.0'
+                                port: 8888
+        pipelines:
+            traces:
+                receivers:
+                    - otlp
+                processors:
+                    - memory_limiter
+                    - k8s_attributes
+                    - transform/service
+                    - batch
+                exporters:
+                    - otlp_http/tempo
+            logs:
+                receivers:
+                    - file_log/k8s
+                    - otlp
+                processors:
+                    - memory_limiter
+                    - resourcedetection
+                    - k8s_attributes
+                    - transform/service
+                    - batch
+                exporters:
+                    - otlp_http/loki
+            metrics:
+                receivers:
+                    - kubelet_stats
+                    - k8s_cluster
+                    - host_metrics
+                    - otlp
+                    - prometheus
+                processors:
+                    - memory_limiter
+                    - k8s_attributes
+                    - transform/service
+                    - resourcedetection
+                    - batch
+                exporters:
+                    - prometheusremotewrite
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otelcol
+  namespace: shoggoth
+spec:
+  selector:
+    app: otelcol
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: metrics
+      port: 8888
+      targetPort: 8888
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otelcol
+  namespace: shoggoth
+spec:
+  selector:
+    matchLabels:
+      app: otelcol
+  template:
+    metadata:
+      labels:
+        app: otelcol
+    spec:
+      serviceAccountName: otelcol
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: otelcol
+          image: otel/opentelemetry-collector-contrib:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 8888
+              name: metrics
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol-contrib/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: host
+              mountPath: /host
+              readOnly: true
+            - name: hostproc
+              mountPath: /host/proc
+              readOnly: true
+            - name: hostsys
+              mountPath: /host/sys
+              readOnly: true
+            - name: podlogs
+              mountPath: /var/log/pods
+              readOnly: true
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 8888
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: 8888
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: config
+          configMap:
+            name: otelcol-config
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: host
+          hostPath:
+            path: /
+            type: ""
+        - name: hostproc
+          hostPath:
+            path: /proc
+            type: ""
+        - name: hostsys
+          hostPath:
+            path: /sys
+            type: ""
+        - name: podlogs
+          hostPath:
+            path: /var/log/pods
+            type: ""
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otelcol
+  namespace: shoggoth
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otelcol
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "namespaces", "nodes/stats", "replicationcontrollers", "services", "resourcequotas"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments", "daemonsets", "statefulsets"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otelcol
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otelcol
+subjects:
+  - kind: ServiceAccount
+    name: otelcol
+    namespace: shoggoth

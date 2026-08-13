@@ -1,0 +1,301 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openldap-data
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openldap-config
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: local-path
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openldap-init
+  namespace: shoggoth
+data:
+  init.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    LDAP_BASE_DN="$(printf '%s' "${LDAP_DOMAIN}" | sed 's/\./,dc=/g; s/^/dc=/')"
+    ADMIN_DN="cn=admin,${LDAP_BASE_DN}"
+    CONFIG_ADMIN_DN="cn=admin,cn=config"
+    LDAP_URL="ldap://localhost:389"
+    LDAP_DIR="/shoggoth/openldap"
+
+    clean_pw_file() {
+        local src="${1}"
+        local dst
+        dst="$(mktemp)"
+        tr -d '\n\r' < "${src}" > "${dst}"
+        printf '%s' "${dst}"
+    }
+
+    ADMIN_PW="$(clean_pw_file /run/secrets/openldap_admin_password)"
+    CONFIG_ADMIN_PW="$(clean_pw_file /run/secrets/openldap_config_admin_password)"
+    trap 'rm -f "${ADMIN_PW}" "${CONFIG_ADMIN_PW}"' EXIT
+
+    SENTINEL="/var/lib/ldap/shoggoth-init-done"
+
+    if [ -f "${SENTINEL}" ]; then
+        echo "shoggoth: LDAP already initialized, re-applying passwords for rotation"
+        for i in $(seq 1 30); do
+            if ldapsearch -x -H "${LDAP_URL}" \
+                -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
+                -b "${LDAP_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
+                break
+            fi
+            if [ "${i}" -eq 30 ]; then
+                echo "shoggoth: FATAL: slapd never became ready" >&2
+                exit 1
+            fi
+            sleep 2
+        done
+        if [ -f "${LDAP_DIR}/passwords.ldif" ]; then
+            ldapmodify -x -H "${LDAP_URL}" \
+                -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
+                -f "${LDAP_DIR}/passwords.ldif" || {
+                echo "shoggoth: ERROR: password rotation failed" >&2
+                exit 1
+            }
+        fi
+        touch /run/shoggoth-ldap-init-done
+        exit 0
+    fi
+
+    echo "shoggoth: === openldap: waiting for slapd ==="
+    for i in $(seq 1 60); do
+        if ldapsearch -x -H "${LDAP_URL}" \
+            -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
+            -b "${LDAP_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
+            echo "shoggoth: slapd is ready."
+            break
+        fi
+        if [ "${i}" -eq 60 ]; then
+            echo "shoggoth: FATAL: slapd never became ready" >&2
+            exit 1
+        fi
+        sleep 2
+    done
+
+    MDB_DN="olcDatabase={1}mdb,cn=config"
+
+    echo "shoggoth: === configuring memberof overlay ==="
+    MEMBEROF_EXISTS="$(ldapsearch -x -H "${LDAP_URL}" \
+        -D "${CONFIG_ADMIN_DN}" -y "${CONFIG_ADMIN_PW}" \
+        -b "olcOverlay=memberof,${MDB_DN}" -s base '(objectClass=*)' \
+        olcMemberOfGroupOC 2>/dev/null || true)"
+
+    if printf '%s\n' "${MEMBEROF_EXISTS}" | grep -q "^olcMemberOfGroupOC:"; then
+        echo "shoggoth: memberof overlay already configured"
+    else
+        MEMBEROF_MODULE_EXISTS="$(ldapsearch -x -H "${LDAP_URL}" \
+            -D "${CONFIG_ADMIN_DN}" -y "${CONFIG_ADMIN_PW}" \
+            -b "cn=module{0},cn=config" -s base '(objectClass=*)' olcModuleLoad 2>/dev/null || true)"
+        if ! printf '%s\n' "${MEMBEROF_MODULE_EXISTS}" | grep -q "memberof"; then
+            if [ -f "${LDAP_DIR}/memberof_module.ldif" ]; then
+                ldapmodify -x -H "${LDAP_URL}" \
+                    -D "${CONFIG_ADMIN_DN}" -y "${CONFIG_ADMIN_PW}" \
+                    -f "${LDAP_DIR}/memberof_module.ldif" || true
+            fi
+        fi
+        if [ -f "${LDAP_DIR}/memberof_overlay.ldif" ]; then
+            ldapadd -x -H "${LDAP_URL}" \
+                -D "${CONFIG_ADMIN_DN}" -y "${CONFIG_ADMIN_PW}" \
+                -f "${LDAP_DIR}/memberof_overlay.ldif" || true
+        fi
+        echo "shoggoth: memberof overlay enabled"
+    fi
+
+    if [ -f "${LDAP_DIR}/config.ldif" ]; then
+        echo "shoggoth: === configuring ACLs ==="
+        ldapmodify -x -H "${LDAP_URL}" \
+            -D "${CONFIG_ADMIN_DN}" -y "${CONFIG_ADMIN_PW}" \
+            -f "${LDAP_DIR}/config.ldif" || true
+    fi
+
+    if [ -f "${LDAP_DIR}/data.ldif" ]; then
+        echo "shoggoth: === provisioning LDAP data ==="
+        ldapadd -c -x -H "${LDAP_URL}" \
+            -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
+            -f "${LDAP_DIR}/data.ldif" 2>&1 | grep -v 'Already exists' || true
+    fi
+
+    if [ -f "${LDAP_DIR}/passwords.ldif" ]; then
+        echo "shoggoth: setting passwords"
+        ldapmodify -x -H "${LDAP_URL}" \
+            -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
+            -f "${LDAP_DIR}/passwords.ldif" || true
+    fi
+
+    touch "${SENTINEL}"
+    touch /run/shoggoth-ldap-init-done
+    echo "shoggoth: OpenLDAP initialization complete."
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openldap
+  namespace: shoggoth
+spec:
+  selector:
+    app: openldap
+  ports:
+    - name: ldap
+      port: 389
+      targetPort: 389
+    - name: ldaps
+      port: 636
+      targetPort: 636
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openldap
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openldap
+  template:
+    metadata:
+      labels:
+        app: openldap
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: openldap
+          image: osixia/openldap:1.5.0
+          ports:
+            - containerPort: 389
+              name: ldap
+            - containerPort: 636
+              name: ldaps
+          env:
+            - name: LDAP_DOMAIN
+              value: "shoggoth.local"
+            - name: LDAP_ADMIN_PASSWORD_FILE
+              value: /run/secrets/openldap_admin_password
+            - name: LDAP_CONFIG_PASSWORD_FILE
+              value: /run/secrets/openldap_config_admin_password
+            - name: LDAP_LOG_LEVEL
+              value: "32"
+            - name: LDAP_TLS
+              value: "false"
+            - name: LDAP_REMOVE_CONFIG_AFTER_SETUP
+              value: "false"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/ldap
+            - name: config
+              mountPath: /etc/ldap/slapd.d
+            - name: rendered
+              mountPath: /shoggoth/openldap
+              subPath: openldap
+              readOnly: true
+            - name: init-script
+              mountPath: /shoggoth/openldap-init.sh
+              subPath: init.sh
+              readOnly: true
+            - name: admin-password
+              mountPath: /run/secrets/openldap_admin_password
+              subPath: password
+              readOnly: true
+            - name: config-admin-password
+              mountPath: /run/secrets/openldap_config_admin_password
+              subPath: password
+              readOnly: true
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/bash
+                  - -c
+                  - |
+                    /bin/bash /shoggoth/openldap-init.sh >/proc/1/fd/1 2>/proc/1/fd/2
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          readinessProbe:
+            exec:
+              command: ["bash", "-c", "test -f /run/shoggoth-ldap-init-done"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            tcpSocket:
+              port: 389
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: init-script
+          configMap:
+            name: openldap-init
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: data
+          persistentVolumeClaim:
+            claimName: openldap-data
+        - name: config
+          persistentVolumeClaim:
+            claimName: openldap-config
+        - name: admin-password
+          secret:
+            secretName: openldap-admin-password
+        - name: config-admin-password
+          secret:
+            secretName: openldap-config-admin-password

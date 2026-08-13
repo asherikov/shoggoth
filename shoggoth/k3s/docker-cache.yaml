@@ -1,0 +1,150 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: docker-cache
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: docker-cache-ca
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docker-cache
+  namespace: shoggoth
+spec:
+  selector:
+    app: docker-cache
+  ports:
+    - name: proxy
+      port: 3128
+      targetPort: 3128
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docker-cache
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: docker-cache
+  template:
+    metadata:
+      labels:
+        app: docker-cache
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: docker-cache
+          image: rpardini/docker-registry-proxy:0.6.5
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SHOGGOTH_DOMAIN
+              value: "s.local"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: REGISTRIES
+              value: "registry.k8s.io gcr.io quay.io ghcr.io mcr.microsoft.com docker.gitea.com docker.angie.software codeberg.org public.ecr.aws"
+            - name: ENABLE_MANIFEST_CACHE
+              value: "true"
+            - name: CACHE_MAX_SIZE
+              value: "64g"
+            - name: MANIFEST_CACHE_PRIMARY_REGEX
+              value: "(stable|nightly|production|test)"
+            - name: MANIFEST_CACHE_PRIMARY_TIME
+              value: "10m"
+            - name: MANIFEST_CACHE_SECONDARY_REGEX
+              value: "(.*)(\\d|\\.)+(\\d|\\.)+(.*)(\\d|\\.)+"
+            - name: MANIFEST_CACHE_SECONDARY_TIME
+              value: "60d"
+            - name: MANIFEST_CACHE_DEFAULT_TIME
+              value: "1h"
+            - name: DISABLE_IPV6
+              value: "true"
+            - name: ALLOW_PUSH
+              value: "true"
+          ports:
+            - containerPort: 3128
+              name: proxy
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          readinessProbe:
+            tcpSocket:
+              port: 3128
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: 3128
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: cache
+              mountPath: /docker_mirror_cache
+            - name: ca
+              mountPath: /ca
+      volumes:
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: cache
+          persistentVolumeClaim:
+            claimName: docker-cache
+        - name: ca
+          persistentVolumeClaim:
+            claimName: docker-cache-ca

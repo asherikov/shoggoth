@@ -1,0 +1,322 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kestra-data
+  namespace: shoggoth
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kestra-entrypoint
+  namespace: shoggoth
+data:
+  entrypoint.sh: |
+    #!/usr/bin/env sh
+    set -eu
+
+    if [ -f /shoggoth_kestra_env ]; then
+        set -a
+        . /shoggoth_kestra_env
+        set +a
+    fi
+
+    exec /app/kestra "$@"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kestra-db
+  namespace: shoggoth
+spec:
+  selector:
+    app: kestra-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kestra-db
+  namespace: shoggoth
+spec:
+  serviceName: kestra-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kestra-db
+  template:
+    metadata:
+      labels:
+        app: kestra-db
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: postgres
+          image: postgres:18-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SHOGGOTH_DOMAIN
+              value: "s.local"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: POSTGRES_DB
+              value: kestra
+            - name: POSTGRES_USER
+              value: kestra
+            - name: POSTGRES_PASSWORD_FILE
+              value: /run/secrets/kestra_db_password
+          volumeMounts:
+            - name: tmpdata
+              mountPath: /var/lib/postgresql
+            - name: db-password
+              mountPath: /run/secrets/kestra_db_password
+              subPath: password
+              readOnly: true
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "kestra"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "kestra"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+      volumes:
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: db-password
+          secret:
+            secretName: kestra-db-password
+        - name: tmpdata
+          emptyDir:
+            medium: Memory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kestra
+  namespace: shoggoth
+spec:
+  selector:
+    app: kestra
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kestra
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kestra
+  template:
+    metadata:
+      labels:
+        app: kestra
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+        - name: fix-plugins-perms
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command: ["bash", "-c"]
+          args:
+            - "mkdir -p /app/plugins && chmod -R 777 /app/plugins"
+          volumeMounts:
+            - name: plugins
+              mountPath: /app/plugins
+        - name: kestra-init
+          image: kestra/kestra:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          args:
+            - "plugins"
+            - "install"
+            - "io.kestra.plugin:plugin-docker:LATEST"
+            - "io.kestra.plugin:plugin-script-shell:LATEST"
+          volumeMounts:
+            - name: plugins
+              mountPath: /app/plugins
+      containers:
+        - name: kestra
+          image: kestra/kestra:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          env:
+            - name: SHOGGOTH_DOMAIN
+              value: "s.local"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: FLOWENV_SHOGGOTH_DOMAIN
+              value: "s.local"
+            - name: FLOWENV_SHOGGOTH_GITHUB_ORG
+              value: "asherikov"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4317"
+          command: ["/bin/sh", "/shoggoth_kestra_entrypoint.sh"]
+          args:
+            - "server"
+            - "standalone"
+            - "--config"
+            - "/shoggoth_kestra.yaml"
+            - "--flow-path"
+            - "/app/flows"
+          ports:
+            - containerPort: 80
+              name: http
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2"
+          readinessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 6
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+            - name: kestra-entrypoint
+              mountPath: /shoggoth_kestra_entrypoint.sh
+              subPath: entrypoint.sh
+              readOnly: true
+            - name: kestra-config
+              mountPath: /shoggoth_kestra.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: kestra-env
+              mountPath: /shoggoth_kestra_env
+              subPath: env
+              readOnly: true
+            - name: data
+              mountPath: /app/storage
+            - name: flows
+              mountPath: /app/flows
+            - name: plugins
+              mountPath: /app/plugins
+            - name: dind-socket
+              mountPath: /dind
+      volumes:
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: kestra-entrypoint
+          configMap:
+            name: kestra-entrypoint
+            defaultMode: 0755
+        - name: kestra-config
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered/kestra
+            type: DirectoryOrCreate
+        - name: kestra-env
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered/kestra
+            type: DirectoryOrCreate
+        - name: data
+          persistentVolumeClaim:
+            claimName: kestra-data
+        - name: flows
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/kestra-flows
+            type: DirectoryOrCreate
+        - name: plugins
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/kestra-plugins
+            type: DirectoryOrCreate
+        - name: dind-socket
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/dind-socket
+            type: DirectoryOrCreate

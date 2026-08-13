@@ -1,0 +1,383 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    name: redmine-db
+    namespace: shoggoth
+spec:
+    accessModes:
+        - ReadWriteOnce
+    resources:
+        requests:
+            storage: 5Gi
+    storageClassName: local-path
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    name: redmine-files
+    namespace: shoggoth
+spec:
+    accessModes:
+        - ReadWriteOnce
+    resources:
+        requests:
+            storage: 5Gi
+    storageClassName: local-path
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+    name: redmine-bundle-cache
+    namespace: shoggoth
+spec:
+    accessModes:
+        - ReadWriteOnce
+    resources:
+        requests:
+            storage: 2Gi
+    storageClassName: local-path
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redmine-init
+  namespace: shoggoth
+data:
+  init.sh: |
+    #!/bin/sh
+    set -eu
+
+    if [ -n "${REDMINE_SECRET_KEY_BASE_FILE:-}" ] && [ -z "${SECRET_KEY_BASE:-}" ]; then
+        export SECRET_KEY_BASE="$(cat "${REDMINE_SECRET_KEY_BASE_FILE}")"
+    fi
+
+    . /shoggoth/rendered/redmine/redmine.env
+
+    for i in $(seq 1 60); do
+        if READY_CHECK="$(bundle exec rails runner 'puts "ready"' 2>&1)"; then
+            echo "shoggoth: Redmine is ready for LDAP configuration"
+            break
+        fi
+        echo "shoggoth: Waiting for Redmine to be ready (attempt ${i}/60): ${READY_CHECK}"
+        sleep 2
+    done
+
+    if ! bundle exec rails runner 'puts "ready"' > /dev/null 2>&1; then
+        echo "shoggoth: FATAL: Redmine never became ready" >&2
+        exit 1
+    fi
+
+    echo "shoggoth: Configuring LDAP auth source"
+    LDAP_HOST="${LDAP_HOST}" LDAP_BIND_DN="${LDAP_BIND_DN}" LDAP_BIND_PASSWORD="${LDAP_BIND_PASSWORD}" LDAP_BASE_DN="${LDAP_BASE_DN}" \
+        bundle exec rails runner '
+        auth = AuthSourceLdap.find_or_initialize_by(name: "openldap")
+        auth.host = ENV["LDAP_HOST"]
+        auth.port = 389
+        auth.account = ENV["LDAP_BIND_DN"]
+        auth.account_password = ENV["LDAP_BIND_PASSWORD"]
+        auth.base_dn = ENV["LDAP_BASE_DN"]
+        auth.attr_login = "uid"
+        auth.attr_firstname = "cn"
+        auth.attr_lastname = "sn"
+        auth.attr_mail = "mail"
+        auth.onthefly_register = true
+        auth.tls = false
+        auth.save!
+    ' && echo "shoggoth: === redmine ldap init complete ===" \
+        || { echo "shoggoth: FATAL: LDAP auth source configuration failed" >&2; exit 1; }
+
+    echo "shoggoth: Setting local admin password"
+    RESULT="$(SHOGGOTH_ADMIN_PASSWORD="${SHOGGOTH_ADMIN_PASSWORD}" bundle exec rails runner '
+        user = User.find_by_login("admin")
+        if user
+          user.password = ENV["SHOGGOTH_ADMIN_PASSWORD"]
+          user.password_confirmation = ENV["SHOGGOTH_ADMIN_PASSWORD"]
+          user.must_change_passwd = false
+          user.save!
+          puts "updated"
+        else
+          puts "not_found"
+        end
+    ')" || { echo "shoggoth: ERROR: admin password update failed" >&2; exit 1; }
+    case "${RESULT}" in
+        updated)    echo "shoggoth: admin password updated" ;;
+        not_found)  echo "shoggoth: admin user not found, skipping password update" ;;
+    esac
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redmine-db
+  namespace: shoggoth
+spec:
+  selector:
+    app: redmine-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redmine-db
+  namespace: shoggoth
+spec:
+  serviceName: redmine-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redmine-db
+  template:
+    metadata:
+      labels:
+        app: redmine-db
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+      containers:
+        - name: postgres
+          image: postgres:18-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_DB
+              value: redmine
+            - name: POSTGRES_USER
+              value: redmine
+            - name: POSTGRES_PASSWORD_FILE
+              value: /run/secrets/redmine_db_password
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+            - name: db-password
+              mountPath: /run/secrets/redmine_db_password
+              subPath: password
+              readOnly: true
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "redmine"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "redmine"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+      volumes:
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: db-password
+          secret:
+            secretName: redmine-db-password
+        - name: data
+          persistentVolumeClaim:
+            claimName: redmine-db
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redmine
+  namespace: shoggoth
+spec:
+  selector:
+    app: redmine
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redmine
+  namespace: shoggoth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redmine
+  template:
+    metadata:
+      labels:
+        app: redmine
+    spec:
+      initContainers:
+        - name: wait-bringup
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - |
+              for i in $(seq 1 120); do
+                if [ -f /shoggoth/rendered/.bringup-done ]; then
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "ERROR: bringup sentinel not found after 600s"
+              exit 1
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+        - name: fix-permissions
+          image: docker-registry.s.local/slave_noble:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command: ["bash", "-c"]
+          args:
+            - "chown -R 999:999 /usr/src/redmine/plugins /usr/src/redmine/files /usr/local/bundle/cache || true"
+          volumeMounts:
+            - name: plugins
+              mountPath: /usr/src/redmine/plugins
+            - name: files
+              mountPath: /usr/src/redmine/files
+            - name: bundle-cache
+              mountPath: /usr/local/bundle/cache
+      containers:
+        - name: redmine
+          image: redmine:6.1.2-alpine
+          imagePullPolicy: IfNotPresent
+          args:
+            - "rails"
+            - "server"
+            - "-b"
+            - "0.0.0.0"
+            - "-p"
+            - "80"
+          env:
+            - name: REDMINE_DB_POSTGRES
+              value: redmine-db
+            - name: REDMINE_DB_PORT
+              value: "5432"
+            - name: REDMINE_DB_DATABASE
+              value: redmine
+            - name: REDMINE_DB_USERNAME
+              value: redmine
+            - name: REDMINE_DB_PASSWORD_FILE
+              value: /run/secrets/redmine_db_password
+            - name: REDMINE_SECRET_KEY_BASE_FILE
+              value: /run/secrets/redmine_secret_key_base
+            - name: REDMINE_PLUGINS_MIGRATE
+              value: "true"
+          volumeMounts:
+            - name: files
+              mountPath: /usr/src/redmine/files
+            - name: bundle-cache
+              mountPath: /usr/local/bundle/cache/
+            - name: plugins
+              mountPath: /usr/src/redmine/plugins
+            - name: rendered
+              mountPath: /shoggoth/rendered
+              readOnly: true
+            - name: init-script
+              mountPath: /shoggoth/redmine/init.sh
+              subPath: init.sh
+              readOnly: true
+            - name: db-password
+              mountPath: /run/secrets/redmine_db_password
+              subPath: password
+              readOnly: true
+            - name: secret-key-base
+              mountPath: /run/secrets/redmine_secret_key_base
+              subPath: secret-key-base
+              readOnly: true
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    /bin/sh /shoggoth/redmine/init.sh >/proc/1/fd/1 2>/proc/1/fd/2
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+      volumes:
+        - name: rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            type: DirectoryOrCreate
+        - name: init-script
+          configMap:
+            name: redmine-init
+            defaultMode: 0755
+        - name: files
+          persistentVolumeClaim:
+            claimName: redmine-files
+        - name: bundle-cache
+          persistentVolumeClaim:
+            claimName: redmine-bundle-cache
+        - name: plugins
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/redmine-plugins
+            type: DirectoryOrCreate
+        - name: db-password
+          secret:
+            secretName: redmine-db-password
+        - name: secret-key-base
+          secret:
+            secretName: redmine-secret-key-base
