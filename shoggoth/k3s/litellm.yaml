@@ -82,6 +82,10 @@ spec:
               value: http://otelcol:4318
             - name: OTEL_EXPORTER_OTLP_PROTOCOL
               value: http/protobuf
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: rendered-config
               mountPath: /app/config.yaml
@@ -92,6 +96,9 @@ spec:
             - name: rendered-ro
               mountPath: /shoggoth/rendered
               readOnly: true
+          ports:
+            - containerPort: 80
+              name: http
           resources:
             requests:
               memory: "512Mi"

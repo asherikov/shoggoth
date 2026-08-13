@@ -51,6 +51,13 @@ data:
         printf '%s' "${dst}"
     }
 
+    get_actual_base_dn() {
+        ldapsearch -x -H "${LDAP_URL}" \
+            -D "${CONFIG_ADMIN_DN}" -y "${CONFIG_ADMIN_PW}" \
+            -b "cn=config" -s sub '(olcSuffix=*)' olcSuffix 2>/dev/null \
+            | grep '^olcSuffix:' | awk '{print $2}' | head -1 || true
+    }
+
     ADMIN_PW="$(clean_pw_file /run/secrets/openldap_admin_password)"
     CONFIG_ADMIN_PW="$(clean_pw_file /run/secrets/openldap_config_admin_password)"
     trap 'rm -f "${ADMIN_PW}" "${CONFIG_ADMIN_PW}"' EXIT
@@ -65,6 +72,16 @@ data:
                 -b "${LDAP_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
                 break
             fi
+            ACTUAL_BASE_DN="$(get_actual_base_dn)"
+            if [ -n "${ACTUAL_BASE_DN}" ] && [ "${ACTUAL_BASE_DN}" != "${LDAP_BASE_DN}" ]; then
+                echo "shoggoth: LDAP domain changed: ${ACTUAL_BASE_DN} -> ${LDAP_BASE_DN}, using actual DB suffix for auth"
+                ADMIN_DN="cn=admin,${ACTUAL_BASE_DN}"
+                if ldapsearch -x -H "${LDAP_URL}" \
+                    -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
+                    -b "${ACTUAL_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
+                    break
+                fi
+            fi
             if [ "${i}" -eq 30 ]; then
                 echo "shoggoth: FATAL: slapd never became ready" >&2
                 exit 1
@@ -72,12 +89,16 @@ data:
             sleep 2
         done
         if [ -f "${LDAP_DIR}/passwords.ldif" ]; then
-            ldapmodify -x -H "${LDAP_URL}" \
-                -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
-                -f "${LDAP_DIR}/passwords.ldif" || {
-                echo "shoggoth: ERROR: password rotation failed" >&2
-                exit 1
-            }
+            if [ "${ADMIN_DN}" = "cn=admin,${LDAP_BASE_DN}" ]; then
+                ldapmodify -x -H "${LDAP_URL}" \
+                    -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
+                    -f "${LDAP_DIR}/passwords.ldif" || {
+                    echo "shoggoth: ERROR: password rotation failed" >&2
+                    exit 1
+                }
+            else
+                echo "shoggoth: skipping password rotation (domain changed, LDIF DNs would not match)"
+            fi
         fi
         touch /run/shoggoth-ldap-init-done
         exit 0
@@ -221,7 +242,7 @@ spec:
               name: ldaps
           env:
             - name: LDAP_DOMAIN
-              value: "shoggoth.local"
+              value: "${SHOGGOTH_DOMAIN}"
             - name: LDAP_ADMIN_PASSWORD_FILE
               value: /run/secrets/openldap_admin_password
             - name: LDAP_CONFIG_PASSWORD_FILE
@@ -232,6 +253,12 @@ spec:
               value: "false"
             - name: LDAP_REMOVE_CONFIG_AFTER_SETUP
               value: "false"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: data
               mountPath: /var/lib/ldap

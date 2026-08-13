@@ -36,6 +36,9 @@ spec:
     - name: api
       port: 80
       targetPort: 80
+    - name: cluster
+      port: 81
+      targetPort: 81
 
 ---
 apiVersion: v1
@@ -79,9 +82,17 @@ spec:
           ports:
             - containerPort: 80
               name: api
+            - containerPort: 81
+              name: cluster
           env:
             - name: BAO_ADDR
               value: "http://openbao:80"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: config
               mountPath: /shoggoth/openbao

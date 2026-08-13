@@ -640,6 +640,9 @@ spec:
           ports:
             - containerPort: 443
               name: https
+          env:
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: config
               mountPath: /etc/angie/angie.conf

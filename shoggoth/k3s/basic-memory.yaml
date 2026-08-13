@@ -71,6 +71,9 @@ spec:
           image: ghcr.io/basicmachines-co/basic-memory:latest
           imagePullPolicy: IfNotPresent
           command: ["basic-memory", "mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "80"]
+          ports:
+            - containerPort: 80
+              name: http
           env:
             - name: BASIC_MEMORY_HOME
               value: /app/data/basic-memory
@@ -86,6 +89,12 @@ spec:
               value: http://litellm:80/v1
             - name: OTEL_SERVICE_NAME
               value: basic-memory
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: data
               mountPath: /app/data

@@ -20,8 +20,8 @@ k3s_host_install_nixos:
 	@echo "Installing K3s on ${HOST} via NixOS..."
 	${MAKE} sync
 	@mkdir -p ${K3S_TMP_DIR}
-	@export SHOGGOTH_DOMAIN="${DOMAIN}"; \
-	envsubst '$${SHOGGOTH_DOMAIN}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix
+	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}"; \
+	envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix
 	${K3S_SCP_BASE} ${K3S_TMP_DIR}/shoggoth.nix ${USER}@${HOST_IP}:/tmp/shoggoth.nix
 	${K3S_SSH} 'sudo cp /tmp/shoggoth.nix /etc/nixos/shoggoth.nix && rm /tmp/shoggoth.nix'
 	${K3S_SSH} 'grep -q "shoggoth.nix" /etc/nixos/configuration.nix || { \
@@ -114,9 +114,9 @@ k3s_stop: k3s_tunnel_up
 # Start all shoggoth K3s services.
 k3s_start: k3s_tunnel_up k3s_client_namespaces
 	@echo "=== Starting all shoggoth K3s services ==="
-	@export SHOGGOTH_DOMAIN="${DOMAIN}"; \
+	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}"; \
 	for f in ${K3S_ALL_MANIFESTS}; do \
-		envsubst '$${SHOGGOTH_DOMAIN}' < $$f | ${K3S_KUBECTL} apply -f - || exit 1; \
+		envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}' < $$f | ${K3S_KUBECTL} apply -f - || exit 1; \
 	done
 	@echo "=== Restarting CoreDNS to pick up custom ConfigMap ==="
 	@${K3S_KUBECTL} -n kube-system rollout restart deployment coredns 2>/dev/null || true
@@ -150,7 +150,7 @@ k3s_start_service: k3s_tunnel_up
 		exit 1; \
 	fi
 	@echo "=== Starting service: ${SERVICE} ==="
-	@export SHOGGOTH_DOMAIN="${DOMAIN}"; \
+	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}"; \
 	MANIFESTS="$$(grep -rl "app: ${SERVICE}" ${K3S_MANIFESTS} --include='*.yaml' | sort)"; \
 	if [ -z "$$MANIFESTS" ]; then \
 		echo "No manifest file found for service '${SERVICE}'"; \
@@ -158,7 +158,7 @@ k3s_start_service: k3s_tunnel_up
 	fi; \
 	for f in $$MANIFESTS; do \
 		echo "Applying $$f..."; \
-		envsubst '$${SHOGGOTH_DOMAIN}' < $$f | ${K3S_KUBECTL} apply -f - || exit 1; \
+		envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}' < $$f | ${K3S_KUBECTL} apply -f - || exit 1; \
 	done
 
 # Restart a single service: make k3s_restart_service SERVICE=kestra

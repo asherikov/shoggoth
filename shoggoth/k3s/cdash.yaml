@@ -258,6 +258,9 @@ spec:
         - name: postgres
           image: postgres:18-alpine
           imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgres
           env:
             - name: POSTGRES_DB
               value: cdash
@@ -265,6 +268,12 @@ spec:
               value: cdash
             - name: POSTGRES_PASSWORD_FILE
               value: /run/secrets/cdash_db_password
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql
@@ -363,6 +372,9 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["/cdash/entrypoint-wrapper.sh"]
           args: ["start-website"]
+          ports:
+            - containerPort: 80
+              name: http
           env:
             - name: APP_URL
               value: http://cdash.${SHOGGOTH_DOMAIN}
@@ -376,6 +388,12 @@ spec:
               value: cdash
             - name: QUEUE_CONNECTION
               value: database
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: storage
               mountPath: /cdash/storage

@@ -82,6 +82,12 @@ spec:
           env:
             - name: SERVER_NAME
               value: ":80"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: rendered
               mountPath: /shoggoth/rendered

@@ -89,6 +89,9 @@ spec:
         - name: postgres
           image: postgres:18-alpine
           imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgres
           env:
             - name: SHOGGOTH_DOMAIN
               value: "${SHOGGOTH_DOMAIN}"
@@ -231,7 +234,7 @@ spec:
             - name: FLOWENV_SHOGGOTH_DOMAIN
               value: "${SHOGGOTH_DOMAIN}"
             - name: FLOWENV_SHOGGOTH_GITHUB_ORG
-              value: "asherikov"
+              value: "${SHOGGOTH_GITHUB_ORG}"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://otelcol:4317"
           command: ["/bin/sh", "/shoggoth_kestra_entrypoint.sh"]

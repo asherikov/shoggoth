@@ -102,6 +102,7 @@ data:
     PRIVATE_DIR="/shoggoth/private"
 
     : "${SHOGGOTH_DOMAIN:?SHOGGOTH_DOMAIN is required}"
+    : "${SHOGGOTH_GITHUB_ORG:=}"
     LDAP_BASE_DN="$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g; s/^/dc=/')"
 
     trap 'echo "FATAL: bringup.sh exited with code $? at line ${LINENO}"' ERR
@@ -435,13 +436,13 @@ data:
     printf 'FLOWENV_SHOGGOTH_VAULT_TOKEN=%s\n' "${SHOGGOTH_VAULT_TOKEN}" > "${RENDERED_DIR}/kestra/env"
     printf 'FLOWENV_GITEA_ADMIN_TOKEN=%s\n' "${GITEA_SERVER_TOKEN}" >> "${RENDERED_DIR}/kestra/env"
     printf 'FLOWENV_GITEA_SLAVE_TOKEN=%s\n' "${GITEA_SLAVE_TOKEN}" >> "${RENDERED_DIR}/kestra/env"
-    printf 'FLOWENV_SHOGGOTH_GITHUB_ORG=asherikov\n' >> "${RENDERED_DIR}/kestra/env"
+    printf 'FLOWENV_SHOGGOTH_GITHUB_ORG=%s\n' "${SHOGGOTH_GITHUB_ORG}" >> "${RENDERED_DIR}/kestra/env"
 
     LDAP_BIND_DN="uid=sldapauth,ou=people,${LDAP_BASE_DN}"
     LDAP_SLDAUTH_PASS=$(cat "${SECRETS_DIR}/openldap-sldapauth-password")
     LDAP_SSLAVE_PASS=$(cat "${SECRETS_DIR}/openldap-sslave-password")
     CDASH_DB_PASSWORD=$(cat "${SECRETS_DIR}/cdash-db-password")
-    CDASH_APP_KEY_RENDERED=$(cat "${SECRETS_DIR}/cdash-app-key")
+    CDASH_APP_KEY_RENDERED="base64:$(printf '%s' "$(cat "${SECRETS_DIR}/cdash-app-key")" | base64 -w0)"
 
     {
         printf 'LDAP_BASE_DN=%s\n' "${LDAP_BASE_DN}"
@@ -501,11 +502,11 @@ data:
         openssl genrsa -out "${CERTS_DIR}/server.key" 2048
         openssl req -new -key "${CERTS_DIR}/server.key" \
             -subj "/CN=*.${SHOGGOTH_DOMAIN}" -out "${CERTS_DIR}/server.csr"
-        printf 'authorityKeyIdentifier=keyid,issuer\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nsubjectAltName=DNS:*.%s\n' "${SHOGGOTH_DOMAIN}" > "${CERTS_DIR}/server.ext"
+        printf 'authorityKeyIdentifier=keyid,issuer\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nsubjectAltName=DNS:*.%s,DNS:%s\n' "${SHOGGOTH_DOMAIN}" "${SHOGGOTH_DOMAIN}" > "${CERTS_DIR}/server.ext"
         openssl x509 -req -in "${CERTS_DIR}/server.csr" \
             -CA "${CERTS_DIR}/ca.crt" -CAkey "${CERTS_DIR}/ca.key" \
             -passin "pass:${CA_PASS}" -CAcreateserial \
-            -out "${CERTS_DIR}/server.crt" -days 365 -sha256 \
+            -out "${CERTS_DIR}/server.crt" -days 3650 -sha256 \
             -extfile "${CERTS_DIR}/server.ext"
     fi
 
@@ -520,9 +521,24 @@ data:
     fi
 
     echo "=== Phase 7: OpenBao LDAP auth configuration ==="
-    curl -sf -X POST "${OPENBAO_ADDR}/v1/sys/auth/ldap" \
+    LDAP_AUTH_ENABLED="$(curl -sf -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
+        "${OPENBAO_ADDR}/v1/sys/auth" 2>/dev/null \
+        | grep -q '"ldap/"' && echo true || echo false)"
+
+    if [ "${LDAP_AUTH_ENABLED}" != "true" ]; then
+        curl -sfS -X POST "${OPENBAO_ADDR}/v1/sys/auth/ldap" \
+            -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"type":"ldap"}' > /dev/null
+    fi
+
+    LDAP_BIND_DN="uid=sldapauth,ou=people,${LDAP_BASE_DN}"
+    LDAP_SLDAUTH_PASS=$(cat "${SECRETS_DIR}/openldap-sldapauth-password")
+
+    curl -sfS -X POST "${OPENBAO_ADDR}/v1/auth/ldap/config" \
         -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
-        -d "{\"url\":\"ldap://openldap:389\",\"binddn\":\"uid=sldapauth,ou=people,${LDAP_BASE_DN}\",\"userdn\":\"ou=people,${LDAP_BASE_DN}\",\"groupdn\":\"ou=groups,${LDAP_BASE_DN}\",\"userattr\":\"uid\",\"groupattr\":\"cn\",\"groupfilter\":\"(member={{.UserDN}})\"}" 2>/dev/null || true
+        -H "Content-Type: application/json" \
+        -d "{\"url\":\"ldap://openldap:389\",\"binddn\":\"${LDAP_BIND_DN}\",\"bindpass\":\"${LDAP_SLDAUTH_PASS}\",\"userdn\":\"ou=people,${LDAP_BASE_DN}\",\"groupdn\":\"ou=groups,${LDAP_BASE_DN}\",\"userattr\":\"uid\",\"groupattr\":\"cn\",\"groupfilter\":\"(member={{.UserDN}})\",\"insecure_tls\":true,\"starttls\":false,\"deny_null_bind\":true,\"username_as_alias\":true}" > /dev/null
 
     curl -sf -X POST "${OPENBAO_ADDR}/v1/sys/policies/acl/shoggoth-admin" \
         -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
@@ -685,6 +701,7 @@ data:
     cp -a "${CERTS_DIR}/server.key" "${SHARED_DIR}/certs/shoggoth.key" || COPY_ERRORS=$((COPY_ERRORS + 1))
     cp -a "${RENDERED_DIR}/phpldapadmin.env" "${SHARED_DIR}/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
     cp -a "${RENDERED_DIR}/plugin.tar.gz" "${SHARED_DIR}/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
+    cp -a "${RENDERED_DIR}/web-external.conf" "${SHARED_DIR}/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
     cp -a "${K8S_SECRETS_DIR}/"* "${SHARED_DIR}/k8s-secrets/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
     cp /shoggoth/bringup/templates/setup-client.sh "${SHARED_DIR}/setup-client.sh" && chmod 755 "${SHARED_DIR}/setup-client.sh" || COPY_ERRORS=$((COPY_ERRORS + 1))
     cp -a "${RENDERED_DIR}/redmine/redmine.env" "${SHARED_DIR}/redmine/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
@@ -3510,6 +3527,8 @@ spec:
           env:
             - name: SHOGGOTH_DOMAIN
               value: "${SHOGGOTH_DOMAIN}"
+            - name: SHOGGOTH_GITHUB_ORG
+              value: "${SHOGGOTH_GITHUB_ORG}"
             - name: OPENBAO_ADDR
               value: "http://openbao:80"
           resources:

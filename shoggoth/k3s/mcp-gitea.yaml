@@ -58,6 +58,9 @@ spec:
           image: docker.gitea.com/gitea-mcp-server:latest
           imagePullPolicy: IfNotPresent
           command: ["/app/gitea-mcp", "--port", "80"]
+          ports:
+            - containerPort: 80
+              name: http
           env:
             - name: MCP_MODE
               value: http
@@ -65,6 +68,12 @@ spec:
               value: http://git:80
             - name: GITEA_INSECURE
               value: "true"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           resources:
             requests:
               memory: "64Mi"

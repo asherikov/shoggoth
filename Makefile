@@ -1,6 +1,7 @@
 JOBS?=4
 USER?=aleks
 DOMAIN?=$(shell grep SHOGGOTH_DOMAIN shoggoth/.env | cut -f 2 -d '=')
+GITHUB_ORG?=$(shell grep SHOGGOTH_GITHUB_ORG shoggoth/.env | cut -f 2 -d '=')
 HOST?=host.${DOMAIN}
 HOST_IP?=$(shell getent hosts ${HOST} | cut -f 1 -d ' ')
 GITEA_TOKEN?=$(shell cat shoggoth/private/gitea-server-token.txt)

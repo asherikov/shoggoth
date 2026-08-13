@@ -10,7 +10,7 @@ data:
 
     server:
         http_listen_port: 3200
-        log_level: warn
+        log_level: error
 
     memory:
         automemlimit_enabled: true
@@ -157,6 +157,13 @@ spec:
               name: http
             - containerPort: 4318
               name: otlp-http
+          env:
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: config
               mountPath: /etc/tempo/config.yaml

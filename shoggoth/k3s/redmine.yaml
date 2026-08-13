@@ -165,6 +165,9 @@ spec:
         - name: postgres
           image: postgres:18-alpine
           imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgres
           env:
             - name: POSTGRES_DB
               value: redmine
@@ -172,6 +175,12 @@ spec:
               value: redmine
             - name: POSTGRES_PASSWORD_FILE
               value: /run/secrets/redmine_db_password
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql
@@ -290,6 +299,9 @@ spec:
             - "0.0.0.0"
             - "-p"
             - "80"
+          ports:
+            - containerPort: 80
+              name: http
           env:
             - name: REDMINE_DB_POSTGRES
               value: redmine-db
@@ -305,6 +317,12 @@ spec:
               value: /run/secrets/redmine_secret_key_base
             - name: REDMINE_PLUGINS_MIGRATE
               value: "true"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: files
               mountPath: /usr/src/redmine/files

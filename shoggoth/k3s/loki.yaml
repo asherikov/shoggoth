@@ -162,6 +162,13 @@ spec:
               name: http
             - containerPort: 9096
               name: grpc
+          env:
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otelcol:4318"
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: config
               mountPath: /etc/loki/config.yaml
