@@ -44,7 +44,7 @@ ghpages_action:
 
 yamlfmt:
 	# https://github.com/google/yamlfmt/blob/main/docs/config-file.md#basic-formatter
-	yamlfmt -formatter indent=4,retain_line_breaks=true shoggoth/docker-compose.yml
+	yamlfmt -formatter indent=4,retain_line_breaks=true shoggoth/k3s/*.yaml
 
 
 get_skill:

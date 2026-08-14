@@ -13,19 +13,6 @@ spec:
   storageClassName: local-path
 ---
 apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: docker-cache-ca
-  namespace: shoggoth
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 100Mi
-  storageClassName: local-path
----
-apiVersion: v1
 kind: Service
 metadata:
   name: docker-cache
@@ -146,5 +133,6 @@ spec:
           persistentVolumeClaim:
             claimName: docker-cache
         - name: ca
-          persistentVolumeClaim:
-            claimName: docker-cache-ca
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/rendered/docker-cache-certs
+            type: DirectoryOrCreate

@@ -143,9 +143,9 @@ Architecture
 
 The system consists of three parts:
 
-- A set of services managed using docker compose, located in `shoggoth`
+- A set of services deployed on K3s, with manifests located in `shoggoth/k3s`
   subfolder.
-- A set of utilities for (remote) control over docker compose, refer to
+- A set of utilities for (remote) control over K3s deployment, refer to
   `Makefile` for more information.
 - A setup script for configuration of service clients.
 
@@ -446,8 +446,8 @@ Troubleshooting
 - `Tempo: "failed to find segment for index"`: WAL watcher error in
   `metrics_generator` after config changes (e.g. `span_metrics.dimensions`).
   Self-healing — the watcher retries every 5 seconds and recovers once new WAL
-  segments are written. If persistent, stop Tempo and delete
-  `monitoring/tempo/data/generator/wal/` before restarting.
+  segments are written. If persistent, stop Tempo and delete the
+  `generator/wal/` directory in the Tempo data volume before restarting.
 - cmake builds fail to find packages in Ubuntu due to missing system
   information, e.g., `CMAKE_LIBRARY_ARCHITECTURE`: check that build cache is
   operational.

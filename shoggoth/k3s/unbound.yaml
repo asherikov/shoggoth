@@ -29,7 +29,7 @@ data:
 apiVersion: v1
 kind: Service
 metadata:
-  name: unbound
+  name: dns
   namespace: shoggoth
 spec:
   clusterIP: 10.43.0.53

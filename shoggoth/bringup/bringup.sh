@@ -187,7 +187,7 @@ envsubst '${SHOGGOTH_DOMAIN} ${GITEA_SLAVE_TOKEN} ${REDMINE_TOKEN} ${CDASH_API_T
 
 echo "shoggoth: Generating shared CA and TLS certificate..."
 CERT_DIR="/shoggoth/bringup/rendered/certs"
-DOCKER_CACHE_CA_DIR="/shoggoth/docker/cache/certs"
+DOCKER_CACHE_CA_DIR="/shoggoth/bringup/rendered/docker-cache-certs"
 mkdir -p "${CERT_DIR}" "${DOCKER_CACHE_CA_DIR}"
 CA_PASS="$(bao_get_or_generate ca/passphrase)"
 if [ ! -f "${CERT_DIR}/shoggoth-ca.key" ] || [ ! -f "${CERT_DIR}/shoggoth-ca.crt" ]; then

@@ -20,12 +20,20 @@ help:
 
 sync:
 	rsync -e "ssh ${SSH_COMMON_ARGS}" -r shoggoth ${USER}@${HOST_IP}:${REMOTE_PATH} || true
+	@cmds="rsync -a --delete /home/${USER}/shoggoth/private/ /var/lib/rancher/k3s/storage/shoggoth/private/"; \
+	cmds="$$cmds && mkdir -p /var/lib/rancher/k3s/storage/shoggoth/unbound-blacklists"; \
+	cmds="$$cmds && cp /home/${USER}/shoggoth/unbound/dns-zone-blacklist/unbound/unbound-nxdomain.blacklist /var/lib/rancher/k3s/storage/shoggoth/unbound-blacklists/unbound-nxdomain.blacklist"; \
+	for entry in ${K3S_HOST_PATHS}; do \
+		DST=$$(echo "$$entry" | cut -d: -f1); \
+		SRC=$$(echo "$$entry" | cut -d: -f2); \
+		cmds="$$cmds && rsync -a --delete /home/${USER}/shoggoth/$$SRC/ /var/lib/rancher/k3s/storage/shoggoth/$$DST/"; \
+	done; \
+	${K3S_SSH} "sudo bash -c '$$cmds'"
 
-sync_restart:
-	-${MAKE} down
+sync_restart: tunnel_up
+	${MAKE} down
 	${MAKE} sync
 	${MAKE} up
-	date
 
 mount:
 	mkdir -p mountpoint
@@ -42,7 +50,6 @@ sshkey:
 
 ssh_exec:
 	ssh ${SSH_COMMON_ARGS} -t ${USER}@${HOST_IP} 'cd ${REMOTE_PATH}/shoggoth && ${CMD}'
-
 
 shutdown:
 	-${MAKE} out
@@ -63,6 +70,10 @@ test:
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> docker cache"
 	curl -s --connect-timeout 5 "docker-cache.${DOMAIN}:3128/ca.crt" --output /dev/null
+	@echo "======================================================="
+	@echo ">>>>>>>>>>>> docker registry"
+	@curl -s --connect-timeout 5 -o /dev/null -w '%{http_code}' "http://docker-registry.${DOMAIN}/v2/" | grep -q '^200' && echo "OK" || echo "FAIL"
+	@curl -s --connect-timeout 5 -o /dev/null -w '%{http_code}' "http://docker-registry.${DOMAIN}/v2/_catalog" | grep -q '^200' && echo "OK" || echo "FAIL"
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> DNS"
 	host ${DOMAIN} dns.${DOMAIN}

@@ -1,31 +1,6 @@
 DOCKER_DISTRO?=noble
 DOCKER_TAG_SUFFIX?=_${DOCKER_DISTRO}
-SERVICE?=
 
-
-exec:
-	${MAKE} ssh_exec CMD='docker compose exec ${SERVICE} sh'
-
-up:
-	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose up -d ${SERVICE}'
-	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose up -d && sleep 5'
-
-down:
-	test -z "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose down ${SERVICE}'
-	test -n "${SERVICE}" || ${MAKE} ssh_exec CMD='docker compose down'
-
-status:
-	${MAKE} ssh_exec CMD='docker container ls'
-
-restart:
-	${MAKE} down
-	${MAKE} up
-
-pull:
-	${MAKE} ssh_exec CMD='docker compose pull'
-
-log:
-	${MAKE} ssh_exec CMD='docker compose logs ${SERVICE} --follow'
 
 docker_build:
 	cd shoggoth \
