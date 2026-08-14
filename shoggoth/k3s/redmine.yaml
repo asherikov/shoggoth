@@ -135,6 +135,14 @@ spec:
       labels:
         app: redmine-db
     spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 10.43.0.53
+        searches:
+          - shoggoth.svc.cluster.local
+          - svc.cluster.local
+          - cluster.local
       initContainers:
         - name: wait-bringup
           image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
@@ -247,6 +255,14 @@ spec:
       labels:
         app: redmine
     spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 10.43.0.53
+        searches:
+          - shoggoth.svc.cluster.local
+          - svc.cluster.local
+          - cluster.local
       initContainers:
         - name: wait-bringup
           image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest

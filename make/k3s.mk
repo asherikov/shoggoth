@@ -97,7 +97,6 @@ tunnel_down:
 down: tunnel_up
 	@echo "=== Stopping all shoggoth K3s workloads (preserving secrets) ==="
 	${K3S_KUBECTL} delete deployment,statefulset,daemonset,job,svc,configmap -n shoggoth --all --ignore-not-found=true
-	${K3S_KUBECTL} delete configmap coredns-custom -n kube-system --ignore-not-found=true
 	@echo "Waiting for all pods to terminate..."
 	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth wait --for=delete pod --all --timeout=60s 2>/dev/null || true
 	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth delete pod --all --grace-period=0 --force 2>/dev/null || true
@@ -112,8 +111,6 @@ up: tunnel_up client_namespaces
 			envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}' < $$f; \
 			printf "\n---\n"; \
 		done | ${K3S_KUBECTL} apply -f -
-	@echo "=== Restarting CoreDNS to pick up custom ConfigMap ==="
-	@${K3S_KUBECTL} -n kube-system rollout restart deployment coredns 2>/dev/null || true
 
 # Stop a single service by name: make stop SERVICE=web-external
 # Deletes deployment, statefulset, and job with matching name, plus its service.

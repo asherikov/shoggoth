@@ -21,8 +21,8 @@ help:
 sync:
 	rsync -e "ssh ${SSH_COMMON_ARGS}" -r shoggoth ${USER}@${HOST_IP}:${REMOTE_PATH} || true
 	@cmds="rsync -a --delete /home/${USER}/shoggoth/private/ /var/lib/rancher/k3s/storage/shoggoth/private/"; \
-	cmds="$$cmds && mkdir -p /var/lib/rancher/k3s/storage/shoggoth/unbound-blacklists"; \
-	cmds="$$cmds && cp /home/${USER}/shoggoth/unbound/dns-zone-blacklist/unbound/unbound-nxdomain.blacklist /var/lib/rancher/k3s/storage/shoggoth/unbound-blacklists/unbound-nxdomain.blacklist"; \
+	cmds="$$cmds && mkdir -p /var/lib/rancher/k3s/storage/shoggoth/coredns-blacklists"; \
+	cmds="$$cmds && cp /home/${USER}/shoggoth/dns/hosts-blacklist/hosts /var/lib/rancher/k3s/storage/shoggoth/coredns-blacklists/blocklist.hosts"; \
 	for entry in ${K3S_HOST_PATHS}; do \
 		DST=$$(echo "$$entry" | cut -d: -f1); \
 		SRC=$$(echo "$$entry" | cut -d: -f2); \

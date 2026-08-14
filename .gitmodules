@@ -1,9 +1,9 @@
-[submodule "shoggoth/unbound/dns-zone-blacklist"]
-	path = shoggoth/unbound/dns-zone-blacklist
-	url = https://github.com/iYUYUE/dns-zone-blacklist.git
 [submodule "shoggoth/redmine/plugins/kanban"]
 	path = shoggoth/redmine/plugins/kanban
 	url = https://github.com/happy-se-life/kanban
 [submodule "shoggoth/redmine/plugins/redmine_forgejo_webhook"]
 	path = shoggoth/redmine/plugins/redmine_forgejo_webhook
 	url = https://github.com/vanzhiganov/redmine-forgejo-webhook
+[submodule "shoggoth/dns/hosts-blacklist"]
+	path = shoggoth/dns/hosts-blacklist
+	url = https://github.com/StevenBlack/hosts.git

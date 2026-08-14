@@ -311,6 +311,14 @@ spec:
       labels:
         app: otelcol
     spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 10.43.0.53
+        searches:
+          - shoggoth.svc.cluster.local
+          - svc.cluster.local
+          - cluster.local
       serviceAccountName: otelcol
       initContainers:
         - name: wait-bringup

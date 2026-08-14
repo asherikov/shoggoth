@@ -117,6 +117,14 @@ spec:
       labels:
         app: tempo
     spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 10.43.0.53
+        searches:
+          - shoggoth.svc.cluster.local
+          - svc.cluster.local
+          - cluster.local
       terminationGracePeriodSeconds: 30
       initContainers:
         - name: wait-bringup

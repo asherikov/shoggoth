@@ -1,0 +1,119 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dns-config
+  namespace: shoggoth
+data:
+  Corefile: |
+    .:53 {
+        errors
+        log
+        ready
+
+        hosts /etc/coredns/blacklist/blocklist.hosts {
+            ttl 60
+            no_reverse
+            reload 1h
+            fallthrough
+        }
+
+        rewrite stop name exact ${SHOGGOTH_DOMAIN} web-internal.shoggoth.svc.cluster.local
+        rewrite stop {
+            name suffix ${SHOGGOTH_DOMAIN} shoggoth.svc.cluster.local
+            answer auto
+        }
+
+        forward . 10.43.0.10
+        cache 30
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dns
+  namespace: shoggoth
+spec:
+  clusterIP: 10.43.0.53
+  selector:
+    app: dns
+  ports:
+    - name: dns-udp
+      port: 53
+      targetPort: 53
+      protocol: UDP
+    - name: dns-tcp
+      port: 53
+      targetPort: 53
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dns
+  namespace: shoggoth
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: dns
+  template:
+    metadata:
+      labels:
+        app: dns
+    spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - 10.43.0.53
+        searches:
+          - shoggoth.svc.cluster.local
+          - svc.cluster.local
+          - cluster.local
+      containers:
+        - name: coredns
+          image: rancher/mirrored-coredns-coredns:1.14.0
+          args: ["-conf", "/etc/coredns/Corefile"]
+          ports:
+            - containerPort: 53
+              protocol: UDP
+              name: dns-udp
+            - containerPort: 53
+              protocol: TCP
+              name: dns-tcp
+          volumeMounts:
+            - name: config
+              mountPath: /etc/coredns
+              readOnly: true
+            - name: blacklist
+              mountPath: /etc/coredns/blacklist
+              readOnly: true
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "25m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8181
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 8181
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: dns-config
+        - name: blacklist
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/shoggoth/coredns-blacklists
+            type: DirectoryOrCreate

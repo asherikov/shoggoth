@@ -217,14 +217,100 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
 
 ## DNS
 
-- **[unbound](https://hub.docker.com/r/mvance/unbound/)** (selected)
+- **[standalone CoreDNS](https://coredns.io/)** (selected, `dns`)
+  - Single CoreDNS deployment handles both domain aliasing and DNS blacklisting
+  - `hosts` plugin loads StevenBlack/hosts blocklist (returns 0.0.0.0 for blocked domains)
+  - `rewrite` plugin maps `*.s.local` → `*.shoggoth.svc.cluster.local`
+  - `forward` plugin sends non-rewritten queries to K3s CoreDNS (10.43.0.10)
+  - ClusterIP 10.43.0.53 (same IP WireGuard pushes to VPN clients via INIT_DNS)
+  - + single DNS service replaces both Unbound and coredns-custom ConfigMap
+  - + avoids modifying K3s CoreDNS (no `coredns-custom` ConfigMap in `kube-system`)
+  - + `hosts` plugin uses hash-based O(1) lookups — handles 150k+ entries at sub-ms latency
+  - + `hosts` plugin auto-reloads blocklist file every 1h (configurable)
+  - + standalone lifecycle — `make down` cleanly removes from shoggoth namespace
+  - - returns 0.0.0.0 for blocked domains (not NXDOMAIN) — client connects to null address
+  - - blocklist downloaded during `make sync` (requires internet on build host)
+
+### Blocklist sources
+
+The `hosts` plugin reads standard hosts-format files (`0.0.0.0 domain.com`).
+Any hosts-format blocklist works. Selected and alternatives:
+
+- **[StevenBlack/hosts](https://github.com/StevenBlack/hosts)** (selected)
+  - ~140-170k entries, daily updates, curated from multiple upstream sources
+  - Unified hosts file with optional extensions (gambling, porn, social, fakenews)
+  - Download: `https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts`
+  - + most popular hosts blocklist (60k+ GitHub stars), well-maintained
+  - + clean format, no comments in host entries, CoreDNS-compatible out of the box
+- <https://github.com/badmojr/1Hosts>
+  - ~110-130k entries, daily updates, three tiers (Lite/Pro/Xtra)
+  - Download: `https://badmojr.github.io/1Hosts/hosts/Pro.txt` (hosts format)
+  - + smaller than StevenBlack with similar coverage
+  - + actively maintained, good false-positive response time
+- <https://github.com/AdguardTeam/AdGuardSDNSFilter>
+  - ~60-80k entries, daily/weekly updates
+  - Download: `https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt` (AdBlock syntax — needs conversion)
+  - + well-maintained by AdGuard team
+  - - not hosts format; needs conversion script or hosts-format variant
+- <https://block.energized.pro/>
+  - Multiple tiers: Spark (~15MB), Blu (~35MB), Ultimate (~75MB)
+  - Download: `https://block.energized.pro/{variant}/formats/hosts.txt`
+  - + largest available blocklists, multiple granularity levels
+  - - very large files may increase CoreDNS memory usage significantly
+- <https://pgl.yoyo.org/adservers/>
+  - ~3.5-4k entries, weekly updates, Peter Lowe's list
+  - Download: `https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts`
+  - + minimal, low false-positive rate, good baseline
+  - - much smaller than other options — limited coverage
+- <https://oisd.nl/>
+  - ~200k+ entries, multiple updates per week
+  - Download: `https://small.oisd.nl/hosts.txt` or `https://big.oisd.nl/hosts.txt`
+  - + very comprehensive, frequently updated
+  - - hosts format availability may change (project shifted to other formats in 2024)
+
+### ~~Unbound~~ (removed)
+
+Previously provided DNS blacklisting and stub-zone forwarding to CoreDNS.
+Replaced by standalone CoreDNS (`dns`) which handles both functions.
+
+- <https://hub.docker.com/r/mvance/unbound/>
+  - Was used for DNS blacklist (NXDOMAIN for ad domains) and stub-zone to CoreDNS
+  - Replaced because: Unbound cannot do DNS name rewriting (DNAME-like wildcard CNAME synthesis in redirect zones produces wrong results), requiring a separate CoreDNS layer anyway — two DNS servers for what one can do
+
+### Domain aliasing (historical)
+
+Shoggoth services use `*.s.local` hostnames that must resolve to K8s internal
+service names (`*.shoggoth.svc.cluster.local`). This requires DNS name
+rewriting — transparently mapping `grafana.s.local` to
+`grafana.shoggoth.svc.cluster.local` so VPN clients can reach internal K8s
+services by their external hostnames.
+
+Approaches evaluated (standalone CoreDNS selected, others rejected):
+
+- coredns-custom ConfigMap (K3s built-in CoreDNS)
+  - Rewrite rules injected into K3s CoreDNS via `coredns-custom` ConfigMap in `kube-system` namespace
+  - + fewer moving parts (no extra pod)
+  - - modifies K3s system component — couples shoggoth DNS to K3s CoreDNS lifecycle
+  - - `make down` must explicitly clean up `coredns-custom` from `kube-system`
+  - - K3s CoreDNS restart required after applying custom ConfigMap
+- Unbound `local-data` / `local-zone` — not viable for name rewriting
+  - `local-data` with per-subdomain A records (e.g., `grafana.s.local. A 10.43.0.xx`) works but returns IP addresses, not rewritten names; requires manual per-service entries and IP maintenance
+  - `local-zone: "s.local." redirect` with wildcard CNAME (`*.s.local. CNAME *.shoggoth.svc.cluster.local.`) produces wrong results: Unbound uses DNAME-like concatenation (RFC 6672) in redirect zones, so `grafana.s.local` resolves to `grafana.s.local.shoggoth.svc.cluster.local.` instead of `grafana.shoggoth.svc.cluster.local.`
+  - Confirmed by reading Unbound source (`local_data_answer()` at localzone.c:1522, wildcard synthesis at lines 1634-1644)
+- Wildcard A record — not viable
+  - Unbound `local-data: "*.s.local. A <IP>"` returns a single IP for all `*.s.local` queries
+  - Eliminates DNS-level name rewriting entirely — requires Ingress Controller with per-service Ingress resources and TLS termination
+  - Changes the routing model: all `*.s.local` queries resolve to the same IP, breaking direct K8s service access
+- dnsmasq / Pi-hole — not viable for name rewriting
+  - dnsmasq `address=/.s.local/<IP>` only returns A records (IP addresses), cannot rewrite DNS names
+  - Same limitations as wildcard A record approach
 
 ### Dynamic DNS injection from Docker
 
-Current Unbound setup uses static records rendered once by the bringup
-container. Adding/removing services requires editing the template and
-re-deploying. Dynamic injection would allow Docker containers to register their
-own DNS records on start/stop.
+Current setup uses static records rendered once by the bringup container.
+Adding/removing services requires editing the template and re-deploying.
+Dynamic injection would allow Docker containers to register their own DNS
+records on start/stop.
 
 - <https://github.com/nginx-proxy/docker-gen> + **[Dnsmasq](https://thekelleys.org.uk/dnsmasq/doc.html)**
   - docker-gen watches Docker events (`start`, `stop`, `die`), generates dnsmasq hosts file from Go template
@@ -232,21 +318,18 @@ own DNS records on start/stop.
   - wildcard subdomains work natively: `address=/.s.local/172.20.0.80`
   - + lightest option (~50MB alpine image for dnsmasq, ~20MB for docker-gen)
   - + no restart, no signal, truly zero-downtime record updates
-  - - loses Unbound blacklist format (needs conversion to dnsmasq `address=/...` syntax)
+  - - no DNS name rewriting (only returns IP addresses)
   - - docker-gen template needs writing and maintaining
-- <https://github.com/nginx-proxy/docker-gen> + Unbound
-  - docker-gen generates `unbound_local-data.conf`, triggers Unbound reload
-  - + keeps Unbound, existing blacklist, existing setup
-  - - Unbound cannot reload `local-data` on SIGHUP (only reopens logs); requires full `unbound-control reload` or process restart
-  - - restart causes brief DNS outage on every container start/stop
-  - - `redirect` zone type requires per-subdomain zone+record pairs (awkward for dynamic generation)
+- <https://github.com/nginx-proxy/docker-gen> + CoreDNS
+  - docker-gen generates hosts file for `hosts` plugin + rewrite rules for aliasing
+  - + keeps CoreDNS, existing blacklist format, existing rewrite rules
+  - - docker-gen template needs writing and maintaining
 - <https://coredns.io/> + <https://etcd.io/> (etcd plugin)
   - CoreDNS reads DNS records from etcd dynamically; a bridge process writes records on container events
   - + truly dynamic — no file regeneration, no restarts, etcd API is simple (HTTP PUT/DELETE)
   - + CoreDNS is production-grade (used by Kubernetes)
   - - adds significant complexity (etcd cluster + CoreDNS + bridge process) for ~10 services
   - - no native Docker watcher — needs custom bridge
-  - - no built-in ad-blocking (no equivalent to Unbound blacklist)
 - <https://github.com/mageddo/dns-proxy-server>
   - standalone DNS server that natively reads Docker container names/hostnames
   - + zero configuration — auto-discovers containers, wildcard hostname support
@@ -256,12 +339,10 @@ own DNS records on start/stop.
   - Pi-hole runs dnsmasq/FTL under the hood; combines DNS serving + ad-blocking in one tool
   - docker-gen writes to `/etc/pihole/custom.list` (hosts format) or dnsmasq snippets to `/etc/dnsmasq.d/`, then SIGHUPs FTL
   - wildcard subdomains work natively: `address=/.s.local/172.20.0.80`
-  - + built-in ad-blocking replaces both Unbound and vendored blacklist — no format conversion needed
-  - + web UI for DNS query log, local record management, blacklist inspection
+  - + built-in ad-blocking with web UI for DNS query log and blacklist inspection
   - + well-maintained Docker image (`pihole/pihole`)
   - + SIGHUP reloads custom.list without restart (not inotify-like, but fast)
   - - heavier than plain dnsmasq (PHP web UI, FTL daemon, lighttpd — ~100MB image)
-  - - local DNS records in hosts format only via `custom.list` (A/AAAA only; CNAME/SRV/TXT needs dnsmasq snippets)
   - - another web UI to manage alongside Angie and wg-easy
 - Docker network aliases
   - `aliases` in compose network definitions, resolved by Docker's embedded DNS (127.0.0.11)

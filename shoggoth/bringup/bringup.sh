@@ -160,9 +160,6 @@ OLLAMA_CLOUD_TOKEN="$(cat /run/secrets/ollama_cloud_token)"
 bao_put "ollama/cloud-token" "value" "${OLLAMA_CLOUD_TOKEN}"
 export OLLAMA_CLOUD_TOKEN
 
-mkdir -p /shoggoth/bringup/rendered/unbound
-envsubst '${SHOGGOTH_DOMAIN}' < /shoggoth/bringup/templates/unbound.conf > /shoggoth/bringup/rendered/unbound/unbound.conf
-
 KESTRA_DB_PASSWORD="$(bao_get_or_generate kestra/db-password)"
 export KESTRA_DATASOURCES_POSTGRES_PASSWORD="${KESTRA_DB_PASSWORD}"
 render_secret "${KESTRA_DB_PASSWORD}" /shoggoth/bringup/rendered/secrets/kestra-db/password 70 70

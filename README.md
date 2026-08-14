@@ -86,8 +86,8 @@ configurable domain, set to `s.local` by default.
   - `web-external.` — TLS-terminating reverse proxy
     (<https://en.angie.software/angie/>) that provides HTTPS access to the
     WireGuard web UI from outside the VPN, by server IP address
-  - `dns.` — Unbound DNS resolver <https://github.com/NLnetLabs/unbound> with
-    blacklisting support <https://github.com/iYUYUE/dns-zone-blacklist>.
+  - `dns.` — CoreDNS <https://coredns.io/> domain aliasing and DNS
+    blacklisting with StevenBlack/hosts <https://github.com/StevenBlack/hosts>.
 - Caching:
   - `apt-cache.` — Debian/Ubuntu package caching proxy
     <https://github.com/sameersbn/docker-apt-cacher-ng>.
