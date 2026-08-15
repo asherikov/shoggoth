@@ -83,18 +83,8 @@ data:
     BASE_IMAGE="docker-registry.${SHOGGOTH_DOMAIN}/slave_noble"
 
     echo "shoggoth: Pulling base image ${BASE_IMAGE}:latest..." >&2
-    ATTEMPT=1
-    while [ "${ATTEMPT}" -le 30 ]; do
-        if docker pull "${BASE_IMAGE}:latest"; then
-            break
-        fi
-        echo "shoggoth: Pull attempt ${ATTEMPT} failed, retrying in 5 seconds..." >&2
-        sleep 5
-        ATTEMPT=$((ATTEMPT + 1))
-    done
-
-    if ! docker image inspect "${BASE_IMAGE}:latest" >/dev/null 2>&1; then
-        echo "shoggoth: FATAL: Failed to pull base image ${BASE_IMAGE}:latest after 30 attempts" >&2
+    if ! docker pull "${BASE_IMAGE}:latest"; then
+        echo "shoggoth: FATAL: Failed to pull base image ${BASE_IMAGE}:latest" >&2
         exit 1
     fi
 
@@ -169,22 +159,12 @@ data:
     rm -f "${SSH_AUTH_SOCK}" "${GIT_CREDENTIAL_SOCK}"
 
     echo "shoggoth: Scanning Gitea SSH host keys on git.${SHOGGOTH_DOMAIN}..." >&2
-    for ATTEMPT in $(seq 1 30); do
-        if ssh-keyscan "git.${SHOGGOTH_DOMAIN}" > "${KNOWN_HOSTS}.tmp" 2>/dev/null; then
-            mv "${KNOWN_HOSTS}.tmp" "${KNOWN_HOSTS}"
-            chmod 644 "${KNOWN_HOSTS}"
-            echo "shoggoth: ssh-keyscan succeeded on attempt ${ATTEMPT}" >&2
-            break
-        fi
-        SLEEP=$((ATTEMPT < 10 ? 2 : 5))
-        echo "shoggoth: Waiting for Gitea SSH on git.${SHOGGOTH_DOMAIN} (attempt ${ATTEMPT}/30)..." >&2
-        sleep "${SLEEP}"
-    done
-
-    if [ ! -s "${KNOWN_HOSTS}" ]; then
-        echo "shoggoth: FATAL: ssh-keyscan failed after 30 attempts" >&2
+    if ! ssh-keyscan "git.${SHOGGOTH_DOMAIN}" > "${KNOWN_HOSTS}.tmp" 2>/dev/null; then
+        echo "shoggoth: FATAL: ssh-keyscan failed on git.${SHOGGOTH_DOMAIN}" >&2
         exit 1
     fi
+    mv "${KNOWN_HOSTS}.tmp" "${KNOWN_HOSTS}"
+    chmod 644 "${KNOWN_HOSTS}"
 
     echo "shoggoth: Starting SSH agent at ${SSH_AUTH_SOCK}..." >&2
     eval "$(su ccws -c "ssh-agent -a '${SSH_AUTH_SOCK}'")"
@@ -288,14 +268,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"

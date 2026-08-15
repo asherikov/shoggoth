@@ -55,14 +55,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"
@@ -130,8 +126,9 @@ spec:
           volumeMounts:
             - name: cache
               mountPath: /docker_mirror_cache
-            - name: ca
+            - name: rendered
               mountPath: /ca
+              subPath: docker-cache-certs
       volumes:
         - name: rendered
           hostPath:
@@ -140,7 +137,3 @@ spec:
         - name: cache
           persistentVolumeClaim:
             claimName: docker-cache
-        - name: ca
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered/docker-cache-certs
-            type: DirectoryOrCreate

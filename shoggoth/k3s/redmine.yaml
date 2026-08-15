@@ -54,19 +54,18 @@ data:
 
     . /shoggoth/rendered/redmine/redmine.env
 
-    for i in $(seq 1 60); do
-        if READY_CHECK="$(bundle exec rails runner 'puts "ready"' 2>&1)"; then
-            echo "shoggoth: Redmine is ready for LDAP configuration"
+    echo "shoggoth: Waiting for Redmine to be ready..."
+    for i in $(seq 1 30); do
+        if bundle exec rails runner 'puts "ready"' > /dev/null 2>&1; then
             break
         fi
-        echo "shoggoth: Waiting for Redmine to be ready (attempt ${i}/60): ${READY_CHECK}"
         sleep 2
     done
-
-    if ! bundle exec rails runner 'puts "ready"' > /dev/null 2>&1; then
-        echo "shoggoth: FATAL: Redmine never became ready" >&2
+    if ! READY_CHECK="$(bundle exec rails runner 'puts "ready"' 2>&1)"; then
+        echo "shoggoth: FATAL: Redmine not ready after 60s: ${READY_CHECK}" >&2
         exit 1
     fi
+    echo "shoggoth: Redmine is ready for LDAP configuration"
 
     echo "shoggoth: Configuring LDAP auth source"
     LDAP_HOST="${LDAP_HOST}" LDAP_BIND_DN="${LDAP_BIND_DN}" LDAP_BIND_PASSWORD="${LDAP_BIND_PASSWORD}" LDAP_BASE_DN="${LDAP_BASE_DN}" \
@@ -150,14 +149,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"
@@ -270,14 +265,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"

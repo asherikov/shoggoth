@@ -10,7 +10,7 @@ K3S_TUNNEL_PORT?=6443
 K3S_KUBECTL=KUBECONFIG=${K3S_KUBECONFIG} kubectl
 
 K3S_APP_LABELS := $(shell grep -h 'app:' ${K3S_ALL_MANIFESTS} | grep -v 'k8s-app' | sed 's/.*app: *//' | sort -u)
-K3S_HOST_PATHS := redmine-plugins:redmine/plugins workflow-scripts:workflow/scripts kestra-flows:workflow/kestra/flows
+K3S_HOST_PATHS := redmine-plugins:redmine/plugins workflow-scripts:workflow/scripts kestra-flows:workflow/kestra/flows private:private
 
 
 # installation
@@ -19,8 +19,8 @@ host_install_nixos:
 	@echo "Installing K3s on ${HOST} via NixOS..."
 	${MAKE} sync
 	@mkdir -p ${K3S_TMP_DIR}
-	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}"; \
-	envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix
+	@export SHOGGOTH_DOMAIN="${DOMAIN}"; \
+	envsubst '$${SHOGGOTH_DOMAIN}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix
 	scp ${SSH_COMMON_ARGS} ${K3S_TMP_DIR}/shoggoth.nix ${USER}@${HOST_IP}:/tmp/shoggoth.nix
 	${K3S_SSH} 'sudo cp /tmp/shoggoth.nix /etc/nixos/shoggoth.nix && rm /tmp/shoggoth.nix'
 	${K3S_SSH} 'grep -q "shoggoth.nix" /etc/nixos/configuration.nix || { \
@@ -30,8 +30,6 @@ host_install_nixos:
 		exit 1; \
 	}'
 	${K3S_SSH} 'sudo nixos-rebuild switch'
-	@echo ""
-	@echo "K3s installed. Next: make client_kubeconfig"
 
 client_install_alpine:
 	su -c 'apk add kubectl helm k9s'
@@ -39,15 +37,10 @@ client_install_alpine:
 client_kubeconfig:
 	@echo "Fetching kubeconfig from ${HOST}..."
 	mkdir -p private
-	${K3S_SSH} 'sudo cp /etc/rancher/k3s/k3s.yaml /tmp/k3s.yaml && sudo chmod 644 /tmp/k3s.yaml'
-	ssh ${SSH_COMMON_ARGS} ${USER}@${HOST_IP} 'cat /tmp/k3s.yaml' > ${K3S_KUBECONFIG}
-	${K3S_SSH} 'sudo rm /tmp/k3s.yaml'
+	@echo "[sudo] password for ${USER}:"
+	${K3S_SSH} 'sudo cat /etc/rancher/k3s/k3s.yaml' > ${K3S_KUBECONFIG}
 	chmod 600 ${K3S_KUBECONFIG}
 	@echo "Kubeconfig saved to ${K3S_KUBECONFIG}"
-
-client_namespaces: tunnel_up
-	@echo "Applying namespaces from ${K3S_MANIFESTS}/namespaces.yaml..."
-	${K3S_KUBECTL} apply -f ${K3S_MANIFESTS}/namespaces.yaml
 
 
 # connection & health
@@ -104,7 +97,7 @@ down: tunnel_up
 	@echo "All workloads stopped."
 
 # Start all shoggoth K3s services.
-up: tunnel_up client_namespaces
+up: tunnel_up
 	@echo "=== Starting all shoggoth K3s services ==="
 	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}"; \
 		for f in ${K3S_ALL_MANIFESTS}; do \
@@ -162,6 +155,9 @@ log: tunnel_up
 	@echo ""
 	@echo "--- Container states ---"
 	@KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth get pod -l app=$(SERVICE) -o json 2>/dev/null | jq -r '.items[] | .metadata.name as $$pod | ("Pod: " + $$pod), (.status.initContainerStatuses // [] | .[] | "  INIT [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)"), (.status.containerStatuses // [] | .[] | "  MAIN  [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)")' 2>&1 || true
+	@echo ""
+	@echo "=== Recent events ==="
+	@KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth get events --sort-by=.lastTimestamp 2>&1 | tail -100 | grep "${SERVICE}" || true
 	@echo ""
 	@echo "--- Logs (from host /var/log/pods) ---"
 	@${K3S_SSH} "sudo find /var/log/pods/ -path '*/shoggoth_$(SERVICE)-[0-9a-z]*/*.log' -exec sh -c ' \

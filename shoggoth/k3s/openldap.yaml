@@ -66,28 +66,35 @@ data:
 
     if [ -f "${SENTINEL}" ]; then
         echo "shoggoth: LDAP already initialized, re-applying passwords for rotation"
+        echo "shoggoth: Waiting for slapd to accept connections..."
         for i in $(seq 1 30); do
-            if ldapsearch -x -H "${LDAP_URL}" \
-                -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
-                -b "${LDAP_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
+            if ldapsearch -x -H "${LDAP_URL}" -b "" -s base namingContexts >/dev/null 2>&1; then
                 break
             fi
+            sleep 1
+        done
+        if ! ldapsearch -x -H "${LDAP_URL}" -b "" -s base namingContexts >/dev/null 2>&1; then
+            echo "shoggoth: FATAL: slapd not accepting connections after 30s" >&2
+            exit 1
+        fi
+        if ! ldapsearch -x -H "${LDAP_URL}" \
+            -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
+            -b "${LDAP_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
             ACTUAL_BASE_DN="$(get_actual_base_dn)"
             if [ -n "${ACTUAL_BASE_DN}" ] && [ "${ACTUAL_BASE_DN}" != "${LDAP_BASE_DN}" ]; then
                 echo "shoggoth: LDAP domain changed: ${ACTUAL_BASE_DN} -> ${LDAP_BASE_DN}, using actual DB suffix for auth"
                 ADMIN_DN="cn=admin,${ACTUAL_BASE_DN}"
-                if ldapsearch -x -H "${LDAP_URL}" \
+                if ! ldapsearch -x -H "${LDAP_URL}" \
                     -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
                     -b "${ACTUAL_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
-                    break
+                    echo "shoggoth: FATAL: slapd not ready" >&2
+                    exit 1
                 fi
-            fi
-            if [ "${i}" -eq 30 ]; then
-                echo "shoggoth: FATAL: slapd never became ready" >&2
+            else
+                echo "shoggoth: FATAL: slapd not ready" >&2
                 exit 1
             fi
-            sleep 2
-        done
+        fi
         if [ -f "${LDAP_DIR}/passwords.ldif" ]; then
             if [ "${ADMIN_DN}" = "cn=admin,${LDAP_BASE_DN}" ]; then
                 ldapmodify -x -H "${LDAP_URL}" \
@@ -104,20 +111,14 @@ data:
         exit 0
     fi
 
-    echo "shoggoth: === openldap: waiting for slapd ==="
-    for i in $(seq 1 60); do
-        if ldapsearch -x -H "${LDAP_URL}" \
-            -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
-            -b "${LDAP_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
-            echo "shoggoth: slapd is ready."
-            break
-        fi
-        if [ "${i}" -eq 60 ]; then
-            echo "shoggoth: FATAL: slapd never became ready" >&2
-            exit 1
-        fi
-        sleep 2
-    done
+    echo "shoggoth: === openldap: checking slapd ==="
+    if ! ldapsearch -x -H "${LDAP_URL}" \
+        -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
+        -b "${LDAP_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
+        echo "shoggoth: FATAL: slapd not ready" >&2
+        exit 1
+    fi
+    echo "shoggoth: slapd is ready."
 
     MDB_DN="olcDatabase={1}mdb,cn=config"
 
@@ -221,14 +222,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"

@@ -74,14 +74,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"
@@ -193,14 +189,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"
@@ -291,13 +283,13 @@ spec:
               mountPath: /shoggoth_kestra_entrypoint.sh
               subPath: entrypoint.sh
               readOnly: true
-            - name: kestra-config
+            - name: rendered
               mountPath: /shoggoth_kestra.yaml
-              subPath: config.yaml
+              subPath: kestra/config.yaml
               readOnly: true
-            - name: kestra-env
+            - name: rendered
               mountPath: /shoggoth_kestra_env
-              subPath: env
+              subPath: kestra/env
               readOnly: true
             - name: data
               mountPath: /app/storage
@@ -316,14 +308,6 @@ spec:
           configMap:
             name: kestra-entrypoint
             defaultMode: 0755
-        - name: kestra-config
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered/kestra
-            type: DirectoryOrCreate
-        - name: kestra-env
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered/kestra
-            type: DirectoryOrCreate
         - name: data
           persistentVolumeClaim:
             claimName: kestra-data

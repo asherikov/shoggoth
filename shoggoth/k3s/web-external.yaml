@@ -621,14 +621,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"
@@ -655,8 +651,9 @@ spec:
               mountPath: /etc/angie/angie.conf
               subPath: angie.conf
               readOnly: true
-            - name: certs
+            - name: rendered
               mountPath: /data/certs
+              subPath: certs
               readOnly: true
             - name: setup-client
               mountPath: /data/setup-client.sh
@@ -688,10 +685,6 @@ spec:
         - name: config
           configMap:
             name: web-external-config
-        - name: certs
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered/certs
-            type: DirectoryOrCreate
         - name: rendered
           hostPath:
             path: /var/lib/rancher/k3s/storage/shoggoth/rendered

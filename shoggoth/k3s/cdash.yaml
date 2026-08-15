@@ -68,19 +68,18 @@ data:
 
     cd /cdash
 
-    for i in $(seq 1 60); do
+    echo "shoggoth: Waiting for CDash to be ready..."
+    for i in $(seq 1 30); do
         if php artisan migrate:status > /dev/null 2>&1; then
-            echo "shoggoth: CDash is ready"
             break
         fi
-        echo "shoggoth: Waiting for CDash to be ready (attempt ${i}/60)"
         sleep 2
     done
-
     if ! php artisan migrate:status > /dev/null 2>&1; then
-        echo "shoggoth: FATAL: CDash never became ready" >&2
+        echo "shoggoth: FATAL: CDash not ready after 60s" >&2
         exit 1
     fi
+    echo "shoggoth: CDash is ready"
 
     php artisan user:save \
         --email=sslave \
@@ -95,18 +94,18 @@ data:
     COOKIE_JAR="$(mktemp)"
     trap 'rm -f "${COOKIE_JAR}"' EXIT
 
-    echo "shoggoth: Waiting for CDash web server"
-    for i in $(seq 1 60); do
+    echo "shoggoth: Waiting for CDash web server..."
+    for i in $(seq 1 30); do
         if curl -s -o /dev/null -w '%{http_code}' "${CDASH_URL}/login" 2>/dev/null | grep -q '^200'; then
-            echo "shoggoth: CDash web server is ready"
             break
-        fi
-        if [ "${i}" -eq 60 ]; then
-            echo "shoggoth: FATAL: CDash web server never became ready" >&2
-            exit 1
         fi
         sleep 2
     done
+    if ! curl -s -o /dev/null -w '%{http_code}' "${CDASH_URL}/login" 2>/dev/null | grep -q '^200'; then
+        echo "shoggoth: FATAL: CDash web server not ready after 60s" >&2
+        exit 1
+    fi
+    echo "shoggoth: CDash web server is ready"
 
     CSRF_PAGE="$(curl -s -c "${COOKIE_JAR}" "${CDASH_URL}/login" 2>/dev/null)" || {
         echo "shoggoth: FATAL: Could not fetch CDash login page" >&2
@@ -187,13 +186,28 @@ data:
         exit 1
     fi
 
-    curl -s -o /dev/null -w '%{http_code}' -X POST "${OPENBAO_ADDR}/v1/secret/data/cdash/api-token" \
+    OBAO_HEALTH="$(curl -s -o /dev/null -w '%{http_code}' "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null)" || true
+    if ! printf '%s' "${OBAO_HEALTH}" | grep -qE '^(200|429|472|473)$'; then
+        echo "shoggoth: FATAL: OpenBao not ready (HTTP ${OBAO_HEALTH})" >&2
+        exit 1
+    fi
+    echo "shoggoth: OpenBao is unsealed (HTTP ${OBAO_HEALTH})"
+
+    OBAO_RESP="$(mktemp)"
+    OBAO_HTTP="$(curl -s -w '%{http_code}' -o "${OBAO_RESP}" -X POST \
+        "${OPENBAO_ADDR}/v1/secret/data/cdash/api-token" \
         -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
         -H "Content-Type: application/json" \
-        -d "{\"data\":{\"value\":\"${RAW_TOKEN}\"}}" | grep -qE '^(200|204)' || {
-        echo "shoggoth: FATAL: Failed to store CDash API token in OpenBao" >&2
+        -d "{\"data\":{\"value\":\"${RAW_TOKEN}\"}}" 2>&1)" || true
+    if ! printf '%s' "${OBAO_HTTP}" | grep -qE '^(200|204)$'; then
+        echo "shoggoth: FATAL: Failed to store CDash API token in OpenBao (HTTP ${OBAO_HTTP})" >&2
+        echo "shoggoth: Response: $(cat "${OBAO_RESP}" 2>/dev/null)" >&2
+        echo "shoggoth: OPENBAO_ADDR=${OPENBAO_ADDR}" >&2
+        echo "shoggoth: Token length: ${#SHOGGOTH_VAULT_TOKEN}" >&2
+        rm -f "${OBAO_RESP}"
         exit 1
-    }
+    fi
+    rm -f "${OBAO_RESP}"
 
     echo "shoggoth: CDash slave token created and stored in OpenBao"
     echo "shoggoth: Restart web-internal to pick up the new token"
@@ -243,14 +257,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"
@@ -363,14 +373,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"

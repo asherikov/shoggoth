@@ -24,17 +24,17 @@ data:
 
     . /shoggoth/rendered/gitea/gitea.env
 
+    echo "shoggoth: Waiting for Gitea to be ready..."
     for i in $(seq 1 30); do
-        if AUTH_CHECK="$(su-exec git gitea admin auth list 2>&1)"; then
+        if su-exec git gitea admin auth list > /dev/null 2>&1; then
             break
         fi
-        if [ "${i}" -eq 30 ]; then
-            echo "shoggoth: ERROR: Gitea never became ready: ${AUTH_CHECK}" >&2
-            exit 1
-        fi
-        echo "shoggoth: Waiting for Gitea to be ready (attempt ${i}/30): ${AUTH_CHECK}"
         sleep 2
     done
+    if ! AUTH_CHECK="$(su-exec git gitea admin auth list 2>&1)"; then
+        echo "shoggoth: ERROR: Gitea not ready after 60s: ${AUTH_CHECK}" >&2
+        exit 1
+    fi
 
     EXISTING="$(su-exec git gitea admin auth list 2>/dev/null \
         | awk -v name="openldap" '$2 == name {print $1; exit}')"
@@ -125,14 +125,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"
@@ -277,14 +273,10 @@ spec:
           command: ["bash", "-c"]
           args:
             - |
-              for i in $(seq 1 120); do
-                if [ -f /shoggoth/rendered/.bringup-done ]; then
-                  exit 0
-                fi
-                sleep 5
-              done
-              echo "ERROR: bringup sentinel not found after 600s"
-              exit 1
+              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
+                echo "ERROR: bringup sentinel not found" >&2
+                exit 1
+              fi
           resources:
             requests:
               memory: "32Mi"

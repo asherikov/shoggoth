@@ -1,5 +1,4 @@
 JOBS?=4
-USER?=aleks
 DOMAIN?=$(shell grep SHOGGOTH_DOMAIN shoggoth/.env | cut -f 2 -d '=')
 GITHUB_ORG?=$(shell grep SHOGGOTH_GITHUB_ORG shoggoth/.env | cut -f 2 -d '=')
 HOST?=host.${DOMAIN}
@@ -7,7 +6,6 @@ HOST_IP?=$(shell getent hosts ${HOST} | cut -f 1 -d ' ')
 GITEA_TOKEN?=$(shell cat shoggoth/private/gitea-server-token.txt)
 API_HOST=api.${DOMAIN}
 REMOTE_PATH?=~/
-
 
 SSH_COMMON_ARGS=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 
@@ -20,15 +18,14 @@ help:
 
 sync:
 	rsync -e "ssh ${SSH_COMMON_ARGS}" -r shoggoth ${USER}@${HOST_IP}:${REMOTE_PATH} || true
-	@cmds="rsync -a --delete /home/${USER}/shoggoth/private/ /var/lib/rancher/k3s/storage/shoggoth/private/"; \
-	cmds="$$cmds && mkdir -p /var/lib/rancher/k3s/storage/shoggoth/coredns-blacklists"; \
-	cmds="$$cmds && cp /home/${USER}/shoggoth/dns/hosts-blacklist/hosts /var/lib/rancher/k3s/storage/shoggoth/coredns-blacklists/blocklist.hosts"; \
+	@cmds="mkdir -p /var/lib/rancher/k3s/storage/shoggoth/coredns-blacklists"; \
+	cmds="$$cmds && cp ./dns/hosts-blacklist/hosts /var/lib/rancher/k3s/storage/shoggoth/coredns-blacklists/blocklist.hosts"; \
 	for entry in ${K3S_HOST_PATHS}; do \
 		DST=$$(echo "$$entry" | cut -d: -f1); \
 		SRC=$$(echo "$$entry" | cut -d: -f2); \
-		cmds="$$cmds && rsync -a --delete /home/${USER}/shoggoth/$$SRC/ /var/lib/rancher/k3s/storage/shoggoth/$$DST/"; \
+		cmds="$$cmds && rsync -a --delete ./$$SRC/ /var/lib/rancher/k3s/storage/shoggoth/$$DST/"; \
 	done; \
-	${K3S_SSH} "sudo bash -c '$$cmds'"
+	${K3S_SSH} "sh -c \"cd ${REMOTE_PATH}/shoggoth && sudo bash -c '$$cmds'\""
 
 sync_restart: tunnel_up
 	${MAKE} down
