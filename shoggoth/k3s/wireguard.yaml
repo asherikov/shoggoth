@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wireguard-entrypoint
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   entrypoint.sh: |
     #!/usr/bin/env bash
@@ -25,20 +25,20 @@ apiVersion: v1
 kind: Service
 metadata:
   name: wireguard
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: wireguard
   ports:
     - name: http
-      port: 80
-      targetPort: 80
+      port: 51821
+      targetPort: 51821
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: wireguard
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   replicas: 1
   strategy:
@@ -55,22 +55,34 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - 10.43.0.53
+          - ${DNS_IP}
         searches:
-          - shoggoth.svc.cluster.local
+          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
           - cluster.local
       initContainers:
         - name: wait-bringup
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: busybox:latest
           imagePullPolicy: IfNotPresent
-          command: ["bash", "-c"]
+          command: ["sh", "-c"]
           args:
             - |
+              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
               if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "ERROR: bringup sentinel not found" >&2
+                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
+                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
+                if [ -d /shoggoth/rendered ]; then
+                  echo "wait-bringup: contents:" >&2
+                  ls -la /shoggoth/rendered/ >&2 || true
+                fi
+                if [ -f /shoggoth/rendered/bringup.log ]; then
+                  echo "wait-bringup: bringup.log tail:" >&2
+                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
+                fi
+                echo "wait-bringup: exiting, bringup may still be in progress" >&2
                 exit 1
               fi
+              echo "wait-bringup: sentinel found"
           resources:
             requests:
               memory: "32Mi"
@@ -86,10 +98,11 @@ spec:
         - name: wireguard
           image: ghcr.io/wg-easy/wg-easy:15
           ports:
-            - containerPort: 51820
+            - containerPort: ${WG_PORT}
+              hostPort: ${WG_PORT}
               protocol: UDP
               name: wireguard
-            - containerPort: 80
+            - containerPort: 51821
               name: http
           env:
             - name: INIT_ENABLED
@@ -99,7 +112,7 @@ spec:
             - name: INIT_HOST
               value: "${SHOGGOTH_DOMAIN}"
             - name: INIT_PORT
-              value: "51820"
+              value: "${WG_PORT}"
             - name: INIT_PASSWORD
               value: "shoggoth1234"
 #              valueFrom:
@@ -109,13 +122,13 @@ spec:
             - name: INIT_ALLOWED_IPS
               value: "10.43.0.0/16"
             - name: INIT_DNS
-              value: "10.43.0.53"
+              value: "${DNS_IP}"
             - name: INSECURE
               value: "true"
             - name: DISABLE_IPV6
               value: "true"
             - name: PORT
-              value: "80"
+              value: "51821"
             - name: OTEL_TRACES_EXPORTER
               value: "otlp"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -143,14 +156,14 @@ spec:
           readinessProbe:
             httpGet:
               path: /
-              port: 80
+              port: 51821
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /
-              port: 80
+              port: 51821
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 6
@@ -166,7 +179,7 @@ spec:
       volumes:
         - name: data
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/wireguard-data
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/wireguard-data
             type: DirectoryOrCreate
         - name: entrypoint
           configMap:
@@ -181,5 +194,5 @@ spec:
             secretName: wireguard-admin-password
         - name: rendered
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
             type: DirectoryOrCreate

@@ -3,7 +3,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: git-pages-data
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
     - ReadWriteOnce
@@ -16,7 +16,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: git-pages-config
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   config.toml: |
     log-format = "text"
@@ -47,7 +47,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: git-pages
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: git-pages
@@ -63,7 +63,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: git-pages
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -77,22 +77,34 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - 10.43.0.53
+          - ${DNS_IP}
         searches:
-          - shoggoth.svc.cluster.local
+          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
           - cluster.local
       initContainers:
         - name: wait-bringup
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: busybox:latest
           imagePullPolicy: IfNotPresent
-          command: ["bash", "-c"]
+          command: ["sh", "-c"]
           args:
             - |
+              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
               if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "ERROR: bringup sentinel not found" >&2
+                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
+                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
+                if [ -d /shoggoth/rendered ]; then
+                  echo "wait-bringup: contents:" >&2
+                  ls -la /shoggoth/rendered/ >&2 || true
+                fi
+                if [ -f /shoggoth/rendered/bringup.log ]; then
+                  echo "wait-bringup: bringup.log tail:" >&2
+                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
+                fi
+                echo "wait-bringup: exiting, bringup may still be in progress" >&2
                 exit 1
               fi
+              echo "wait-bringup: sentinel found"
           resources:
             requests:
               memory: "32Mi"
@@ -151,7 +163,7 @@ spec:
       volumes:
         - name: rendered
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
             type: DirectoryOrCreate
         - name: config
           configMap:

@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: bringup-scripts
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   bao_helpers.sh: |
     #!/usr/bin/env bash
@@ -137,7 +137,7 @@ data:
         echo "OpenBao is initialized but unseal key file missing on PVC, trying K8s Secret backup..."
         K8S_API="https://kubernetes.default.svc"
         SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)"
-        K8S_NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo shoggoth)"
+        K8S_NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo ${SHOGGOTH_NAMESPACE})"
         K8S_CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
         SECRET_HTTP_CODE=$(curl -s -o /tmp/k8s-unseal-key.json -w '%{http_code}' \
             --cacert "${K8S_CACERT}" \
@@ -192,13 +192,13 @@ data:
         echo "Backing up unseal key and root token to K8s Secret..."
         K8S_API="https://kubernetes.default.svc"
         SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)"
-        K8S_NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo shoggoth)"
+        K8S_NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo ${SHOGGOTH_NAMESPACE})"
         K8S_CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
         UNSEAL_KEY_B64=$(printf '%s' "${UNSEAL_KEY}" | base64 -w0)
         ROOT_TOKEN_B64=$(printf '%s' "${ROOT_TOKEN}" | base64 -w0)
         SECRET_PAYLOAD=$(jq -c -n \
             --arg uk "${UNSEAL_KEY_B64}" --arg rt "${ROOT_TOKEN_B64}" \
-            '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"openbao-unseal-key","namespace":"shoggoth"},"type":"Opaque","data":{"unseal-key":$uk,"root-token":$rt}}')
+            '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"openbao-unseal-key","namespace":"${SHOGGOTH_NAMESPACE}"},"type":"Opaque","data":{"unseal-key":$uk,"root-token":$rt}}')
         SECRET_HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
             --cacert "${K8S_CACERT}" \
             -X PUT \
@@ -233,7 +233,7 @@ data:
         echo "Unseal with PVC key failed, trying K8s Secret backup..."
         K8S_API="https://kubernetes.default.svc"
         SA_TOKEN_BAK="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)"
-        K8S_NS_BAK="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo shoggoth)"
+        K8S_NS_BAK="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo ${SHOGGOTH_NAMESPACE})"
         K8S_CACERT_BAK="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
         BAK_HTTP_CODE=$(curl -s -o /tmp/k8s-unseal-bak.json -w '%{http_code}' \
             --cacert "${K8S_CACERT_BAK}" \
@@ -275,7 +275,7 @@ data:
     echo "Ensuring K8s Secret backup of unseal key..."
     K8S_API="https://kubernetes.default.svc"
     SA_TOKEN_BAK="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)"
-    K8S_NS_BAK="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo shoggoth)"
+    K8S_NS_BAK="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo ${SHOGGOTH_NAMESPACE})"
     K8S_CACERT_BAK="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
     BAK_CHECK=$(curl -s -o /dev/null -w '%{http_code}' \
         --cacert "${K8S_CACERT_BAK}" \
@@ -287,7 +287,7 @@ data:
         ROOT_TOKEN_B64=$(printf '%s' "${ROOT_TOKEN}" | base64 -w0)
         SECRET_PAYLOAD=$(jq -c -n \
             --arg uk "${UNSEAL_KEY_B64}" --arg rt "${ROOT_TOKEN_B64}" \
-            '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"openbao-unseal-key","namespace":"shoggoth"},"type":"Opaque","data":{"unseal-key":$uk,"root-token":$rt}}')
+            '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"openbao-unseal-key","namespace":"${SHOGGOTH_NAMESPACE}"},"type":"Opaque","data":{"unseal-key":$uk,"root-token":$rt}}')
         BAK_PUT_HTTP=$(curl -s -o /dev/null -w '%{http_code}' \
             --cacert "${K8S_CACERT_BAK}" \
             -X POST \
@@ -568,7 +568,7 @@ data:
     write_secret() {
         local name="$1" file="$2"
         local key="$3" value_b64="$4"
-        printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"shoggoth"},"type":"Opaque","data":{"%s":"%s"}}\n' \
+        printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"${SHOGGOTH_NAMESPACE}"},"type":"Opaque","data":{"%s":"%s"}}\n' \
             "${name}" "${key}" "${value_b64}" > "${K8S_SECRETS_DIR}/${file}"
     }
 
@@ -596,7 +596,7 @@ data:
     GITEA_SLAVE_TOKEN_B64=$(printf '%s' "${GITEA_SLAVE_TOKEN}" | base64 -w0)
     REDMINE_TOKEN_B64=$(printf '%s' "${REDMINE_TOKEN}" | base64 -w0)
     CDASH_API_TOKEN_B64=$(printf '%s' "${CDASH_API_TOKEN}" | base64 -w0)
-    printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"angie-tokens","namespace":"shoggoth"},"type":"Opaque","data":{"gitea-slave-token":"%s","redmine-token":"%s","cdash-api-token":"%s"}}\n' \
+    printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"angie-tokens","namespace":"${SHOGGOTH_NAMESPACE}"},"type":"Opaque","data":{"gitea-slave-token":"%s","redmine-token":"%s","cdash-api-token":"%s"}}\n' \
         "${GITEA_SLAVE_TOKEN_B64}" "${REDMINE_TOKEN_B64}" "${CDASH_API_TOKEN_B64}" \
         > "${K8S_SECRETS_DIR}/angie-tokens.yaml"
 
@@ -633,7 +633,7 @@ data:
     if [ -f "${SECRETS_DIR}/gitea-user" ]; then
         SLAVE_DIND_USER_B64=$(base64 -w0 < "${SECRETS_DIR}/gitea-user")
     fi
-    printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"slave-dind-secrets","namespace":"shoggoth"},"type":"Opaque","data":{"gitea-slave-token":"%s","ssh-id-rsa":"%s","gitea-user":"%s"}}\n' \
+    printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"slave-dind-secrets","namespace":"${SHOGGOTH_NAMESPACE}"},"type":"Opaque","data":{"gitea-slave-token":"%s","ssh-id-rsa":"%s","gitea-user":"%s"}}\n' \
         "${SLAVE_DIND_TOKEN_B64}" "${SLAVE_DIND_SSH_B64}" "${SLAVE_DIND_USER_B64}" \
         > "${K8S_SECRETS_DIR}/slave-dind-secrets.yaml"
 
@@ -642,7 +642,7 @@ data:
     echo "=== Phase 10: Apply K8s Secrets via API ==="
     K8S_API="https://kubernetes.default.svc"
     SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)"
-    K8S_NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo shoggoth)"
+    K8S_NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo ${SHOGGOTH_NAMESPACE})"
     K8S_CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
     if [ -n "${SA_TOKEN}" ]; then
         echo "  K8S API: ${K8S_API}"
@@ -726,7 +726,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: bringup-templates
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   openldap_config.ldif: |
     dn: olcDatabase={1}mdb,cn=config
@@ -986,7 +986,7 @@ data:
     }
 
     http {
-        resolver 10.43.0.10 valid=30s;
+        resolver ${DNS_IP} valid=30s;
 
         map $http_upgrade $connection_upgrade {
             default upgrade;
@@ -1066,15 +1066,15 @@ data:
 
         upstream git {
             zone git 1m;
-            server git.shoggoth.svc.cluster.local resolve;
+            server git.${SHOGGOTH_NAMESPACE}.svc.cluster.local resolve;
         }
         upstream redmine {
             zone redmine 1m;
-            server redmine.shoggoth.svc.cluster.local resolve;
+            server redmine.${SHOGGOTH_NAMESPACE}.svc.cluster.local resolve;
         }
         upstream cdash {
             zone cdash 1m;
-            server cdash.shoggoth.svc.cluster.local resolve;
+            server cdash.${SHOGGOTH_NAMESPACE}.svc.cluster.local resolve;
         }
 
         server {
@@ -1121,7 +1121,7 @@ data:
 
         upstream slave-dind {
             zone slave-dind 1m;
-            server slave-dind.shoggoth.svc.cluster.local resolve;
+            server slave-dind.${SHOGGOTH_NAMESPACE}.svc.cluster.local resolve;
         }
         server {
             listen 80;
@@ -1150,7 +1150,7 @@ data:
     }
 
     http {
-        resolver 10.43.0.10 valid=30s;
+        resolver ${DNS_IP} valid=30s;
 
         map $http_upgrade $connection_upgrade {
             default upgrade;
@@ -1164,7 +1164,7 @@ data:
 
         upstream wireguard {
             zone wireguard 1m;
-            server wireguard.shoggoth.svc.cluster.local resolve;
+            server wireguard.${SHOGGOTH_NAMESPACE}.svc.cluster.local resolve;
         }
 
         server {
@@ -1726,7 +1726,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: bringup-plugin
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   plugin.json: |
     {
@@ -3462,10 +3462,10 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: bringup
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   ttlSecondsAfterFinished: 86400
-  backoffLimit: 0
+  backoffLimit: 6
   template:
     metadata:
       labels:
@@ -3474,27 +3474,46 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - 10.43.0.53
+          - ${DNS_IP}
         searches:
-          - shoggoth.svc.cluster.local
+          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
           - cluster.local
       restartPolicy: OnFailure
       serviceAccountName: bringup
       initContainers:
-        - name: wait-openbao
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+        - name: preflight
+          image: busybox:latest
           imagePullPolicy: IfNotPresent
-          command: ["bash", "-c"]
+          command: ["sh", "-c"]
           args:
             - |
+              echo "bringup preflight: checking dependencies"
+              REG="docker-registry.${SHOGGOTH_DOMAIN}"
+              echo "bringup preflight: DNS ${REG} -> $(nslookup ${REG} 2>&1 || echo FAILED)"
+              echo "bringup preflight: HTTP ${REG} -> $(wget -q -S -O /dev/null --timeout=3 http://${REG}/v2/ 2>&1 || echo FAILED)"
+              echo "bringup preflight: OpenBao -> $(wget -q -S -O /dev/null --timeout=3 http://openbao:80/v1/sys/health 2>&1 || echo FAILED)"
+              echo "bringup preflight: done"
+          resources:
+            requests:
+              memory: "16Mi"
+              cpu: "10m"
+            limits:
+              memory: "32Mi"
+              cpu: "100m"
+        - name: wait-openbao
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "bringup: wait-openbao started"
               while true; do
-                code=$(curl -s -o /dev/null -w '%{http_code}' http://openbao:80/v1/sys/health 2>/dev/null || true)
-                if [ "${code}" != "000" ]; then
-                  echo "OpenBao responding (HTTP ${code})"
+                if wget -q -S -O /dev/null --timeout=3 http://openbao:80/v1/sys/health 2>&1 | grep -q 'HTTP/'; then
+                  echo "bringup: OpenBao responding"
                   exit 0
                 fi
-                echo "Waiting for OpenBao..."
+                echo "bringup: waiting for OpenBao..."
                 sleep 2
               done
           resources:
@@ -3505,9 +3524,9 @@ spec:
               memory: "64Mi"
               cpu: "200m"
         - name: fix-permissions
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: busybox:latest
           imagePullPolicy: IfNotPresent
-          command: ["bash", "-c"]
+          command: ["sh", "-c"]
           args:
             - "find /shoggoth/rendered -mindepth 1 -delete 2>/dev/null; mkdir -p /shoggoth/rendered/certs && chown -R 1000:1000 /shoggoth/rendered"
           securityContext:
@@ -3574,7 +3593,7 @@ spec:
             defaultMode: 0755
         - name: private
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/private
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/private
             type: DirectoryOrCreate
         - name: openbao-data
           persistentVolumeClaim:
@@ -3583,7 +3602,7 @@ spec:
           emptyDir: {}
         - name: shared-rendered
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
             type: DirectoryOrCreate
         - name: plugin
           configMap:

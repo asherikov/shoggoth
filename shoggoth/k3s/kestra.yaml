@@ -3,7 +3,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: kestra-data
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
     - ReadWriteOnce
@@ -16,7 +16,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: kestra-entrypoint
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   entrypoint.sh: |
     #!/usr/bin/env sh
@@ -34,7 +34,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: kestra-db
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: kestra-db
@@ -47,7 +47,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: kestra-db
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   serviceName: kestra-db
   replicas: 1
@@ -62,22 +62,34 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - 10.43.0.53
+          - ${DNS_IP}
         searches:
-          - shoggoth.svc.cluster.local
+          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
           - cluster.local
       initContainers:
         - name: wait-bringup
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: busybox:latest
           imagePullPolicy: IfNotPresent
-          command: ["bash", "-c"]
+          command: ["sh", "-c"]
           args:
             - |
+              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
               if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "ERROR: bringup sentinel not found" >&2
+                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
+                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
+                if [ -d /shoggoth/rendered ]; then
+                  echo "wait-bringup: contents:" >&2
+                  ls -la /shoggoth/rendered/ >&2 || true
+                fi
+                if [ -f /shoggoth/rendered/bringup.log ]; then
+                  echo "wait-bringup: bringup.log tail:" >&2
+                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
+                fi
+                echo "wait-bringup: exiting, bringup may still be in progress" >&2
                 exit 1
               fi
+              echo "wait-bringup: sentinel found"
           resources:
             requests:
               memory: "32Mi"
@@ -137,7 +149,7 @@ spec:
       volumes:
         - name: rendered
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
             type: DirectoryOrCreate
         - name: db-password
           secret:
@@ -150,7 +162,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: kestra
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: kestra
@@ -163,7 +175,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kestra
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -177,22 +189,34 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - 10.43.0.53
+          - ${DNS_IP}
         searches:
-          - shoggoth.svc.cluster.local
+          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
           - cluster.local
       initContainers:
         - name: wait-bringup
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: busybox:latest
           imagePullPolicy: IfNotPresent
-          command: ["bash", "-c"]
+          command: ["sh", "-c"]
           args:
             - |
+              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
               if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "ERROR: bringup sentinel not found" >&2
+                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
+                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
+                if [ -d /shoggoth/rendered ]; then
+                  echo "wait-bringup: contents:" >&2
+                  ls -la /shoggoth/rendered/ >&2 || true
+                fi
+                if [ -f /shoggoth/rendered/bringup.log ]; then
+                  echo "wait-bringup: bringup.log tail:" >&2
+                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
+                fi
+                echo "wait-bringup: exiting, bringup may still be in progress" >&2
                 exit 1
               fi
+              echo "wait-bringup: sentinel found"
           resources:
             requests:
               memory: "32Mi"
@@ -302,7 +326,7 @@ spec:
       volumes:
         - name: rendered
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
             type: DirectoryOrCreate
         - name: kestra-entrypoint
           configMap:
@@ -313,13 +337,13 @@ spec:
             claimName: kestra-data
         - name: flows
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/kestra-flows
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/kestra-flows
             type: DirectoryOrCreate
         - name: plugins
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/kestra-plugins
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/kestra-plugins
             type: DirectoryOrCreate
         - name: dind-socket
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/dind-socket
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/dind-socket
             type: DirectoryOrCreate

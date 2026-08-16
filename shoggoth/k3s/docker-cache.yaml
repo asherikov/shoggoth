@@ -3,7 +3,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: docker-cache
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
     - ReadWriteOnce
@@ -16,7 +16,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: docker-cache
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: docker-cache
@@ -29,7 +29,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: docker-cache
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -40,25 +40,31 @@ spec:
       labels:
         app: docker-cache
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-          - 10.43.0.53
-        searches:
-          - shoggoth.svc.cluster.local
-          - svc.cluster.local
-          - cluster.local
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       initContainers:
         - name: wait-bringup
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: busybox:latest
           imagePullPolicy: IfNotPresent
-          command: ["bash", "-c"]
+          command: ["sh", "-c"]
           args:
             - |
+              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
               if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "ERROR: bringup sentinel not found" >&2
+                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
+                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
+                if [ -d /shoggoth/rendered ]; then
+                  echo "wait-bringup: contents:" >&2
+                  ls -la /shoggoth/rendered/ >&2 || true
+                fi
+                if [ -f /shoggoth/rendered/bringup.log ]; then
+                  echo "wait-bringup: bringup.log tail:" >&2
+                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
+                fi
+                echo "wait-bringup: exiting, bringup may still be in progress" >&2
                 exit 1
               fi
+              echo "wait-bringup: sentinel found"
           resources:
             requests:
               memory: "32Mi"
@@ -70,6 +76,24 @@ spec:
             - name: rendered
               mountPath: /shoggoth/rendered
               readOnly: true
+        - name: patch-nginx-conf
+          image: rpardini/docker-registry-proxy:0.6.5
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              sed 's/listen 80 /listen 8080 /g; s/listen \[::\]:80 /listen [::]:8080 /g' \
+                /etc/nginx/nginx.conf > /tmp/nginx.conf
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /tmp
       containers:
         - name: docker-cache
           image: rpardini/docker-registry-proxy:0.6.5
@@ -82,7 +106,7 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://otelcol:4318"
             - name: REGISTRIES
-              value: "registry.k8s.io gcr.io quay.io ghcr.io mcr.microsoft.com docker.gitea.com docker.angie.software codeberg.org public.ecr.aws"
+              value: "docker.io registry.k8s.io gcr.io quay.io ghcr.io mcr.microsoft.com docker.gitea.com docker.angie.software codeberg.org public.ecr.aws"
             - name: ENABLE_MANIFEST_CACHE
               value: "true"
             - name: CACHE_MAX_SIZE
@@ -129,11 +153,16 @@ spec:
             - name: rendered
               mountPath: /ca
               subPath: docker-cache-certs
+            - name: nginx-conf
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
       volumes:
         - name: rendered
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
             type: DirectoryOrCreate
         - name: cache
           persistentVolumeClaim:
             claimName: docker-cache
+        - name: nginx-conf
+          emptyDir: {}

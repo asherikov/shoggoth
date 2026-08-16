@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: dns-config
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   Corefile: |
     .:53 {
@@ -18,9 +18,9 @@ data:
             fallthrough
         }
 
-        rewrite stop name exact ${SHOGGOTH_DOMAIN} web-internal.shoggoth.svc.cluster.local
+        rewrite stop name exact ${SHOGGOTH_DOMAIN} web-internal.${SHOGGOTH_NAMESPACE}.svc.cluster.local
         rewrite stop {
-            name suffix ${SHOGGOTH_DOMAIN} shoggoth.svc.cluster.local
+            name suffix ${SHOGGOTH_DOMAIN} ${SHOGGOTH_NAMESPACE}.svc.cluster.local
             answer auto
         }
 
@@ -32,9 +32,9 @@ apiVersion: v1
 kind: Service
 metadata:
   name: dns
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
-  clusterIP: 10.43.0.53
+  clusterIP: ${DNS_IP}
   selector:
     app: dns
   ports:
@@ -51,7 +51,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: dns
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   replicas: 1
   strategy:
@@ -67,9 +67,9 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - 10.43.0.53
+          - ${DNS_IP}
         searches:
-          - shoggoth.svc.cluster.local
+          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
           - cluster.local
       containers:
@@ -115,5 +115,5 @@ spec:
             name: dns-config
         - name: blacklist
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/coredns-blacklists
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/coredns-blacklists
             type: DirectoryOrCreate

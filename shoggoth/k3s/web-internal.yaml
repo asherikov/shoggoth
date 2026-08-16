@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: web-internal-config-template
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   angie.conf.tmpl: |
     load_module modules/ngx_otel_module.so;
@@ -13,7 +13,7 @@ data:
     }
 
     http {
-        resolver 10.43.0.10 valid=30s;
+        resolver ${DNS_IP} valid=30s;
 
         map $http_upgrade $connection_upgrade {
             default upgrade;
@@ -107,17 +107,17 @@ data:
 
         upstream git {
             zone git 1m;
-            server git.shoggoth.svc.cluster.local resolve;
+            server git.${SHOGGOTH_NAMESPACE}.svc.cluster.local resolve;
         }
 
         upstream redmine {
             zone redmine 1m;
-            server redmine.shoggoth.svc.cluster.local resolve;
+            server redmine.${SHOGGOTH_NAMESPACE}.svc.cluster.local resolve;
         }
 
         upstream cdash {
             zone cdash 1m;
-            server cdash.shoggoth.svc.cluster.local resolve;
+            server cdash.${SHOGGOTH_NAMESPACE}.svc.cluster.local resolve;
         }
 
         server {
@@ -173,7 +173,7 @@ data:
 
         upstream slave-dind {
             zone slave-dind 1m;
-            server slave-dind.shoggoth.svc.cluster.local resolve;
+            server slave-dind.${SHOGGOTH_NAMESPACE}.svc.cluster.local resolve;
         }
 
         server {
@@ -201,7 +201,7 @@ data:
 
         upstream grafana {
             zone grafana 1m;
-            server grafana.shoggoth.svc.cluster.local resolve;
+            server grafana.${SHOGGOTH_NAMESPACE}.svc.cluster.local resolve;
         }
 
         server {
@@ -226,7 +226,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: web-internal-html
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   index.html: |
     <!DOCTYPE html>
@@ -291,7 +291,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: web-internal
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: web-internal
@@ -304,7 +304,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: python-cache
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: web-internal
@@ -317,7 +317,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: build-cache
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: web-internal
@@ -330,7 +330,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: api
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: web-internal
@@ -343,7 +343,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: slave-term
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: web-internal
@@ -356,7 +356,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: angie-build-cache
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
     - ReadWriteOnce
@@ -369,7 +369,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: python-cache
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
     - ReadWriteOnce
@@ -382,7 +382,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: web-internal
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   replicas: 1
   selector:
@@ -396,22 +396,34 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - 10.43.0.53
+          - ${DNS_IP}
         searches:
-          - shoggoth.svc.cluster.local
+          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
           - cluster.local
       initContainers:
         - name: wait-bringup
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: busybox:latest
           imagePullPolicy: IfNotPresent
-          command: ["bash", "-c"]
+          command: ["sh", "-c"]
           args:
             - |
+              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
               if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "ERROR: bringup sentinel not found" >&2
+                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
+                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
+                if [ -d /shoggoth/rendered ]; then
+                  echo "wait-bringup: contents:" >&2
+                  ls -la /shoggoth/rendered/ >&2 || true
+                fi
+                if [ -f /shoggoth/rendered/bringup.log ]; then
+                  echo "wait-bringup: bringup.log tail:" >&2
+                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
+                fi
+                echo "wait-bringup: exiting, bringup may still be in progress" >&2
                 exit 1
               fi
+              echo "wait-bringup: sentinel found"
           resources:
             requests:
               memory: "32Mi"
@@ -551,5 +563,5 @@ spec:
             claimName: python-cache
         - name: plugin
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
             type: DirectoryOrCreate

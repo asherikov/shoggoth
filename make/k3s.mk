@@ -19,13 +19,15 @@ host_install_nixos:
 	@echo "Installing K3s on ${HOST} via NixOS..."
 	${MAKE} sync
 	@mkdir -p ${K3S_TMP_DIR}
-	@export SHOGGOTH_DOMAIN="${DOMAIN}"; \
-	envsubst '$${SHOGGOTH_DOMAIN}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix
-	scp ${SSH_COMMON_ARGS} ${K3S_TMP_DIR}/shoggoth.nix ${USER}@${HOST_IP}:/tmp/shoggoth.nix
-	${K3S_SSH} 'sudo cp /tmp/shoggoth.nix /etc/nixos/shoggoth.nix && rm /tmp/shoggoth.nix'
-	${K3S_SSH} 'grep -q "shoggoth.nix" /etc/nixos/configuration.nix || { \
+	@export SHOGGOTH_DOMAIN="${DOMAIN}" DNS_IP="${DNS_IP}"; \
+	envsubst '$${SHOGGOTH_DOMAIN}$${DNS_IP}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix
+	@printf '{ config, pkgs, ... }:\n{\n  networking.firewall.allowedTCPPorts = [ %s ];\n  networking.firewall.allowedUDPPorts = [ %s ];\n  networking.firewall.interfaces.wg0 = {\n    allowedTCPPorts = [ %s ];\n  };\n}\n' \
+		"${WEB_EXT_PORT}" "${WG_PORT}" "${WEB_EXT_PORT}" > ${K3S_TMP_DIR}/${INSTANCE}-ports.nix
+	scp ${SSH_COMMON_ARGS} ${K3S_TMP_DIR}/shoggoth.nix ${K3S_TMP_DIR}/${INSTANCE}-ports.nix ${USER}@${HOST_IP}:/tmp/
+	${K3S_SSH} 'sudo cp /tmp/shoggoth.nix /tmp/${INSTANCE}-ports.nix /etc/nixos/ && rm /tmp/shoggoth.nix /tmp/${INSTANCE}-ports.nix'
+	${K3S_SSH} 'grep -q "${INSTANCE}-ports.nix" /etc/nixos/configuration.nix || { \
 		echo ""; echo "Add this line to /etc/nixos/configuration.nix:"; \
-		echo "  imports = [ ./shoggoth.nix ];"; \
+		echo "  imports = [ ./shoggoth.nix ./${INSTANCE}-ports.nix ];"; \
 		echo ""; echo "Then re-run: make host_install_nixos"; \
 		exit 1; \
 	}'
@@ -89,19 +91,44 @@ tunnel_down:
 # -----
 down: tunnel_up
 	@echo "=== Stopping all shoggoth K3s workloads (preserving secrets) ==="
-	${K3S_KUBECTL} delete deployment,statefulset,daemonset,job,svc,configmap -n shoggoth --all --ignore-not-found=true
+	${K3S_KUBECTL} delete deployment,statefulset,daemonset,job,svc,configmap -n ${INSTANCE} --all --ignore-not-found=true
 	@echo "Waiting for all pods to terminate..."
-	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth wait --for=delete pod --all --timeout=60s 2>/dev/null || true
-	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth delete pod --all --grace-period=0 --force 2>/dev/null || true
-	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth wait --for=delete pod --all --timeout=30s 2>/dev/null || true
+	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n ${INSTANCE} wait --for=delete pod --all --timeout=60s 2>/dev/null || true
+	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n ${INSTANCE} delete pod --all --grace-period=0 --force 2>/dev/null || true
+	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n ${INSTANCE} wait --for=delete pod --all --timeout=30s 2>/dev/null || true
 	@echo "All workloads stopped."
+
+purge: tunnel_up
+	@if [ "${INSTANCE}" = "shoggoth" ]; then \
+		echo "ERROR: Refusing to purge the default 'shoggoth' instance."; \
+		echo "       Set INSTANCE=<name> to purge a specific instance."; \
+		exit 1; \
+	fi
+	@echo "=== Purging shoggoth instance '${INSTANCE}' (namespace, PVCs, host data) ==="
+	@echo "Deleting namespace ${INSTANCE} (all workloads, secrets, PVCs)..."
+	-${K3S_KUBECTL} delete namespace ${INSTANCE} --ignore-not-found=true --timeout=120s
+	@echo "Removing hostPath data..."
+	-${K3S_SSH} 'sudo rm -rf /var/lib/rancher/k3s/storage/${INSTANCE}'
+	@echo "Removing remote deployment directory..."
+	-${K3S_SSH} 'rm -rf ${REMOTE_PATH}/${INSTANCE}'
+	@echo "Instance '${INSTANCE}' purged."
 
 # Start all shoggoth K3s services.
 up: tunnel_up
-	@echo "=== Starting all shoggoth K3s services ==="
-	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}"; \
+	@if ! printf '%s' "${INSTANCE}" | grep -qE '^[a-z0-9][a-z0-9-]*[a-z0-9]$$|^[a-z0-9]$$'; then \
+		echo "ERROR: INSTANCE must be lowercase alphanumeric with hyphens (RFC 1123), got: '${INSTANCE}'"; exit 1; \
+	fi
+	@if [ $$(printf '%s' "${INSTANCE}" | wc -c) -gt 54 ]; then \
+		echo "ERROR: '${INSTANCE}' exceeds 53 chars (namespace limit)"; exit 1; \
+	fi
+	@echo "=== Starting all shoggoth K3s services (namespace: ${INSTANCE}) ==="
+	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}" \
+		SHOGGOTH_NAMESPACE="${INSTANCE}" \
+		SHOGGOTH_INSTANCE_DIR="${INSTANCE}" \
+		DNS_IP="${DNS_IP}" \
+		WEB_EXT_PORT="${WEB_EXT_PORT}" WG_PORT="${WG_PORT}"; \
 		for f in ${K3S_ALL_MANIFESTS}; do \
-			envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}' < $$f; \
+			envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${DNS_IP}$${WEB_EXT_PORT}$${WG_PORT}' < $$f; \
 			printf "\n---\n"; \
 		done | ${K3S_KUBECTL} apply -f -
 
@@ -115,10 +142,10 @@ stop: tunnel_up
 		exit 1; \
 	fi
 	@echo "=== Stopping service: ${SERVICE} ==="
-	-${K3S_KUBECTL} delete deployment,statefulset,daemonset,job,svc ${SERVICE} -n shoggoth --ignore-not-found=true
+	-${K3S_KUBECTL} delete deployment,statefulset,daemonset,job,svc ${SERVICE} -n ${INSTANCE} --ignore-not-found=true
 	@echo "Waiting for ${SERVICE} pod to terminate..."
-	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth wait --for=delete pod -l app=${SERVICE} --timeout=60s 2>/dev/null || true
-	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth delete pod -l app=${SERVICE} --grace-period=0 --force 2>/dev/null || true
+	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n ${INSTANCE} wait --for=delete pod -l app=${SERVICE} --timeout=60s 2>/dev/null || true
+	-KUBECONFIG=${K3S_KUBECONFIG} kubectl -n ${INSTANCE} delete pod -l app=${SERVICE} --grace-period=0 --force 2>/dev/null || true
 	@echo "Service ${SERVICE} stopped."
 
 # Start a single service by name: make start SERVICE=web-external
@@ -130,7 +157,11 @@ start: tunnel_up
 		exit 1; \
 	fi
 	@echo "=== Starting service: ${SERVICE} ==="
-	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}"; \
+	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}" \
+		SHOGGOTH_NAMESPACE="${INSTANCE}" \
+		SHOGGOTH_INSTANCE_DIR="${INSTANCE}" \
+		DNS_IP="${DNS_IP}" \
+		WEB_EXT_PORT="${WEB_EXT_PORT}" WG_PORT="${WG_PORT}"; \
 	MANIFESTS="$$(grep -rl "app: ${SERVICE}" ${K3S_MANIFESTS} --include='*.yaml' | sort)"; \
 	if [ -z "$$MANIFESTS" ]; then \
 		echo "No manifest file found for service '${SERVICE}'"; \
@@ -138,7 +169,7 @@ start: tunnel_up
 	fi; \
 	for f in $$MANIFESTS; do \
 		echo "Applying $$f..."; \
-		envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}' < $$f | ${K3S_KUBECTL} apply -f - || exit 1; \
+		envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${DNS_IP}$${WEB_EXT_PORT}$${WG_PORT}' < $$f | ${K3S_KUBECTL} apply -f - || exit 1; \
 	done
 
 # Restart a single service: make restart_service SERVICE=kestra
@@ -151,16 +182,16 @@ log: tunnel_up
 	@echo "=== $(SERVICE) ==="
 	@echo ""
 	@echo "--- Status ---"
-	@KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth get pod -l app=$(SERVICE) -o wide 2>&1 || true
+	@KUBECONFIG=${K3S_KUBECONFIG} kubectl -n ${INSTANCE} get pod -l app=$(SERVICE) -o wide 2>&1 || true
 	@echo ""
 	@echo "--- Container states ---"
-	@KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth get pod -l app=$(SERVICE) -o json 2>/dev/null | jq -r '.items[] | .metadata.name as $$pod | ("Pod: " + $$pod), (.status.initContainerStatuses // [] | .[] | "  INIT [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)"), (.status.containerStatuses // [] | .[] | "  MAIN  [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)")' 2>&1 || true
+	@KUBECONFIG=${K3S_KUBECONFIG} kubectl -n ${INSTANCE} get pod -l app=$(SERVICE) -o json 2>/dev/null | jq -r '.items[] | .metadata.name as $$pod | ("Pod: " + $$pod), (.status.initContainerStatuses // [] | .[] | "  INIT [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)"), (.status.containerStatuses // [] | .[] | "  MAIN  [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)")' 2>&1 || true
 	@echo ""
 	@echo "=== Recent events ==="
-	@KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth get events --sort-by=.lastTimestamp 2>&1 | tail -100 | grep "${SERVICE}" || true
+	@KUBECONFIG=${K3S_KUBECONFIG} kubectl -n ${INSTANCE} get events --sort-by=.lastTimestamp 2>&1 | tail -100 | grep "${SERVICE}" || true
 	@echo ""
 	@echo "--- Logs (from host /var/log/pods) ---"
-	@${K3S_SSH} "sudo find /var/log/pods/ -path '*/shoggoth_$(SERVICE)-[0-9a-z]*/*.log' -exec sh -c ' \
+	@${K3S_SSH} "sudo find /var/log/pods/ -path '*/${INSTANCE}_$(SERVICE)-[0-9a-z]*/*.log' -exec sh -c ' \
 		dir=\$$(dirname \"\$$1\"); \
 		cname=\$$(basename \"\$$dir\"); \
 		pod=\$$(basename \"\$$(dirname \"\$$dir\")\"); \
@@ -171,16 +202,16 @@ log: tunnel_up
 	' _ {} \;" 2>&1 || echo "No pod logs found on host for $(SERVICE)"
 
 status: tunnel_up
-	@echo "=== K3s shoggoth services ==="
-	${K3S_KUBECTL} get pods,svc,deployment,statefulset,job,pvc -n shoggoth -o wide
+	@echo "=== K3s shoggoth services (namespace: ${INSTANCE}) ==="
+	${K3S_KUBECTL} get pods,svc,deployment,statefulset,job,pvc -n ${INSTANCE} -o wide
 	@echo ""
 	@echo "=== Recent events ==="
-	@KUBECONFIG=${K3S_KUBECONFIG} kubectl -n shoggoth get events --sort-by=.lastTimestamp 2>&1 | tail -20 || true
+	@KUBECONFIG=${K3S_KUBECONFIG} kubectl -n ${INSTANCE} get events --sort-by=.lastTimestamp 2>&1 | tail -20 || true
 	@echo ""
 	@echo "=== CoreDNS ==="
 	${K3S_KUBECTL} get pods -n kube-system -l k8s-app=kube-dns
 	@echo ""
 	@echo "=== Pod readiness ==="
-	@${K3S_KUBECTL} get pods -n shoggoth \
+	@${K3S_KUBECTL} get pods -n ${INSTANCE} \
 		-o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,STATUS:.status.phase \
 		2>&1 || true

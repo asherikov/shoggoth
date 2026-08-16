@@ -3,7 +3,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: web-external-config
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   angie.conf: |
     load_module modules/ngx_otel_module.so;
@@ -13,7 +13,7 @@ data:
     }
 
     http {
-        resolver 10.43.0.10 valid=30s;
+        resolver ${DNS_IP} valid=30s;
 
         map $http_upgrade $connection_upgrade {
             default upgrade;
@@ -27,11 +27,11 @@ data:
 
         upstream wireguard {
             zone wireguard 1m;
-            server wireguard.shoggoth.svc.cluster.local resolve;
+            server wireguard.${SHOGGOTH_NAMESPACE}.svc.cluster.local:51821 resolve;
         }
 
         server {
-            listen 443 ssl default_server;
+            listen ${WEB_EXT_PORT} ssl default_server;
 
             ssl_certificate /data/certs/shoggoth.crt;
             ssl_certificate_key /data/certs/shoggoth.key;
@@ -74,7 +74,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: setup-client-script
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 data:
   setup-client.sh: |
     #!/bin/sh
@@ -224,7 +224,7 @@ data:
     install_ca_certificate() {
         local os_id
         os_id=$(detect_os)
-        local ca_url="https://${HOST_IP}/ca.crt"
+        local ca_url="https://${HOST_IP}:${WEB_EXT_PORT}/ca.crt"
 
         if [ "${HOST_IP}" = "127.0.0.1" ] && [ "${CONFIGURE_DOCKER}" = "true" ]; then
             echo "Warning: HOST_IP is 127.0.0.1 (default). CA certificate download will fail on remote clients." >&2
@@ -578,20 +578,20 @@ apiVersion: v1
 kind: Service
 metadata:
   name: web-external
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
     app: web-external
   ports:
     - name: https
-      port: 443
-      targetPort: 443
+      port: ${WEB_EXT_PORT}
+      targetPort: ${WEB_EXT_PORT}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: web-external
-  namespace: shoggoth
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   replicas: 1
   strategy:
@@ -605,26 +605,37 @@ spec:
       labels:
         app: web-external
     spec:
-      hostNetwork: true
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - 10.43.0.53
+          - ${DNS_IP}
         searches:
-          - shoggoth.svc.cluster.local
+          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
           - cluster.local
       initContainers:
         - name: wait-bringup
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: busybox:latest
           imagePullPolicy: IfNotPresent
-          command: ["bash", "-c"]
+          command: ["sh", "-c"]
           args:
             - |
+              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
               if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "ERROR: bringup sentinel not found" >&2
+                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
+                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
+                if [ -d /shoggoth/rendered ]; then
+                  echo "wait-bringup: contents:" >&2
+                  ls -la /shoggoth/rendered/ >&2 || true
+                fi
+                if [ -f /shoggoth/rendered/bringup.log ]; then
+                  echo "wait-bringup: bringup.log tail:" >&2
+                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
+                fi
+                echo "wait-bringup: exiting, bringup may still be in progress" >&2
                 exit 1
               fi
+              echo "wait-bringup: sentinel found"
           resources:
             requests:
               memory: "32Mi"
@@ -641,7 +652,8 @@ spec:
           image: docker.angie.software/angie:latest
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 443
+            - containerPort: ${WEB_EXT_PORT}
+              hostPort: ${WEB_EXT_PORT}
               name: https
           env:
             - name: SHOGGOTH_DOMAIN
@@ -668,17 +680,17 @@ spec:
               cpu: "500m"
           startupProbe:
             tcpSocket:
-              port: 443
+              port: ${WEB_EXT_PORT}
             periodSeconds: 5
             failureThreshold: 24
           readinessProbe:
             tcpSocket:
-              port: 443
+              port: ${WEB_EXT_PORT}
             periodSeconds: 5
             failureThreshold: 3
           livenessProbe:
             tcpSocket:
-              port: 443
+              port: ${WEB_EXT_PORT}
             periodSeconds: 10
             failureThreshold: 3
       volumes:
@@ -687,7 +699,7 @@ spec:
             name: web-external-config
         - name: rendered
           hostPath:
-            path: /var/lib/rancher/k3s/storage/shoggoth/rendered
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
             type: DirectoryOrCreate
         - name: setup-client
           configMap:
