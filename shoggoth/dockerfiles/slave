@@ -23,12 +23,11 @@ RUN \
     && usermod -aG docker ccws
 
 # nodejs is needed for some actions, e.g., actions/checkout@v5
-# ldap-utils is needed for LDAP provisioning; slapd provides slappasswd for hash generation
 RUN \
 --mount=type=cache,target=/var/cache/apt,sharing=locked \
 --mount=type=cache,target=/var/lib/apt/lists/,sharing=locked \
 --mount=type=cache,target=/cache/pip,sharing=locked \
-    ${APT_INSTALL} nodejs ldap-utils slapd
+    ${APT_INSTALL} nodejs
 
 RUN curl -fsSL \
         "https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg --print-architecture`.tar.gz" \

@@ -109,6 +109,14 @@ data:
 
     source /shoggoth/bringup/bao_helpers.sh
 
+    slappasswd() {
+        local salt
+        salt=$(openssl rand 4)
+        local hash
+        hash=$(printf '%s%s' "$1" "${salt}" | openssl dgst -sha1 -binary)
+        printf '{SSHA}%s' "$(printf '%s%s' "${hash}" "${salt}" | openssl base64 -A)"
+    }
+
     mkdir -p "${SECRETS_DIR}" "${RENDERED_DIR}" "${RENDERED_LDAP_DIR}"
 
     echo "=== Phase 1: OpenBao init + unseal ==="
@@ -399,10 +407,10 @@ data:
 
     export LDAP_ADMIN_PASS LDAP_CONFIG_ADMIN_PASS LDAP_SLDAUTH_PASS LDAP_SSLAVE_PASS
 
-    ADMIN_HASH=$(slappasswd -s "${LDAP_ADMIN_PASS}")
-    CONFIG_ADMIN_HASH=$(slappasswd -s "${LDAP_CONFIG_ADMIN_PASS}")
-    SLDAUTH_HASH=$(slappasswd -s "${LDAP_SLDAUTH_PASS}")
-    SSLAVE_HASH=$(slappasswd -s "${LDAP_SSLAVE_PASS}")
+    ADMIN_HASH=$(slappasswd "${LDAP_ADMIN_PASS}")
+    CONFIG_ADMIN_HASH=$(slappasswd "${LDAP_CONFIG_ADMIN_PASS}")
+    SLDAUTH_HASH=$(slappasswd "${LDAP_SLDAUTH_PASS}")
+    SSLAVE_HASH=$(slappasswd "${LDAP_SSLAVE_PASS}")
 
     export ADMIN_HASH CONFIG_ADMIN_HASH SLDAUTH_HASH SSLAVE_HASH
 
@@ -651,7 +659,7 @@ data:
         echo "  CA cert: $([ -f "${K8S_CACERT}" ] && echo 'present' || echo 'MISSING')"
         for f in "${K8S_SECRETS_DIR}"/*.yaml; do
             [ -f "$f" ] || continue
-            SECRET_NAME=$(python3 -c "import json,sys; print(json.load(sys.stdin)['metadata']['name'])" < "$f" 2>/dev/null || true)
+            SECRET_NAME=$(jq -r '.metadata.name // empty' < "$f" 2>/dev/null || true)
             [ -z "${SECRET_NAME}" ] && { echo "  ERROR: cannot parse secret name from $(basename "$f")"; continue; }
             HTTP_CODE=$(curl -s -o /tmp/k8s-secret-resp.json -w '%{http_code}' \
                 --cacert "${K8S_CACERT}" \
