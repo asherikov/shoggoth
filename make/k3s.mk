@@ -197,7 +197,7 @@ log: tunnel_up
 		pod=\$$(basename \"\$$(dirname \"\$$dir\")\"); \
 		sz=\$$(wc -c < \"\$$1\"); \
 		echo \"  [\$$cname] (\$${sz} bytes):\"; \
-		if [ \"\$$sz\" -gt 0 ]; then tail -1500 \"\$$1\" 2>&1; fi; \
+		if [ \"\$$sz\" -gt 0 ]; then tail -3000 \"\$$1\" 2>&1; fi; \
 		echo \"\"; \
 	' _ {} \;" 2>&1 || echo "No pod logs found on host for $(SERVICE)"
 

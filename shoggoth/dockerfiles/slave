@@ -22,15 +22,9 @@ RUN \
         ttyd \
     && usermod -aG docker ccws
 
-# nodejs is needed for some actions, e.g., actions/checkout@v5
-RUN \
---mount=type=cache,target=/var/cache/apt,sharing=locked \
---mount=type=cache,target=/var/lib/apt/lists/,sharing=locked \
---mount=type=cache,target=/cache/pip,sharing=locked \
-    ${APT_INSTALL} nodejs
-
 RUN curl -fsSL \
-        "https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg --print-architecture`.tar.gz" \
+"https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg
+--print-architecture`.tar.gz" \
     | tar -xz -C /usr/bin
 
 RUN mkdir -p /tmp/codebase \
@@ -41,10 +35,6 @@ RUN mkdir -p /tmp/codebase \
     && rm -rf /tmp/codebase
 
 USER ccws
-
-# create qwen directory with correct permissions to facilitate mounting files inside
-RUN \
-    mkdir -p /home/ccws/.qwen/
 
 ARG PYTHON_PKG=mcp opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
 RUN \

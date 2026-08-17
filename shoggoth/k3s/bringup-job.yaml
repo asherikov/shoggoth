@@ -3551,7 +3551,7 @@ spec:
               mountPath: /shoggoth/rendered
       containers:
         - name: bringup
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: asherikov/shoggoth_tools:alpine
           imagePullPolicy: IfNotPresent
           workingDir: /shoggoth/bringup
           command: ["bash", "-c"]

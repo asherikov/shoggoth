@@ -439,6 +439,24 @@ records on start/stop.
 
 - **[Kestra](https://kestra.io/docs)** (selected)
   - <https://github.com/kestra-io/kestra>
+  - + rich plugin ecosystem, webhook triggers, file-based flow loading, OTel
+  - + Docker task runner with host socket access (networkMode: host)
+  - - k8s task runner requires Enterprise edition (plugin-ee-kubernetes)
+  - - Docker task runner needs DinD socket (security concern, requires host volume mount)
+- [Argo Workflows](https://github.com/argoproj/argo-workflows) (Apache-2.0, Go)
+  - + native k8s pods for task execution (no DinD dependency)
+  - + eliminated need for DinD socket (security benefit)
+  - + simpler architecture for k8s-native workloads
+  - + built-in webhook events endpoint (`POST /api/v1/events/{namespace}/{discriminator}`)
+  - + `WorkflowEventBinding` CRDs with expr-lang selectors for event routing
+  - + supports `hostNetwork: true` and `hostPath` volumes (equivalent to Docker task runner)
+  - + `CronWorkflow` CRD for scheduled tasks
+  - + `withItems` for iterating over lists (equivalent to Kestra's ForEach)
+  - - narrower plugin ecosystem compared to Kestra
+  - - no file-based flow loading (flows submitted via API/CRDs)
+  - - no built-in webhook signature verification (needs proxy for Gitea's X-Gitea-Signature)
+  - - no event deduplication (at-least-once delivery)
+  - - webhook event queue default: 16 events, 4 workers (configurable)
 - <https://github.com/dagucloud/dagu/>
   - no webhook trigger support in free version
 - <https://github.com/StackStorm/st2>
