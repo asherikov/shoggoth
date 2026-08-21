@@ -6,6 +6,10 @@ GITHUB_ORG?=$(shell grep SHOGGOTH_GITHUB_ORG ${SHOGGOTH_ENV} | cut -f 2 -d '=')
 WEB_EXT_PORT?=$(shell grep '^WEB_EXT_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
 WG_PORT?=$(shell grep '^WG_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
 DNS_IP?=$(shell grep '^DNS_IP=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+CONTAINER_CACHE_PORT?=$(shell grep '^CONTAINER_CACHE_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+DOCKER_CACHE_PORT?=$(shell grep '^DOCKER_CACHE_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+DOCKER_REGISTRY_PORT?=$(shell grep '^DOCKER_REGISTRY_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+WG_UI_PORT?=$(shell grep '^WG_UI_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
 HOST?=host.${DOMAIN}
 HOST_IP?=$(shell getent hosts ${HOST} | cut -f 1 -d ' ')
 GITEA_TOKEN?=$(shell cat shoggoth/private/gitea-server-token.txt)
@@ -71,8 +75,10 @@ home:
 test:
 	@echo "Requires VPN connectivity"
 	@echo "======================================================="
-	@echo ">>>>>>>>>>>> docker cache"
-	curl -s --connect-timeout 5 "docker-cache.${DOMAIN}:8080/ca.crt" --output /dev/null
+	@echo ">>>>>>>>>>>> container cache (zot)"
+	curl -s --connect-timeout 5 "http://container-cache.${DOMAIN}:${CONTAINER_CACHE_PORT}/v2/" --output /dev/null
+	@echo ">>>>>>>>>>>> docker cache (proxy)"
+	curl -s --connect-timeout 5 "http://docker-cache.${DOMAIN}:${DOCKER_CACHE_PORT}/v2/" --output /dev/null
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> docker registry"
 	@curl -s --connect-timeout 5 -o /dev/null -w '%{http_code}' "http://docker-registry.${DOMAIN}/v2/" | grep -q '^200' && echo "OK" || echo "FAIL"

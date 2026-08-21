@@ -1752,7 +1752,12 @@ spec:
                   - /bin/bash
                   - -c
                   - |
-                    grafana cli --homepath /usr/share/grafana admin reset-admin-password "$(tr -d '\n\r' < /run/secrets/admin_password)" 2>&1 | tee /var/log/shoggoth-grafana-init.log
+                    set -o pipefail
+                    LOG=/var/log/shoggoth-grafana-init.log
+                    exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
+                    echo "=== grafana-init start $(date -Iseconds) ==="
+                    grafana cli --homepath /usr/share/grafana admin reset-admin-password "$(tr -d '\n\r' < /run/secrets/admin_password)"
+                    echo "=== grafana-init exit $? $(date -Iseconds) ==="
           resources:
             requests:
               memory: "256Mi"

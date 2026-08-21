@@ -88,7 +88,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - "--config"
-            - "/app/config.yaml"
+            - "/shoggoth/litellm/config.yaml"
             - "--port"
             - "80"
           env:
@@ -104,8 +104,7 @@ spec:
               value: "${SHOGGOTH_DOMAIN}"
           volumeMounts:
             - name: rendered-config
-              mountPath: /app/config.yaml
-              subPath: litellm/config.yaml
+              mountPath: /shoggoth/litellm
               readOnly: true
             - name: data
               mountPath: /app/litellm
@@ -139,7 +138,7 @@ spec:
       volumes:
         - name: rendered-config
           hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered/litellm
             type: DirectoryOrCreate
         - name: rendered-ro
           hostPath:

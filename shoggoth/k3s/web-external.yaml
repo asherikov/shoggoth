@@ -27,7 +27,7 @@ data:
 
         upstream wireguard {
             zone wireguard 1m;
-            server wireguard.${SHOGGOTH_NAMESPACE}.svc.cluster.local:51821 resolve;
+            server wireguard.${SHOGGOTH_NAMESPACE}.svc.cluster.local:${WG_UI_PORT} resolve;
         }
 
         server {
@@ -80,7 +80,7 @@ data:
     #!/bin/sh
     set -e
 
-    DOCKER_PROXY_PORT="${DOCKER_PROXY_PORT:-3128}"
+    DOCKER_PROXY_PORT="${DOCKER_PROXY_PORT:-${DOCKER_CACHE_PORT}}"
     CONFIGURE_DOCKER="${CONFIGURE_DOCKER:-}"
     CONFIGURE_HOSTS="${CONFIGURE_HOSTS:-}"
     CONFIGURE_ALL="${CONFIGURE_ALL:-}"
@@ -277,12 +277,8 @@ data:
 
         run_priv_cmd "cat > ${docker_daemon_file} <<EOF
     {
-      \"insecure-registries\": [\"docker-registry.${DOMAIN}\"],
-      \"proxies\": {
-        \"http-proxy\": \"${PROXY_URL}\",
-        \"https-proxy\": \"${PROXY_URL}\",
-        \"no-proxy\": \"*.${DOMAIN}\"
-      }
+      \"insecure-registries\": [\"docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\", \"docker-registry.${DOMAIN}\"],
+      \"registry-mirrors\": [\"http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\"]
     }
     EOF"
 
@@ -538,7 +534,6 @@ data:
             echo "Setting up Docker client to use shoggoth proxy at ${PROXY_URL}"
 
             configure_docker_proxy
-            install_ca_certificate
 
             echo "Docker proxy setup complete. Test with: docker pull nginx:latest"
         fi

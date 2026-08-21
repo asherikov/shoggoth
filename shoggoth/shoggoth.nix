@@ -11,16 +11,43 @@
 
 let
   domain = "${SHOGGOTH_DOMAIN}";
-  dockerProxyPort = "3128";
+  dockerProxyPort = "${CONTAINER_CACHE_PORT}";
   k3sRegistries = pkgs.writeText "registries.yaml" ''
     mirrors:
       docker.io:
+        endpoint:
+          - "http://localhost:${dockerProxyPort}"
+      ghcr.io:
+        endpoint:
+          - "http://localhost:${dockerProxyPort}"
+      gcr.io:
+        endpoint:
+          - "http://localhost:${dockerProxyPort}"
+      quay.io:
+        endpoint:
+          - "http://localhost:${dockerProxyPort}"
+      mcr.microsoft.com:
+        endpoint:
+          - "http://localhost:${dockerProxyPort}"
+      codeberg.org:
+        endpoint:
+          - "http://localhost:${dockerProxyPort}"
+      docker.gitea.com:
+        endpoint:
+          - "http://localhost:${dockerProxyPort}"
+      docker.angie.software:
+        endpoint:
+          - "http://localhost:${dockerProxyPort}"
+      public.ecr.aws:
         endpoint:
           - "http://localhost:${dockerProxyPort}"
       docker-registry.${domain}:
         endpoint:
           - "http://localhost"
     configs:
+      "localhost:${dockerProxyPort}":
+        tls:
+          insecure_skip_verify: true
       docker-registry.${domain}:
         tls:
           insecure_skip_verify: true
@@ -41,18 +68,14 @@ in {
   # K3s API server is accessed via SSH tunnel, not exposed on the network.
 
   # K3s uses its own containerd instance. Configure containerd registries
-  # so K3s pulls images through the shoggoth docker-cache proxy and treats
+  # so K3s pulls images through the shoggoth container-cache proxy and treats
   # the internal registry as insecure (HTTP, self-signed CA).
   environment.etc."rancher/k3s/registries.yaml".source = k3sRegistries;
 
   virtualisation.docker.enable = true;
   virtualisation.docker.daemon.settings = {
-    insecure-registries = [ "localhost" ];
-    proxies = {
-      "http-proxy" = "http://localhost:${dockerProxyPort}";
-      "https-proxy" = "http://localhost:${dockerProxyPort}";
-      "no-proxy" = "*.${domain}";
-    };
+    insecure-registries = [ "localhost" "localhost:${dockerProxyPort}" ];
+    registry-mirrors = [ "http://localhost:${dockerProxyPort}" ];
   };
 
   networking.firewall.trustedInterfaces = [ "cni0" ];

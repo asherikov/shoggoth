@@ -204,11 +204,59 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
 
 ### cache (mirroring proxy)
 
-- **[docker-registry-proxy](https://github.com/rpardini/docker-registry-proxy)** (selected)
+- **[Zot](https://github.com/project-zot/zot)** (selected, `ghcr.io/project-zot/zot:latest`)
+  - OCI-native distribution server with pull-through sync extension
+  - Single instance handles all upstream registries (docker.io, ghcr.io, gcr.io, quay.io, mcr.microsoft.com, codeberg.org, docker.gitea.com, docker.angie.software, public.ecr.aws) via `sync` extension with on-demand mode
+  - Containerd and Docker talk to Zot via standard OCI distribution API (`/v2/`)
+  - PVC-backed local storage for cached layers
+  - + OCI-native — no MITM TLS interception, no CA certificate distribution needed
+  - + compatible with both containerd (k3s) and Docker daemon as clients
+  - + single instance replaces 9 upstream registry mirrors (one per registry)
+  - + lightweight Go binary (~50MB image), minimal resource usage
+  - + tag regex filters per upstream to limit cached artifacts
+  - + no init containers or certificate generation required
+  - - no built-in Prometheus metrics (OTel tracing available)
+  - - sync extension caches on first pull (cold start for new images)
+  - - containerd falls back to upstream registries if the cache is unavailable (see note below)
+- ~~**[docker-registry-proxy](https://github.com/rpardini/docker-registry-proxy)**~~ (removed)
+  - MITM HTTPS proxy that intercepts TLS connections to upstream registries
+  - Replaced because: MITM approach is incompatible with containerd — containerd validates TLS certificates and OCI image layer integrity, causing pull failures when a proxy re-signs layers with a different CA
+  - Required distributing a custom CA certificate to all clients (containerd, Docker daemon)
+  - One nginx instance per upstream registry, plus init containers for certificate generation
+  - Port 3128 (squid proxy convention)
+- <https://distribution.github.io/distribution/> (CNCF Distribution)
+  - The reference OCI registry implementation; can be configured as pull-through cache with `proxy.remoteurl`
+  - + CNCF graduated project, widely deployed, battle-tested
+  - + native OCI distribution API — same as Zot, fully containerd-compatible
+  - + Prometheus metrics endpoint built-in
+  - - one instance per upstream registry (no multi-upstream sync extension)
+  - - 9 separate deployments needed for shoggoth's upstream registries vs 1 for Zot
+  - - pull-through mode is less actively maintained than Zot's sync extension
 - <https://docs.docker.com/docker-hub/image-library/mirror/#run-a-registry-as-a-pull-through-cache>
-  - "Only the central Hub can be mirrored."
+  - Docker's official documentation on pull-through cache mirroring
+  - Notes: "Only the central Hub can be mirrored" (applies to Docker Hub's built-in mirror feature, not to third-party registries)
 - <https://github.com/spegel-org/spegel>
-  - needs kubernetes
+  - Peer-to-peer OCI registry for Kubernetes — nodes share cached images via P2P
+  - + eliminates external registry dependency entirely — images distributed across cluster nodes
+  - - requires multi-node Kubernetes cluster (k3s single-node has no peers)
+  - - does not cache upstream registries — only redistributes already-pulled images
+
+### Containerd mirror fallback behavior
+
+When a mirror endpoint is configured in `registries.yaml`, containerd tries the
+mirror first. If all mirror endpoints fail, containerd unconditionally falls back
+to the original upstream registry. This fallback is hardcoded in the CRI plugin
+source and cannot be disabled via `registries.yaml` or `hosts.toml` configuration.
+
+Consequence: if the Zot cache is down, containerd pulls directly from upstream
+registries (docker.io, ghcr.io, etc.) bypassing the cache entirely. There is no
+configuration-only way to make pulls fail when the cache is unavailable.
+
+Possible mitigations (none currently implemented):
+- Node firewall rules blocking outbound HTTPS to upstream registry IPs — fragile
+  (IPs change), may break non-container traffic to those hosts
+- DNS override pointing upstream registry domains to an unreachable address —
+  breaks all DNS resolution for those domains, not just containerd
 
 ## Docker registry
 

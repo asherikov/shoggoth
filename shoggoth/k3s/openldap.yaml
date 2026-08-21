@@ -87,11 +87,11 @@ data:
                 if ! ldapsearch -x -H "${LDAP_URL}" \
                     -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
                     -b "${ACTUAL_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
-                    echo "shoggoth: FATAL: slapd not ready" >&2
+                    echo "shoggoth: FATAL: slapd not ready (admin=${ADMIN_DN}, base=${ACTUAL_BASE_DN})" >&2
                     exit 1
                 fi
             else
-                echo "shoggoth: FATAL: slapd not ready" >&2
+                echo "shoggoth: FATAL: slapd not ready (admin=${ADMIN_DN}, base=${LDAP_BASE_DN})" >&2
                 exit 1
             fi
         fi
@@ -112,10 +112,17 @@ data:
     fi
 
     echo "shoggoth: === openldap: checking slapd ==="
+    echo "shoggoth: Waiting for slapd to accept connections..."
+    for i in $(seq 1 30); do
+        if ldapsearch -x -H "${LDAP_URL}" -b "" -s base namingContexts >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
     if ! ldapsearch -x -H "${LDAP_URL}" \
         -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
         -b "${LDAP_BASE_DN}" -s base '(objectClass=*)' dn > /dev/null 2>&1; then
-        echo "shoggoth: FATAL: slapd not ready" >&2
+        echo "shoggoth: FATAL: slapd not ready (admin=${ADMIN_DN}, base=${LDAP_BASE_DN})" >&2
         exit 1
     fi
     echo "shoggoth: slapd is ready."
@@ -257,6 +264,7 @@ spec:
               name: ldap
             - containerPort: 636
               name: ldaps
+          args: ["--loglevel", "debug"]
           env:
             - name: LDAP_DOMAIN
               value: "${SHOGGOTH_DOMAIN}"
@@ -265,9 +273,11 @@ spec:
             - name: LDAP_CONFIG_PASSWORD_FILE
               value: /run/secrets/openldap_config_admin_password
             - name: LDAP_LOG_LEVEL
-              value: "32"
+              value: "256"
             - name: LDAP_TLS
               value: "false"
+            - name: CONTAINER_LOG_LEVEL
+              value: "5"
             - name: LDAP_REMOVE_CONFIG_AFTER_SETUP
               value: "false"
             - name: OTEL_TRACES_EXPORTER
@@ -304,7 +314,12 @@ spec:
                   - /bin/bash
                   - -c
                   - |
-                    /bin/bash /shoggoth/openldap-init.sh >/proc/1/fd/1 2>/proc/1/fd/2
+                    set -o pipefail
+                    LOG=/shoggoth/rendered/openldap-init.log
+                    exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
+                    echo "=== openldap-init start $(date -Iseconds) ==="
+                    /bin/bash /shoggoth/openldap-init.sh
+                    echo "=== openldap-init exit $? $(date -Iseconds) ==="
           resources:
             requests:
               memory: "256Mi"

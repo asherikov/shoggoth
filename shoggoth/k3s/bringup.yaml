@@ -111,10 +111,10 @@ data:
 
     slappasswd() {
         local salt
-        salt=$(openssl rand 4)
+        salt=$(openssl rand -hex 4)
         local hash
-        hash=$(printf '%s%s' "$1" "${salt}" | openssl dgst -sha1 -binary)
-        printf '{SSHA}%s' "$(printf '%s%s' "${hash}" "${salt}" | openssl base64 -A)"
+        hash=$(printf '%s%s' "$1" "$(printf '%s' "${salt}" | xxd -r -p)" | openssl dgst -sha1 -hex | awk '{print $NF}')
+        printf '{SSHA}%s' "$(printf '%s%s' "${hash}" "${salt}" | xxd -r -p | openssl base64 -A)"
     }
 
     mkdir -p "${SECRETS_DIR}" "${RENDERED_DIR}" "${RENDERED_LDAP_DIR}"
@@ -127,22 +127,16 @@ data:
     UNSEAL_KEY_FILE="${BAO_DATA}/.shoggoth-unseal-key"
     ROOT_TOKEN_FILE="${BAO_DATA}/shoggoth/root-token"
 
-    health=$(curl -s "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null || echo '{}')
-    echo "OpenBao health: ${health}"
-    initialized=$(printf '%s' "${health}" | jq -r '.initialized | tostring')
-    is_sealed=$(printf '%s' "${health}" | jq -r '.sealed | tostring')
+    echo "PVC contents (${BAO_DATA}):"
+    ls -la "${BAO_DATA}/" 2>&1 || echo "  (empty or not accessible)"
 
-    if [ -f "${INIT_FLAG}" ] && [ -f "${UNSEAL_KEY_FILE}" ]; then
-        echo "OpenBao already initialized (flag file), unsealing..."
-        UNSEAL_KEY=$(cat "${UNSEAL_KEY_FILE}")
-        ROOT_TOKEN=$(cat "${ROOT_TOKEN_FILE}")
-    elif [ "${initialized}" = "true" ] && [ -f "${UNSEAL_KEY_FILE}" ]; then
-        echo "OpenBao already initialized, unsealing..."
+    if [ -f "${UNSEAL_KEY_FILE}" ]; then
+        echo "Unsealing OpenBao from PVC key..."
         UNSEAL_KEY=$(cat "${UNSEAL_KEY_FILE}")
         ROOT_TOKEN=$(cat "${ROOT_TOKEN_FILE}")
         touch "${INIT_FLAG}"
-    elif [ "${initialized}" = "true" ]; then
-        echo "OpenBao is initialized but unseal key file missing on PVC, trying K8s Secret backup..."
+    else
+        echo "No unseal key on PVC. Trying K8s Secret backup..."
         K8S_API="https://kubernetes.default.svc"
         SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)"
         K8S_NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo ${SHOGGOTH_NAMESPACE})"
@@ -164,71 +158,50 @@ data:
                 mkdir -p "${BAO_DATA}/shoggoth"
                 touch "${INIT_FLAG}"
             else
-                echo "ERROR: OpenBao is initialized, K8s Secret exists but key data is incomplete."
-                echo "Cannot recover unseal key. Manual intervention required."
+                echo "ERROR: K8s Secret exists but key data is incomplete."
+                echo "Run 'make wipe_openbao INSTANCE=<instance>' to reset, then retry."
                 exit 1
             fi
         else
-            echo "ERROR: OpenBao is initialized but no unseal key file exists."
-            echo "K8s Secret backup not found (HTTP ${SECRET_HTTP_CODE})."
-            echo "Cannot recover unseal key. Manual intervention required."
-            exit 1
-        fi
-    else
-        echo "Initializing OpenBao..."
-        INIT_HTTP_CODE=$(curl -s -o /tmp/init_response.json -w '%{http_code}' \
-            -X PUT "${OPENBAO_ADDR}/v1/sys/init" \
-            -H "Content-Type: application/json" \
-            -d '{"secret_shares":1,"secret_threshold":1}' 2>/dev/null || true)
-        INIT_RESPONSE=$(cat /tmp/init_response.json 2>/dev/null || true)
-        echo "Init HTTP code: ${INIT_HTTP_CODE}"
-        UNSEAL_KEY=$(printf '%s' "${INIT_RESPONSE}" | jq -r '.unseal_keys_b64[0] // empty' 2>/dev/null || true)
-        ROOT_TOKEN=$(printf '%s' "${INIT_RESPONSE}" | jq -r '.root_token // empty' 2>/dev/null || true)
-        echo "Parsed unseal_key length: ${#UNSEAL_KEY}, root_token length: ${#ROOT_TOKEN}"
-        if [ -z "${UNSEAL_KEY}" ] || [ -z "${ROOT_TOKEN}" ]; then
-            echo "ERROR: OpenBao init failed (HTTP ${INIT_HTTP_CODE}). Response: ${INIT_RESPONSE}"
-            exit 1
-        fi
-        echo "Writing key files to ${BAO_DATA}..."
-        printf '%s' "${UNSEAL_KEY}" > "${UNSEAL_KEY_FILE}"
-        chmod 400 "${UNSEAL_KEY_FILE}"
-        printf '%s' "${ROOT_TOKEN}" > "${ROOT_TOKEN_FILE}"
-        chmod 400 "${ROOT_TOKEN_FILE}"
-        mkdir -p "${BAO_DATA}/shoggoth"
-        touch "${INIT_FLAG}"
-        echo "Key files written, init flag touched."
-        echo "Backing up unseal key and root token to K8s Secret..."
-        K8S_API="https://kubernetes.default.svc"
-        SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || true)"
-        K8S_NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo ${SHOGGOTH_NAMESPACE})"
-        K8S_CACERT="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-        UNSEAL_KEY_B64=$(printf '%s' "${UNSEAL_KEY}" | base64 -w0)
-        ROOT_TOKEN_B64=$(printf '%s' "${ROOT_TOKEN}" | base64 -w0)
-        SECRET_PAYLOAD=$(jq -c -n \
-            --arg uk "${UNSEAL_KEY_B64}" --arg rt "${ROOT_TOKEN_B64}" \
-            '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"openbao-unseal-key","namespace":"${SHOGGOTH_NAMESPACE}"},"type":"Opaque","data":{"unseal-key":$uk,"root-token":$rt}}')
-        SECRET_HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-            --cacert "${K8S_CACERT}" \
-            -X PUT \
-            -H "Authorization: Bearer ${SA_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "${SECRET_PAYLOAD}" \
-            "${K8S_API}/api/v1/namespaces/${K8S_NS}/secrets/openbao-unseal-key" 2>/dev/null || true)
-        if [ "${SECRET_HTTP_CODE}" != "200" ] && [ "${SECRET_HTTP_CODE}" != "201" ]; then
-            SECRET_HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
-                --cacert "${K8S_CACERT}" \
-                -X POST \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
+            echo "No K8s Secret found. Attempting fresh init..."
+            INIT_HTTP_CODE=$(curl -s -o /tmp/init_response.json -w '%{http_code}' \
+                -X PUT "${OPENBAO_ADDR}/v1/sys/init" \
                 -H "Content-Type: application/json" \
-                -d "${SECRET_PAYLOAD}" \
-                "${K8S_API}/api/v1/namespaces/${K8S_NS}/secrets" 2>/dev/null || true)
+                -d '{"secret_shares":1,"secret_threshold":1}' 2>/dev/null || true)
+            INIT_RESPONSE=$(cat /tmp/init_response.json 2>/dev/null || true)
+            echo "PUT /v1/sys/init: HTTP ${INIT_HTTP_CODE}, ${INIT_RESPONSE}"
+            UNSEAL_KEY=$(printf '%s' "${INIT_RESPONSE}" | jq -r '.keys_base64[0] // empty' 2>/dev/null || true)
+            ROOT_TOKEN=$(printf '%s' "${INIT_RESPONSE}" | jq -r '.root_token // empty' 2>/dev/null || true)
+            if [ -n "${UNSEAL_KEY}" ] && [ -n "${ROOT_TOKEN}" ]; then
+                printf '%s' "${UNSEAL_KEY}" > "${UNSEAL_KEY_FILE}"
+                chmod 400 "${UNSEAL_KEY_FILE}"
+                mkdir -p "${BAO_DATA}/shoggoth"
+                printf '%s' "${ROOT_TOKEN}" > "${ROOT_TOKEN_FILE}"
+                chmod 400 "${ROOT_TOKEN_FILE}"
+                touch "${INIT_FLAG}"
+                echo "OpenBao initialized."
+                echo "Backing up unseal key and root token to K8s Secret..."
+                UNSEAL_KEY_B64=$(printf '%s' "${UNSEAL_KEY}" | base64 -w0)
+                ROOT_TOKEN_B64=$(printf '%s' "${ROOT_TOKEN}" | base64 -w0)
+                SECRET_PAYLOAD=$(jq -c -n \
+                    --arg uk "${UNSEAL_KEY_B64}" --arg rt "${ROOT_TOKEN_B64}" --arg ns "${SHOGGOTH_NAMESPACE}" \
+                    '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"openbao-unseal-key","namespace":$ns},"type":"Opaque","data":{"unseal-key":$uk,"root-token":$rt}}')
+                SECRET_HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+                    --cacert "${K8S_CACERT}" \
+                    -X POST \
+                    -H "Authorization: Bearer ${SA_TOKEN}" \
+                    -H "Content-Type: application/json" \
+                    -d "${SECRET_PAYLOAD}" \
+                    "${K8S_API}/api/v1/namespaces/${K8S_NS}/secrets" 2>/dev/null || true)
+                echo "K8s Secret backup HTTP code: ${SECRET_HTTP_CODE}"
+            else
+                echo "ERROR: Init failed (HTTP ${INIT_HTTP_CODE}). Response: ${INIT_RESPONSE}"
+                echo "Run 'INSTANCE=<instance> make wipe_openbao' to reset PVC, then retry."
+                exit 1
+            fi
         fi
-        echo "K8s Secret backup HTTP code: ${SECRET_HTTP_CODE}"
     fi
 
-    if [ "${is_sealed}" = "false" ]; then
-        echo "OpenBao already unsealed, skipping unseal"
-    else
     echo "Unsealing OpenBao..."
     UNSEAL_RESPONSE=$(curl -s -o /tmp/unseal_response.json -w '%{http_code}' \
         -X PUT "${OPENBAO_ADDR}/v1/sys/unseal" \
@@ -278,7 +251,6 @@ data:
         echo "ERROR: OpenBao unseal failed with both PVC and K8s Secret keys"
         exit 1
     fi
-    fi
 
     echo "Ensuring K8s Secret backup of unseal key..."
     K8S_API="https://kubernetes.default.svc"
@@ -294,8 +266,8 @@ data:
         UNSEAL_KEY_B64=$(printf '%s' "${UNSEAL_KEY}" | base64 -w0)
         ROOT_TOKEN_B64=$(printf '%s' "${ROOT_TOKEN}" | base64 -w0)
         SECRET_PAYLOAD=$(jq -c -n \
-            --arg uk "${UNSEAL_KEY_B64}" --arg rt "${ROOT_TOKEN_B64}" \
-            '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"openbao-unseal-key","namespace":"${SHOGGOTH_NAMESPACE}"},"type":"Opaque","data":{"unseal-key":$uk,"root-token":$rt}}')
+            --arg uk "${UNSEAL_KEY_B64}" --arg rt "${ROOT_TOKEN_B64}" --arg ns "${SHOGGOTH_NAMESPACE}" \
+            '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"openbao-unseal-key","namespace":$ns},"type":"Opaque","data":{"unseal-key":$uk,"root-token":$rt}}')
         BAK_PUT_HTTP=$(curl -s -o /dev/null -w '%{http_code}' \
             --cacert "${K8S_CACERT_BAK}" \
             -X POST \
@@ -518,16 +490,6 @@ data:
             -extfile "${CERTS_DIR}/server.ext"
     fi
 
-    DOCKER_CACHE_CA_DIR="${RENDERED_DIR}/docker-cache-certs"
-    mkdir -p "${DOCKER_CACHE_CA_DIR}"
-    if [ ! -f "${DOCKER_CACHE_CA_DIR}/ca.key" ] || [ ! -f "${DOCKER_CACHE_CA_DIR}/ca.crt" ]; then
-        openssl rsa -in "${CERTS_DIR}/ca.key" -passin "pass:${CA_PASS}" -des3 -passout "pass:foobar" -out "${DOCKER_CACHE_CA_DIR}/ca.key"
-        cp "${CERTS_DIR}/ca.crt" "${DOCKER_CACHE_CA_DIR}/ca.crt"
-        echo "01" > "${DOCKER_CACHE_CA_DIR}/ca.srl"
-        chmod 600 "${DOCKER_CACHE_CA_DIR}/ca.key"
-        chmod 644 "${DOCKER_CACHE_CA_DIR}/ca.crt" "${DOCKER_CACHE_CA_DIR}/ca.srl"
-    fi
-
     echo "=== Phase 7: OpenBao LDAP auth configuration ==="
     LDAP_AUTH_ENABLED="$(curl -sf -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
         "${OPENBAO_ADDR}/v1/sys/auth" 2>/dev/null \
@@ -700,27 +662,30 @@ data:
     SHARED_DIR="/shoggoth/rendered"
     mkdir -p "${SHARED_DIR}/openldap" "${SHARED_DIR}/certs" "${SHARED_DIR}/k8s-secrets" \
              "${SHARED_DIR}/redmine" "${SHARED_DIR}/cdash" "${SHARED_DIR}/gitea" \
-             "${SHARED_DIR}/kestra" "${SHARED_DIR}/litellm" "${SHARED_DIR}/gitea-runner" \
-             "${SHARED_DIR}/docker-cache-certs"
+             "${SHARED_DIR}/kestra" "${SHARED_DIR}/litellm" "${SHARED_DIR}/gitea-runner"
     COPY_ERRORS=0
-    cp -a "${RENDERED_LDAP_DIR}/"* "${SHARED_DIR}/openldap/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${CERTS_DIR}/ca.crt" "${SHARED_DIR}/certs/shoggoth-ca.crt" || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${CERTS_DIR}/server.crt" "${SHARED_DIR}/certs/shoggoth.crt" || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${CERTS_DIR}/server.key" "${SHARED_DIR}/certs/shoggoth.key" || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${RENDERED_DIR}/phpldapadmin.env" "${SHARED_DIR}/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${RENDERED_DIR}/plugin.tar.gz" "${SHARED_DIR}/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${RENDERED_DIR}/web-external.conf" "${SHARED_DIR}/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${K8S_SECRETS_DIR}/"* "${SHARED_DIR}/k8s-secrets/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp /shoggoth/bringup/templates/setup-client.sh "${SHARED_DIR}/setup-client.sh" && chmod 755 "${SHARED_DIR}/setup-client.sh" || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${RENDERED_DIR}/redmine/redmine.env" "${SHARED_DIR}/redmine/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${RENDERED_DIR}/cdash/cdash.env" "${SHARED_DIR}/cdash/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${RENDERED_DIR}/gitea/gitea.env" "${SHARED_DIR}/gitea/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${RENDERED_DIR}/kestra/env" "${SHARED_DIR}/kestra/" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${RENDERED_DIR}/kestra-config.yaml" "${SHARED_DIR}/kestra/config.yaml" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${RENDERED_DIR}/litellm-config.yaml" "${SHARED_DIR}/litellm/config.yaml" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    cp -a "${RENDERED_DIR}/gitea-runner-config.yaml" "${SHARED_DIR}/gitea-runner/config.yaml" 2>/dev/null || COPY_ERRORS=$((COPY_ERRORS + 1))
-    mkdir -p "${SHARED_DIR}/docker-cache-certs"
-    cp -a "${DOCKER_CACHE_CA_DIR}/"* "${SHARED_DIR}/docker-cache-certs/" 2>&1 || echo "WARNING: docker-cache-certs copy failed (non-fatal)"
+    echo "  openldap: ${RENDERED_LDAP_DIR}/"
+    ls "${RENDERED_LDAP_DIR}/" 2>&1 || true
+    cp -a "${RENDERED_LDAP_DIR}/"* "${SHARED_DIR}/openldap/" 2>&1 || { echo "  FAIL: openldap" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    echo "  certs: ${CERTS_DIR}/"
+    ls "${CERTS_DIR}/" 2>&1 || true
+    cp -a "${CERTS_DIR}/ca.crt" "${SHARED_DIR}/certs/shoggoth-ca.crt" 2>&1 || { echo "  FAIL: ca.crt" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${CERTS_DIR}/server.crt" "${SHARED_DIR}/certs/shoggoth.crt" 2>&1 || { echo "  FAIL: server.crt" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${CERTS_DIR}/server.key" "${SHARED_DIR}/certs/shoggoth.key" 2>&1 || { echo "  FAIL: server.key" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${RENDERED_DIR}/phpldapadmin.env" "${SHARED_DIR}/" 2>&1 || { echo "  FAIL: phpldapadmin.env" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${RENDERED_DIR}/plugin.tar.gz" "${SHARED_DIR}/" 2>&1 || { echo "  FAIL: plugin.tar.gz" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${RENDERED_DIR}/web-external.conf" "${SHARED_DIR}/" 2>&1 || { echo "  FAIL: web-external.conf" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${K8S_SECRETS_DIR}/"* "${SHARED_DIR}/k8s-secrets/" 2>&1 || { echo "  FAIL: k8s-secrets" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp /shoggoth/bringup/templates/setup-client.sh "${SHARED_DIR}/setup-client.sh" 2>&1 && chmod 755 "${SHARED_DIR}/setup-client.sh" || { echo "  FAIL: setup-client.sh" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${RENDERED_DIR}/redmine/redmine.env" "${SHARED_DIR}/redmine/" 2>&1 || { echo "  FAIL: redmine.env" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${RENDERED_DIR}/cdash/cdash.env" "${SHARED_DIR}/cdash/" 2>&1 || { echo "  FAIL: cdash.env" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${RENDERED_DIR}/gitea/gitea.env" "${SHARED_DIR}/gitea/" 2>&1 || { echo "  FAIL: gitea.env" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${RENDERED_DIR}/kestra/env" "${SHARED_DIR}/kestra/" 2>&1 || { echo "  FAIL: kestra/env" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${RENDERED_DIR}/kestra-config.yaml" "${SHARED_DIR}/kestra/config.yaml" 2>&1 || { echo "  FAIL: kestra-config.yaml" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    printf '#!/usr/bin/env sh\nset -eu\n\nif [ -f /shoggoth/kestra/env ]; then\n    set -a\n    . /shoggoth/kestra/env\n    set +a\nfi\n\nexec /app/kestra "$@"\n' > "${SHARED_DIR}/kestra/entrypoint.sh"
+    chmod 755 "${SHARED_DIR}/kestra/entrypoint.sh"
+    cp -a "${RENDERED_DIR}/litellm-config.yaml" "${SHARED_DIR}/litellm/config.yaml" 2>&1 || { echo "  FAIL: litellm-config.yaml" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
+    cp -a "${RENDERED_DIR}/gitea-runner-config.yaml" "${SHARED_DIR}/gitea-runner/config.yaml" 2>&1 || { echo "  FAIL: gitea-runner-config.yaml" >&2; COPY_ERRORS=$((COPY_ERRORS + 1)); }
 
     if [ "${COPY_ERRORS}" -gt 0 ]; then
         echo "ERROR: ${COPY_ERRORS} file copy operation(s) failed in Phase 11. Sentinel not created." >&2
@@ -1218,7 +1183,7 @@ data:
     #!/bin/sh
     set -e
 
-    DOCKER_PROXY_PORT="${DOCKER_PROXY_PORT:-3128}"
+    DOCKER_PROXY_PORT="${DOCKER_PROXY_PORT:-${DOCKER_CACHE_PORT}}"
     CONFIGURE_DOCKER="${CONFIGURE_DOCKER:-}"
     CONFIGURE_HOSTS="${CONFIGURE_HOSTS:-}"
     CONFIGURE_ALL="${CONFIGURE_ALL:-}"
@@ -1415,12 +1380,8 @@ data:
 
         run_priv_cmd "cat > ${docker_daemon_file} <<EOF
     {
-      \"insecure-registries\": [\"docker-registry.${DOMAIN}\"],
-      \"proxies\": {
-        \"http-proxy\": \"${PROXY_URL}\",
-        \"https-proxy\": \"${PROXY_URL}\",
-        \"no-proxy\": \"*.${DOMAIN}\"
-      }
+      \"insecure-registries\": [\"docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\", \"docker-registry.${DOMAIN}\"],
+      \"registry-mirrors\": [\"http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\"]
     }
     EOF"
 
@@ -1677,7 +1638,6 @@ data:
             echo "Setting up Docker client to use shoggoth proxy at ${PROXY_URL}"
 
             configure_docker_proxy
-            install_ca_certificate
 
             echo "Docker proxy setup complete. Test with: docker pull nginx:latest"
         fi
@@ -3473,7 +3433,7 @@ metadata:
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   ttlSecondsAfterFinished: 86400
-  backoffLimit: 6
+  backoffLimit: 0
   template:
     metadata:
       labels:
@@ -3487,9 +3447,48 @@ spec:
           - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
           - cluster.local
-      restartPolicy: OnFailure
+      restartPolicy: Never
       serviceAccountName: bringup
       initContainers:
+        - name: wait-openbao
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              echo "=== wait-openbao: network diagnostics ==="
+              echo "Container: $(hostname)"
+              echo "--- /etc/resolv.conf ---"
+              cat /etc/resolv.conf
+              echo "--- /etc/hosts ---"
+              cat /etc/hosts
+              echo "--- wget http://openbao:80/ ---"
+              wget -S -O /dev/null --timeout=2 http://openbao:80/ 2>&1 || true
+              echo "--- wget http://openbao.${SHOGGOTH_NAMESPACE}.svc.cluster.local:80/ ---"
+              wget -S -O /dev/null --timeout=2 http://openbao.${SHOGGOTH_NAMESPACE}.svc.cluster.local:80/ 2>&1 || true
+              echo "=== wait-openbao: polling /v1/sys/health ==="
+              RETRIES=0
+              MAX_RETRIES=60
+              while [ ${RETRIES} -lt ${MAX_RETRIES} ]; do
+                  RETRIES=$((RETRIES + 1))
+                  echo "--- attempt ${RETRIES}/${MAX_RETRIES} ---"
+                  WGET_OUT=$(wget -S -O /dev/null --timeout=3 http://openbao:80/v1/sys/health 2>&1)
+                  echo "${WGET_OUT}"
+                  if echo "${WGET_OUT}" | grep -q 'HTTP/'; then
+                      echo "OpenBao is reachable"
+                      exit 0
+                  fi
+                  sleep 2
+              done
+              echo "ERROR: OpenBao not reachable after ${MAX_RETRIES} retries"
+              exit 1
+          resources:
+            requests:
+              memory: "16Mi"
+              cpu: "10m"
+            limits:
+              memory: "32Mi"
+              cpu: "100m"
         - name: preflight
           image: busybox:latest
           imagePullPolicy: IfNotPresent
@@ -3509,28 +3508,6 @@ spec:
             limits:
               memory: "32Mi"
               cpu: "100m"
-        - name: wait-openbao
-          image: busybox:latest
-          imagePullPolicy: IfNotPresent
-          command: ["sh", "-c"]
-          args:
-            - |
-              echo "bringup: wait-openbao started"
-              while true; do
-                if wget -q -S -O /dev/null --timeout=3 http://openbao:80/v1/sys/health 2>&1 | grep -q 'HTTP/'; then
-                  echo "bringup: OpenBao responding"
-                  exit 0
-                fi
-                echo "bringup: waiting for OpenBao..."
-                sleep 2
-              done
-          resources:
-            requests:
-              memory: "32Mi"
-              cpu: "50m"
-            limits:
-              memory: "64Mi"
-              cpu: "200m"
         - name: fix-permissions
           image: busybox:latest
           imagePullPolicy: IfNotPresent
@@ -3556,7 +3533,13 @@ spec:
           workingDir: /shoggoth/bringup
           command: ["bash", "-c"]
           args:
-            - "bash /shoggoth/bringup/bringup.sh 2>&1 | tee /shoggoth/rendered/bringup.log; exit ${PIPESTATUS[0]}"
+            - |
+              LOG=/shoggoth/rendered/bringup.log
+              echo "=== bringup start $(date -Iseconds) ===" >> "${LOG}"
+              bash /shoggoth/bringup/bringup.sh 2>&1 | tee -a "${LOG}"
+              EXIT=${PIPESTATUS[0]}
+              echo "=== bringup exit ${EXIT} $(date -Iseconds) ===" >> "${LOG}"
+              exit ${EXIT}
           securityContext:
             runAsUser: 0
           env:

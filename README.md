@@ -91,7 +91,9 @@ configurable domain, set to `s.local` by default.
 - Caching:
   - `apt-cache.` — Debian/Ubuntu package caching proxy
     <https://github.com/sameersbn/docker-apt-cacher-ng>.
-  - `docker-cache.` — Docker registry caching proxy
+  - `container-cache.` — Container image caching proxy (zot, k3s internal)
+    <https://zotregistry.dev/>.
+  - `docker-cache.` — Docker registry caching proxy (backward-compatible clients)
     <https://github.com/rpardini/docker-registry-proxy>.
   - `python-cache.` — Python package caching proxy, served by
     <https://en.angie.software/angie/> (proxy_cache to pypi.org).

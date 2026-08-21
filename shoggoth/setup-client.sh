@@ -198,12 +198,8 @@ configure_docker_proxy() {
 
     run_priv_cmd "cat > ${docker_daemon_file} <<EOF
 {
-  \"insecure-registries\": [\"docker-registry.${DOMAIN}\"],
-  \"proxies\": {
-    \"http-proxy\": \"${PROXY_URL}\",
-    \"https-proxy\": \"${PROXY_URL}\",
-    \"no-proxy\": \"*.${DOMAIN}\"
-  }
+  \"insecure-registries\": [\"docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\", \"docker-registry.${DOMAIN}\"],
+  \"registry-mirrors\": [\"http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\"]
 }
 EOF"
 
@@ -460,7 +456,6 @@ main() {
         echo "Setting up Docker client to use shoggoth proxy at ${PROXY_URL}"
 
         configure_docker_proxy
-        install_ca_certificate
 
         echo "Docker proxy setup complete. Test with: docker pull nginx:latest"
     fi

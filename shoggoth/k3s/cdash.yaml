@@ -465,7 +465,12 @@ spec:
                   - /bin/bash
                   - -c
                   - |
-                    /bin/bash /shoggoth/cdash/init.sh >/proc/1/fd/1 2>/proc/1/fd/2
+                    set -o pipefail
+                    LOG=/shoggoth/rendered/cdash-init.log
+                    exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
+                    echo "=== cdash-init start $(date -Iseconds) ==="
+                    /bin/bash /shoggoth/cdash/init.sh
+                    echo "=== cdash-init exit $? $(date -Iseconds) ==="
           resources:
             requests:
               memory: "256Mi"

@@ -229,10 +229,15 @@ spec:
             postStart:
               exec:
                 command:
-                  - /bin/sh
+                  - /bin/bash
                   - -c
                   - |
-                    /bin/sh /shoggoth/git/gitea/init.sh >/proc/1/fd/1 2>/proc/1/fd/2
+                    set -o pipefail
+                    LOG=/shoggoth/rendered/gitea-init.log
+                    exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
+                    echo "=== gitea-init start $(date -Iseconds) ==="
+                    /bin/sh /shoggoth/git/gitea/init.sh
+                    echo "=== gitea-init exit $? $(date -Iseconds) ==="
           volumeMounts:
             - name: data
               mountPath: /data
@@ -332,7 +337,7 @@ spec:
             - name: GITEA_RUNNER_REGISTRATION_TOKEN_FILE
               value: "/run/secrets/gitea_runner_token"
             - name: CONFIG_FILE
-              value: "/config.yaml"
+              value: "/shoggoth/gitea-runner/config.yaml"
           volumeMounts:
             - name: data
               mountPath: /data
@@ -340,8 +345,7 @@ spec:
               mountPath: /shoggoth/rendered
               readOnly: true
             - name: config
-              mountPath: /config.yaml
-              subPath: config.yaml
+              mountPath: /shoggoth/gitea-runner
               readOnly: true
             - name: dind-socket
               mountPath: /dind

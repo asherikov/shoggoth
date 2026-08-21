@@ -22,9 +22,9 @@ data:
     #!/usr/bin/env sh
     set -eu
 
-    if [ -f /shoggoth_kestra_env ]; then
+    if [ -f /shoggoth/kestra/env ]; then
         set -a
-        . /shoggoth_kestra_env
+        . /shoggoth/kestra/env
         set +a
     fi
 
@@ -269,12 +269,12 @@ spec:
               value: "${SHOGGOTH_GITHUB_ORG}"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://otelcol:4317"
-          command: ["/bin/sh", "/shoggoth_kestra_entrypoint.sh"]
+          command: ["/bin/sh", "/shoggoth/kestra-entrypoint/entrypoint.sh"]
           args:
             - "server"
             - "standalone"
             - "--config"
-            - "/shoggoth_kestra.yaml"
+            - "/shoggoth/kestra/config.yaml"
             - "--flow-path"
             - "/app/flows"
           ports:
@@ -303,17 +303,11 @@ spec:
             - name: rendered
               mountPath: /shoggoth/rendered
               readOnly: true
-            - name: kestra-entrypoint
-              mountPath: /shoggoth_kestra_entrypoint.sh
-              subPath: entrypoint.sh
+            - name: kestra-rendered
+              mountPath: /shoggoth/kestra
               readOnly: true
-            - name: rendered
-              mountPath: /shoggoth_kestra.yaml
-              subPath: kestra/config.yaml
-              readOnly: true
-            - name: rendered
-              mountPath: /shoggoth_kestra_env
-              subPath: kestra/env
+            - name: entrypoint
+              mountPath: /shoggoth/kestra-entrypoint
               readOnly: true
             - name: data
               mountPath: /app/storage
@@ -328,7 +322,11 @@ spec:
           hostPath:
             path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
             type: DirectoryOrCreate
-        - name: kestra-entrypoint
+        - name: kestra-rendered
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered/kestra
+            type: DirectoryOrCreate
+        - name: entrypoint
           configMap:
             name: kestra-entrypoint
             defaultMode: 0755

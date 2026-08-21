@@ -52,6 +52,10 @@ data:
         export SECRET_KEY_BASE="$(cat "${REDMINE_SECRET_KEY_BASE_FILE}")"
     fi
 
+    if [ ! -f /shoggoth/rendered/redmine/redmine.env ]; then
+        echo "shoggoth: FATAL: /shoggoth/rendered/redmine/redmine.env not found — bringup may not have completed" >&2
+        exit 1
+    fi
     . /shoggoth/rendered/redmine/redmine.env
 
     echo "shoggoth: Waiting for Redmine to be ready..."
@@ -68,6 +72,13 @@ data:
     echo "shoggoth: Redmine is ready for LDAP configuration"
 
     echo "shoggoth: Configuring LDAP auth source"
+    for VAR in LDAP_HOST LDAP_BIND_DN LDAP_BIND_PASSWORD LDAP_BASE_DN; do
+        eval "VAL=\${${VAR}:-}"
+        if [ -z "${VAL}" ]; then
+            echo "shoggoth: ERROR: ${VAR} not set — redmine.env may be incomplete" >&2
+            exit 1
+        fi
+    done
     LDAP_HOST="${LDAP_HOST}" LDAP_BIND_DN="${LDAP_BIND_DN}" LDAP_BIND_PASSWORD="${LDAP_BIND_PASSWORD}" LDAP_BASE_DN="${LDAP_BASE_DN}" \
         bundle exec rails runner '
         auth = AuthSourceLdap.find_or_initialize_by(name: "openldap")
@@ -87,6 +98,10 @@ data:
         || { echo "shoggoth: FATAL: LDAP auth source configuration failed" >&2; exit 1; }
 
     echo "shoggoth: Setting local admin password"
+    if [ -z "${SHOGGOTH_ADMIN_PASSWORD:-}" ]; then
+        echo "shoggoth: ERROR: SHOGGOTH_ADMIN_PASSWORD not set — redmine.env may be incomplete" >&2
+        exit 1
+    fi
     RESULT="$(SHOGGOTH_ADMIN_PASSWORD="${SHOGGOTH_ADMIN_PASSWORD}" bundle exec rails runner '
         user = User.find_by_login("admin")
         if user
@@ -380,10 +395,15 @@ spec:
             postStart:
               exec:
                 command:
-                  - /bin/sh
+                  - /bin/bash
                   - -c
                   - |
-                    /bin/sh /shoggoth/redmine/init.sh >/proc/1/fd/1 2>/proc/1/fd/2
+                    set -o pipefail
+                    LOG=/shoggoth/rendered/redmine-init.log
+                    exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
+                    echo "=== redmine-init start $(date -Iseconds) ==="
+                    /bin/sh /shoggoth/redmine/init.sh
+                    echo "=== redmine-init exit $? $(date -Iseconds) ==="
           resources:
             requests:
               memory: "256Mi"

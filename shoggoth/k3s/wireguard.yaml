@@ -31,8 +31,8 @@ spec:
     app: wireguard
   ports:
     - name: http
-      port: 51821
-      targetPort: 51821
+      port: ${WG_UI_PORT}
+      targetPort: ${WG_UI_PORT}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -102,7 +102,7 @@ spec:
               hostPort: ${WG_PORT}
               protocol: UDP
               name: wireguard
-            - containerPort: 51821
+            - containerPort: ${WG_UI_PORT}
               name: http
           env:
             - name: INIT_ENABLED
@@ -128,7 +128,7 @@ spec:
             - name: DISABLE_IPV6
               value: "true"
             - name: PORT
-              value: "51821"
+              value: "${WG_UI_PORT}"
             - name: OTEL_TRACES_EXPORTER
               value: "otlp"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -156,14 +156,14 @@ spec:
           readinessProbe:
             httpGet:
               path: /
-              port: 51821
+              port: ${WG_UI_PORT}
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 30
           livenessProbe:
             httpGet:
               path: /
-              port: 51821
+              port: ${WG_UI_PORT}
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 6

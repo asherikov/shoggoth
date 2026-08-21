@@ -1,0 +1,118 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: container-cache
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: container-cache
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  selector:
+    app: container-cache
+  ports:
+    - name: registry
+      port: ${CONTAINER_CACHE_PORT}
+      targetPort: ${CONTAINER_CACHE_PORT}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: container-cache-config
+  namespace: ${SHOGGOTH_NAMESPACE}
+data:
+  config.json: |
+    {
+      "storage": {
+        "rootDirectory": "/var/lib/zot"
+      },
+      "http": {
+        "address": "0.0.0.0",
+        "port": "${CONTAINER_CACHE_PORT}"
+      },
+      "log": {
+        "level": "info"
+      },
+      "extensions": {
+        "sync": {
+          "registries": [
+            { "urls": ["https://registry-1.docker.io"], "onDemand": true, "content": [{"prefix": "**", "tags": {"regex": "^(latest|stable|[0-9]+(\\.[0-9]+){0,3}([-.].*)?)$", "semver": true}}] },
+            { "urls": ["https://ghcr.io"], "onDemand": true, "content": [{"prefix": "**", "tags": {"regex": "^(latest|stable|main|[0-9]+(\\.[0-9]+){0,3}([-.].*)?)$", "semver": true}}] },
+            { "urls": ["https://gcr.io"], "onDemand": true },
+            { "urls": ["https://quay.io"], "onDemand": true },
+            { "urls": ["https://mcr.microsoft.com"], "onDemand": true },
+            { "urls": ["https://codeberg.org"], "onDemand": true },
+            { "urls": ["https://docker.gitea.com"], "onDemand": true },
+            { "urls": ["https://docker.angie.software"], "onDemand": true },
+            { "urls": ["https://public.ecr.aws"], "onDemand": true }
+          ]
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: container-cache
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: container-cache
+  template:
+    metadata:
+      labels:
+        app: container-cache
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: container-cache
+          image: ghcr.io/project-zot/zot:latest
+          imagePullPolicy: IfNotPresent
+          args: ["serve", "/etc/zot/config.json"]
+          ports:
+            - containerPort: ${CONTAINER_CACHE_PORT}
+              name: registry
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: ${CONTAINER_CACHE_PORT}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: ${CONTAINER_CACHE_PORT}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: cache
+              mountPath: /var/lib/zot
+            - name: config
+              mountPath: /etc/zot
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: container-cache
+        - name: config
+          configMap:
+            name: container-cache-config
