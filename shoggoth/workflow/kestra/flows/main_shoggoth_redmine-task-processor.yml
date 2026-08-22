@@ -15,7 +15,7 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: docker-registry.s.local/slave_noble:dind
+    containerImage: registry.s.local/slave_noble:dind
     commands:
       - /shoggoth/workflow/scripts/redmine_task_list.sh
 

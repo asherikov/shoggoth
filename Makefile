@@ -6,9 +6,7 @@ GITHUB_ORG?=$(shell grep SHOGGOTH_GITHUB_ORG ${SHOGGOTH_ENV} | cut -f 2 -d '=')
 WEB_EXT_PORT?=$(shell grep '^WEB_EXT_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
 WG_PORT?=$(shell grep '^WG_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
 DNS_IP?=$(shell grep '^DNS_IP=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
-CONTAINER_CACHE_PORT?=$(shell grep '^CONTAINER_CACHE_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
-DOCKER_CACHE_PORT?=$(shell grep '^DOCKER_CACHE_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
-DOCKER_REGISTRY_PORT?=$(shell grep '^DOCKER_REGISTRY_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+REGISTRY_PORT?=$(shell grep '^REGISTRY_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
 WG_UI_PORT?=$(shell grep '^WG_UI_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
 HOST?=host.${DOMAIN}
 HOST_IP?=$(shell getent hosts ${HOST} | cut -f 1 -d ' ')
@@ -29,7 +27,9 @@ sync:
 	rsync -e "ssh ${SSH_COMMON_ARGS}" -r shoggoth ${USER}@${HOST_IP}:${REMOTE_PATH}/${INSTANCE} || true
 	@K3S_DIR="${INSTANCE}"; \
 	cmds="mkdir -p /var/lib/rancher/k3s/storage/$${K3S_DIR}/coredns-blacklists"; \
+	cmds="$$cmds && mkdir -p /var/lib/rancher/k3s/storage/$${K3S_DIR}/scripts"; \
 	cmds="$$cmds && cp ./dns/hosts-blacklist/hosts /var/lib/rancher/k3s/storage/$${K3S_DIR}/coredns-blacklists/blocklist.hosts"; \
+	cmds="$$cmds && cp ./setup-client.sh /var/lib/rancher/k3s/storage/$${K3S_DIR}/scripts/setup-client.sh"; \
 	for entry in ${K3S_HOST_PATHS}; do \
 		DST=$$(echo "$$entry" | cut -d: -f1); \
 		SRC=$$(echo "$$entry" | cut -d: -f2); \
@@ -75,14 +75,9 @@ home:
 test:
 	@echo "Requires VPN connectivity"
 	@echo "======================================================="
-	@echo ">>>>>>>>>>>> container cache (zot)"
-	curl -s --connect-timeout 5 "http://container-cache.${DOMAIN}:${CONTAINER_CACHE_PORT}/v2/" --output /dev/null
-	@echo ">>>>>>>>>>>> docker cache (proxy)"
-	curl -s --connect-timeout 5 "http://docker-cache.${DOMAIN}:${DOCKER_CACHE_PORT}/v2/" --output /dev/null
-	@echo "======================================================="
-	@echo ">>>>>>>>>>>> docker registry"
-	@curl -s --connect-timeout 5 -o /dev/null -w '%{http_code}' "http://docker-registry.${DOMAIN}/v2/" | grep -q '^200' && echo "OK" || echo "FAIL"
-	@curl -s --connect-timeout 5 -o /dev/null -w '%{http_code}' "http://docker-registry.${DOMAIN}/v2/_catalog" | grep -q '^200' && echo "OK" || echo "FAIL"
+	@echo ">>>>>>>>>>>> registry (zot)"
+	@curl -s --connect-timeout 5 -o /dev/null -w '%{http_code}' "http://registry.${DOMAIN}:${REGISTRY_PORT}/v2/" | grep -q '^200' && echo "OK" || echo "FAIL"
+	@curl -s --connect-timeout 5 -o /dev/null -w '%{http_code}' "http://registry.${DOMAIN}:${REGISTRY_PORT}/v2/_catalog" | grep -q '^200' && echo "OK" || echo "FAIL"
 	@echo "======================================================="
 	@echo ">>>>>>>>>>>> DNS"
 	host ${DOMAIN} dns.${DOMAIN}

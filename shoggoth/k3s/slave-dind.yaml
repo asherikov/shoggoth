@@ -43,7 +43,7 @@ data:
     export DOCKER_HOST=unix:///dind/docker.sock
 
     mkdir -p /etc/docker/
-    printf '{"insecure-registries":["docker-registry.%s"]}\n' "${SHOGGOTH_DOMAIN}" > /etc/docker/daemon.json
+    printf '{"insecure-registries":["registry.%s"]}\n' "${SHOGGOTH_DOMAIN}" > /etc/docker/daemon.json
 
     rm -f /var/run/docker.pid
 
@@ -80,7 +80,7 @@ data:
         exit 1
     fi
 
-    BASE_IMAGE="docker-registry.${SHOGGOTH_DOMAIN}/slave_noble"
+    BASE_IMAGE="registry.${SHOGGOTH_DOMAIN}/slave_noble"
 
     echo "shoggoth: Pulling base image ${BASE_IMAGE}:latest..." >&2
     if ! docker pull "${BASE_IMAGE}:latest"; then
@@ -104,7 +104,7 @@ data:
 
     DOCKERFILE="${BUILD_DIR}/Dockerfile"
     cat > "${DOCKERFILE}" <<'DOCKERFILE_HEAD'
-    FROM docker-registry.__SHOGGOTH_DOMAIN__/slave_noble:latest
+    FROM registry.__SHOGGOTH_DOMAIN__/slave_noble:latest
 
     ENV SSH_AUTH_SOCK="/shoggoth/git-cred/ssh_auth_sock"
     ENV CCWS_CACHE="/cache/ccws/"
@@ -204,7 +204,7 @@ data:
         slave-term:
             build:
                 context: ${BUILD_DIR}
-            image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+            image: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
             container_name: slave-term
             restart: unless-stopped
             network_mode: host
@@ -328,7 +328,7 @@ spec:
               command:
                 - "sh"
                 - "-c"
-                - "docker info > /dev/null 2>&1 && docker image inspect docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:dind > /dev/null 2>&1 && test -S /shoggoth/git-cred/ssh_auth_sock"
+                - "docker info > /dev/null 2>&1 && docker image inspect registry.${SHOGGOTH_DOMAIN}/slave_noble:dind > /dev/null 2>&1 && test -S /shoggoth/git-cred/ssh_auth_sock"
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 30

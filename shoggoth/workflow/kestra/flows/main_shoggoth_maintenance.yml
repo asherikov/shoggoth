@@ -19,7 +19,7 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py kestra-webhooks
     env:
@@ -34,7 +34,7 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py redmine-webhooks
     env:
@@ -49,7 +49,7 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py slave-access
     env:
@@ -64,7 +64,7 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py slave-token
     env:
@@ -81,7 +81,7 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py ssh-key
     env:

@@ -265,7 +265,7 @@ data:
             <li><a href="http://git.${SHOGGOTH_DOMAIN}/">git</a> - Gitea git service</li>
             <li><a href="http://redmine.${SHOGGOTH_DOMAIN}/">redmine</a> - Redmine issue tracker</li>
             <li><a href="http://kestra.${SHOGGOTH_DOMAIN}/">kestra</a> - Kestra workflow orchestration</li>
-            <li><a href="http://docker-registry.${SHOGGOTH_DOMAIN}/v2/_catalog">docker-registry</a> - Docker image registry</li>
+            <li><a href="http://registry.${SHOGGOTH_DOMAIN}/v2/_catalog">registry</a> - Container image registry (zot)</li>
             <li><a href="http://python-cache.${SHOGGOTH_DOMAIN}/">python-cache</a> - PyPI cache proxy</li>
             <li><a href="http://apt-cache.${SHOGGOTH_DOMAIN}/">apt-cache</a> - APT package cache
                 <a href="http://apt-cache.${SHOGGOTH_DOMAIN}/acng-report.html">Usage statistics.</a></li>
@@ -436,7 +436,7 @@ spec:
               mountPath: /shoggoth/rendered
               readOnly: true
         - name: render-config
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: asherikov/shoggoth_tools:alpine
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:
@@ -486,7 +486,7 @@ spec:
             - name: rendered-config
               mountPath: /rendered
         - name: fix-permissions
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: asherikov/shoggoth_tools:alpine
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c", "chown -R 100:101 /data/build_cache /data/python_cache"]
           securityContext:

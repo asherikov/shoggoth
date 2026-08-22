@@ -1,17 +1,17 @@
 #!/bin/sh
 set -e
 
-DOCKER_PROXY_PORT="${DOCKER_PROXY_PORT:-3128}"
 CONFIGURE_DOCKER="${CONFIGURE_DOCKER:-}"
 CONFIGURE_HOSTS="${CONFIGURE_HOSTS:-}"
 CONFIGURE_ALL="${CONFIGURE_ALL:-}"
 CONFIGURE_APT_CACHE="${CONFIGURE_APT_CACHE:-}"
 CONFIGURE_CLIENT_CONF="${CONFIGURE_CLIENT_CONF:-}"
+CONFIGURE_CA_CERT="${CONFIGURE_CA_CERT:-}"
 CONFIGURE_GITEA_USER="${CONFIGURE_GITEA_USER:-}"
 CONFIGURE_AI_TOKEN="${CONFIGURE_AI_TOKEN:-ai}"
 CONFIGURE_API_GATEWAY="${CONFIGURE_API_GATEWAY:-}"
 CONFIGURE_SSH_CONFIG="${CONFIGURE_SSH_CONFIG:-}"
-DOMAIN="${DOMAIN:?DOMAIN is required -- pass --domain or set DOMAIN env var}"
+DOMAIN="${DOMAIN:-${SHOGGOTH_DOMAIN:?DOMAIN or SHOGGOTH_DOMAIN is required}}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
 CLIENT_CONF_DIR="${CLIENT_CONF_DIR:-${HOME}/.config/shoggoth}"
 
@@ -48,9 +48,10 @@ Set up Docker client to use shoggoth proxy and generate configuration files.
 Options:
     --domain DOMAIN         Domain name for service URLs and hosts entries (required)
     --host-ip IP            IP address for /etc/hosts entries (default: 127.0.0.1)
-    --docker [PORT]         Configure Docker proxy, optionally with a port (default: 3128)
+    --docker                Configure Docker to use shoggoth registry
     --update-hosts          Append generated hosts file to /etc/hosts
     --apt-cache             Install apt cache config to system apt config
+    --install-ca-cert       Install web-external TLS CA certificate to system trust store
     --gitea-user USER       Configure gitea tea CLI username for basic auth
     --ai-token TOKEN        Configure OpenAI API key for AI services (OPENAI_API_KEY)
     --api-gateway           Use API gateway for Gitea/Redmine auth (tokens injected by gateway)
@@ -74,12 +75,6 @@ parse_args() {
                 ;;
             --docker)
                 CONFIGURE_DOCKER="true"
-                if [ -n "${2:-}" ]; then
-                    case "${2}" in
-                        --*) ;;
-                        *) DOCKER_PROXY_PORT="$2"; shift ;;
-                    esac
-                fi
                 shift
                 ;;
             --update-hosts)
@@ -88,6 +83,10 @@ parse_args() {
                 ;;
             --apt-cache)
                 CONFIGURE_APT_CACHE="true"
+                shift
+                ;;
+            --install-ca-cert)
+                CONFIGURE_CA_CERT="true"
                 shift
                 ;;
             --gitea-user)
@@ -142,45 +141,6 @@ detect_os() {
     fi
 }
 
-install_ca_certificate() {
-    local os_id
-    os_id=$(detect_os)
-    local ca_url="https://${HOST_IP}/ca.crt"
-
-    if [ "${HOST_IP}" = "127.0.0.1" ] && [ "${CONFIGURE_DOCKER}" = "true" ]; then
-        echo "Warning: HOST_IP is 127.0.0.1 (default). CA certificate download will fail on remote clients." >&2
-        echo "Use --host-ip <SERVER_IP> to specify the server address." >&2
-        exit 1
-    fi
-
-    case "$os_id" in
-        ubuntu|debian)
-            curl -sk "${ca_url}" -o /tmp/docker_registry_proxy.crt
-            run_priv_cmd "cp /tmp/docker_registry_proxy.crt /usr/share/ca-certificates/docker_registry_proxy.crt"
-            echo "docker_registry_proxy.crt" | run_priv_cmd "tee -a /etc/ca-certificates.conf" >/dev/null
-            run_priv_cmd "update-ca-certificates --fresh"
-            ;;
-        centos|rhel|rocky|almalinux|fedora)
-            curl -sk "${ca_url}" -o /tmp/docker_registry_proxy.crt
-            run_priv_cmd "cp /tmp/docker_registry_proxy.crt /etc/pki/ca-trust/source/anchors/docker_registry_proxy.crt"
-            run_priv_cmd "update-ca-trust"
-            ;;
-        alpine)
-            curl -sk "${ca_url}" -o /tmp/docker_registry_proxy.crt
-            run_priv_cmd "cp /tmp/docker_registry_proxy.crt /usr/local/share/ca-certificates/docker_registry_proxy.crt"
-            run_priv_cmd "update-ca-certificates"
-            ;;
-        nixos)
-            curl -sk "${ca_url}" -o /tmp/docker_registry_proxy.crt
-            run_priv_cmd "cp /tmp/docker_registry_proxy.crt /etc/ssl/certs/docker_registry_proxy.crt"
-            ;;
-        *)
-            echo "Warning: Unsupported OS '$os_id'. Please install CA certificate manually."
-            echo "Download from: ${ca_url}"
-            ;;
-    esac
-}
-
 configure_docker_proxy() {
     local os_id
     os_id=$(detect_os)
@@ -198,8 +158,8 @@ configure_docker_proxy() {
 
     run_priv_cmd "cat > ${docker_daemon_file} <<EOF
 {
-  \"insecure-registries\": [\"docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\", \"docker-registry.${DOMAIN}\"],
-  \"registry-mirrors\": [\"http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}\"]
+  \"insecure-registries\": [\"registry.${DOMAIN}\"],
+  \"registry-mirrors\": [\"http://registry.${DOMAIN}\"]
 }
 EOF"
 
@@ -213,8 +173,51 @@ EOF"
     fi
 }
 
+install_ca_certificate() {
+    local os_id
+    os_id=$(detect_os)
+    local ca_url="https://web-external.${DOMAIN}/ca.crt"
+    local ca_tmp="/tmp/shoggoth-ca.crt"
+
+    echo "Downloading CA certificate from ${ca_url}..."
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --insecure "${ca_url}" -o "${ca_tmp}"
+    elif command -v wget >/dev/null 2>&1; then
+        wget --no-check-certificate -q "${ca_url}" -O "${ca_tmp}"
+    else
+        echo "Error: Neither curl nor wget is available."
+        exit 1
+    fi
+
+    case "${os_id}" in
+        ubuntu|debian)
+            local dest="/usr/local/share/ca-certificates/shoggoth.crt"
+            run_priv_cmd "cp ${ca_tmp} ${dest}"
+            run_priv_cmd "update-ca-certificates"
+            ;;
+        fedora|rhel|centos|rocky|alma)
+            local dest="/etc/pki/ca-trust/source/anchors/shoggoth.crt"
+            run_priv_cmd "cp ${ca_tmp} ${dest}"
+            run_priv_cmd "update-ca-trust"
+            ;;
+        nixos)
+            echo "NixOS: add the certificate via security.pki.certificates in configuration.nix."
+            echo "Certificate saved to ${ca_tmp}"
+            return
+            ;;
+        *)
+            echo "Unsupported OS '${os_id}'. Certificate saved to ${ca_tmp}"
+            echo "Install it manually to your system's trusted CA store."
+            return
+            ;;
+    esac
+
+    rm -f "${ca_tmp}"
+    echo "CA certificate installed successfully."
+}
+
 update_hosts() {
-    services="kestra dns apt-cache docker-cache litellm git build-cache git-pages redmine python-cache docker-registry grafana otelcol api slave-term"
+    services="kestra dns apt-cache registry litellm git build-cache git-pages redmine python-cache grafana otelcol api slave-term"
     hosts_entries="${HOST_IP} ${DOMAIN}
 "
 
@@ -420,7 +423,6 @@ main() {
     parse_args "$@"
 
     ENV_FILE="${CLIENT_CONF_DIR}/env"
-    PROXY_URL="http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}"
 
     if [ $# -eq 0 ]; then
         usage
@@ -431,6 +433,7 @@ main() {
         CONFIGURE_DOCKER="true"
         CONFIGURE_HOSTS="true"
         CONFIGURE_APT_CACHE="true"
+        CONFIGURE_CA_CERT="true"
         CONFIGURE_CLIENT_CONF="true"
         CONFIGURE_API_GATEWAY="true"
         CONFIGURE_SSH_CONFIG="true"
@@ -449,15 +452,11 @@ main() {
     fi
 
     if [ -n "${CONFIGURE_DOCKER}" ]; then
-        case "${CONFIGURE_DOCKER}" in
-            ''|*[!0-9]*) ;;
-            *) DOCKER_PROXY_PORT="${CONFIGURE_DOCKER}"; PROXY_URL="http://docker-cache.${DOMAIN}:${DOCKER_PROXY_PORT}" ;;
-        esac
-        echo "Setting up Docker client to use shoggoth proxy at ${PROXY_URL}"
+        echo "Setting up Docker client to use shoggoth registry at registry.${DOMAIN}"
 
         configure_docker_proxy
 
-        echo "Docker proxy setup complete. Test with: docker pull nginx:latest"
+        echo "Docker registry setup complete. Test with: docker pull nginx:latest"
     fi
 
     if [ "${CONFIGURE_HOSTS}" = "true" ]; then
@@ -469,6 +468,10 @@ main() {
         echo "Setting up apt cache at http://apt-cache.${DOMAIN}/"
         configure_apt_cache
         echo "Apt cache setup complete."
+    fi
+
+    if [ "${CONFIGURE_CA_CERT}" = "true" ]; then
+        install_ca_certificate
     fi
 
     if [ "${CONFIGURE_API_GATEWAY}" = "true" ] && [ -n "${CONFIGURE_CLIENT_CONF}" ]; then

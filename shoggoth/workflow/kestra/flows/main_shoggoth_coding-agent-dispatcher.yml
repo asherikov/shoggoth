@@ -37,7 +37,7 @@ tasks:
         - "/shoggoth/ci_cache:/cache"
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: docker-registry.s.local/slave_noble:dind
+    containerImage: registry.s.local/slave_noble:dind
     commands:
       - "export PATH=\"/shoggoth/workflow/scripts:${PATH}\" && {{ inputs.script }} --verbose {{ inputs.task_id }}"
     env:

@@ -320,7 +320,7 @@ spec:
               mountPath: /shoggoth/rendered
               readOnly: true
         - name: fix-permissions
-          image: docker-registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+          image: asherikov/shoggoth_tools:alpine
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0

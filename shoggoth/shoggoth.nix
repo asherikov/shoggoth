@@ -11,44 +11,44 @@
 
 let
   domain = "${SHOGGOTH_DOMAIN}";
-  dockerProxyPort = "${CONTAINER_CACHE_PORT}";
+  registryPort = "${REGISTRY_PORT}";
   k3sRegistries = pkgs.writeText "registries.yaml" ''
     mirrors:
       docker.io:
         endpoint:
-          - "http://localhost:${dockerProxyPort}"
+          - "http://localhost:${registryPort}"
       ghcr.io:
         endpoint:
-          - "http://localhost:${dockerProxyPort}"
+          - "http://localhost:${registryPort}"
       gcr.io:
         endpoint:
-          - "http://localhost:${dockerProxyPort}"
+          - "http://localhost:${registryPort}"
       quay.io:
         endpoint:
-          - "http://localhost:${dockerProxyPort}"
+          - "http://localhost:${registryPort}"
       mcr.microsoft.com:
         endpoint:
-          - "http://localhost:${dockerProxyPort}"
+          - "http://localhost:${registryPort}"
       codeberg.org:
         endpoint:
-          - "http://localhost:${dockerProxyPort}"
+          - "http://localhost:${registryPort}"
       docker.gitea.com:
         endpoint:
-          - "http://localhost:${dockerProxyPort}"
+          - "http://localhost:${registryPort}"
       docker.angie.software:
         endpoint:
-          - "http://localhost:${dockerProxyPort}"
+          - "http://localhost:${registryPort}"
       public.ecr.aws:
         endpoint:
-          - "http://localhost:${dockerProxyPort}"
-      docker-registry.${domain}:
+          - "http://localhost:${registryPort}"
+      registry.${domain}:
         endpoint:
-          - "http://localhost"
+          - "http://localhost:${registryPort}"
     configs:
-      "localhost:${dockerProxyPort}":
+      "localhost:${registryPort}":
         tls:
           insecure_skip_verify: true
-      docker-registry.${domain}:
+      registry.${domain}:
         tls:
           insecure_skip_verify: true
   '';
@@ -74,8 +74,8 @@ in {
 
   virtualisation.docker.enable = true;
   virtualisation.docker.daemon.settings = {
-    insecure-registries = [ "localhost" "localhost:${dockerProxyPort}" ];
-    registry-mirrors = [ "http://localhost:${dockerProxyPort}" ];
+    insecure-registries = [ "localhost" "localhost:${registryPort}" "registry.${domain}" ];
+    registry-mirrors = [ "http://localhost:${registryPort}" ];
   };
 
   networking.firewall.trustedInterfaces = [ "cni0" ];

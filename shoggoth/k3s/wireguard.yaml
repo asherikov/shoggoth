@@ -121,6 +121,8 @@ spec:
 #                  key: admin-password
             - name: INIT_ALLOWED_IPS
               value: "10.43.0.0/16"
+            - name: WG_PERSISTENT_KEEPALIVE
+              value: "25"
             - name: INIT_DNS
               value: "${DNS_IP}"
             - name: INSECURE

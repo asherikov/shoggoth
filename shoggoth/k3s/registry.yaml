@@ -2,43 +2,55 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: container-cache
+  name: registry
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 10Gi
+      storage: 100Gi
   storageClassName: local-path
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: container-cache
+  name: registry
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   selector:
-    app: container-cache
+    app: registry
   ports:
     - name: registry
-      port: ${CONTAINER_CACHE_PORT}
-      targetPort: ${CONTAINER_CACHE_PORT}
+      port: ${REGISTRY_PORT}
+      targetPort: ${REGISTRY_PORT}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: container-cache-config
+  name: registry-config
   namespace: ${SHOGGOTH_NAMESPACE}
 data:
   config.json: |
     {
       "storage": {
-        "rootDirectory": "/var/lib/zot"
+        "rootDirectory": "/var/lib/zot",
+        "gc": true,
+        "retention": {
+          "policies": [
+            {
+              "repositories": ["**"],
+              "deleteUntagged": true
+            }
+          ]
+        }
       },
       "http": {
         "address": "0.0.0.0",
-        "port": "${CONTAINER_CACHE_PORT}"
+        "port": "${REGISTRY_PORT}",
+        "readTimeout": "0s",
+        "writeTimeout": "0s",
+        "compat": ["docker2s2"]
       },
       "log": {
         "level": "info"
@@ -46,8 +58,8 @@ data:
       "extensions": {
         "sync": {
           "registries": [
-            { "urls": ["https://registry-1.docker.io"], "onDemand": true, "content": [{"prefix": "**", "tags": {"regex": "^(latest|stable|[0-9]+(\\.[0-9]+){0,3}([-.].*)?)$", "semver": true}}] },
-            { "urls": ["https://ghcr.io"], "onDemand": true, "content": [{"prefix": "**", "tags": {"regex": "^(latest|stable|main|[0-9]+(\\.[0-9]+){0,3}([-.].*)?)$", "semver": true}}] },
+            { "urls": ["https://registry-1.docker.io"], "onDemand": true },
+            { "urls": ["https://ghcr.io"], "onDemand": true },
             { "urls": ["https://gcr.io"], "onDemand": true },
             { "urls": ["https://quay.io"], "onDemand": true },
             { "urls": ["https://mcr.microsoft.com"], "onDemand": true },
@@ -63,56 +75,56 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: container-cache
+  name: registry
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: container-cache
+      app: registry
   template:
     metadata:
       labels:
-        app: container-cache
+        app: registry
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
-        - name: container-cache
+        - name: registry
           image: ghcr.io/project-zot/zot:latest
           imagePullPolicy: IfNotPresent
           args: ["serve", "/etc/zot/config.json"]
           ports:
-            - containerPort: ${CONTAINER_CACHE_PORT}
+            - containerPort: ${REGISTRY_PORT}
               name: registry
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "50m"
+              memory: "256Mi"
+              cpu: "100m"
             limits:
-              memory: "512Mi"
-              cpu: "500m"
+              memory: "1Gi"
+              cpu: "1"
           readinessProbe:
             httpGet:
               path: /v2/
-              port: ${CONTAINER_CACHE_PORT}
+              port: ${REGISTRY_PORT}
             initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /v2/
-              port: ${CONTAINER_CACHE_PORT}
+              port: ${REGISTRY_PORT}
             initialDelaySeconds: 30
             periodSeconds: 30
           volumeMounts:
-            - name: cache
+            - name: data
               mountPath: /var/lib/zot
             - name: config
               mountPath: /etc/zot
       volumes:
-        - name: cache
+        - name: data
           persistentVolumeClaim:
-            claimName: container-cache
+            claimName: registry
         - name: config
           configMap:
-            name: container-cache-config
+            name: registry-config

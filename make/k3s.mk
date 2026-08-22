@@ -18,10 +18,10 @@ host_install_nixos:
 	@echo "Installing K3s on ${HOST} via NixOS..."
 	${MAKE} sync
 	@mkdir -p ${K3S_TMP_DIR}
-	@export SHOGGOTH_DOMAIN="${DOMAIN}" DNS_IP="${DNS_IP}" CONTAINER_CACHE_PORT="${CONTAINER_CACHE_PORT}"; \
-	envsubst '$${SHOGGOTH_DOMAIN}$${DNS_IP}$${CONTAINER_CACHE_PORT}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix
-	@printf '{ config, pkgs, ... }:\n{\n  networking.firewall.allowedTCPPorts = [ %s ];\n  networking.firewall.allowedUDPPorts = [ %s ];\n  networking.firewall.interfaces.wg0 = {\n    allowedTCPPorts = [ %s ];\n  };\n}\n' \
-		"${WEB_EXT_PORT}" "${WG_PORT}" "${WEB_EXT_PORT}" > ${K3S_TMP_DIR}/${INSTANCE}-ports.nix
+	@export SHOGGOTH_DOMAIN="${DOMAIN}" DNS_IP="${DNS_IP}" REGISTRY_PORT="${REGISTRY_PORT}" \
+		WEB_EXT_PORT="${WEB_EXT_PORT}" WG_PORT="${WG_PORT}" WG_UI_PORT="${WG_UI_PORT}"; \
+	envsubst '$${SHOGGOTH_DOMAIN}$${DNS_IP}$${REGISTRY_PORT}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix; \
+	envsubst '$${WEB_EXT_PORT}$${WG_PORT}$${WG_UI_PORT}$${REGISTRY_PORT}' < shoggoth/ports.nix > ${K3S_TMP_DIR}/${INSTANCE}-ports.nix
 	scp ${SSH_COMMON_ARGS} ${K3S_TMP_DIR}/shoggoth.nix ${K3S_TMP_DIR}/${INSTANCE}-ports.nix ${USER}@${HOST_IP}:/tmp/
 	${K3S_SSH} 'sudo cp /tmp/shoggoth.nix /tmp/${INSTANCE}-ports.nix /etc/nixos/ && rm /tmp/shoggoth.nix /tmp/${INSTANCE}-ports.nix'
 	${K3S_SSH} 'grep -q "${INSTANCE}-ports.nix" /etc/nixos/configuration.nix || { \
@@ -31,10 +31,10 @@ host_install_nixos:
 		exit 1; \
 	}'
 	${K3S_SSH} 'sudo nixos-rebuild switch'
-	${MAKE} pull_docker_cache_image
+	${MAKE} pull_registry_image
 
-pull_docker_cache_image:
-	@echo "Pulling container-cache image on ${HOST} (bypassing containerd mirror)..."
+pull_registry_image:
+	@echo "Pulling registry image on ${HOST} (bypassing containerd mirror)..."
 	${K3S_SSH} 'sudo k3s ctr images pull ghcr.io/project-zot/zot:latest'
 
 client_install_alpine:
@@ -173,10 +173,10 @@ up: tunnel_up
 		SHOGGOTH_INSTANCE_DIR="${INSTANCE}" \
 		DNS_IP="${DNS_IP}" \
 		WEB_EXT_PORT="${WEB_EXT_PORT}" WG_PORT="${WG_PORT}" \
-		CONTAINER_CACHE_PORT="${CONTAINER_CACHE_PORT}" DOCKER_CACHE_PORT="${DOCKER_CACHE_PORT}" DOCKER_REGISTRY_PORT="${DOCKER_REGISTRY_PORT}" \
+		REGISTRY_PORT="${REGISTRY_PORT}" \
 		WG_UI_PORT="${WG_UI_PORT}"; \
 		for f in ${K3S_ALL_MANIFESTS}; do \
-			envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${DNS_IP}$${WEB_EXT_PORT}$${WG_PORT}$${CONTAINER_CACHE_PORT}$${DOCKER_CACHE_PORT}$${DOCKER_REGISTRY_PORT}$${WG_UI_PORT}' < $$f; \
+			envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${DNS_IP}$${WEB_EXT_PORT}$${WG_PORT}$${REGISTRY_PORT}$${WG_UI_PORT}' < $$f; \
 			printf "\n---\n"; \
 		done | kubectl apply -f -
 
@@ -210,7 +210,7 @@ start: tunnel_up
 		SHOGGOTH_INSTANCE_DIR="${INSTANCE}" \
 		DNS_IP="${DNS_IP}" \
 		WEB_EXT_PORT="${WEB_EXT_PORT}" WG_PORT="${WG_PORT}" \
-		CONTAINER_CACHE_PORT="${CONTAINER_CACHE_PORT}" DOCKER_CACHE_PORT="${DOCKER_CACHE_PORT}" DOCKER_REGISTRY_PORT="${DOCKER_REGISTRY_PORT}" \
+		REGISTRY_PORT="${REGISTRY_PORT}" \
 		WG_UI_PORT="${WG_UI_PORT}"; \
 	MANIFESTS="$$(grep -rl "app: ${SERVICE}" ${K3S_MANIFESTS} --include='*.yaml' | sort)"; \
 	if [ -z "$$MANIFESTS" ]; then \
@@ -219,7 +219,7 @@ start: tunnel_up
 	fi; \
 	for f in $$MANIFESTS; do \
 		echo "Applying $$f..."; \
-		envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${DNS_IP}$${WEB_EXT_PORT}$${WG_PORT}$${CONTAINER_CACHE_PORT}$${DOCKER_CACHE_PORT}$${DOCKER_REGISTRY_PORT}$${WG_UI_PORT}' < $$f | kubectl apply -f - || exit 1; \
+		envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${DNS_IP}$${WEB_EXT_PORT}$${WG_PORT}$${REGISTRY_PORT}$${WG_UI_PORT}' < $$f | kubectl apply -f - || exit 1; \
 	done
 
 # Restart a single service: make restart_service SERVICE=kestra

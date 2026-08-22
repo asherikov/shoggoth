@@ -91,17 +91,13 @@ configurable domain, set to `s.local` by default.
 - Caching:
   - `apt-cache.` — Debian/Ubuntu package caching proxy
     <https://github.com/sameersbn/docker-apt-cacher-ng>.
-  - `container-cache.` — Container image caching proxy (zot, k3s internal)
+  - `registry.` — Container image registry with pull-through caching (zot)
     <https://zotregistry.dev/>.
-  - `docker-cache.` — Docker registry caching proxy (backward-compatible clients)
-    <https://github.com/rpardini/docker-registry-proxy>.
   - `python-cache.` — Python package caching proxy, served by
     <https://en.angie.software/angie/> (proxy_cache to pypi.org).
   - `build-cache.` — build cache server for ccache/sccache, served by
     <https://en.angie.software/angie/>.
 - Development:
-  - `docker-registry.` — private Docker registry
-    <https://github.com/distribution/distribution>.
   - Gitea development suite:
     - `git.` — Gitea Git server <https://about.gitea.com/>.
     - `git-pages.` — Git Pages static site hosting <https://git-pages.org/>.
