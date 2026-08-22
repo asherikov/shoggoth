@@ -1,9 +1,0 @@
-dn: olcOverlay=memberof,${MDB_DN}
-objectClass: olcOverlayConfig
-objectClass: olcMemberOf
-olcOverlay: memberof
-olcMemberOfDangling: ignore
-olcMemberOfRefInt: FALSE
-olcMemberOfGroupOC: groupOfNames
-olcMemberOfMemberAD: member
-olcMemberOfMemberOfAD: memberOf

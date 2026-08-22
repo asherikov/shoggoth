@@ -1,8 +1,0 @@
-{
-  "name": "shoggoth",
-  "description": "Shoggoth infrastructure plugin: Basic Memory knowledge graph workflow, Redmine/Gitea/Kestra CLI wrappers, and caveman compression mode",
-  "version": "1.0.0",
-  "author": {
-    "name": "Shoggoth"
-  }
-}

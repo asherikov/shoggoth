@@ -8,7 +8,6 @@ data:
   Corefile: |
     .:53 {
         errors
-        log
         ready
 
         hosts /etc/coredns/blacklist/blocklist.hosts {

@@ -1,8 +1,0 @@
----
-- id: "nomic-embed-text-v1.5"
-  overrides:
-      embeddings: true
-      gpu_layers: 99999999
-      options:
-          - gpu
----
