@@ -3,7 +3,21 @@ FROM ${BASE_IMAGE}
 
 ARG SHOGGOTH_DOMAIN=
 
+ENV SSH_AUTH_SOCK="/shoggoth/git-cred/ssh_auth_sock"
+ENV CCWS_CACHE="/cache/ccws/"
+ENV PIP_CACHE_DIR="/cache/ccws/pip"
+
 USER root
+
+RUN chown -R ccws /cache/*
+
+RUN mkdir -p /root/.qwen mkdir -p /home/ccws/.qwen \
+    && chown -R ccws /home/ccws/.qwen
+
+RUN git config --system credential.helper 'cache --socket=/shoggoth/git-cred/git_credential_sock' \
+    && git config --system user.email 'shoggoth@shoggoth.local' \
+    && git config --system user.name 'shoggoth' \
+    && printf 'Host *\n  UserKnownHostsFile /shoggoth/git-cred/known_hosts\n' > /etc/ssh/ssh_config.d/shoggoth.conf
 
 RUN \
 --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -31,8 +45,7 @@ RUN mkdir -p /tmp/codebase \
         "https://github.com/DeusData/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-linux-`dpkg --print-architecture`-portable.tar.gz" \
         | tar -xz -C /tmp/codebase/ \
     && mv /tmp/codebase/codebase-memory-mcp /usr/bin \
-    && rm -rf /tmp/codebase \
-    && chown -R ccws /cache/*
+    && rm -rf /tmp/codebase
 
 USER ccws
 

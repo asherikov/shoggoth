@@ -106,26 +106,9 @@ data:
     cat > "${DOCKERFILE}" <<'DOCKERFILE_HEAD'
     FROM registry.__SHOGGOTH_DOMAIN__/slave_noble:latest
 
-    ENV SSH_AUTH_SOCK="/shoggoth/git-cred/ssh_auth_sock"
-    ENV CCWS_CACHE="/cache/ccws/"
-    ENV PIP_CACHE_DIR="/cache/ccws/pip"
-
-    RUN mkdir -p /home/ccws/.qwen
     COPY workflow/qwen-settings.json /home/ccws/.qwen/settings.json
-
-    USER root
-
-    RUN mkdir -p /root/.qwen \
-        && chown -R ccws /home/ccws/.qwen \
-        && git config --system credential.helper 'cache --socket=/shoggoth/git-cred/git_credential_sock' \
-        && git config --system user.email 'slave@__SHOGGOTH_DOMAIN__' \
-        && git config --system user.name 'shoggoth' \
-        && printf 'Host *\n  UserKnownHostsFile /shoggoth/git-cred/known_hosts\n' > /etc/ssh/ssh_config.d/shoggoth.conf
-
     COPY workflow/apt-cache.conf /etc/apt/apt.conf.d/00-shoggoth-apt-cache
     COPY scripts/ /shoggoth/workflow/scripts/
-
-    USER ccws
     DOCKERFILE_HEAD
 
     sed -i "s|__SHOGGOTH_DOMAIN__|${SHOGGOTH_DOMAIN}|g" "${DOCKERFILE}"
