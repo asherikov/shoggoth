@@ -7,7 +7,6 @@ CONFIGURE_ALL="${CONFIGURE_ALL:-}"
 CONFIGURE_APT_CACHE="${CONFIGURE_APT_CACHE:-}"
 CONFIGURE_CLIENT_CONF="${CONFIGURE_CLIENT_CONF:-}"
 CONFIGURE_CA_CERT="${CONFIGURE_CA_CERT:-}"
-CONFIGURE_GITEA_USER="${CONFIGURE_GITEA_USER:-}"
 CONFIGURE_AI_TOKEN="${CONFIGURE_AI_TOKEN:-ai}"
 CONFIGURE_API_GATEWAY="${CONFIGURE_API_GATEWAY:-}"
 CONFIGURE_SSH_CONFIG="${CONFIGURE_SSH_CONFIG:-}"
@@ -52,7 +51,6 @@ Options:
     --update-hosts          Append generated hosts file to /etc/hosts
     --apt-cache             Install apt cache config to system apt config
     --install-ca-cert       Install web-external TLS CA certificate to system trust store
-    --gitea-user USER       Configure gitea tea CLI username for basic auth
     --ai-token TOKEN        Configure OpenAI API key for AI services (OPENAI_API_KEY)
     --api-gateway           Use API gateway for Gitea/Redmine auth (tokens injected by gateway)
     --ssh-config            Generate SSH config with known hosts for git server
@@ -88,10 +86,6 @@ parse_args() {
             --install-ca-cert)
                 CONFIGURE_CA_CERT="true"
                 shift
-                ;;
-            --gitea-user)
-                CONFIGURE_GITEA_USER="$2"
-                shift 2
                 ;;
             --ai-token)
                 CONFIGURE_AI_TOKEN="$2"
@@ -295,7 +289,7 @@ EOF
 generate_gitea_config() {
     cat >> "${ENV_FILE}" <<EOF
 
-# Gitea tea CLI
+# Gitea
 GITEA_SERVER_URL=http://api.${DOMAIN}/gitea
 GITEA_SERVER_TOKEN=gateway
 GITEA_INSTANCE_SSH_HOST=git.${DOMAIN}
@@ -313,36 +307,6 @@ REDMINE_API_KEY=gateway
 REDMINE_NO_UPDATE_CHECK=1
 EOF
     chmod 600 "${ENV_FILE}"
-}
-
-generate_gitea_cli_conf() {
-    local tea_config_file="${CLIENT_CONF_DIR}/tea-config.yml"
-
-    if [ -n "${CONFIGURE_GITEA_USER}" ]; then
-        cat > "${tea_config_file}" <<EOF
-logins:
-  - name: shoggoth
-    url: http://api.${DOMAIN}/gitea
-    ssh_host: git.${DOMAIN}
-    token: gateway
-    user: ${CONFIGURE_GITEA_USER}
-    default: true
-    version_check: false
-EOF
-    else
-        cat > "${tea_config_file}" <<EOF
-logins:
-  - name: shoggoth
-    url: http://api.${DOMAIN}/gitea
-    ssh_host: git.${DOMAIN}
-    token: gateway
-    default: true
-    version_check: false
-EOF
-    fi
-
-    chmod 600 "${tea_config_file}"
-    echo "Generated ${tea_config_file}"
 }
 
 generate_redmine_cli_conf() {
@@ -476,8 +440,7 @@ main() {
 
     if [ "${CONFIGURE_API_GATEWAY}" = "true" ] && [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
         generate_gitea_config
-        generate_gitea_cli_conf
-        echo "Gitea tea CLI configured via environment variables (GITEA_SERVER_URL, GITEA_SERVER_TOKEN) and config file (${CLIENT_CONF_DIR}/tea-config.yml)"
+        echo "Gitea configured via environment variables (GITEA_SERVER_URL, GITEA_SERVER_TOKEN)"
         generate_redmine_config
         generate_redmine_cli_conf
         echo "Redmine CLI configured via environment variables (REDMINE_SERVER, REDMINE_AUTH_METHOD, REDMINE_API_KEY)"

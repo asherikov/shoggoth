@@ -131,19 +131,24 @@ def http_patch_json(url, payload, headers=None):
     if headers:
         hdrs.update(headers)
     req = Request(url, data=data, headers=hdrs, method="PATCH")
-    try:
-        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            return json.loads(resp.read().decode())
-    except HTTPError as e:
-        body = e.read().decode(errors="replace")[:500]
-        print(f"WARNING: HTTP PATCH {url} failed: {e.code} {e.reason}: {body}", file=sys.stderr)
-        return None
-    except (URLError, OSError) as e:
-        print(f"WARNING: HTTP PATCH {url} failed: {e}", file=sys.stderr)
-        return None
-    except json.JSONDecodeError as e:
-        print(f"WARNING: HTTP PATCH {url} returned invalid JSON: {e}", file=sys.stderr)
-        return None
+    with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        body = resp.read().decode()
+        if not body:
+            return {}
+        return json.loads(body)
+
+
+def http_put_json(url, payload, headers=None):
+    data = json.dumps(payload).encode()
+    hdrs = {"Content-Type": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    req = Request(url, data=data, headers=hdrs, method="PUT")
+    with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        body = resp.read().decode()
+        if not body:
+            return {}
+        return json.loads(body)
 
 
 def http_delete_json(url, payload, headers=None):
@@ -183,7 +188,7 @@ def _paginate(fetch_page, limit=50):
 class Gitea:
     def __init__(self):
         self.api_url = os.environ["GITEA_SERVER_URL"] + "/api/v1"
-        self.token = os.environ["GITEA_SLAVE_TOKEN"]
+        self.token = os.environ.get("GITEA_SLAVE_TOKEN", "")
 
         self._payload = None
 
@@ -244,11 +249,16 @@ class Gitea:
     def get_ci_workflow_name(self):
         return self._payload.get("workflow", {}).get("name", "")
 
+    def _auth_headers(self):
+        if self.token:
+            return {"Authorization": f"token {self.token}"}
+        return {}
+
     def get_ci_logs(self, repo, run_id):
         if not run_id:
             return "CI logs unavailable: no run ID in payload"
         url = f"{self.api_url}/repos/{repo}/actions/runs/{run_id}/logs"
-        req = Request(url, headers={"Authorization": f"token {self.token}"})
+        req = Request(url, headers=self._auth_headers())
         try:
             with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 data = resp.read()
@@ -266,21 +276,17 @@ class Gitea:
             return f"CI logs unavailable: failed to parse zip: {e}"
 
     def get(self, path, params=None):
-        headers = {"Authorization": f"token {self.token}",
-                   "Content-Type": "application/json"}
+        headers = {**self._auth_headers(), "Content-Type": "application/json"}
         return http_get(f"{self.api_url}/{path}", headers=headers, params=params)
 
     def post(self, path, payload):
-        headers = {"Authorization": f"token {self.token}"}
-        return http_post_json(f"{self.api_url}/{path}", payload, headers=headers)
+        return http_post_json(f"{self.api_url}/{path}", payload, headers=self._auth_headers())
 
     def patch(self, path, payload):
-        headers = {"Authorization": f"token {self.token}"}
-        return http_patch_json(f"{self.api_url}/{path}", payload, headers=headers)
+        return http_patch_json(f"{self.api_url}/{path}", payload, headers=self._auth_headers())
 
     def delete(self, path, payload):
-        headers = {"Authorization": f"token {self.token}"}
-        return http_delete_json(f"{self.api_url}/{path}", payload, headers=headers)
+        return http_delete_json(f"{self.api_url}/{path}", payload, headers=self._auth_headers())
 
     def get_file(self, repo, filepath, ref=None):
         params = {}
@@ -457,19 +463,79 @@ class Gitea:
         return True
 
 
+def _fetch_openbao_secret(path, key):
+    addr = os.environ.get("OPENBAO_ADDR", "")
+    token = os.environ.get("SHOGGOTH_VAULT_TOKEN", "")
+    if not addr or not token:
+        return None
+    url = f"{addr}/v1/{path}"
+    req = Request(url, headers={"X-Vault-Token": token, "accept": "application/json"})
+    try:
+        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("data", {}).get("data", {}).get(key)
+    except Exception:
+        return None
+
+
 class Redmine:
     def __init__(self):
+        domain = os.environ.get("SHOGGOTH_DOMAIN", "")
+        if not domain:
+            die("SHOGGOTH_DOMAIN is required")
+        self.api_url = f"http://api.{domain}/redmine"
+        self.token = os.environ.get("REDMINE_TOKEN", "")
+        if not self.token:
+            self.token = _fetch_openbao_secret("secret/data/redmine/slave-token", "value") or ""
         self._projects = None
+        self._statuses = None
+        self._user_logins = {}
+
+    def get_user_login(self, user_id):
+        if user_id in self._user_logins:
+            return self._user_logins[user_id]
+        data = self._get(f"users/{user_id}.json")
+        if data is None:
+            log(f"get_user_login: failed to fetch user #{user_id}")
+            return None
+        user = data.get("user", data)
+        login = user.get("login")
+        if login:
+            self._user_logins[user_id] = login
+        return login
+
+    def _headers(self):
+        headers = {"Content-Type": "application/json",
+                   "accept": "application/json"}
+        if self.token:
+            headers["X-Redmine-API-Key"] = self.token
+        return headers
+
+    def _get(self, path, params=None):
+        url = f"{self.api_url}/{path}"
+        return http_get(url, headers=self._headers(), params=params)
+
+    def _put(self, path, payload):
+        url = f"{self.api_url}/{path}"
+        return http_put_json(url, payload, headers=self._headers())
+
+    def _resolve_status_id(self, name):
+        if self._statuses is None:
+            data = self._get("issue_statuses.json")
+            if data is None:
+                die("failed to list redmine issue statuses")
+            self._statuses = {s["name"]: s["id"] for s in data.get("issue_statuses", [])}
+        status_id = self._statuses.get(name)
+        if status_id is None:
+            die(f"unknown Redmine status: {name}")
+        return status_id
 
     def match_project(self, normalized):
         if self._projects is None:
-            result = run(["redmine", "projects", "list", "--output=json"], check=False)
-            if result.returncode != 0:
-                die(f"failed to list redmine projects: {result.stderr}")
-            try:
-                self._projects = json.loads(result.stdout)
-            except json.JSONDecodeError:
-                die("failed to parse redmine projects list as JSON")
+            data = self._get("projects.json", params={"limit": 100})
+            if data is None:
+                die("failed to list redmine projects")
+            self._projects = data.get("projects", [])
 
         for proj in self._projects:
             identifier = proj.get("identifier", "")
@@ -493,14 +559,11 @@ class Redmine:
         return None
 
     def get_issue(self, task_id):
-        result = run(["redmine", "issues", "get", str(task_id),
-                      "--journals", "--children", "--output=json"], check=False)
-        if result.returncode != 0:
-            die(f"failed to get redmine issue #{task_id}: {result.stderr}")
-        try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError:
-            die(f"failed to parse redmine issue #{task_id} as JSON")
+        data = self._get(f"issues/{task_id}.json",
+                         params={"include": "journals,children"})
+        if data is None:
+            die(f"failed to get redmine issue #{task_id}")
+        return data.get("issue", data)
 
     def get_task_project(self, task_id):
         task = self.get_issue(task_id)
@@ -510,16 +573,10 @@ class Redmine:
         return normalize_for_branch(task_project)
 
     def get_project_repo(self, project_id, domain):
-        result = run(
-            ["redmine", "projects", "show", str(project_id), "--output=json"],
-            check=False,
-        )
-        if result.returncode != 0:
-            die(f"failed to fetch redmine project info: {result.stderr}")
-        try:
-            project_info = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            die("failed to parse redmine project info as JSON")
+        data = self._get(f"projects/{project_id}.json")
+        if data is None:
+            die("failed to fetch redmine project info")
+        project_info = data.get("project", data)
 
         homepage = project_info.get("homepage", "") or ""
         if homepage:
@@ -545,20 +602,28 @@ class Redmine:
         return None
 
     def update_issue(self, task_id, *args):
-        result = run(["redmine", "issues", "update", str(task_id)] + list(args), check=False)
-        if result.returncode != 0:
-            die(f"failed to update redmine issue #{task_id}: {result.stderr}")
-        return result
+        issue = {}
+        notes = None
+        i = 0
+        while i < len(args):
+            if args[i] == "--status" and i + 1 < len(args):
+                issue["status_id"] = self._resolve_status_id(args[i + 1])
+                i += 2
+            elif args[i] == "--note" and i + 1 < len(args):
+                notes = args[i + 1]
+                i += 2
+            else:
+                i += 1
+        payload = {"issue": issue}
+        if notes:
+            payload["issue"]["notes"] = notes
+        return self._put(f"issues/{task_id}.json", payload)
 
     def list_issues(self, project):
-        result = run(["redmine", "issues", "list", "--project", project,
-                       "--limit=100", "--output=json"], check=False)
-        if result.returncode != 0:
+        data = self._get("issues.json", params={"project_id": project, "limit": 100})
+        if data is None:
             return None
-        try:
-            return json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return None
+        return data.get("issues", [])
 
 
 class Shoggoth:
@@ -582,6 +647,7 @@ class Shoggoth:
         log(f"identify_project: command={args.command}")
         if args.command == "task":
             task = redmine.get_issue(args.task_id)
+            self._check_task_actionable(task, redmine)
             self.task_subject = task.get("subject", "")
             task_project = task.get("project", {}).get("name", "")
             if not task_project:
@@ -599,6 +665,28 @@ class Shoggoth:
             self.task_subject = self.working_branch.split("/", 1)[1]
         self.project = redmine.identify_project_from_branch(self.working_branch, self.working_repo)
         log(f"identify_project: repo={self.working_repo} branch={self.working_branch} project={self.project}")
+
+    def _check_task_actionable(self, task, redmine):
+        task_id = task.get("id")
+        status_name = (task.get("status") or {}).get("name")
+        slave_user_login = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        assigned_to = task.get("assigned_to") or {}
+        assigned_to_id = assigned_to.get("id")
+        assigned_to_login = assigned_to.get("login")
+        if assigned_to_login is None and assigned_to_id is not None:
+            assigned_to_login = redmine.get_user_login(assigned_to_id)
+        if status_name != "In Progress":
+            log(f"task: skipping #{task_id} status={status_name!r} (expected 'In Progress')")
+            print(f"Task #{task_id} status is {status_name!r}, not 'In Progress' — skipping",
+                  flush=True)
+            sys.exit(0)
+        if assigned_to_login != slave_user_login:
+            log(f"task: skipping #{task_id} assignee_id={assigned_to_id!r} "
+                f"assignee_login={assigned_to_login!r} (expected {slave_user_login!r})")
+            print(f"Task #{task_id} assigned to {assigned_to_login!r}, "
+                f"not {slave_user_login!r} — skipping",
+                  flush=True)
+            sys.exit(0)
 
     def identify_project_repo(self, redmine, gitea):
         normalized = normalize_for_branch(self.project)
@@ -699,6 +787,7 @@ class OtlpLogger:
         self.service_name = None
         self.log_thread = None
         self.last_result = None
+        self.last_error = None
         self.assistant_text = []
 
     def _push_line(self, line):
@@ -733,24 +822,12 @@ class OtlpLogger:
 
     def reset(self):
         self.last_result = None
+        self.last_error = None
         self.assistant_text = []
 
     def stop_session(self):
-        if self.log_thread is not None:
-            self.log_thread.join(timeout=30)
-            self.log_thread = None
         self.session_id = None
         log("otlp: stop_session done")
-
-    def forward_stream(self, stream):
-        try:
-            for line in stream:
-                line = line.decode(errors="replace").rstrip("\n")
-                if line:
-                    self._push_line(line)
-                    self._capture_stream_json(line)
-        except Exception as e:
-            print(f"WARNING: otlp forward thread crashed: {e}", file=sys.stderr)
 
     def _capture_stream_json(self, line):
         try:
@@ -766,21 +843,22 @@ class OtlpLogger:
                     if text:
                         self.assistant_text.append(text)
         elif etype == "result":
-            if not event.get("is_error"):
-                self.last_result = event.get("result", "")
+            result_text = event.get("result", "") or ""
+            if event.get("is_error"):
+                self.last_error = result_text
+                self.last_result = None
+            elif result_text.lstrip().startswith("[API Error") or result_text.lstrip().startswith("API Error"):
+                self.last_error = result_text
+                self.last_result = None
+            else:
+                self.last_result = result_text
 
     def get_review_text(self):
+        if self.last_error:
+            return ""
         if self.last_result:
             return str(self.last_result)
         return "\n\n".join(self.assistant_text) if self.assistant_text else ""
-
-    def start_forwarding(self, stream):
-        self.log_thread = threading.Thread(
-            target=self.forward_stream,
-            args=(stream,),
-            daemon=True,
-        )
-        self.log_thread.start()
 
 
 class Agent:
@@ -793,9 +871,9 @@ class Agent:
         self.otlp.start_session(event_type)
 
         SECRET_ENV_KEYS = frozenset([
-            "GITEA_ADMIN_TOKEN", "GITEA_SLAVE_TOKEN",
+            "GITEA_ADMIN_TOKEN",
             "SHOGGOTH_VAULT_TOKEN", "REDMINE_TOKEN",
-            "OPENBAO_ADDR", "OLLAMA_CLOUD_TOKEN",
+            "OPENBAO_ADDR", "SHOGGOTH_AI_DEFAULT_TOKEN",
             "GITHUB_TOKEN", "REDMINE_WEBHOOK_SECRET",
         ])
         self.qwen_env = {k: v for k, v in os.environ.items()
@@ -806,12 +884,15 @@ class Agent:
         plugin_archive = run(["curl", "-sfS", "--max-time", "30", "-o", "/tmp/plugin.tar.gz", plugin_url],
                              check=False, capture_output=True, text=True, timeout=60)
         if plugin_archive.returncode != 0:
-            print(f"WARNING: failed to download plugin from {plugin_url}: {plugin_archive.stderr}", file=sys.stderr)
-        else:
-            log(f"start_session: installing plugin from /tmp/plugin.tar.gz")
-            run(["qwen", "extensions", "install", "/tmp/plugin.tar.gz",
-                 "--scope", "user", "--consent"],
-                check=False, capture_output=True, text=True, timeout=60)
+            die(f"failed to download plugin from {plugin_url}: {plugin_archive.stderr.strip()}")
+
+        log(f"start_session: installing plugin from /tmp/plugin.tar.gz")
+        plugin_install = run(["qwen", "extensions", "install", "/tmp/plugin.tar.gz",
+                              "--scope", "user", "--consent"],
+                             check=False, capture_output=True, text=True, timeout=60)
+        if plugin_install.returncode != 0:
+            err = (plugin_install.stderr or plugin_install.stdout or "").strip()
+            die(f"failed to install plugin from {plugin_url}: {err}")
 
         index_path = self.shoggoth.repo_dir
         log(f"start_session: indexing repo at {index_path}")
@@ -839,7 +920,26 @@ class Agent:
 
         log(f"prompt: resume={resume} session={self.otlp.session_id} timeout={timeout}")
         log(f"prompt: cmd={' '.join(cmd[:6])}... (prompt length={len(text)})")
+        log(f"prompt: text:\n{text}")
         log("prompt: starting qwen subprocess")
+
+        def _pump(stream, label):
+            try:
+                for line in iter(stream.readline, b""):
+                    decoded = line.decode(errors="replace")
+                    if label == "stdout":
+                        sys.stdout.write(decoded)
+                        sys.stdout.flush()
+                        stripped = decoded.rstrip("\n")
+                        self.otlp._push_line(stripped)
+                        self.otlp._capture_stream_json(stripped)
+                    else:
+                        sys.stderr.write(decoded)
+                        sys.stderr.flush()
+            except Exception as e:
+                print(f"WARNING: stream pump {label} crashed: {e}", file=sys.stderr)
+            finally:
+                stream.close()
 
         self.otlp.reset()
         qwen = subprocess.Popen(
@@ -848,22 +948,29 @@ class Agent:
             stderr=subprocess.PIPE,
             env=self.qwen_env,
         )
-        self.otlp.start_forwarding(qwen.stdout)
+        stdout_thread = threading.Thread(
+            target=_pump, args=(qwen.stdout, "stdout"), daemon=True)
+        stderr_thread = threading.Thread(
+            target=_pump, args=(qwen.stderr, "stderr"), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
         timed_out = False
         try:
-            stderr = qwen.communicate(timeout=timeout)[1]
+            qwen.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             log(f"prompt: TIMEOUT after {timeout}s, killing qwen")
             qwen.kill()
             timed_out = True
-            stderr = qwen.communicate()[1]
-        self.otlp.log_thread.join(timeout=10)
-        if stderr:
-            print(f"qwen stderr: {stderr.decode(errors='replace')}", file=sys.stderr)
+            qwen.wait()
+        stdout_thread.join(timeout=10)
+        stderr_thread.join(timeout=10)
         if timed_out:
             log("prompt: qwen killed due to timeout")
             return 124
         log(f"prompt: qwen exited with code {qwen.returncode}")
+        if self.otlp.last_error:
+            log(f"prompt: agent reported an error: {str(self.otlp.last_error)[:200]}")
+            return 125
         return qwen.returncode
 
 
@@ -1018,6 +1125,7 @@ class TaskCommand(CommandBase):
             die(f"invalid task ID: {self.task_id}")
 
         task = self.redmine.get_issue(self.task_id)
+
         task_subject = self.shoggoth.task_subject
         normalized_subject = normalize_for_branch(task_subject)
         if not normalized_subject:
@@ -1067,7 +1175,8 @@ class TaskCommand(CommandBase):
             redmine_update_args = ["--note",
                                    f"Changes pushed to branch {shoggoth_branch} but MR creation failed"]
         else:
-            redmine_update_args = ["--note", "No changes produced by agent"]
+            redmine_update_args = ["--status", "Feedback",
+                                   "--note", "Reverted to Feedback: agent produced no source code changes"]
 
         self.redmine.update_issue(self.task_id, *redmine_update_args)
 

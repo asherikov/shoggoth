@@ -9,43 +9,23 @@ ENV PIP_CACHE_DIR="/cache/ccws/pip"
 
 USER root
 
-RUN chown -R ccws /cache/*
-
-RUN mkdir -p /root/.qwen mkdir -p /home/ccws/.qwen \
-    && chown -R ccws /home/ccws/.qwen
-
 RUN git config --system credential.helper 'cache --socket=/shoggoth/git-cred/git_credential_sock' \
-    && git config --system user.email 'shoggoth@shoggoth.local' \
+    && git config --system user.email 'slave@shoggoth.local' \
     && git config --system user.name 'shoggoth' \
     && printf 'Host *\n  UserKnownHostsFile /shoggoth/git-cred/known_hosts\n' > /etc/ssh/ssh_config.d/shoggoth.conf
 
 RUN \
 --mount=type=cache,target=/var/cache/apt,sharing=locked \
 --mount=type=cache,target=/var/lib/apt/lists/,sharing=locked \
---mount=type=cache,target=/cache/pip,sharing=locked \
+--mount=type=cache,target=/cache/,sharing=locked \
     curl -fsSL http://download.docker.com/linux/ubuntu/gpg -o /etc/apt/trusted.gpg.d/docker.asc \
     && echo "deb [arch=$(dpkg --print-architecture)] http://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
         | sudo tee /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && ${APT_INSTALL} \
-        docker-ce \
         docker-ce-cli \
-        containerd.io \
         docker-buildx-plugin \
-        docker-compose-plugin \
-        ttyd \
-    && usermod -aG docker ccws
-
-RUN curl -fsSL \
-    "https://github.com/aarondpn/redmine-cli/releases/latest/download/redmine-cli-linux-`dpkg --print-architecture`.tar.gz" \
-    | tar -xz -C /usr/bin
-
-RUN mkdir -p /tmp/codebase \
-    && curl -fsSL \
-        "https://github.com/DeusData/codebase-memory-mcp/releases/latest/download/codebase-memory-mcp-linux-`dpkg --print-architecture`-portable.tar.gz" \
-        | tar -xz -C /tmp/codebase/ \
-    && mv /tmp/codebase/codebase-memory-mcp /usr/bin \
-    && rm -rf /tmp/codebase
+        ttyd
 
 USER ccws
 

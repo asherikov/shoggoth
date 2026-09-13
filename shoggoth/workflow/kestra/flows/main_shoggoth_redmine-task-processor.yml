@@ -1,38 +1,29 @@
+#kestra_trigger:
+#	curl -X POST \
+#		http://kestra.{{ envs.shoggoth_domain }}/api/v1/main/executions/webhook/shoggoth/redmine-task-processor/key \
+#		-H "Content-Type: application/json" \
+#		-d '{"data":{"issue":{"id":1,"subject":"Test task","status":{"id":2,"name":"In Progress"},"assigned_to":{"id":5,"name":"Slave User"},"project":{"id":1,"name":"sample"}}},"type":"issue.updated","timestamp":"2026-09-06T16:46:34Z"}'
+
 id: redmine-task-processor
 namespace: shoggoth
-#disabled: true
 
-#triggers:
-#  - id: schedule
-#    type: io.kestra.plugin.core.trigger.Schedule
-#    cron: "0 * * * *"
-#    allowConcurrent: false
+triggers:
+  - id: webhook
+    type: io.kestra.plugin.core.trigger.Webhook
+    key: key
+    allowConcurrent: true
 
 tasks:
-  - id: list_tasks
-    type: io.kestra.plugin.scripts.shell.Commands
-    taskRunner:
-      type: io.kestra.plugin.scripts.runner.docker.Docker
-      #pullPolicy: ALWAYS
-      networkMode: host
-    containerImage: registry.s.local/slave_noble:dind
-    commands:
-      - /shoggoth/workflow/scripts/redmine_task_list.sh
-
-  - id: print
+  - id: log_webhook_body
     type: io.kestra.plugin.core.log.Log
-    message: "{{ outputs.list_tasks }}"
+    message: "redmine-task-processor webhook received: {{ trigger.body | json }}"
 
-  - id: process_tasks
-    type: io.kestra.plugin.core.flow.ForEach
-    values: "{{ outputs.list_tasks.exitCode == 0 ? outputs.list_tasks.vars.task_ids : [] }}"
-    tasks:
-      - id: process_task
-        type: io.kestra.plugin.core.flow.Subflow
-        namespace: shoggoth
-        flowId: coding-agent-dispatcher
-        wait: true
-        transmitFailed: true
-        inputs:
-          script: "shoggoth_workflow.py"
-          task_id: "task {{ taskrun.value }}"
+  - id: dispatch
+    type: io.kestra.plugin.core.flow.Subflow
+    namespace: shoggoth
+    flowId: coding-agent-dispatcher
+    wait: true
+    transmitFailed: true
+    inputs:
+      script: "shoggoth_workflow.py"
+      task_id: "task {{ trigger.body.data.issue.id }}"

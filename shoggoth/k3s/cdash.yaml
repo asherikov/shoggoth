@@ -245,34 +245,45 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - ${DNS_IP}
+          - ${SHOGGOTH_DNS_IP}
         searches:
           - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
           - cluster.local
       initContainers:
-        - name: wait-bringup
-          image: busybox:latest
+        - name: wait-bootstrap
+          image: asherikov/shoggoth_tools:alpine
           imagePullPolicy: IfNotPresent
-          command: ["sh", "-c"]
+          command:
+            - bash
+            - -c
           args:
             - |
-              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
-              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
-                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
-                if [ -d /shoggoth/rendered ]; then
-                  echo "wait-bringup: contents:" >&2
-                  ls -la /shoggoth/rendered/ >&2 || true
+              set -euo pipefail
+              K8S_API="${K8S_API:-https://kubernetes.default.svc}"
+              SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+              SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+              for i in $(seq 1 120); do
+                http_code=$(curl -sS --cacert "${SA_CA}" \
+                  -o /dev/null -w '%{http_code}' \
+                  -H "Authorization: Bearer ${SA_TOKEN}" \
+                  "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
+                if [ "${http_code}" = "200" ]; then
+                  echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
+                  exit 0
                 fi
-                if [ -f /shoggoth/rendered/bringup.log ]; then
-                  echo "wait-bringup: bringup.log tail:" >&2
-                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
+                echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
+                if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
+                  curl -sS --cacert "${SA_CA}" \
+                    -H "Authorization: Bearer ${SA_TOKEN}" \
+                    "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
                 fi
-                echo "wait-bringup: exiting, bringup may still be in progress" >&2
-                exit 1
-              fi
-              echo "wait-bringup: sentinel found"
+                sleep 5
+              done
+              echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
+              echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
+              echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
+              exit 1
           resources:
             requests:
               memory: "32Mi"
@@ -280,10 +291,6 @@ spec:
             limits:
               memory: "64Mi"
               cpu: "200m"
-          volumeMounts:
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
       containers:
         - name: postgres
           image: postgres:18-alpine
@@ -330,16 +337,13 @@ spec:
               memory: "256Mi"
               cpu: "500m"
       volumes:
-        - name: rendered
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
-            type: DirectoryOrCreate
         - name: db-password
           secret:
             secretName: cdash-db-password
         - name: data
           persistentVolumeClaim:
             claimName: cdash-db
+      serviceAccountName: cdash-db
 
 ---
 apiVersion: v1
@@ -373,7 +377,7 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - ${DNS_IP}
+          - ${SHOGGOTH_DNS_IP}
         searches:
           - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
@@ -511,3 +515,34 @@ spec:
         - name: db-password
           secret:
             secretName: cdash-db-password
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cdash-db
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cdash-db-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["shoggoth-bootstrap-done"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cdash-db-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cdash-db-bootstrap-wait
+subjects:
+  - kind: ServiceAccount
+    name: cdash-db
+    namespace: ${SHOGGOTH_NAMESPACE}

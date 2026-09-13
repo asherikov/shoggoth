@@ -1,4 +1,3 @@
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -6,7 +5,7 @@ metadata:
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
-    - ReadWriteOnce
+  - ReadWriteOnce
   resources:
     requests:
       storage: 5Gi
@@ -39,9 +38,9 @@ spec:
   selector:
     app: kestra-db
   ports:
-    - name: postgres
-      port: 5432
-      targetPort: 5432
+  - name: postgres
+    port: 5432
+    targetPort: 5432
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -62,101 +61,112 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - ${DNS_IP}
+        - ${SHOGGOTH_DNS_IP}
         searches:
-          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
-          - svc.cluster.local
-          - cluster.local
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
       initContainers:
-        - name: wait-bringup
-          image: busybox:latest
-          imagePullPolicy: IfNotPresent
-          command: ["sh", "-c"]
-          args:
-            - |
-              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
-              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
-                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
-                if [ -d /shoggoth/rendered ]; then
-                  echo "wait-bringup: contents:" >&2
-                  ls -la /shoggoth/rendered/ >&2 || true
-                fi
-                if [ -f /shoggoth/rendered/bringup.log ]; then
-                  echo "wait-bringup: bringup.log tail:" >&2
-                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
-                fi
-                echo "wait-bringup: exiting, bringup may still be in progress" >&2
-                exit 1
-              fi
-              echo "wait-bringup: sentinel found"
-          resources:
-            requests:
-              memory: "32Mi"
-              cpu: "50m"
-            limits:
-              memory: "64Mi"
-              cpu: "200m"
-          volumeMounts:
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
+      - name: wait-bootstrap
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
+          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          for i in $(seq 1 120); do
+            http_code=$(curl -sS --cacert "${SA_CA}" \
+              -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${SA_TOKEN}" \
+              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
+            if [ "${http_code}" = "200" ]; then
+              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
+              exit 0
+            fi
+            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
+            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
+              curl -sS --cacert "${SA_CA}" \
+                -H "Authorization: Bearer ${SA_TOKEN}" \
+                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
+            fi
+            sleep 5
+          done
+          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
+          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
+          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
+          exit 1
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts: []
       containers:
-        - name: postgres
-          image: postgres:18-alpine
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 5432
-              name: postgres
-          env:
-            - name: SHOGGOTH_DOMAIN
-              value: "${SHOGGOTH_DOMAIN}"
-            - name: OTEL_TRACES_EXPORTER
-              value: "otlp"
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otelcol:4318"
-            - name: POSTGRES_DB
-              value: kestra
-            - name: POSTGRES_USER
-              value: kestra
-            - name: POSTGRES_PASSWORD_FILE
-              value: /run/secrets/kestra_db_password
-          volumeMounts:
-            - name: tmpdata
-              mountPath: /var/lib/postgresql
-            - name: db-password
-              mountPath: /run/secrets/kestra_db_password
-              subPath: password
-              readOnly: true
-          readinessProbe:
-            exec:
-              command: ["pg_isready", "-U", "kestra"]
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 60
-          livenessProbe:
-            exec:
-              command: ["pg_isready", "-U", "kestra"]
-            initialDelaySeconds: 30
-            periodSeconds: 10
-          resources:
-            requests:
-              memory: "128Mi"
-              cpu: "100m"
-            limits:
-              memory: "256Mi"
-              cpu: "500m"
-      volumes:
-        - name: rendered
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
-            type: DirectoryOrCreate
-        - name: db-password
-          secret:
-            secretName: kestra-db-password
+      - name: postgres
+        image: postgres:18-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4318
+        - name: POSTGRES_DB
+          value: kestra
+        - name: POSTGRES_USER
+          value: kestra
+        - name: POSTGRES_PASSWORD_FILE
+          value: /run/secrets/kestra_db_password
+        volumeMounts:
         - name: tmpdata
-          emptyDir:
-            medium: Memory
+          mountPath: /var/lib/postgresql
+        - name: db-password
+          mountPath: /run/secrets/kestra_db_password
+          subPath: password
+          readOnly: true
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - kestra
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 60
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - kestra
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: 128Mi
+            cpu: 100m
+          limits:
+            memory: 256Mi
+            cpu: 500m
+      volumes:
+      - name: db-password
+        secret:
+          secretName: kestra-db-password
+      - name: tmpdata
+        emptyDir:
+          medium: Memory
+      serviceAccountName: kestra-db
 ---
 apiVersion: v1
 kind: Service
@@ -167,9 +177,9 @@ spec:
   selector:
     app: kestra
   ports:
-    - name: http
-      port: 80
-      targetPort: 80
+  - name: http
+    port: 80
+    targetPort: 80
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -189,159 +199,350 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - ${DNS_IP}
+        - ${SHOGGOTH_DNS_IP}
         searches:
-          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
-          - svc.cluster.local
-          - cluster.local
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
       initContainers:
-        - name: wait-bringup
-          image: busybox:latest
-          imagePullPolicy: IfNotPresent
-          command: ["sh", "-c"]
-          args:
-            - |
-              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
-              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
-                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
-                if [ -d /shoggoth/rendered ]; then
-                  echo "wait-bringup: contents:" >&2
-                  ls -la /shoggoth/rendered/ >&2 || true
-                fi
-                if [ -f /shoggoth/rendered/bringup.log ]; then
-                  echo "wait-bringup: bringup.log tail:" >&2
-                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
-                fi
-                echo "wait-bringup: exiting, bringup may still be in progress" >&2
-                exit 1
-              fi
-              echo "wait-bringup: sentinel found"
-          resources:
-            requests:
-              memory: "32Mi"
-              cpu: "50m"
-            limits:
-              memory: "64Mi"
-              cpu: "200m"
-          volumeMounts:
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
-        - name: fix-plugins-perms
-          image: asherikov/shoggoth_tools:alpine
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
-          command: ["bash", "-c"]
-          args:
-            - "mkdir -p /app/plugins && chmod -R 777 /app/plugins"
-          volumeMounts:
-            - name: plugins
-              mountPath: /app/plugins
-        - name: kestra-init
-          image: kestra/kestra:latest
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
-          args:
-            - "plugins"
-            - "install"
-            - "io.kestra.plugin:plugin-docker:LATEST"
-            - "io.kestra.plugin:plugin-script-shell:LATEST"
-          volumeMounts:
-            - name: plugins
-              mountPath: /app/plugins
+      - name: wait-bootstrap
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
+          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          for i in $(seq 1 120); do
+            http_code=$(curl -sS --cacert "${SA_CA}" \
+              -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${SA_TOKEN}" \
+              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
+            if [ "${http_code}" = "200" ]; then
+              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
+              exit 0
+            fi
+            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
+            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
+              curl -sS --cacert "${SA_CA}" \
+                -H "Authorization: Bearer ${SA_TOKEN}" \
+                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
+            fi
+            sleep 5
+          done
+          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
+          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
+          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
+          exit 1
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts: []
+      - name: render-config
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SHOGGOTH_VAULT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: openbao-unseal-key
+              key: root-token
+        - name: GITEA_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: gitea-server-token
+              key: token
+        - name: GITEA_SLAVE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: gitea-slave-token
+              key: token
+        - name: SHOGGOTH_GITHUB_ORG
+          value: ${SHOGGOTH_GITHUB_ORG}
+        - name: KESTRA_DATASOURCES_POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: kestra-db-password
+              key: password
+        - name: SHOGGOTH_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openldap-admin-password
+              key: password
+        - name: RENDER_VARS
+          value: ${SHOGGOTH_VAULT_TOKEN}${GITEA_ADMIN_TOKEN}${GITEA_SLAVE_TOKEN}${SHOGGOTH_GITHUB_ORG}${KESTRA_DATASOURCES_POSTGRES_PASSWORD}${SHOGGOTH_ADMIN_PASSWORD}
+        command:
+        - bash
+        - -c
+        - 'exec /tmpl/render.sh
+
+          '
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts:
+        - name: templates
+          mountPath: /templates
+          readOnly: true
+        - name: rendered-config
+          mountPath: /rendered
+        - name: render-script
+          mountPath: /tmpl
+          readOnly: true
       containers:
-        - name: kestra
-          image: kestra/kestra:latest
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
-          env:
-            - name: SHOGGOTH_DOMAIN
-              value: "${SHOGGOTH_DOMAIN}"
-            - name: OTEL_TRACES_EXPORTER
-              value: "otlp"
-            - name: FLOWENV_SHOGGOTH_DOMAIN
-              value: "${SHOGGOTH_DOMAIN}"
-            - name: FLOWENV_SHOGGOTH_GITHUB_ORG
-              value: "${SHOGGOTH_GITHUB_ORG}"
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otelcol:4317"
-          command: ["/bin/sh", "/shoggoth/kestra-entrypoint/entrypoint.sh"]
-          args:
-            - "server"
-            - "standalone"
-            - "--config"
-            - "/shoggoth/kestra/config.yaml"
-            - "--flow-path"
-            - "/app/flows"
-          ports:
-            - containerPort: 80
-              name: http
-          resources:
-            requests:
-              memory: "512Mi"
-              cpu: "500m"
-            limits:
-              memory: "2Gi"
-              cpu: "2"
-          readinessProbe:
-            tcpSocket:
-              port: 80
-            initialDelaySeconds: 60
-            periodSeconds: 10
-            failureThreshold: 60
-          livenessProbe:
-            tcpSocket:
-              port: 80
-            initialDelaySeconds: 120
-            periodSeconds: 30
-            failureThreshold: 6
-          volumeMounts:
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
-            - name: kestra-rendered
-              mountPath: /shoggoth/kestra
-              readOnly: true
-            - name: entrypoint
-              mountPath: /shoggoth/kestra-entrypoint
-              readOnly: true
-            - name: data
-              mountPath: /app/storage
-            - name: flows
-              mountPath: /app/flows
-            - name: plugins
-              mountPath: /app/plugins
-            - name: dind-socket
-              mountPath: /dind
-      volumes:
-        - name: rendered
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
-            type: DirectoryOrCreate
-        - name: kestra-rendered
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered/kestra
-            type: DirectoryOrCreate
+      - name: kestra
+        image: kestra/kestra:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+        env:
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: FLOWENV_SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: FLOWENV_SHOGGOTH_GITHUB_ORG
+          value: ${SHOGGOTH_GITHUB_ORG}
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4317
+        command:
+        - /bin/sh
+        - /shoggoth/kestra-entrypoint/entrypoint.sh
+        args:
+        - server
+        - standalone
+        - --config
+        - /shoggoth/kestra/config.yaml
+        - --flow-path
+        - /app/flows
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 500m
+          limits:
+            memory: 2Gi
+            cpu: '2'
+        readinessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          failureThreshold: 60
+        livenessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          failureThreshold: 6
+        volumeMounts:
         - name: entrypoint
-          configMap:
-            name: kestra-entrypoint
-            defaultMode: 0755
+          mountPath: /shoggoth/kestra-entrypoint
+          readOnly: true
         - name: data
-          persistentVolumeClaim:
-            claimName: kestra-data
+          mountPath: /app/storage
         - name: flows
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/kestra-flows
-            type: DirectoryOrCreate
+          mountPath: /app/flows
         - name: plugins
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/kestra-plugins
-            type: DirectoryOrCreate
+          mountPath: /app/plugins
         - name: dind-socket
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/dind-socket
-            type: DirectoryOrCreate
+          mountPath: /dind
+        - name: rendered-config
+          mountPath: /shoggoth/kestra
+          readOnly: true
+      volumes:
+      - name: rendered-config
+        emptyDir: {}
+      - name: entrypoint
+        configMap:
+          name: kestra-entrypoint
+          defaultMode: 493
+      - name: data
+        persistentVolumeClaim:
+          claimName: kestra-data
+      - name: flows
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/kestra-flows
+          type: DirectoryOrCreate
+      - name: plugins
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/kestra-plugins
+          type: DirectoryOrCreate
+      - name: dind-socket
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/dind-socket
+          type: DirectoryOrCreate
+      - name: templates
+        configMap:
+          name: kestra-templates
+      - name: render-script
+        configMap:
+          name: shoggoth-render-config
+          defaultMode: 493
+      serviceAccountName: kestra
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kestra
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kestra-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kestra-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kestra-bootstrap-wait
+subjects:
+- kind: ServiceAccount
+  name: kestra
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kestra-db
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kestra-db-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kestra-db-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kestra-db-bootstrap-wait
+subjects:
+- kind: ServiceAccount
+  name: kestra-db
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kestra-templates
+  namespace: ${SHOGGOTH_NAMESPACE}
+data:
+  env: 'FLOWENV_SHOGGOTH_VAULT_TOKEN=${SHOGGOTH_VAULT_TOKEN}
+
+    FLOWENV_GITEA_ADMIN_TOKEN=${GITEA_ADMIN_TOKEN}
+
+    FLOWENV_GITEA_SLAVE_TOKEN=${GITEA_SLAVE_TOKEN}
+
+    FLOWENV_SHOGGOTH_GITHUB_ORG=${SHOGGOTH_GITHUB_ORG}
+
+    '
+  config.yaml: |
+    datasources:
+      postgres:
+        url: jdbc:postgresql://kestra-db:5432/kestra
+        driverClassName: org.postgresql.Driver
+        username: kestra
+        password: "${KESTRA_DATASOURCES_POSTGRES_PASSWORD}"
+    micronaut:
+      server:
+        host: 0.0.0.0
+        port: 80
+      application:
+        name: kestra
+      otel:
+        enabled: true
+        endpoint: http://otelcol:4317
+      metrics:
+        export:
+          otlp:
+            enabled: true
+            url: http://otelcol:4318/v1/metrics
+            resource-attributes:
+              service.name: kestra
+      io:
+        watch:
+          enabled: true
+          paths:
+            - /app/flows
+    kestra:
+      storage:
+        type: local
+        local:
+          basePath: /app/storage
+      repository:
+        type: postgres
+      queue:
+        type: postgres
+      flows:
+        paths:
+          - /app/flows
+      server:
+        basic-auth:
+          username: admin@${SHOGGOTH_DOMAIN}
+          password: "${SHOGGOTH_ADMIN_PASSWORD}"
+          open-urls:
+            - "/api/v1/executions/webhook/"
+            - "/api/v1/main/executions/webhook/"
+        termination-grace-period: 30s
+      ai:
+        enabled: false
+      anonymous-usage-report:
+        enabled: false
+      ui-anonymous-usage-report:
+        enabled: false
+      tutorial-flows:
+        enabled: false
+      plugins:
+        configurations:
+          - type: io.kestra.plugin.scripts.runner.docker.Docker
+            values:
+              volume-enabled: true
+              dockerHost: unix:///dind/docker.sock
+      variables:
+        env-vars-prefix: FLOWENV_
+    grpc:
+      server:
+        enabled: false
+        health:
+          enabled: false

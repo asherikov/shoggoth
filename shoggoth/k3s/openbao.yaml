@@ -24,6 +24,433 @@ data:
 
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-seed-paths
+  namespace: ${SHOGGOTH_NAMESPACE}
+data:
+  paths.yaml: |
+    - path: kestra/db-password             | format: base64 | length: 32 | secret-key: password
+    - path: redmine/db-password            | format: base64 | length: 32 | secret-key: password
+    - path: cdash/db-password              | format: base64 | length: 32 | secret-key: password
+    - path: redmine/secret-key-base        | format: hex    | length: 48 | secret-key: secret-key-base
+    - path: gitea/runner-token             | format: hex    | length: 48 | secret-key: token
+    - path: gitea/slave-token              | format: base64 | length: 32 | secret-key: token
+    - path: gitea/server-token             | format: base64 | length: 32 | secret-key: token
+    - path: ai/default-token               | format: base64 | length: 32 | secret-key: token
+    - path: openldap/admin-password        | format: base64 | length: 32 | secret-key: password
+    - path: openldap/config-admin-password | format: base64 | length: 32 | secret-key: password
+    - path: openldap/sldapauth-password    | format: base64 | length: 32 | secret-key: password
+    - path: openldap/sslave-password       | format: base64 | length: 32 | secret-key: password
+    - path: cdash/app-key                  | format: base64 | length: 32 | secret-key: app-key
+    - path: ca/passphrase                  | format: base64 | length: 32 | secret-key: passphrase
+    - path: cdash/api-token                | format: base64 | length: 32 | secret-key: token
+    - path: redmine/slave-token            | format: base64 | length: 32 | secret-key: token
+    - path: wireguard/admin-password      | format: base64    | length: 32 | secret-key: admin-password
+    - path: grafana/admin-password        | format: base64    | length: 32 | secret-key: admin-password
+    - path: ssh/slave-private-key         | format: ssh-ed25519 | length: 0 | secret-key: ssh-id-rsa | public-key-path: ssh/slave-public-key
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-bootstrap
+  namespace: ${SHOGGOTH_NAMESPACE}
+data:
+  bootstrap.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    OPENBAO_ADDR="${OPENBAO_ADDR:-http://127.0.0.1:8200}"
+    BAO_DATA="${BAO_DATA:-/openbao/file}"
+    PRIVATE_DIR="${PRIVATE_DIR:-/shoggoth/private}"
+    UNSEAL_KEY_FILE="${BAO_DATA}/.shoggoth-unseal-key"
+    ROOT_TOKEN_FILE="${BAO_DATA}/shoggoth/root-token"
+    INIT_FLAG="${BAO_DATA}/.shoggoth-initialized"
+    K8S_API="${K8S_API:-https://kubernetes.default.svc}"
+    NAMESPACE="${NAMESPACE}"
+    SEED_PATHS_FILE="${SEED_PATHS_FILE:-/seed/paths.yaml}"
+
+    log() { echo "[openbao-bootstrap] $*" >&2; }
+    die() { echo "[openbao-bootstrap] FATAL: $*" >&2; exit 1; }
+
+    sa_token() { cat /var/run/secrets/kubernetes.io/serviceaccount/token; }
+    k8s_ca()   { echo "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"; }
+
+    k8s_put_secret() {
+        local name="$1" payload="$2"
+        local attempt code method
+        for attempt in 1 2 3 4 5; do
+            method="PUT"
+            code=$(curl -sS --cacert "$(k8s_ca)" \
+                -o /tmp/k8s-bootstrap-resp.json \
+                -w '%{http_code}' \
+                -X PUT \
+                -H "Authorization: Bearer $(sa_token)" \
+                -H "Content-Type: application/json" \
+                -d "${payload}" \
+                "${K8S_API}/api/v1/namespaces/${NAMESPACE}/secrets/${name}" 2>/tmp/k8s-bootstrap-err.txt) || code="000"
+            if [ "${code}" = "404" ]; then
+                method="POST"
+                code=$(curl -sS --cacert "$(k8s_ca)" \
+                    -o /tmp/k8s-bootstrap-resp.json \
+                    -w '%{http_code}' \
+                    -X POST \
+                    -H "Authorization: Bearer $(sa_token)" \
+                    -H "Content-Type: application/json" \
+                    -d "${payload}" \
+                    "${K8S_API}/api/v1/namespaces/${NAMESPACE}/secrets" 2>/tmp/k8s-bootstrap-err.txt) || code="000"
+            fi
+            if [ "${code}" = "200" ] || [ "${code}" = "201" ]; then
+                log "K8s Secret ${name} ${method} (HTTP ${code})"
+                return 0
+            fi
+            log "k8s ${method} secret/${name} HTTP ${code} (attempt ${attempt}/5): $(head -c 400 /tmp/k8s-bootstrap-resp.json 2>/dev/null || echo 'no body')"
+            if [ "${attempt}" -lt 5 ]; then
+                sleep $((attempt * 2))
+            fi
+        done
+        log "k8s put/create secret/${name} failed after 5 attempts"
+        return 1
+    }
+
+    gen_value() {
+        local format="$1" length="$2"
+        case "${format}" in
+            base64) openssl rand -base64 "${length}" | tr -dc 'a-zA-Z0-9' | head -c "${length}" ;;
+            hex)    openssl rand -hex    "$((length / 2))" ;;
+            *)      die "unknown format: ${format}" ;;
+        esac
+    }
+
+    bao_get_value() {
+        local path="$1"
+        local response http_code
+        response=$(curl -sS -o /tmp/bao-get.json -w '%{http_code}' \
+            -H "X-Vault-Token: ${ROOT_TOKEN}" \
+            "${OPENBAO_ADDR}/v1/secret/data/${path}" 2>/dev/null) || true
+        if [ "${response}" != "200" ]; then
+            return 1
+        fi
+        jq -r '.data.data.value // empty' < /tmp/bao-get.json
+    }
+
+    bao_put_value() {
+        local path="$1" value="$2"
+        local payload
+        payload=$(jq -c -n --arg v "${value}" '{data:{value:$v}}')
+        local code
+        code=$(curl -sS -o /tmp/bao-put.json -w '%{http_code}' \
+            -X POST \
+            -H "X-Vault-Token: ${ROOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${payload}" \
+            "${OPENBAO_ADDR}/v1/secret/data/${path}" 2>/dev/null) || true
+        if [ "${code}" != "200" ] && [ "${code}" != "204" ]; then
+            die "PUT ${path} HTTP ${code}: $(cat /tmp/bao-put.json 2>/dev/null)"
+        fi
+    }
+
+    # === Phase A: idempotent init + unseal ===
+    log "Phase A: waiting for OpenBao at ${OPENBAO_ADDR}"
+    until code=$(curl -s -o /dev/null -w '%{http_code}' "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null) \
+              && [ "${#code}" = "3" ]; do
+        sleep 2
+    done
+    log "Phase A: OpenBao is reachable (HTTP ${code})"
+
+    mkdir -p "${BAO_DATA}/shoggoth"
+
+    if [ -f "${UNSEAL_KEY_FILE}" ] && [ -f "${ROOT_TOKEN_FILE}" ]; then
+        log "Phase A: unseal key + root token found on PVC, reusing"
+        UNSEAL_KEY=$(cat "${UNSEAL_KEY_FILE}")
+        ROOT_TOKEN=$(cat "${ROOT_TOKEN_FILE}")
+    else
+        log "Phase A: no unseal key on PVC; trying K8s Secret backup"
+        local_code=$(curl -sS -o /tmp/bao-backup.json -w '%{http_code}' \
+            --cacert "$(k8s_ca)" \
+            -H "Authorization: Bearer $(sa_token)" \
+            "${K8S_API}/api/v1/namespaces/${NAMESPACE}/secrets/openbao-unseal-key" 2>/dev/null) || true
+        if [ "${local_code}" = "200" ]; then
+            UNSEAL_KEY=$(jq -r '.data."unseal-key"' < /tmp/bao-backup.json | base64 -d)
+            ROOT_TOKEN=$(jq -r '.data."root-token"' < /tmp/bao-backup.json | base64 -d)
+            printf '%s' "${UNSEAL_KEY}" > "${UNSEAL_KEY_FILE}"
+            chmod 400 "${UNSEAL_KEY_FILE}"
+            printf '%s' "${ROOT_TOKEN}" > "${ROOT_TOKEN_FILE}"
+            chmod 400 "${ROOT_TOKEN_FILE}"
+            log "Phase A: recovered from K8s Secret backup"
+        else
+            log "Phase A: no backup; initializing fresh OpenBao"
+            init_code=$(curl -sS -o /tmp/bao-init.json -w '%{http_code}' \
+                -X PUT \
+                -H "Content-Type: application/json" \
+                -d '{"secret_shares":1,"secret_threshold":1}' \
+                "${OPENBAO_ADDR}/v1/sys/init" 2>/dev/null) || true
+            if [ "${init_code}" != "200" ]; then
+                die "PUT /v1/sys/init HTTP ${init_code}: $(cat /tmp/bao-init.json 2>/dev/null)"
+            fi
+            UNSEAL_KEY=$(jq -r '.keys_base64[0]' < /tmp/bao-init.json)
+            ROOT_TOKEN=$(jq -r '.root_token' < /tmp/bao-init.json)
+            printf '%s' "${UNSEAL_KEY}" > "${UNSEAL_KEY_FILE}"
+            chmod 400 "${UNSEAL_KEY_FILE}"
+            printf '%s' "${ROOT_TOKEN}" > "${ROOT_TOKEN_FILE}"
+            chmod 400 "${ROOT_TOKEN_FILE}"
+            log "Phase A: fresh init complete"
+        fi
+    fi
+
+    # Always (re)write the K8s Secret backup so downstream pods (kestra render-config,
+    # etc.) can read root-token regardless of which branch above produced UNSEAL_KEY.
+    payload=$(jq -c -n \
+        --arg uk "$(printf '%s' "${UNSEAL_KEY}" | base64 -w0)" \
+        --arg rt "$(printf '%s' "${ROOT_TOKEN}" | base64 -w0)" \
+        --arg ns "${NAMESPACE}" \
+        '{apiVersion:"v1",kind:"Secret",metadata:{name:"openbao-unseal-key",namespace:$ns},type:"Opaque",data:{"unseal-key":$uk,"root-token":$rt}}')
+    k8s_put_secret openbao-unseal-key "${payload}"
+
+    # Unseal (idempotent: returns error if already unsealed)
+    unseal_code=$(curl -sS -o /tmp/bao-unseal.json -w '%{http_code}' \
+        -X PUT \
+        -H "Content-Type: application/json" \
+        -d "{\"key\":\"${UNSEAL_KEY}\"}" \
+        "${OPENBAO_ADDR}/v1/sys/unseal" 2>/dev/null) || true
+    if [ "${unseal_code}" != "200" ]; then
+        die "PUT /v1/sys/unseal HTTP ${unseal_code}: $(cat /tmp/bao-unseal.json 2>/dev/null)"
+    fi
+    touch "${INIT_FLAG}"
+    log "Phase A: unsealed (init flag at ${INIT_FLAG})"
+
+    # Ensure KV-v2 mount exists (idempotent)
+    mount_check=$(curl -sS -o /dev/null -w '%{http_code}' \
+        -H "X-Vault-Token: ${ROOT_TOKEN}" \
+        "${OPENBAO_ADDR}/v1/sys/mounts/secret" 2>/dev/null) || true
+    if [ "${mount_check}" != "200" ]; then
+        log "Phase A: mounting KV-v2 at secret/"
+        curl -sS -o /dev/null -w '%{http_code}' \
+            -X POST \
+            -H "X-Vault-Token: ${ROOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"type":"kv-v2"}' \
+            "${OPENBAO_ADDR}/v1/sys/mounts/secret" 2>/dev/null || true
+    else
+        log "Phase A: KV-v2 mount already present"
+    fi
+
+    # === Phase B: ensure every path in seed-paths has a value ===
+    log "Phase B: seeding secrets from ${SEED_PATHS_FILE}"
+    SEEDED=0
+    SKIPPED=0
+    while IFS='|' read -r line; do
+        [ -z "${line}" ] && continue
+        path="$(echo "${line}"      | sed 's/^.*- path:[[:space:]]*//' | sed 's/[[:space:]]*|.*//' | sed 's/[[:space:]]*$//')"
+        format="$(echo "${line}"     | sed 's/.*format:[[:space:]]*//' | sed 's/[[:space:]].*//')"
+        length="$(echo "${line}"     | sed 's/.*length:[[:space:]]*//' | sed 's/[[:space:]].*//')"
+        secret_key="$(echo "${line}" | sed 's/.*secret-key:[[:space:]]*//' | sed 's/[[:space:]].*//')"
+        [ -z "${path}" ] && continue
+        if value=$(bao_get_value "${path}" 2>/dev/null) && [ -n "${value}" ]; then
+            SKIPPED=$((SKIPPED + 1))
+            continue
+        fi
+        # Externally-managed tokens (paths with secret-key: token) must never
+        # be randomly generated here — a random string has no chance of
+        # matching the upstream service's stored credential, so generation
+        # would only delay the failure until the first request. Such paths
+        # are provisioned by other means (e.g. the Kestra maintenance
+        # workflow's slave-token task, or operator-supplied bao_put_value).
+        # Skip silently with a log; Phase C will likewise skip writing the
+        # K8s Secret. Downstream pods must declare these Secrets as
+        # non-optional so they fail-fast at pod start instead of silently
+        # sending empty auth headers.
+        if [ "${secret_key}" = "token" ]; then
+            log "  skip ${path} (token path; must be provisioned externally)"
+            SKIPPED=$((SKIPPED + 1))
+            continue
+        fi
+        case "${format}" in
+            base64|hex)
+                value=$(gen_value "${format}" "${length}")
+                bao_put_value "${path}" "${value}"
+                SEEDED=$((SEEDED + 1))
+                log "  seeded ${path} (${format}, ${length} chars)"
+                ;;
+            ssh-ed25519)
+                log "  generating SSH ed25519 keypair for ${path}"
+                TMP_SSH=$(mktemp -d)
+                ssh-keygen -t ed25519 -N "" -C "shoggoth-slave" -f "${TMP_SSH}/id_ed25519" >/dev/null 2>&1
+                PRIV="$(cat "${TMP_SSH}/id_ed25519"; printf x)"
+                PRIV="${PRIV%x}"
+                PUB=$(cat "${TMP_SSH}/id_ed25519.pub")
+                rm -rf "${TMP_SSH}"
+                bao_put_value "${path}" "${PRIV}"
+                if echo "${line}" | grep -q 'public-key-path:'; then
+                    PUB_PATH="$(echo "${line}" | sed 's/.*public-key-path:[[:space:]]*//' | sed 's/[[:space:]].*//')"
+                else
+                    PUB_PATH="$(echo "${path}" | sed 's|private-key|public-key|')"
+                fi
+                [ "${PUB_PATH}" != "${path}" ] && bao_put_value "${PUB_PATH}" "${PUB}"
+                SEEDED=$((SEEDED + 1))
+                log "  seeded ${path} (ssh-ed25519)"
+                ;;
+            *)
+                die "unknown format: ${format}"
+                ;;
+        esac
+    done < "${SEED_PATHS_FILE}"
+    log "Phase B: done (seeded=${SEEDED}, skipped=${SKIPPED})"
+
+    # === Phase E: apply user-supplied secret overrides ===
+    log "Phase E: applying user-supplied secret overrides from ${PRIVATE_DIR}"
+    if [ -f "${SHOGGOTH_GITEA_SERVER_TOKEN_FILE}" ]; then
+        TOKEN="$(cat "${SHOGGOTH_GITEA_SERVER_TOKEN_FILE}")"
+        if [ -n "${TOKEN}" ]; then
+            bao_put_value "gitea/server-token" "${TOKEN}"
+            log "  gitea/server-token: overridden from ${SHOGGOTH_GITEA_SERVER_TOKEN_FILE}"
+        else
+            log "  gitea/server-token: ${SHOGGOTH_GITEA_SERVER_TOKEN_FILE} is empty, skipping"
+        fi
+    fi
+    if [ -f "${SHOGGOTH_AI_DEFAULT_TOKEN_FILE}" ]; then
+        TOKEN="$(cat "${SHOGGOTH_AI_DEFAULT_TOKEN_FILE}")"
+        if [ -n "${TOKEN}" ]; then
+            bao_put_value "ai/default-token" "${TOKEN}"
+            log "  ai/default-token: overridden from ${SHOGGOTH_AI_DEFAULT_TOKEN_FILE}"
+        else
+            log "  ai/default-token: ${SHOGGOTH_AI_DEFAULT_TOKEN_FILE} is empty, skipping"
+        fi
+    fi
+    if [ -f "${PRIVATE_DIR}/admin-password.txt" ]; then
+        PASS="$(tr -d '\n\r' < "${PRIVATE_DIR}/admin-password.txt")"
+        bao_put_value "openldap/admin-password" "${PASS}"
+        log "  openldap/admin-password: overridden from ${PRIVATE_DIR}/admin-password.txt"
+    fi
+
+    # === Phase C: push K8s Secrets for every value ===
+    log "Phase C: writing K8s Secrets"
+    WRITTEN=0
+    while IFS='|' read -r line; do
+        [ -z "${line}" ] && continue
+        path="$(echo "${line}"      | sed 's/^.*- path:[[:space:]]*//' | sed 's/[[:space:]]*|.*//' | sed 's/[[:space:]]*$//')"
+        secret_key="$(echo "${line}" | sed 's/.*secret-key:[[:space:]]*//' | sed 's/[[:space:]].*//')"
+        [ -z "${path}" ] && continue
+        value=$(bao_get_value "${path}" 2>/dev/null)
+        [ -z "${value}" ] && { log "  skip ${path} (no value)"; continue; }
+        # Build K8s Secret name from path: foo/bar-baz -> foo-bar-baz
+        secret_name="$(echo "${path}" | tr '/' '-')"
+        value_b64=$(printf '%s' "${value}" | base64 -w0)
+        payload=$(jq -c -n \
+            --arg n "${secret_name}" \
+            --arg ns "${NAMESPACE}" \
+            --arg k "${secret_key}" \
+            --arg v "${value_b64}" \
+            '{apiVersion:"v1",kind:"Secret",metadata:{name:$n,namespace:$ns},type:"Opaque",data:{($k):$v}}')
+        k8s_put_secret "${secret_name}" "${payload}"
+        WRITTEN=$((WRITTEN + 1))
+    done < "${SEED_PATHS_FILE}"
+    log "Phase C: done (wrote ${WRITTEN} K8s Secrets)"
+
+    # === Phase B.5: Configure OpenBao LDAP auth (idempotent) ===
+    log "Phase B.5: configuring OpenBao LDAP auth"
+    LDAP_BASE_DN="dc=$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g')"
+    LDAP_BIND_DN="uid=sldapauth,ou=people,${LDAP_BASE_DN}"
+    LDAP_BIND_PASSWORD=$(bao_get_value "openldap/sldapauth-password" 2>/dev/null) || die "openldap/sldapauth-password missing in OpenBao"
+    [ -z "${LDAP_BIND_PASSWORD}" ] && die "openldap/sldapauth-password is empty in OpenBao"
+    LDAP_AUTH_ENABLED="$(curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
+        "${OPENBAO_ADDR}/v1/sys/auth" 2>/dev/null \
+        | grep -q '"ldap/"' && echo true || echo false)"
+    if [ "${LDAP_AUTH_ENABLED}" != "true" ]; then
+        log "Phase B.5: enabling auth/ldap"
+        curl -sfS -X POST "${OPENBAO_ADDR}/v1/sys/auth/ldap" \
+            -H "X-Vault-Token: ${ROOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"type":"ldap"}' > /dev/null
+    fi
+    log "Phase B.5: configuring LDAP backend"
+    curl -sfS -X POST "${OPENBAO_ADDR}/v1/auth/ldap/config" \
+        -H "X-Vault-Token: ${ROOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{\"url\":\"ldap://openldap:389\",\"binddn\":\"${LDAP_BIND_DN}\",\"bindpass\":\"${LDAP_BIND_PASSWORD}\",\"userdn\":\"ou=people,${LDAP_BASE_DN}\",\"groupdn\":\"ou=groups,${LDAP_BASE_DN}\",\"userattr\":\"uid\",\"groupattr\":\"cn\",\"groupfilter\":\"(member={{.UserDN}})\",\"username_as_alias\":true,\"deny_null_bind\":true}" > /dev/null
+    log "Phase B.5: creating shoggoth-admin ACL policy"
+    curl -sf -X POST "${OPENBAO_ADDR}/v1/sys/policies/acl/shoggoth-admin" \
+        -H "X-Vault-Token: ${ROOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d '{"policy":"path \"secret/data/*\" { capabilities = [\"create\",\"read\",\"update\",\"delete\",\"list\"] }\npath \"sys/*\" { capabilities = [\"read\",\"list\"] }"}' > /dev/null 2>&1 || true
+    log "Phase B.5: mapping admins group to shoggoth-admin"
+    curl -sf -X POST "${OPENBAO_ADDR}/v1/auth/ldap/groups/admins" \
+        -H "X-Vault-Token: ${ROOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d '{"policies":"shoggoth-admin"}' > /dev/null 2>&1 || true
+    log "Phase B.5: complete"
+
+    # === Phase D: TLS certificate generation ===
+    log "Phase D: generating TLS certificates"
+    CERT_DIR="${BAO_DATA}/certs"
+    mkdir -p "${CERT_DIR}"
+    CA_PASS=$(bao_get_value "ca/passphrase" 2>/dev/null) || die "ca/passphrase missing in OpenBao"
+    if [ -z "${CA_PASS}" ]; then
+        die "ca/passphrase is empty in OpenBao"
+    fi
+    SHOGGOTH_DOMAIN="${SHOGGOTH_DOMAIN:?SHOGGOTH_DOMAIN must be set}"
+    if [ ! -f "${CERT_DIR}/ca.crt" ]; then
+        log "Phase D: generating fresh CA + server cert"
+        openssl genrsa -des3 -passout "pass:${CA_PASS}" -out "${CERT_DIR}/ca.key" 4096 2>/dev/null
+        openssl req -x509 -new -nodes -key "${CERT_DIR}/ca.key" \
+            -passin "pass:${CA_PASS}" -sha256 -days 3650 \
+            -subj "/CN=shoggoth-ca" -out "${CERT_DIR}/ca.crt" 2>/dev/null
+        openssl genrsa -out "${CERT_DIR}/server.key" 2048 2>/dev/null
+        openssl req -new -key "${CERT_DIR}/server.key" \
+            -subj "/CN=*.${SHOGGOTH_DOMAIN}" -out "${CERT_DIR}/server.csr" 2>/dev/null
+        printf 'authorityKeyIdentifier=keyid,issuer\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nsubjectAltName=DNS:*.%s,DNS:%s\n' \
+            "${SHOGGOTH_DOMAIN}" "${SHOGGOTH_DOMAIN}" > "${CERT_DIR}/server.ext"
+        openssl x509 -req -in "${CERT_DIR}/server.csr" \
+            -CA "${CERT_DIR}/ca.crt" -CAkey "${CERT_DIR}/ca.key" \
+            -passin "pass:${CA_PASS}" -CAcreateserial \
+            -out "${CERT_DIR}/server.crt" -days 3650 -sha256 \
+            -extfile "${CERT_DIR}/server.ext" 2>/dev/null
+        chmod 600 "${CERT_DIR}/ca.key" "${CERT_DIR}/server.key"
+        log "Phase D: certs generated"
+    else
+        log "Phase D: certs already present"
+    fi
+
+    k8s_put_secret_from_file() {
+        local name="$1" file="$2" key="$3"
+        local b64
+        b64="$(base64 -w0 < "${file}")"
+        local payload
+        payload=$(jq -c -n \
+            --arg n "${name}" --arg ns "${NAMESPACE}" \
+            --arg k "${key}" --arg v "${b64}" \
+            '{apiVersion:"v1",kind:"Secret",metadata:{name:$n,namespace:$ns},type:"Opaque",data:{($k):$v}}')
+        k8s_put_secret "${name}" "${payload}"
+    }
+
+    k8s_put_secret_tls_from_files() {
+        local name="$1" cert_file="$2" key_file="$3"
+        local b64_crt b64_key
+        b64_crt="$(base64 -w0 < "${cert_file}")"
+        b64_key="$(base64 -w0 < "${key_file}")"
+        local payload
+        payload=$(jq -c -n \
+            --arg n "${name}" --arg ns "${NAMESPACE}" \
+            --arg crt "${b64_crt}" --arg key "${b64_key}" \
+            '{apiVersion:"v1",kind:"Secret",metadata:{name:$n,namespace:$ns},type:"kubernetes.io/tls",data:{"tls.crt":$crt,"tls.key":$key}}')
+        k8s_put_secret "${name}" "${payload}"
+    }
+
+    k8s_put_secret_from_file       shoggoth-ca    "${CERT_DIR}/ca.crt"     ca.crt
+    k8s_put_secret_tls_from_files shoggoth-server "${CERT_DIR}/server.crt" "${CERT_DIR}/server.key"
+    log "Phase D: done (wrote shoggoth-ca + shoggoth-server K8s Secrets)"
+
+    # Marker Secret: signals downstream services that openbao-bootstrap is complete.
+    # Consumed by wait-bootstrap init containers via kubectl get.
+    marker_payload=$(jq -c -n \
+        --arg ns "${NAMESPACE}" \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{apiVersion:"v1",kind:"Secret",metadata:{name:"shoggoth-bootstrap-done",namespace:$ns},type:"Opaque",data:{"timestamp":($ts | @base64)}}')
+    k8s_put_secret shoggoth-bootstrap-done "${marker_payload}"
+
+    log "all phases complete"
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: openbao
@@ -70,7 +497,7 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - ${DNS_IP}
+          - ${SHOGGOTH_DNS_IP}
         searches:
           - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
           - svc.cluster.local
@@ -79,6 +506,7 @@ spec:
         runAsUser: 100
         runAsGroup: 1000
         fsGroup: 1000
+      serviceAccountName: openbao-init
       initContainers:
         - name: fix-permissions
           image: busybox:latest
@@ -161,3 +589,127 @@ spec:
             claimName: openbao-data
         - name: home
           emptyDir: {}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-bootstrap
+  namespace: ${SHOGGOTH_NAMESPACE}
+  labels:
+    app: openbao-bootstrap
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app: openbao-bootstrap
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: openbao-init
+      initContainers:
+        - name: wait-for-openbao
+          image: asherikov/shoggoth_tools:alpine
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+                set -euo pipefail
+                # Accept any HTTP response — sealed (503) and uninitialized (501)
+                # are valid post-startup states that the bootstrap script handles.
+                until code=$(curl -s -o /dev/null -w '%{http_code}' http://openbao:80/v1/sys/health 2>/dev/null) \
+                          && [ "${#code}" = "3" ]; do
+                  echo "wait-for-openbao: OpenBao not reachable yet..."
+                  sleep 2
+                done
+                echo "wait-for-openbao: OpenBao answered (HTTP ${code})"
+      containers:
+        - name: bootstrap
+          image: asherikov/shoggoth_tools:alpine
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-c"]
+          args:
+            - /tmpl/bootstrap.sh
+          env:
+            - name: OPENBAO_ADDR
+              value: "http://openbao:80"
+            - name: BAO_DATA
+              value: "/openbao/file"
+            - name: K8S_API
+              value: "https://kubernetes.default.svc"
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SEED_PATHS_FILE
+              value: /seed/paths.yaml
+            - name: SHOGGOTH_DOMAIN
+              value: "${SHOGGOTH_DOMAIN}"
+            - name: SHOGGOTH_GITEA_SERVER_TOKEN_FILE
+              value: "${SHOGGOTH_GITEA_SERVER_TOKEN_FILE}"
+            - name: SHOGGOTH_AI_DEFAULT_TOKEN_FILE
+              value: "${SHOGGOTH_AI_DEFAULT_TOKEN_FILE}"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: bootstrap
+              mountPath: /tmpl
+              readOnly: true
+            - name: seed-paths
+              mountPath: /seed
+              readOnly: true
+            - name: data
+              mountPath: /openbao/file
+            - name: private
+              mountPath: /shoggoth/private
+              readOnly: true
+      volumes:
+        - name: bootstrap
+          configMap:
+            name: openbao-bootstrap
+            defaultMode: 0755
+        - name: seed-paths
+          configMap:
+            name: openbao-seed-paths
+        - name: data
+          persistentVolumeClaim:
+            claimName: openbao-data
+        - name: private
+          hostPath:
+            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/private
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao-init
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-init-secrets
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "update", "patch", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-init-secrets
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: openbao-init-secrets
+subjects:
+  - kind: ServiceAccount
+    name: openbao-init
+    namespace: ${SHOGGOTH_NAMESPACE}

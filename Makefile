@@ -3,11 +3,16 @@ INSTANCE?=shoggoth
 SHOGGOTH_ENV=shoggoth/${INSTANCE}.env
 DOMAIN?=$(shell grep SHOGGOTH_DOMAIN ${SHOGGOTH_ENV} | cut -f 2 -d '=')
 GITHUB_ORG?=$(shell grep SHOGGOTH_GITHUB_ORG ${SHOGGOTH_ENV} | cut -f 2 -d '=')
-WEB_EXT_PORT?=$(shell grep '^WEB_EXT_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
-WG_PORT?=$(shell grep '^WG_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
-DNS_IP?=$(shell grep '^DNS_IP=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
-REGISTRY_PORT?=$(shell grep '^REGISTRY_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
-WG_UI_PORT?=$(shell grep '^WG_UI_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+WEB_EXT_PORT?=$(shell grep '^SHOGGOTH_WEB_EXT_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+WG_PORT?=$(shell grep '^SHOGGOTH_WG_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+DNS_IP?=$(shell grep '^SHOGGOTH_DNS_IP=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+REGISTRY_PORT?=$(shell grep '^SHOGGOTH_REGISTRY_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+WG_UI_PORT?=$(shell grep '^SHOGGOTH_WG_UI_PORT=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+AI_DEFAULT_MODEL?=$(shell grep '^SHOGGOTH_AI_DEFAULT_MODEL=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+AI_DEFAULT_API?=$(shell grep '^SHOGGOTH_AI_DEFAULT_API=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+AI_DEFAULT_TOKEN_FILE?=$(shell grep '^SHOGGOTH_AI_DEFAULT_TOKEN_FILE=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+GITEA_SERVER_TOKEN_FILE?=$(shell grep '^SHOGGOTH_GITEA_SERVER_TOKEN_FILE=' ${SHOGGOTH_ENV} | cut -f 2 -d '=')
+LDAP_BASE_DN?=$(shell printf '%s' "${DOMAIN}" | sed 's/\./,dc=/g; s/^/dc=/')
 HOST?=host.${DOMAIN}
 HOST_IP?=$(shell getent hosts ${HOST} | cut -f 1 -d ' ')
 GITEA_TOKEN?=$(shell cat shoggoth/private/gitea-server-token.txt)
@@ -27,8 +32,8 @@ sync:
 	rsync -e "ssh ${SSH_COMMON_ARGS}" -r shoggoth ${USER}@${HOST_IP}:${REMOTE_PATH}/${INSTANCE} || true
 	@K3S_DIR="${INSTANCE}"; \
 	cmds="mkdir -p /var/lib/rancher/k3s/storage/$${K3S_DIR}/coredns-blacklists"; \
-	cmds="$$cmds && mkdir -p /var/lib/rancher/k3s/storage/$${K3S_DIR}/scripts"; \
 	cmds="$$cmds && cp ./dns/hosts-blacklist/hosts /var/lib/rancher/k3s/storage/$${K3S_DIR}/coredns-blacklists/blocklist.hosts"; \
+	cmds="$$cmds && mkdir -p /var/lib/rancher/k3s/storage/$${K3S_DIR}/scripts"; \
 	cmds="$$cmds && cp ./setup-client.sh /var/lib/rancher/k3s/storage/$${K3S_DIR}/scripts/setup-client.sh"; \
 	for entry in ${K3S_HOST_PATHS}; do \
 		DST=$$(echo "$$entry" | cut -d: -f1); \
@@ -110,6 +115,5 @@ personal_conf:
 	./shoggoth/setup-client.sh \
 		--client-conf ${HOME}/.config/shoggoth \
 		--domain "${DOMAIN}" --host-ip "${HOST_IP}" \
-		--gitea-user $$(cat shoggoth/private/gitea-user.txt) \
 		--ai-token ${AI_TOKEN} \
 		--ssh-config

@@ -1,8 +1,8 @@
 { config, pkgs, ... }:
 {
-  networking.firewall.allowedTCPPorts = [ ${WG_UI_PORT} ${REGISTRY_PORT} ${WEB_EXT_PORT} ];
-  networking.firewall.allowedUDPPorts = [ ${WG_PORT} ];
+  networking.firewall.allowedTCPPorts = [ ${SHOGGOTH_WG_UI_PORT} ${SHOGGOTH_REGISTRY_PORT} ${SHOGGOTH_WEB_EXT_PORT} ];
+  networking.firewall.allowedUDPPorts = [ ${SHOGGOTH_WG_PORT} ];
   networking.firewall.interfaces.wg0 = {
-    allowedTCPPorts = [ ${WG_UI_PORT} ${REGISTRY_PORT} ${WEB_EXT_PORT} ];
+    allowedTCPPorts = [ ${SHOGGOTH_WG_UI_PORT} ${SHOGGOTH_REGISTRY_PORT} ${SHOGGOTH_WEB_EXT_PORT} ];
   };
 }

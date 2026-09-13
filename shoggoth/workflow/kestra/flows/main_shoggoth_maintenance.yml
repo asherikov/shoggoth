@@ -19,9 +19,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+    containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py kestra-webhooks
+      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose kestra-webhooks 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
@@ -34,14 +34,30 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+    containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py redmine-webhooks
+      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose redmine-webhooks 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
       GITEA_ADMIN_TOKEN: "{{ envs.gitea_admin_token }}"
       SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"
+
+  - id: setup_redmine_kestra_webhook
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+    containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose redmine-kestra-webhooks 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
+      REDMINE_SERVER: "http://redmine.{{ envs.shoggoth_domain }}"
+      SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"
+      SHOGGOTH_VAULT_TOKEN: "{{ envs.shoggoth_vault_token }}"
+      OPENBAO_ADDR: "http://openbao:80"
 
   - id: slave_access
     type: io.kestra.plugin.scripts.shell.Commands
@@ -49,9 +65,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+    containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py slave-access
+      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose slave-access 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
@@ -64,9 +80,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+    containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py slave-token
+      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose slave-token 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
@@ -81,9 +97,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+    containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py ssh-key
+      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose ssh-key 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"

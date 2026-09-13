@@ -224,6 +224,7 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
   - Required distributing a custom CA certificate to all clients (containerd, Docker daemon)
   - One nginx instance per upstream registry, plus init containers for certificate generation
   - Port 3128 (squid proxy convention)
+  - Does not work with containerd (and kubernetes).
 - <https://distribution.github.io/distribution/> (CNCF Distribution)
   - The reference OCI registry implementation; can be configured as pull-through cache with `proxy.remoteurl`
   - + CNCF graduated project, widely deployed, battle-tested

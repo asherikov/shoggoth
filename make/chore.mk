@@ -55,7 +55,6 @@ skills:
 	# https://code.claude.com/docs/en/plugin-marketplaces
 	# https://deepwiki.com/QwenLM/qwen-code/9.4-creating-extensions
 	# https://qwenlm.github.io/qwen-code-docs/en/users/extension/introduction
-	${MAKE} get_skill NAME=redmine-cli 		URL=https://raw.githubusercontent.com/aarondpn/redmine-cli/main/skills/redmine-cli/
 	${MAKE} get_skill NAME=kestra-flow 		URL=https://raw.githubusercontent.com/kestra-io/agent-skills/main/skills/kestra-flow/
 	${MAKE} get_skill NAME=caveman			URL=https://raw.githubusercontent.com/JuliusBrussee/caveman/main/skills/caveman/
 	${MAKE} get_skill NAME=memory-notes 	URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-notes/

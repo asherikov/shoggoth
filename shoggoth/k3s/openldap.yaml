@@ -1,4 +1,3 @@
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -6,12 +5,11 @@ metadata:
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
-    - ReadWriteOnce
+  - ReadWriteOnce
   resources:
     requests:
       storage: 1Gi
   storageClassName: local-path
-
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -20,12 +18,11 @@ metadata:
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
-    - ReadWriteOnce
+  - ReadWriteOnce
   resources:
     requests:
       storage: 1Gi
   storageClassName: local-path
-
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -180,7 +177,159 @@ data:
     touch "${SENTINEL}"
     touch /run/shoggoth-ldap-init-done
     echo "shoggoth: OpenLDAP initialization complete."
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openldap-ldif-templates
+  namespace: ${SHOGGOTH_NAMESPACE}
+data:
+  config.ldif: |
+    dn: olcDatabase={1}mdb,cn=config
+    changetype: modify
+    replace: olcAccess
+    olcAccess: {0}to attrs=userPassword by self write by anonymous auth by * none
+    olcAccess: {1}to attrs=shadowLastChange by self write by users read
+    olcAccess: {2}to * by users read by * none
+  data.ldif: |
+    dn: ou=people,${LDAP_BASE_DN}
+    changetype: add
+    objectClass: organizationalUnit
+    ou: people
 
+    dn: ou=groups,${LDAP_BASE_DN}
+    changetype: add
+    objectClass: organizationalUnit
+    ou: groups
+
+    dn: uid=admin,ou=people,${LDAP_BASE_DN}
+    changetype: add
+    objectClass: inetOrgPerson
+    objectClass: posixAccount
+    uid: admin
+    cn: Admin
+    sn: Shoggoth
+    uidNumber: 10000
+    gidNumber: 10000
+    homeDirectory: /home/admin
+    mail: admin@${SHOGGOTH_DOMAIN}
+
+    dn: uid=sldapauth,ou=people,${LDAP_BASE_DN}
+    changetype: add
+    objectClass: inetOrgPerson
+    objectClass: posixAccount
+    uid: sldapauth
+    cn: LDAP Auth
+    sn: Shoogoth
+    uidNumber: 10001
+    gidNumber: 10001
+    homeDirectory: /home/sldapauth
+    mail: sldapauth@${SHOGGOTH_DOMAIN}
+
+    dn: uid=sslave,ou=people,${LDAP_BASE_DN}
+    changetype: add
+    objectClass: inetOrgPerson
+    objectClass: posixAccount
+    uid: sslave
+    cn: Slave
+    sn: Shoggoth
+    uidNumber: 10002
+    gidNumber: 10002
+    homeDirectory: /home/sslave
+    mail: sslave@${SHOGGOTH_DOMAIN}
+
+    dn: cn=admins,ou=groups,${LDAP_BASE_DN}
+    changetype: add
+    objectClass: groupOfNames
+    cn: admins
+    member: uid=admin,ou=people,${LDAP_BASE_DN}
+
+    dn: cn=shoggoth-auth,ou=groups,${LDAP_BASE_DN}
+    changetype: add
+    objectClass: groupOfNames
+    cn: shoggoth-auth
+    member: uid=sldapauth,ou=people,${LDAP_BASE_DN}
+  memberof_module.ldif: |
+    dn: cn=module{0},cn=config
+    changetype: modify
+    add: olcModuleLoad
+    olcModuleLoad: memberof
+  memberof_overlay.ldif: |
+    dn: olcOverlay=memberof,${MDB_DN}
+    objectClass: olcOverlayConfig
+    objectClass: olcMemberOf
+    olcOverlay: memberof
+    olcMemberOfDangling: ignore
+    olcMemberOfRefInt: FALSE
+    olcMemberOfGroupOC: groupOfNames
+    olcMemberOfMemberAD: member
+    olcMemberOfMemberOfAD: memberOf
+  passwords.ldif: |
+    dn: uid=admin,ou=people,${LDAP_BASE_DN}
+    changetype: modify
+    replace: userPassword
+    userPassword: ${ADMIN_HASH}
+
+    dn: uid=sldapauth,ou=people,${LDAP_BASE_DN}
+    changetype: modify
+    replace: userPassword
+    userPassword: ${SLDAUTH_HASH}
+
+    dn: uid=sslave,ou=people,${LDAP_BASE_DN}
+    changetype: modify
+    replace: userPassword
+    userPassword: ${SSLAVE_HASH}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openldap-render-ldif
+  namespace: ${SHOGGOTH_NAMESPACE}
+data:
+  render.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    TEMPLATES_DIR="/templates"
+    RENDERED_DIR="/rendered"
+
+    read_pw() {
+        local f="${1}"
+        tr -d '\n\r' < "${f}"
+    }
+
+    hex_to_raw() {
+        local hex="${1}"
+        printf '%b' "$(printf '%s' "${hex}" | sed 's/\(..\)/\\x\1/g')"
+    }
+
+    slappasswd() {
+        local pw="${1}"
+        local salt_hex salt hash
+        salt_hex="$(openssl rand -hex 4)"
+        salt="$(hex_to_raw "${salt_hex}")"
+        hash="$(printf '%s%s' "${pw}" "${salt}" | openssl dgst -sha1 -hex | awk '{print $NF}')"
+        local combined
+        combined="$(hex_to_raw "${hash}${salt_hex}")"
+        printf '{SSHA}%s' "$(printf '%s' "${combined}" | openssl base64 -A)"
+    }
+
+    export ADMIN_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_admin_password)")"
+    export SLDAUTH_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_sldapauth_password)")"
+    export SSLAVE_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_sslave_password)")"
+
+    VARS='${LDAP_BASE_DN}${SHOGGOTH_DOMAIN}${MDB_DN}${ADMIN_HASH}${SLDAUTH_HASH}${SSLAVE_HASH}'
+
+    for tmpl in config.ldif data.ldif memberof_module.ldif memberof_overlay.ldif passwords.ldif; do
+        if [ ! -f "${TEMPLATES_DIR}/${tmpl}" ]; then
+            echo "render-ldif: FATAL: missing template ${tmpl}" >&2
+            exit 1
+        fi
+        envsubst "${VARS}" < "${TEMPLATES_DIR}/${tmpl}" > "${RENDERED_DIR}/${tmpl}"
+    done
+
+    echo "render-ldif: rendered $(ls ${RENDERED_DIR} | wc -l) LDIF files"
+    ls -la "${RENDERED_DIR}"
 ---
 apiVersion: v1
 kind: Service
@@ -191,13 +340,12 @@ spec:
   selector:
     app: openldap
   ports:
-    - name: ldap
-      port: 389
-      targetPort: 389
-    - name: ldaps
-      port: 636
-      targetPort: 636
-
+  - name: ldap
+    port: 389
+    targetPort: 389
+  - name: ldaps
+    port: 636
+    targetPort: 636
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -217,144 +365,250 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - ${DNS_IP}
+        - ${SHOGGOTH_DNS_IP}
         searches:
-          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
-          - svc.cluster.local
-          - cluster.local
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
       initContainers:
-        - name: wait-bringup
-          image: busybox:latest
-          imagePullPolicy: IfNotPresent
-          command: ["sh", "-c"]
-          args:
-            - |
-              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
-              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
-                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
-                if [ -d /shoggoth/rendered ]; then
-                  echo "wait-bringup: contents:" >&2
-                  ls -la /shoggoth/rendered/ >&2 || true
-                fi
-                if [ -f /shoggoth/rendered/bringup.log ]; then
-                  echo "wait-bringup: bringup.log tail:" >&2
-                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
-                fi
-                echo "wait-bringup: exiting, bringup may still be in progress" >&2
-                exit 1
-              fi
-              echo "wait-bringup: sentinel found"
-          resources:
-            requests:
-              memory: "32Mi"
-              cpu: "50m"
-            limits:
-              memory: "64Mi"
-              cpu: "200m"
-          volumeMounts:
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
-      containers:
-        - name: openldap
-          image: osixia/openldap:1.5.0
-          ports:
-            - containerPort: 389
-              name: ldap
-            - containerPort: 636
-              name: ldaps
-          args: ["--loglevel", "debug"]
-          env:
-            - name: LDAP_DOMAIN
-              value: "${SHOGGOTH_DOMAIN}"
-            - name: LDAP_ADMIN_PASSWORD_FILE
-              value: /run/secrets/openldap_admin_password
-            - name: LDAP_CONFIG_PASSWORD_FILE
-              value: /run/secrets/openldap_config_admin_password
-            - name: LDAP_LOG_LEVEL
-              value: "256"
-            - name: LDAP_TLS
-              value: "false"
-            - name: CONTAINER_LOG_LEVEL
-              value: "5"
-            - name: LDAP_REMOVE_CONFIG_AFTER_SETUP
-              value: "false"
-            - name: OTEL_TRACES_EXPORTER
-              value: "otlp"
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otelcol:4318"
-            - name: SHOGGOTH_DOMAIN
-              value: "${SHOGGOTH_DOMAIN}"
-          volumeMounts:
-            - name: data
-              mountPath: /var/lib/ldap
-            - name: config
-              mountPath: /etc/ldap/slapd.d
-            - name: rendered
-              mountPath: /shoggoth/openldap
-              subPath: openldap
-              readOnly: true
-            - name: init-script
-              mountPath: /shoggoth/openldap-init.sh
-              subPath: init.sh
-              readOnly: true
-            - name: admin-password
-              mountPath: /run/secrets/openldap_admin_password
-              subPath: password
-              readOnly: true
-            - name: config-admin-password
-              mountPath: /run/secrets/openldap_config_admin_password
-              subPath: password
-              readOnly: true
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - /bin/bash
-                  - -c
-                  - |
-                    set -o pipefail
-                    LOG=/shoggoth/rendered/openldap-init.log
-                    exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
-                    echo "=== openldap-init start $(date -Iseconds) ==="
-                    /bin/bash /shoggoth/openldap-init.sh
-                    echo "=== openldap-init exit $? $(date -Iseconds) ==="
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
-              memory: "512Mi"
-              cpu: "1000m"
-          readinessProbe:
-            exec:
-              command: ["bash", "-c", "test -f /run/shoggoth-ldap-init-done"]
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            failureThreshold: 60
-          livenessProbe:
-            tcpSocket:
-              port: 389
-            initialDelaySeconds: 30
-            periodSeconds: 10
-      volumes:
-        - name: init-script
-          configMap:
-            name: openldap-init
-        - name: rendered
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
-            type: DirectoryOrCreate
-        - name: data
-          persistentVolumeClaim:
-            claimName: openldap-data
-        - name: config
-          persistentVolumeClaim:
-            claimName: openldap-config
+      - name: render-ldif
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: LDAP_BASE_DN
+          value: dc=$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g')
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: MDB_DN
+          value: olcDatabase={1}mdb,cn=config
+        command:
+        - bash
+        - -c
+        args:
+        - /tmpl/render.sh
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts:
+        - name: ldif-templates
+          mountPath: /templates
+          readOnly: true
+        - name: rendered-ldif
+          mountPath: /rendered
         - name: admin-password
-          secret:
-            secretName: openldap-admin-password
+          mountPath: /run/secrets/openldap_admin_password
+          subPath: password
+          readOnly: true
+        - name: sldapauth-password
+          mountPath: /run/secrets/openldap_sldapauth_password
+          subPath: password
+          readOnly: true
+        - name: sslave-password
+          mountPath: /run/secrets/openldap_sslave_password
+          subPath: password
+          readOnly: true
+        - name: render-script
+          mountPath: /tmpl
+          readOnly: true
+      - name: wait-bootstrap
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
+          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          for i in $(seq 1 120); do
+            http_code=$(curl -sS --cacert "${SA_CA}" \
+              -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${SA_TOKEN}" \
+              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
+            if [ "${http_code}" = "200" ]; then
+              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
+              exit 0
+            fi
+            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
+            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
+              curl -sS --cacert "${SA_CA}" \
+                -H "Authorization: Bearer ${SA_TOKEN}" \
+                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
+            fi
+            sleep 5
+          done
+          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
+          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
+          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
+          exit 1
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts: []
+      containers:
+      - name: openldap
+        image: osixia/openldap:1.5.0
+        ports:
+        - containerPort: 389
+          name: ldap
+        - containerPort: 636
+          name: ldaps
+        args:
+        - --loglevel
+        - debug
+        env:
+        - name: LDAP_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: LDAP_ADMIN_PASSWORD_FILE
+          value: /run/secrets/openldap_admin_password
+        - name: LDAP_CONFIG_PASSWORD_FILE
+          value: /run/secrets/openldap_config_admin_password
+        - name: LDAP_LOG_LEVEL
+          value: '256'
+        - name: LDAP_TLS
+          value: 'false'
+        - name: CONTAINER_LOG_LEVEL
+          value: '5'
+        - name: LDAP_REMOVE_CONFIG_AFTER_SETUP
+          value: 'false'
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4318
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/ldap
+        - name: config
+          mountPath: /etc/ldap/slapd.d
+        - name: rendered-ldif
+          mountPath: /shoggoth/openldap
+          readOnly: true
+        - name: init-script
+          mountPath: /shoggoth/openldap-init.sh
+          subPath: init.sh
+          readOnly: true
+        - name: admin-password
+          mountPath: /run/secrets/openldap_admin_password
+          subPath: password
+          readOnly: true
         - name: config-admin-password
-          secret:
-            secretName: openldap-config-admin-password
+          mountPath: /run/secrets/openldap_config_admin_password
+          subPath: password
+          readOnly: true
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - /bin/bash
+              - -c
+              - 'set -o pipefail
+
+                LOG=/var/lib/ldap/openldap-init.log
+
+                exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
+
+                echo "=== openldap-init start $(date -Iseconds) ==="
+
+                /bin/bash /shoggoth/openldap-init.sh
+
+                echo "=== openldap-init exit $? $(date -Iseconds) ==="
+
+                '
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 1000m
+        readinessProbe:
+          exec:
+            command:
+            - bash
+            - -c
+            - test -f /run/shoggoth-ldap-init-done
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 60
+        livenessProbe:
+          tcpSocket:
+            port: 389
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: init-script
+        configMap:
+          name: openldap-init
+      - name: ldif-templates
+        configMap:
+          name: openldap-ldif-templates
+      - name: render-script
+        configMap:
+          name: openldap-render-ldif
+          defaultMode: 0755
+      - name: rendered-ldif
+        emptyDir: {}
+      - name: data
+        persistentVolumeClaim:
+          claimName: openldap-data
+      - name: config
+        persistentVolumeClaim:
+          claimName: openldap-config
+      - name: admin-password
+        secret:
+          secretName: openldap-admin-password
+      - name: config-admin-password
+        secret:
+          secretName: openldap-config-admin-password
+      - name: sldapauth-password
+        secret:
+          secretName: openldap-sldapauth-password
+      - name: sslave-password
+        secret:
+          secretName: openldap-sslave-password
+      serviceAccountName: openldap
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openldap
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openldap-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openldap-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: openldap-bootstrap-wait
+subjects:
+- kind: ServiceAccount
+  name: openldap
+  namespace: ${SHOGGOTH_NAMESPACE}

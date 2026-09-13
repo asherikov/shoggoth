@@ -1,4 +1,3 @@
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -6,7 +5,7 @@ metadata:
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
-    - ReadWriteOnce
+  - ReadWriteOnce
   resources:
     requests:
       storage: 10Gi
@@ -19,7 +18,7 @@ metadata:
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
-    - ReadWriteOnce
+  - ReadWriteOnce
   resources:
     requests:
       storage: 5Gi
@@ -61,6 +60,7 @@ data:
     trap cleanup EXIT
 
     echo "shoggoth: Starting dockerd..." >&2
+    cat /etc/docker/daemon.json
     dockerd --host unix:///dind/docker.sock --config-file /etc/docker/daemon.json &
     DOCKERD_PID=$!
 
@@ -93,13 +93,12 @@ data:
     rm -rf "${BUILD_DIR}"
     mkdir -p "${BUILD_DIR}/workflow" "${BUILD_DIR}/scripts"
 
-    echo "shoggoth: Generating client configuration..." >&2
-    /shoggoth/rendered/setup-client.sh \
-        --client-conf "${BUILD_DIR}/workflow" \
-        --domain "${SHOGGOTH_DOMAIN}" \
-        --api-gateway \
-        --gitea-user "$(cat /run/secrets/gitea_user)" \
-        --ai-token litellm
+    echo "shoggoth: Downloading setup-client.sh and plugin from web-internal..." >&2
+    WEB_INTERNAL="http://web-internal.${SHOGGOTH_NAMESPACE}.svc.cluster.local"
+    wget --timeout=60 -q "${WEB_INTERNAL}/setup-client.sh" -O "${BUILD_DIR}/setup-client.sh" || { echo "shoggoth: FATAL: failed to download setup-client.sh" >&2; exit 1; }
+    chmod 0755 "${BUILD_DIR}/setup-client.sh"
+    wget --timeout=60 -q "${WEB_INTERNAL}/plugin.tar.gz" -O "${BUILD_DIR}/plugin.tar.gz" || { echo "shoggoth: FATAL: failed to download plugin.tar.gz" >&2; exit 1; }
+    "${BUILD_DIR}/setup-client.sh" --client-conf "${BUILD_DIR}/workflow" --domain "${SHOGGOTH_DOMAIN}" --api-gateway --ai-token litellm
     cp -r /host_volumes/workflow-scripts/* "${BUILD_DIR}/scripts/"
 
     DOCKERFILE="${BUILD_DIR}/Dockerfile"
@@ -109,6 +108,8 @@ data:
     COPY workflow/qwen-settings.json /home/ccws/.qwen/settings.json
     COPY workflow/apt-cache.conf /etc/apt/apt.conf.d/00-shoggoth-apt-cache
     COPY scripts/ /shoggoth/workflow/scripts/
+
+    RUN sudo chown -R ccws /home/ccws/
     DOCKERFILE_HEAD
 
     sed -i "s|__SHOGGOTH_DOMAIN__|${SHOGGOTH_DOMAIN}|g" "${DOCKERFILE}"
@@ -121,7 +122,7 @@ data:
         printf 'ENV %s="%s"\n' "${key}" "${value}" >> "${DOCKERFILE}"
     done < "${BUILD_DIR}/workflow/env"
 
-    GITEA_SLAVE_TOKEN="$(cat /run/secrets/gitea_slave_token)"
+    GITEA_SLAVE_TOKEN="${GITEA_SLAVE_TOKEN:-}"
 
     echo "shoggoth: Creating ci_cache directory..." >&2
     mkdir -p /shoggoth/ci_cache
@@ -154,15 +155,70 @@ data:
     SSH_AGENT_PID="$(echo "${SSH_AGENT_PID}" | head -1)"
     chmod 600 "${SSH_AUTH_SOCK}"
 
+    SSH_ID_RSA="${SSH_ID_RSA:-}"
+    if [ -z "${SSH_ID_RSA}" ]; then
+        echo "shoggoth: FATAL: SSH_ID_RSA env var is empty; ssh-agent would have no identities" >&2
+        echo "shoggoth:        expected source: K8s Secret 'ssh-slave-private-key' (key 'ssh-id-rsa') in namespace '${SHOGGOTH_NAMESPACE}'" >&2
+        echo "shoggoth:        if the Secret exists, run: kubectl get secret -n ${SHOGGOTH_NAMESPACE} ssh-slave-private-key -o jsonpath='{.data.ssh-id-rsa}' | base64 -d" >&2
+        exit 1
+    fi
+
+    echo "shoggoth: SSH_ID_RSA received (${#SSH_ID_RSA} bytes)" >&2
+
+    FIRST_LINE=$(printf '%s' "${SSH_ID_RSA}" | head -n 1)
+    case "${FIRST_LINE}" in
+        "-----BEGIN"*)
+            ;;
+        *)
+            echo "shoggoth: FATAL: SSH_ID_RSA does not start with a BEGIN marker (first line: ${FIRST_LINE})" >&2
+            exit 1
+            ;;
+    esac
+
+    LAST_LINE=$(printf '%s' "${SSH_ID_RSA}" | awk 'NF{last=$0} END{print last}')
+    case "${LAST_LINE}" in
+        "-----END"*)
+            ;;
+        *)
+            echo "shoggoth: FATAL: SSH_ID_RSA does not end with an END marker (last line: ${LAST_LINE})" >&2
+            exit 1
+            ;;
+    esac
+
+    LAST_CHAR_DEC=$(printf '%s' "${SSH_ID_RSA}" | tail -c 1 | od -An -tu1 | tr -d ' \n')
+    case "${LAST_CHAR_DEC}" in
+        10) TRAILING_NL="yes" ;;
+        *)  TRAILING_NL="no"  ;;
+    esac
+    echo "shoggoth: SSH_ID_RSA looks like an OpenSSH key (trailing_newline=${TRAILING_NL}, last_byte=${LAST_CHAR_DEC})" >&2
+
     echo "shoggoth: Adding SSH identity..." >&2
-    cp /run/secrets/ssh_id_rsa "${SSH_AUTH_SOCK}.key"
+    printf '%s\n' "${SSH_ID_RSA}" > "${SSH_AUTH_SOCK}.key"
+    WRITTEN_SIZE=$(wc -c < "${SSH_AUTH_SOCK}.key")
+    LAST_BYTE_HEX=$(tail -c 1 "${SSH_AUTH_SOCK}.key" | od -An -tx1 | tr -d ' \n')
+    echo "shoggoth: wrote key file size=${WRITTEN_SIZE} last_byte=0x${LAST_BYTE_HEX}" >&2
+
     chmod 400 "${SSH_AUTH_SOCK}.key"
     chown 1000:1000 "${SSH_AUTH_SOCK}.key"
-    su ccws -c "ssh-add -v '${SSH_AUTH_SOCK}.key'"
+
+    if ! su ccws -c "ssh-add '${SSH_AUTH_SOCK}.key'" 2>&1; then
+        echo "shoggoth: FATAL: ssh-add failed for ${SSH_AUTH_SOCK}.key" >&2
+        rm -f "${SSH_AUTH_SOCK}.key"
+        exit 1
+    fi
     rm -f "${SSH_AUTH_SOCK}.key"
 
-    echo "shoggoth: Listing SSH agent identities:" >&2
-    su ccws -c "SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' ssh-add -l" >&2
+    echo "shoggoth: SSH agent identities:" >&2
+    if ! su ccws -c "SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' ssh-add -l" >&2; then
+        echo "shoggoth: FATAL: ssh-add -l failed" >&2
+        exit 1
+    fi
+    IDENTITY_COUNT=$(su ccws -c "SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' ssh-add -l" | wc -l | tr -d ' \n')
+    echo "shoggoth: ssh-agent has ${IDENTITY_COUNT} identity(ies)" >&2
+    if [ "${IDENTITY_COUNT}" = "0" ]; then
+        echo "shoggoth: FATAL: ssh-agent has no identities; subsequent SSH clones will fail" >&2
+        exit 1
+    fi
 
     echo "shoggoth: Starting git credential cache daemon at ${GIT_CREDENTIAL_SOCK}..." >&2
     git credential-cache--daemon "${GIT_CREDENTIAL_SOCK}" &
@@ -171,9 +227,7 @@ data:
     chmod 600 "${GIT_CREDENTIAL_SOCK}"
 
     echo "shoggoth: Storing Gitea HTTP credentials..." >&2
-    printf 'protocol=http\nhost=git.%s\nusername=token\npassword=%s\n' \
-        "${SHOGGOTH_DOMAIN}" "${GITEA_SLAVE_TOKEN}" \
-        | git credential-cache --socket "${GIT_CREDENTIAL_SOCK}" --timeout "${CREDENTIAL_TIMEOUT}" store
+    printf 'protocol=http\nhost=git.%s\nusername=token\npassword=%s\n' "${SHOGGOTH_DOMAIN}" "${GITEA_SLAVE_TOKEN}" | git credential-cache --socket "${GIT_CREDENTIAL_SOCK}" --timeout "${CREDENTIAL_TIMEOUT}" store
 
     chown -R 1000:1000 /shoggoth/git-cred
 
@@ -206,6 +260,7 @@ data:
     done
 
     wait "${DOCKERD_PID}" || true
+
 ---
 apiVersion: v1
 kind: Service
@@ -216,9 +271,9 @@ spec:
   selector:
     app: slave-dind
   ports:
-    - name: http
-      port: 80
-      targetPort: 80
+  - name: http
+    port: 80
+    targetPort: 80
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -239,165 +294,185 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - ${DNS_IP}
+        - ${SHOGGOTH_DNS_IP}
         searches:
-          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
-          - svc.cluster.local
-          - cluster.local
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
       initContainers:
-        - name: wait-bringup
-          image: busybox:latest
-          imagePullPolicy: IfNotPresent
-          command: ["sh", "-c"]
-          args:
-            - |
-              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
-              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
-                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
-                if [ -d /shoggoth/rendered ]; then
-                  echo "wait-bringup: contents:" >&2
-                  ls -la /shoggoth/rendered/ >&2 || true
-                fi
-                if [ -f /shoggoth/rendered/bringup.log ]; then
-                  echo "wait-bringup: bringup.log tail:" >&2
-                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
-                fi
-                echo "wait-bringup: exiting, bringup may still be in progress" >&2
-                exit 1
-              fi
-              echo "wait-bringup: sentinel found"
-          resources:
-            requests:
-              memory: "32Mi"
-              cpu: "50m"
-            limits:
-              memory: "64Mi"
-              cpu: "200m"
-          volumeMounts:
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
+      - name: wait-bootstrap
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: SHOGGOTH_NAMESPACE
+            value: "${SHOGGOTH_NAMESPACE}"
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
+          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          for i in $(seq 1 120); do
+            http_code=$(curl -sS --cacert "${SA_CA}" -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${SA_TOKEN}" "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
+            if [ "${http_code}" = "200" ]; then
+              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
+              exit 0
+            fi
+            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
+            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
+              curl -sS --cacert "${SA_CA}" -H "Authorization: Bearer ${SA_TOKEN}" "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
+            fi
+            sleep 5
+          done
+          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
+          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
+          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
+          exit 1
+
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts: []
       containers:
-        - name: dind
-          image: docker:dind
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            privileged: true
-          env:
-            - name: SHOGGOTH_DOMAIN
-              value: "${SHOGGOTH_DOMAIN}"
-            - name: OTEL_TRACES_EXPORTER
-              value: "otlp"
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otelcol:4318"
-            - name: DOCKER_HOST
-              value: "unix:///dind/docker.sock"
-            - name: DOCKER_TLS_CERTDIR
-              value: ""
-          command: ["/bin/sh", "/entrypoint/entrypoint.sh"]
-          ports:
-            - containerPort: 80
-              name: http
-          resources:
-            requests:
-              memory: "512Mi"
-              cpu: "500m"
-            limits:
-              memory: "2Gi"
-              cpu: "2"
-          readinessProbe:
-            exec:
-              command:
-                - "sh"
-                - "-c"
-                - "docker info > /dev/null 2>&1 && docker image inspect registry.${SHOGGOTH_DOMAIN}/slave_noble:dind > /dev/null 2>&1 && test -S /shoggoth/git-cred/ssh_auth_sock"
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            failureThreshold: 30
-            timeoutSeconds: 5
-          livenessProbe:
-            exec:
-              command:
-                - "sh"
-                - "-c"
-                - "docker info > /dev/null 2>&1"
-            initialDelaySeconds: 60
-            periodSeconds: 30
-            failureThreshold: 3
-            timeoutSeconds: 10
-          volumeMounts:
-            - name: dind-socket
-              mountPath: /dind
-            - name: entrypoint
-              mountPath: /entrypoint
-              readOnly: true
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
-            - name: workflow-scripts
-              mountPath: /host_volumes/workflow-scripts
-              readOnly: true
-            - name: git-cred
-              mountPath: /shoggoth/git-cred
-            - name: ci-cache
-              mountPath: /shoggoth/ci_cache
-            - name: dind-data
-              mountPath: /var/lib/docker
-            - name: gitea-slave-token
-              mountPath: /run/secrets/gitea_slave_token
-              subPath: gitea-slave-token
-              readOnly: true
-            - name: ssh-id-rsa
-              mountPath: /run/secrets/ssh_id_rsa
-              subPath: ssh-id-rsa
-              readOnly: true
-            - name: gitea-user
-              mountPath: /run/secrets/gitea_user
-              subPath: gitea-user
-              readOnly: true
-      volumes:
+      - name: dind
+        image: docker:dind
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+        env:
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4318
+        - name: DOCKER_HOST
+          value: unix:///dind/docker.sock
+        - name: DOCKER_TLS_CERTDIR
+          value: ''
+        - name: SHOGGOTH_REGISTRY_PORT
+          value: '${SHOGGOTH_REGISTRY_PORT}'
+        - name: SSH_ID_RSA
+          valueFrom:
+            secretKeyRef:
+              name: ssh-slave-private-key
+              key: ssh-id-rsa
+              optional: true
+        - name: GITEA_SLAVE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: gitea-slave-token
+              key: token
+              optional: true
+        command:
+        - /bin/sh
+        - /entrypoint/entrypoint.sh
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 500m
+          limits:
+            memory: 2Gi
+            cpu: '2'
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - docker info > /dev/null 2>&1 && docker image inspect registry.${SHOGGOTH_DOMAIN}/slave_noble:dind > /dev/null 2>&1 && test -S /shoggoth/git-cred/ssh_auth_sock
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 30
+          timeoutSeconds: 5
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - docker info > /dev/null 2>&1
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 10
+        volumeMounts:
         - name: dind-socket
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/dind-socket
-            type: DirectoryOrCreate
+          mountPath: /dind
         - name: entrypoint
-          configMap:
-            name: slave-dind-entrypoint
-            defaultMode: 0755
-        - name: rendered
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
-            type: DirectoryOrCreate
+          mountPath: /entrypoint
+          readOnly: true
         - name: workflow-scripts
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/workflow-scripts
-            type: DirectoryOrCreate
+          mountPath: /host_volumes/workflow-scripts
+          readOnly: true
         - name: git-cred
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/slave-dind-git-cred
-            type: DirectoryOrCreate
+          mountPath: /shoggoth/git-cred
         - name: ci-cache
-          persistentVolumeClaim:
-            claimName: slave-dind-ci-cache
+          mountPath: /shoggoth/ci_cache
         - name: dind-data
-          persistentVolumeClaim:
-            claimName: slave-dind-data
-        - name: gitea-slave-token
-          secret:
-            secretName: slave-dind-secrets
-            items:
-              - key: gitea-slave-token
-                path: gitea-slave-token
-        - name: ssh-id-rsa
-          secret:
-            secretName: slave-dind-secrets
-            items:
-              - key: ssh-id-rsa
-                path: ssh-id-rsa
-        - name: gitea-user
-          secret:
-            secretName: slave-dind-secrets
-            items:
-              - key: gitea-user
-                path: gitea-user
+          mountPath: /var/lib/docker
+      volumes:
+      - name: dind-socket
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/dind-socket
+          type: DirectoryOrCreate
+      - name: entrypoint
+        configMap:
+          name: slave-dind-entrypoint
+          defaultMode: 493
+      - name: workflow-scripts
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/workflow-scripts
+          type: DirectoryOrCreate
+      - name: git-cred
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/slave-dind-git-cred
+          type: DirectoryOrCreate
+      - name: ci-cache
+        persistentVolumeClaim:
+          claimName: slave-dind-ci-cache
+      - name: dind-data
+        persistentVolumeClaim:
+          claimName: slave-dind-data
+      serviceAccountName: slave-dind
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: slave-dind
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: slave-dind-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: slave-dind-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: slave-dind-bootstrap-wait
+subjects:
+- kind: ServiceAccount
+  name: slave-dind
+  namespace: ${SHOGGOTH_NAMESPACE}

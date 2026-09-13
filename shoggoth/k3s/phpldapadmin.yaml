@@ -1,20 +1,36 @@
----
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: phpldapadmin-entrypoint
   namespace: ${SHOGGOTH_NAMESPACE}
 data:
-  entrypoint.sh: |
-    #!/usr/bin/env bash
+  entrypoint.sh: '#!/usr/bin/env bash
+
     set -euo pipefail
 
+
     set -a
+
     . /shoggoth/rendered/phpldapadmin.env
+
     set +a
+
 
     exec /sbin/init-docker --config /etc/caddy/Caddyfile --adapter caddyfile
 
+    '
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: phpldapadmin-templates
+  namespace: ${SHOGGOTH_NAMESPACE}
+data:
+  phpldapadmin.env: |
+    LDAP_HOST=openldap
+    LDAP_PORT=389
+    LDAP_USERNAME=uid=sldapauth,ou=people,${LDAP_BASE_DN}
+    LDAP_PASSWORD=${LDAP_SLDAUTH_PASS}
 ---
 apiVersion: v1
 kind: Service
@@ -25,10 +41,9 @@ spec:
   selector:
     app: phpldapadmin
   ports:
-    - name: http
-      port: 80
-      targetPort: 80
-
+  - name: http
+    port: 80
+    targetPort: 80
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -48,96 +63,179 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - ${DNS_IP}
+        - ${SHOGGOTH_DNS_IP}
         searches:
-          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
-          - svc.cluster.local
-          - cluster.local
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
       initContainers:
-        - name: wait-bringup
-          image: busybox:latest
-          imagePullPolicy: IfNotPresent
-          command: ["sh", "-c"]
-          args:
-            - |
-              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
-              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
-                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
-                if [ -d /shoggoth/rendered ]; then
-                  echo "wait-bringup: contents:" >&2
-                  ls -la /shoggoth/rendered/ >&2 || true
-                fi
-                if [ -f /shoggoth/rendered/bringup.log ]; then
-                  echo "wait-bringup: bringup.log tail:" >&2
-                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
-                fi
-                echo "wait-bringup: exiting, bringup may still be in progress" >&2
-                exit 1
-              fi
-              echo "wait-bringup: sentinel found"
-          resources:
-            requests:
-              memory: "32Mi"
-              cpu: "50m"
-            limits:
-              memory: "64Mi"
-              cpu: "200m"
-          volumeMounts:
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
+      - name: render-config
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: LDAP_BASE_DN
+          value: dc=$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g')
+        - name: LDAP_SLDAUTH_PASS
+          valueFrom:
+            secretKeyRef:
+              name: openldap-sldapauth-password
+              key: password
+        - name: RENDER_VARS
+          value: ${LDAP_BASE_DN}${LDAP_SLDAUTH_PASS}
+        command:
+        - bash
+        - -c
+        - /tmpl/render.sh
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts:
+        - name: templates
+          mountPath: /templates
+          readOnly: true
+        - name: rendered-config
+          mountPath: /rendered
+        - name: render-script
+          mountPath: /tmpl
+          readOnly: true
+      - name: wait-bootstrap
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
+          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+          for i in $(seq 1 120); do
+            http_code=$(curl -sS --cacert "${SA_CA}" \
+              -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${SA_TOKEN}" \
+              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
+            if [ "${http_code}" = "200" ]; then
+              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
+              exit 0
+            fi
+            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
+            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
+              curl -sS --cacert "${SA_CA}" \
+                -H "Authorization: Bearer ${SA_TOKEN}" \
+                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
+            fi
+            sleep 5
+          done
+          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
+          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
+          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
+          exit 1
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts: []
       containers:
-        - name: phpldapadmin
-          image: phpldapadmin/phpldapadmin:latest
-          imagePullPolicy: IfNotPresent
-          command: ["/bin/bash", "/shoggoth/entrypoint.sh"]
-          ports:
-            - containerPort: 80
-              name: http
-          env:
-            - name: SERVER_NAME
-              value: ":80"
-            - name: OTEL_TRACES_EXPORTER
-              value: "otlp"
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otelcol:4318"
-            - name: SHOGGOTH_DOMAIN
-              value: "${SHOGGOTH_DOMAIN}"
-          volumeMounts:
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
-            - name: entrypoint
-              mountPath: /shoggoth/entrypoint.sh
-              subPath: entrypoint.sh
-              readOnly: true
-          resources:
-            requests:
-              memory: "64Mi"
-              cpu: "50m"
-            limits:
-              memory: "128Mi"
-              cpu: "500m"
-          readinessProbe:
-            httpGet:
-              path: /
-              port: 80
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 30
-          livenessProbe:
-            httpGet:
-              path: /
-              port: 80
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 6
-      volumes:
-        - name: rendered
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
-            type: DirectoryOrCreate
+      - name: phpldapadmin
+        image: phpldapadmin/phpldapadmin:latest
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - /shoggoth/entrypoint.sh
+        ports:
+        - containerPort: 80
+          name: http
+        env:
+        - name: SERVER_NAME
+          value: :80
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4318
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        volumeMounts:
+        - name: rendered-config
+          mountPath: /shoggoth/rendered
+          readOnly: true
         - name: entrypoint
-          configMap:
-            name: phpldapadmin-entrypoint
+          mountPath: /shoggoth/entrypoint.sh
+          subPath: entrypoint.sh
+          readOnly: true
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+          limits:
+            memory: 128Mi
+            cpu: 500m
+        readinessProbe:
+          httpGet:
+            path: /up
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /up
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 3
+          timeoutSeconds: 5
+      volumes:
+      - name: templates
+        configMap:
+          name: phpldapadmin-templates
+      - name: render-script
+        configMap:
+          name: shoggoth-render-config
+          defaultMode: 0755
+      - name: rendered-config
+        emptyDir: {}
+      - name: entrypoint
+        configMap:
+          name: phpldapadmin-entrypoint
+      serviceAccountName: phpldapadmin
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: phpldapadmin
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: phpldapadmin-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: phpldapadmin-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: phpldapadmin-bootstrap-wait
+subjects:
+- kind: ServiceAccount
+  name: phpldapadmin
+  namespace: ${SHOGGOTH_NAMESPACE}

@@ -11,7 +11,7 @@
 
 let
   domain = "${SHOGGOTH_DOMAIN}";
-  registryPort = "${REGISTRY_PORT}";
+  registryPort = "${SHOGGOTH_REGISTRY_PORT}";
   k3sRegistries = pkgs.writeText "registries.yaml" ''
     mirrors:
       docker.io:

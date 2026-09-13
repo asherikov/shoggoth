@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shoggoth-render-config
+  namespace: ${SHOGGOTH_NAMESPACE}
+data:
+  render.sh: |
+    #!/usr/bin/env bash
+    # Generic shoggoth file render helper.
+    # Used by per-service render-config init containers to envsubst templates.
+    #
+    # Env:
+    #   RENDER_VARS    envsubst VARS expression (e.g. '${FOO}${BAR}').
+    #                  If empty, substitutes all env vars present in the container.
+    #
+    # Mounts:
+    #   /templates (read-only)  ConfigMap containing file templates
+    #   /rendered  (read-write)  emptyDir where rendered files are written
+    set -euo pipefail
+
+    for DIR in /templates /rendered; do
+        if [ ! -d "${DIR}" ]; then
+            echo "render-config: FATAL: ${DIR} not mounted" >&2
+            exit 1
+        fi
+    done
+
+    rendered=0
+    for tmpl in /templates/*; do
+        [ -f "${tmpl}" ] || continue
+        name="$(basename "${tmpl}")"
+        if [ -n "${RENDER_VARS:-}" ]; then
+            envsubst "${RENDER_VARS}" < "${tmpl}" > "/rendered/${name}"
+        else
+            envsubst < "${tmpl}" > "/rendered/${name}"
+        fi
+        rendered=$((rendered + 1))
+    done
+
+    echo "render-config: rendered ${rendered} file(s) to /rendered"
+    ls -la /rendered

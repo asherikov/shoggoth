@@ -192,7 +192,7 @@ Shoggoth slave container includes three main layers:
   <https://github.com/asherikov/ccws/blob/master/ccws/examples/Dockerfile>.
 - <https://github.com/QwenLM/qwen-code> terminal coding agent, see
   <https://github.com/asherikov/ccws/blob/master/ccws/examples/Dockerfile.qwen>.
-- `shoggoth`-sepecific set iof utilities, such as gitea and redmin cli clients,
+- `shoggoth`-sepecific set of utilities, such as the redmine cli client,
   docker file is located in `shoggoth/dockerfiles/slave`.
 
 The slave container is intended to be used in three different ways:
@@ -283,7 +283,7 @@ Run the setup script on each client machine.
 ./shoggoth/setup-client.sh --all --domain s.local --host-ip 192.168.1.100
 
 # Configure with Gitea and Redmine tokens (generates env, qwen configuration)
-./shoggoth/setup-client.sh --client-conf --domain s.local --api-gateway --gitea-user your-user
+./shoggoth/setup-client.sh --client-conf --domain s.local --api-gateway
 ```
 
 The script generates the following files when `--client-conf` is used:
@@ -316,6 +316,19 @@ Caveats
 Neither redmine nor gitea cli clients can be configured exclusively with
 environment variables. Moreover gitea cli requires user name to be specified in
 addition to a token for smooth operation.
+
+The container image registry (zot) is affected by upstream issue
+[#4357](https://github.com/project-zot/zot/issues/4357): an on-demand sync
+that is interrupted (host reboot, pod restart, client disconnect at the wrong
+moment) leaves a stale `.sync/<uuid>/` staging directory. On the next start,
+zot does not clean these up — re-pulling the same image may re-download
+already-cached layers, and in some cases every by-tag manifest GET across all
+repositories hangs indefinitely. The `registry` Deployment works around this
+with a `cleanup-sync-staging` initContainer that removes any `.sync` directories
+before zot starts on every pod restart; if a registry pull ever hangs and
+`kubectl logs deploy/registry -p` shows no progress, restart the pod to clear
+the stale state. The pod's persistent volume is preserved across restarts,
+so no cached images are lost.
 
 Service Usage Examples
 ----------------------
@@ -360,14 +373,6 @@ git clone ssh://git@git.s.local/admin/repo.git
 
 # HTTP
 git clone http://git.s.local/admin/repo.git
-```
-
-Configure the `tea` CLI by providing a token:
-
-``` bash
-./shoggoth/setup-client.sh --domain s.local --gitea-token your-token
-set -a; source ~/.config/shoggoth/env; set +a
-tea issues list
 ```
 
 ### Gitea MCP Server (AI Agent Integration)

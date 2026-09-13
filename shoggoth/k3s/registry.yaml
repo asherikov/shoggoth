@@ -1,4 +1,3 @@
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -6,7 +5,7 @@ metadata:
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
   accessModes:
-    - ReadWriteOnce
+  - ReadWriteOnce
   resources:
     requests:
       storage: 100Gi
@@ -21,9 +20,9 @@ spec:
   selector:
     app: registry
   ports:
-    - name: registry
-      port: ${REGISTRY_PORT}
-      targetPort: ${REGISTRY_PORT}
+  - name: registry
+    port: ${SHOGGOTH_REGISTRY_PORT}
+    targetPort: ${SHOGGOTH_REGISTRY_PORT}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -47,7 +46,7 @@ data:
       },
       "http": {
         "address": "0.0.0.0",
-        "port": "${REGISTRY_PORT}",
+        "port": "${SHOGGOTH_REGISTRY_PORT}",
         "readTimeout": "0s",
         "writeTimeout": "0s",
         "compat": ["docker2s2"]
@@ -90,41 +89,43 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
-        - name: registry
-          image: ghcr.io/project-zot/zot:latest
-          imagePullPolicy: IfNotPresent
-          args: ["serve", "/etc/zot/config.json"]
-          ports:
-            - containerPort: ${REGISTRY_PORT}
-              name: registry
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
-              memory: "1Gi"
-              cpu: "1"
-          readinessProbe:
-            httpGet:
-              path: /v2/
-              port: ${REGISTRY_PORT}
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /v2/
-              port: ${REGISTRY_PORT}
-            initialDelaySeconds: 30
-            periodSeconds: 30
-          volumeMounts:
-            - name: data
-              mountPath: /var/lib/zot
-            - name: config
-              mountPath: /etc/zot
-      volumes:
+      - name: registry
+        image: ghcr.io/project-zot/zot:latest
+        imagePullPolicy: IfNotPresent
+        args:
+        - serve
+        - /etc/zot/config.json
+        ports:
+        - containerPort: ${SHOGGOTH_REGISTRY_PORT}
+          name: registry
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 1Gi
+            cpu: '1'
+        readinessProbe:
+          httpGet:
+            path: /v2/
+            port: ${SHOGGOTH_REGISTRY_PORT}
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /v2/
+            port: ${SHOGGOTH_REGISTRY_PORT}
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        volumeMounts:
         - name: data
-          persistentVolumeClaim:
-            claimName: registry
+          mountPath: /var/lib/zot
         - name: config
-          configMap:
-            name: registry-config
+          mountPath: /etc/zot
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: registry
+      - name: config
+        configMap:
+          name: registry-config

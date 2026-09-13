@@ -18,10 +18,10 @@ host_install_nixos:
 	@echo "Installing K3s on ${HOST} via NixOS..."
 	${MAKE} sync
 	@mkdir -p ${K3S_TMP_DIR}
-	@export SHOGGOTH_DOMAIN="${DOMAIN}" DNS_IP="${DNS_IP}" REGISTRY_PORT="${REGISTRY_PORT}" \
-		WEB_EXT_PORT="${WEB_EXT_PORT}" WG_PORT="${WG_PORT}" WG_UI_PORT="${WG_UI_PORT}"; \
-	envsubst '$${SHOGGOTH_DOMAIN}$${DNS_IP}$${REGISTRY_PORT}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix; \
-	envsubst '$${WEB_EXT_PORT}$${WG_PORT}$${WG_UI_PORT}$${REGISTRY_PORT}' < shoggoth/ports.nix > ${K3S_TMP_DIR}/${INSTANCE}-ports.nix
+	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_DNS_IP="${DNS_IP}" SHOGGOTH_REGISTRY_PORT="${REGISTRY_PORT}" \
+		SHOGGOTH_WEB_EXT_PORT="${WEB_EXT_PORT}" SHOGGOTH_WG_PORT="${WG_PORT}" SHOGGOTH_WG_UI_PORT="${WG_UI_PORT}"; \
+	envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_DNS_IP}$${SHOGGOTH_REGISTRY_PORT}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix; \
+	envsubst '$${SHOGGOTH_WEB_EXT_PORT}$${SHOGGOTH_WG_PORT}$${SHOGGOTH_WG_UI_PORT}$${SHOGGOTH_REGISTRY_PORT}' < shoggoth/ports.nix > ${K3S_TMP_DIR}/${INSTANCE}-ports.nix
 	scp ${SSH_COMMON_ARGS} ${K3S_TMP_DIR}/shoggoth.nix ${K3S_TMP_DIR}/${INSTANCE}-ports.nix ${USER}@${HOST_IP}:/tmp/
 	${K3S_SSH} 'sudo cp /tmp/shoggoth.nix /tmp/${INSTANCE}-ports.nix /etc/nixos/ && rm /tmp/shoggoth.nix /tmp/${INSTANCE}-ports.nix'
 	${K3S_SSH} 'grep -q "${INSTANCE}-ports.nix" /etc/nixos/configuration.nix || { \
@@ -117,6 +117,51 @@ purge: tunnel_up
 	-${K3S_SSH} 'rm -rf ${REMOTE_PATH}/${INSTANCE}'
 	@echo "Instance '${INSTANCE}' purged."
 
+# Purge all Kubernetes Secrets in the ${INSTANCE} namespace.
+# Removes OpenBao-seeded secrets, TLS cert secrets, the unseal-key backup,
+# and the bootstrap marker. PVC data and the OpenBao raft are untouched —
+k3s_purge_secrets: tunnel_up
+	@echo "=== Purging all Kubernetes Secrets in namespace '${INSTANCE}' ==="
+	-kubectl delete secret --all -n ${INSTANCE} --ignore-not-found=true
+	@echo "All Secrets in '${INSTANCE}' purged."
+
+# Check existence and contents of a specific Kubernetes Secret in ${INSTANCE}.
+# Prints namespace, type, age, data keys, and decoded values of every key.
+# Exits 0 if the Secret exists, 1 if missing, 2 on kubectl/parse errors.
+#
+# Usage: make k3s_check_secret SECRET=<name>
+# Example: make k3s_check_secret SECRET=redmine-slave-token
+K3S_CHECK_SECRET_JQ_SUMMARY = "\n" + "  namespace: " + $$ns + "\n" + "  name:      " + .metadata.name + "\n" + "  type:      " + (.type // "<unknown>") + "\n" + "  age:       " + (.metadata.creationTimestamp // "unknown" | sub("T"; " ") | sub("Z"; "")) + "\n" + "  data keys: " + (if (.data // {}) | length == 0 then "(none)" else (.data | keys | join(", ")) end) + "\n\n"
+K3S_CHECK_SECRET_JQ_VALUES = .data // {} | to_entries[] | "  [\(.key)] (decoded; stored in K8s as \(.value | length) base64 chars):\n    \(.value | @base64d)"
+k3s_check_secret: tunnel_up
+	@if [ -z "${SECRET}" ]; then \
+		echo "Usage: make k3s_check_secret SECRET=<name>"; \
+		echo "Example: make k3s_check_secret SECRET=redmine-slave-token"; \
+		exit 2; \
+	fi
+	@echo "=== Checking Secret '${SECRET}' in namespace '${INSTANCE}' ==="
+	@RESP_FILE=$$(mktemp); \
+	HTTP_CODE=$$(kubectl get secret "${SECRET}" -n "${INSTANCE}" -o json --request-timeout=10s > "$${RESP_FILE}" 2>/tmp/k3s-check-secret.err && echo 200 || echo "$$?"); \
+	if [ "$${HTTP_CODE}" != "200" ]; then \
+		if [ "$${HTTP_CODE}" = "1" ]; then \
+			echo "  NOT FOUND: Secret '${SECRET}' does not exist in namespace '${INSTANCE}'"; \
+			echo "  (kubectl exit 1: not found / no resources / cluster unreachable)"; \
+			[ -s /tmp/k3s-check-secret.err ] && sed 's/^/  kubectl: /' /tmp/k3s-check-secret.err; \
+			rm -f "$${RESP_FILE}" /tmp/k3s-check-secret.err; \
+			exit 1; \
+		else \
+			echo "  ERROR: kubectl failed with exit code $${HTTP_CODE}"; \
+			[ -s /tmp/k3s-check-secret.err ] && sed 's/^/  kubectl: /' /tmp/k3s-check-secret.err; \
+			rm -f "$${RESP_FILE}" /tmp/k3s-check-secret.err; \
+			exit 2; \
+		fi; \
+	fi; \
+	rm -f /tmp/k3s-check-secret.err; \
+	jq -r --arg ns "${INSTANCE}" '${K3S_CHECK_SECRET_JQ_SUMMARY}' "$${RESP_FILE}"; \
+	jq -r '${K3S_CHECK_SECRET_JQ_VALUES}' "$${RESP_FILE}"; \
+	rm -f "$${RESP_FILE}"; \
+	echo ""; echo "  Secret '${SECRET}' exists."; exit 0
+
 # Wipe OpenBao raft storage. Does NOT restart anything — run sync_restart after.
 # Useful when the unseal key is lost or OpenBao data is corrupted.
 wipe_openbao: tunnel_up
@@ -153,10 +198,6 @@ wipe_openbao: tunnel_up
 	fi
 	@echo "Deleting unseal key secret..."
 	@-kubectl delete secret openbao-unseal-key -n ${INSTANCE} --ignore-not-found=true
-	@echo "Deleting failed bringup job..."
-	@-kubectl delete job bringup -n ${INSTANCE} --ignore-not-found=true
-	@echo "Waiting for bringup pod to terminate..."
-	@-kubectl wait --for=delete pod -l job-name=bringup -n ${INSTANCE} --timeout=60s 2>/dev/null || true
 	@echo "Done. Run 'make sync_restart' to re-deploy."
 
 # Start all shoggoth K3s services.
@@ -171,12 +212,17 @@ up: tunnel_up
 	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}" \
 		SHOGGOTH_NAMESPACE="${INSTANCE}" \
 		SHOGGOTH_INSTANCE_DIR="${INSTANCE}" \
-		DNS_IP="${DNS_IP}" \
-		WEB_EXT_PORT="${WEB_EXT_PORT}" WG_PORT="${WG_PORT}" \
-		REGISTRY_PORT="${REGISTRY_PORT}" \
-		WG_UI_PORT="${WG_UI_PORT}"; \
+		SHOGGOTH_DNS_IP="${DNS_IP}" \
+		SHOGGOTH_WEB_EXT_PORT="${WEB_EXT_PORT}" SHOGGOTH_WG_PORT="${WG_PORT}" \
+		SHOGGOTH_REGISTRY_PORT="${REGISTRY_PORT}" \
+		SHOGGOTH_WG_UI_PORT="${WG_UI_PORT}" \
+		SHOGGOTH_AI_DEFAULT_MODEL="${AI_DEFAULT_MODEL}" \
+		SHOGGOTH_AI_DEFAULT_API="${AI_DEFAULT_API}" \
+		SHOGGOTH_AI_DEFAULT_TOKEN_FILE="${AI_DEFAULT_TOKEN_FILE}" \
+		SHOGGOTH_GITEA_SERVER_TOKEN_FILE="${GITEA_SERVER_TOKEN_FILE}" \
+		LDAP_BASE_DN="${LDAP_BASE_DN}"; \
 		for f in ${K3S_ALL_MANIFESTS}; do \
-			envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${DNS_IP}$${WEB_EXT_PORT}$${WG_PORT}$${REGISTRY_PORT}$${WG_UI_PORT}' < $$f; \
+			envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${SHOGGOTH_DNS_IP}$${SHOGGOTH_WEB_EXT_PORT}$${SHOGGOTH_WG_PORT}$${SHOGGOTH_REGISTRY_PORT}$${SHOGGOTH_WG_UI_PORT}$${SHOGGOTH_AI_DEFAULT_MODEL}$${SHOGGOTH_AI_DEFAULT_API}$${SHOGGOTH_AI_DEFAULT_TOKEN_FILE}$${SHOGGOTH_GITEA_SERVER_TOKEN_FILE}$${LDAP_BASE_DN}' < $$f; \
 			printf "\n---\n"; \
 		done | kubectl apply -f -
 
@@ -208,10 +254,15 @@ start: tunnel_up
 	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}" \
 		SHOGGOTH_NAMESPACE="${INSTANCE}" \
 		SHOGGOTH_INSTANCE_DIR="${INSTANCE}" \
-		DNS_IP="${DNS_IP}" \
-		WEB_EXT_PORT="${WEB_EXT_PORT}" WG_PORT="${WG_PORT}" \
-		REGISTRY_PORT="${REGISTRY_PORT}" \
-		WG_UI_PORT="${WG_UI_PORT}"; \
+		SHOGGOTH_DNS_IP="${DNS_IP}" \
+		SHOGGOTH_WEB_EXT_PORT="${WEB_EXT_PORT}" SHOGGOTH_WG_PORT="${WG_PORT}" \
+		SHOGGOTH_REGISTRY_PORT="${REGISTRY_PORT}" \
+		SHOGGOTH_WG_UI_PORT="${WG_UI_PORT}" \
+		SHOGGOTH_AI_DEFAULT_MODEL="${AI_DEFAULT_MODEL}" \
+		SHOGGOTH_AI_DEFAULT_API="${AI_DEFAULT_API}" \
+		SHOGGOTH_AI_DEFAULT_TOKEN_FILE="${AI_DEFAULT_TOKEN_FILE}" \
+		SHOGGOTH_GITEA_SERVER_TOKEN_FILE="${GITEA_SERVER_TOKEN_FILE}" \
+		LDAP_BASE_DN="${LDAP_BASE_DN}"; \
 	MANIFESTS="$$(grep -rl "app: ${SERVICE}" ${K3S_MANIFESTS} --include='*.yaml' | sort)"; \
 	if [ -z "$$MANIFESTS" ]; then \
 		echo "No manifest file found for service '${SERVICE}'"; \
@@ -219,7 +270,7 @@ start: tunnel_up
 	fi; \
 	for f in $$MANIFESTS; do \
 		echo "Applying $$f..."; \
-		envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${DNS_IP}$${WEB_EXT_PORT}$${WG_PORT}$${REGISTRY_PORT}$${WG_UI_PORT}' < $$f | kubectl apply -f - || exit 1; \
+		envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${SHOGGOTH_DNS_IP}$${SHOGGOTH_WEB_EXT_PORT}$${SHOGGOTH_WG_PORT}$${SHOGGOTH_REGISTRY_PORT}$${SHOGGOTH_WG_UI_PORT}$${SHOGGOTH_AI_DEFAULT_MODEL}$${SHOGGOTH_AI_DEFAULT_API}$${SHOGGOTH_AI_DEFAULT_TOKEN_FILE}$${SHOGGOTH_GITEA_SERVER_TOKEN_FILE}$${LDAP_BASE_DN}' < $$f | kubectl apply -f - || exit 1; \
 	done
 
 # Restart a single service: make restart_service SERVICE=kestra
@@ -248,7 +299,7 @@ log: tunnel_up
 		pod=\$$(basename \"\$$(dirname \"\$$dir\")\"); \
 		sz=\$$(wc -c < \"\$$1\"); \
 		echo \"  [\$$cname] (\$${sz} bytes):\"; \
-		if [ \"\$$sz\" -gt 0 ]; then tail -3000 \"\$$1\" 2>&1; fi; \
+		if [ \"\$$sz\" -gt 0 ]; then tail -3000 \"\$$1\" 2>&1 | grep -v kube-probe; fi; \
 		echo \"\"; \
 	' _ {} \;" 2>&1 || echo "No pod logs found on host for $(SERVICE)"
 
@@ -266,3 +317,41 @@ status: tunnel_up
 	@kubectl get pods -n ${INSTANCE} \
 		-o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,STATUS:.status.phase \
 		2>&1 || true
+
+# Drop a tag from the local zot registry cache.
+#
+# Triggers on-demand re-sync from upstream on the next pull of IMAGE:TAG.
+# zot is configured with anonymous access, so no credentials are required.
+# Requires network reachability to registry.${DOMAIN}:${REGISTRY_PORT}.
+# Idempotent: HTTP 404 (tag not present) is treated as success.
+#
+# Usage: make drop_image_tag IMAGE=<repo> TAG=<tag>
+# Example: make drop_image_tag IMAGE=library/nginx TAG=latest
+drop_image_tag:
+	@if [ -z "${IMAGE}" ] || [ -z "${TAG}" ]; then \
+		echo "Usage: make drop_image_tag IMAGE=<repo> TAG=<tag>"; \
+		echo "Example: make drop_image_tag IMAGE=library/nginx TAG=latest"; \
+		exit 1; \
+	fi
+	@echo "=== Dropping tag ${IMAGE}:${TAG} from registry.${DOMAIN} ==="
+	@RESP_FILE=$$(mktemp); \
+	HTTP_CODE=$$(curl -sS -o "$${RESP_FILE}" -w '%{http_code}' \
+		-X DELETE \
+		-H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json' \
+		"http://registry.${DOMAIN}:${REGISTRY_PORT}/v2/${IMAGE}/manifests/${TAG}"); \
+	CURL_EXIT=$$?; \
+	if [ $${CURL_EXIT} -ne 0 ]; then \
+		echo "  FAIL: curl exited with $${CURL_EXIT}" >&2; \
+		rm -f "$${RESP_FILE}"; \
+		exit 1; \
+	fi; \
+	case "$${HTTP_CODE}" in \
+		202|200|204) echo "  OK: tag dropped (HTTP $${HTTP_CODE})" ;; \
+		404) echo "  OK: tag not present (HTTP 404, idempotent)" ;; \
+		*) echo "  FAIL: HTTP $${HTTP_CODE}" >&2; \
+			[ -s "$${RESP_FILE}" ] && cat "$${RESP_FILE}" >&2; \
+			rm -f "$${RESP_FILE}"; \
+			exit 1 ;; \
+	esac; \
+	rm -f "$${RESP_FILE}"
+	@echo "Done. Next pull of ${IMAGE}:${TAG} will re-sync from upstream."
