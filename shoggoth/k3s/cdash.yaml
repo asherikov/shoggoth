@@ -40,7 +40,7 @@ data:
     export APP_KEY DB_PASSWORD
     export CDASH_AUTHENTICATION_PROVIDER LOGIN_FIELD
     export LDAP_HOSTS LDAP_PORT LDAP_PROVIDER LDAP_LOCATE_USERS_BY LDAP_USERNAME LDAP_PASSWORD LDAP_BASE_DN
-    export USER_CREATE_PROJECTS TOKEN_DURATION OPENLDAP_S_SLAVE_PASSWORD SHOGGOTH_VAULT_TOKEN OPENBAO_ADDR
+    export USER_CREATE_PROJECTS TOKEN_DURATION OPENLDAP_SLAVE_PASSWORD SHOGGOTH_VAULT_TOKEN OPENBAO_ADDR
 
     printf 'Listen 80\n' > /etc/apache2/ports.conf
     sed -i 's/:8080/:80/g' /etc/apache2/sites-enabled/cdash-site.conf
@@ -82,11 +82,11 @@ data:
     echo "shoggoth: CDash is ready"
 
     php artisan user:save \
-        --email=sslave \
+        --email=slave \
         --firstname=Slave \
         --lastname=User \
         --institution=shoggoth \
-        --password="${OPENLDAP_S_SLAVE_PASSWORD}" \
+        --password="${OPENLDAP_SLAVE_PASSWORD}" \
         --admin=0 \
         || echo "shoggoth: WARNING: user:save failed (may already exist or DB issue)" >&2
 
@@ -122,17 +122,17 @@ data:
     LOGIN_RESULT="$(curl -s -b "${COOKIE_JAR}" -c "${COOKIE_JAR}" \
         -X POST "${CDASH_URL}/login" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "_token=${CSRF_TOKEN}&email=sslave&password=${OPENLDAP_S_SLAVE_PASSWORD}" \
+        -d "_token=${CSRF_TOKEN}&email=slave&password=${OPENLDAP_SLAVE_PASSWORD}" \
         -o /dev/null -w '%{http_code} %{redirect_url}')"
     LOGIN_CODE="${LOGIN_RESULT%% *}"
     LOGIN_REDIRECT="${LOGIN_RESULT#* }"
     if [ "${LOGIN_CODE}" = "302" ] && printf '%s' "${LOGIN_REDIRECT}" | grep -qE '^https?://[^/]+/login'; then
-        echo "shoggoth: FATAL: CDash login failed for sslave (redirected back to login)" >&2
+        echo "shoggoth: FATAL: CDash login failed for slave (redirected back to login)" >&2
         echo "shoggoth: Check /cdash/storage/logs/laravel.log for LDAP auth errors" >&2
         exit 1
     fi
     if [ "${LOGIN_CODE}" != "200" ] && [ "${LOGIN_CODE}" != "302" ]; then
-        echo "shoggoth: FATAL: CDash login failed for sslave (HTTP ${LOGIN_CODE})" >&2
+        echo "shoggoth: FATAL: CDash login failed for slave (HTTP ${LOGIN_CODE})" >&2
         exit 1
     fi
 

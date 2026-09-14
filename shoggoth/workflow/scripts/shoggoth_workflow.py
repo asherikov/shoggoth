@@ -214,7 +214,7 @@ class Gitea:
         return "review" in self._payload
 
     def is_review_by_slave_user(self):
-        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
         review = self._payload.get("review", {})
         if review.get("user", {}).get("login") == slave_user:
             return True
@@ -224,10 +224,12 @@ class Gitea:
         return False
 
     def is_slave_user_reviewer(self):
-        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        reviewer_user = os.environ.get("SHOGGOTH_REVIEWER_USER", "slave-reviewer")
+        candidates = {u for u in (slave_user, reviewer_user) if u}
         pr = self._payload.get("pull_request", {})
         requested = pr.get("requested_reviewers", [])
-        if any(r.get("login") == slave_user for r in requested):
+        if any(r.get("login") in candidates for r in requested):
             return True
         return False
 
@@ -346,7 +348,7 @@ class Gitea:
         self.patch(f"repos/{repo_full}", {"has_pull_requests": True})
 
     def get_unresolved_review_comments(self, repo, pr_number):
-        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
         all_reviews = _paginate(lambda page, limit: self.get(
             f"repos/{repo}/pulls/{pr_number}/reviews",
             params={"page": page, "limit": limit}))
@@ -669,7 +671,7 @@ class Shoggoth:
     def _check_task_actionable(self, task, redmine):
         task_id = task.get("id")
         status_name = (task.get("status") or {}).get("name")
-        slave_user_login = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        slave_user_login = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
         assigned_to = task.get("assigned_to") or {}
         assigned_to_id = assigned_to.get("id")
         assigned_to_login = assigned_to.get("login")
@@ -998,7 +1000,7 @@ class TaskCommand(CommandBase):
 
     def create_pull_request(self, repo, branch, task_id, title, base="main"):
         self.gitea.ensure_pull_requests_enabled(repo)
-        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
         review_user = os.environ.get("SHOGGOTH_REVIEW_USER", "admin")
         result = self.gitea.post(f"repos/{repo}/pulls", {
             "base": base,
@@ -1136,6 +1138,14 @@ class TaskCommand(CommandBase):
               f"project={self.shoggoth.project} subject={task_subject} ===",
               flush=True)
 
+        log(f"task: switching #{self.task_id} status to 'Feedback'")
+        self.redmine.update_issue(
+            self.task_id,
+            "--status", "Feedback",
+            "--note",
+            "Task execution triggered; status changed from 'In Progress' to 'Feedback'.",
+        )
+
         self.agent.start_session("task")
 
         task_data = {
@@ -1147,8 +1157,7 @@ class TaskCommand(CommandBase):
         prompt = (
             f"Execute the following task: {task_subject}\n\n"
             f"{json.dumps(task_data, indent=2)}\n\n"
-            f"Use the codebase-memory-mcp MCP tools (search_graph, "
-            f"get_code_snippet, trace_path) to explore the codebase and "
+            f"Use the codebase-memory skill to explore the codebase and "
             f"understand the relevant code before making changes.\n\n"
             f"Leave all changes uncommitted in the working tree.\n\n"
             f"Update basic memory with any new information learned about "
@@ -1211,8 +1220,7 @@ class CiFailureCommand(CommandBase):
             f"at commit {ci_sha} (branch {ci_branch}).\n"
             f"Run URL: {ci_run_url}\n\n"
             f"CI logs:\n{ci_logs}\n\n"
-            f"Use the codebase-memory-mcp MCP tools (search_graph, "
-            f"get_code_snippet, trace_path) to understand the code related "
+            f"Use the codebase-memory skill to understand the code related "
             f"to the failure. Fix the code, commit, and push."
         )
 
@@ -1273,10 +1281,9 @@ class PrUpdateCommand(CommandBase):
             f"/review {repo_dir} --effort low\n\n"
             f"PR: {pr_url}\n"
             f"Title: {pr_title}\n\n"
-            f"Use the codebase-memory-mcp MCP tools (search_graph, get_code_snippet, "
-            f"trace_path) to understand the code context and cross-references. "
-            f"Use the basic_memory MCP tools (search, read_note) to consult any "
-            f"relevant project notes and prior decisions."
+            f"Use the codebase-memory skill to understand the code context and "
+            f"cross-references. Use the basic_memory MCP tools (search, read_note) "
+            f"to consult any relevant project notes and prior decisions."
         )
 
         rc = self.agent.prompt(prompt)
@@ -1294,9 +1301,11 @@ class PrUpdateCommand(CommandBase):
         else:
             log("pr-review: no review text captured from agent")
 
-        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
-        log(f"pr-review: removing requested reviewer {slave_user}")
+        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        reviewer_user = os.environ.get("SHOGGOTH_REVIEWER_USER", "slave-reviewer")
+        log(f"pr-review: removing requested reviewers {slave_user}, {reviewer_user}")
         self.gitea.remove_requested_reviewer(pr_repo, pr_number, slave_user)
+        self.gitea.remove_requested_reviewer(pr_repo, pr_number, reviewer_user)
 
     def _resolve_task(self, branch):
         issues = self.redmine.list_issues(self.shoggoth.project)
@@ -1434,8 +1443,7 @@ class PrUpdateCommand(CommandBase):
             prompt = (
                 f"Address the following review comment on PR {pr_url} "
                 f"(file: {location}): "
-                f"{c_body}. Use the codebase-memory-mcp MCP tools "
-                f"(search_graph, get_code_snippet, trace_path) to understand "
+                f"{c_body}. Use the codebase-memory skill to understand "
                 f"the code context around the comment. "
                 f"Leave all changes uncommitted in the working tree. "
                 f"Do not post comments, reviews, or replies via Gitea MCP tools."

@@ -214,29 +214,41 @@ data:
     homeDirectory: /home/admin
     mail: admin@${SHOGGOTH_DOMAIN}
 
-    dn: uid=sldapauth,ou=people,${LDAP_BASE_DN}
+    dn: uid=ldapauth,ou=people,${LDAP_BASE_DN}
     changetype: add
     objectClass: inetOrgPerson
     objectClass: posixAccount
-    uid: sldapauth
+    uid: ldapauth
     cn: LDAP Auth
     sn: Shoogoth
     uidNumber: 10001
     gidNumber: 10001
-    homeDirectory: /home/sldapauth
-    mail: sldapauth@${SHOGGOTH_DOMAIN}
+    homeDirectory: /home/ldapauth
+    mail: ldapauth@${SHOGGOTH_DOMAIN}
 
-    dn: uid=sslave,ou=people,${LDAP_BASE_DN}
+    dn: uid=slave,ou=people,${LDAP_BASE_DN}
     changetype: add
     objectClass: inetOrgPerson
     objectClass: posixAccount
-    uid: sslave
+    uid: slave
     cn: Slave
     sn: Shoggoth
     uidNumber: 10002
     gidNumber: 10002
-    homeDirectory: /home/sslave
-    mail: sslave@${SHOGGOTH_DOMAIN}
+    homeDirectory: /home/slave
+    mail: slave@${SHOGGOTH_DOMAIN}
+
+    dn: uid=slave-reviewer,ou=people,${LDAP_BASE_DN}
+    changetype: add
+    objectClass: inetOrgPerson
+    objectClass: posixAccount
+    uid: slave-reviewer
+    cn: Slave Reviewer
+    sn: Shoggoth
+    uidNumber: 10003
+    gidNumber: 10003
+    homeDirectory: /home/slave-reviewer
+    mail: slave-reviewer@${SHOGGOTH_DOMAIN}
 
     dn: cn=admins,ou=groups,${LDAP_BASE_DN}
     changetype: add
@@ -248,7 +260,7 @@ data:
     changetype: add
     objectClass: groupOfNames
     cn: shoggoth-auth
-    member: uid=sldapauth,ou=people,${LDAP_BASE_DN}
+    member: uid=ldapauth,ou=people,${LDAP_BASE_DN}
   memberof_module.ldif: |
     dn: cn=module{0},cn=config
     changetype: modify
@@ -270,15 +282,20 @@ data:
     replace: userPassword
     userPassword: ${ADMIN_HASH}
 
-    dn: uid=sldapauth,ou=people,${LDAP_BASE_DN}
+    dn: uid=ldapauth,ou=people,${LDAP_BASE_DN}
     changetype: modify
     replace: userPassword
-    userPassword: ${SLDAUTH_HASH}
+    userPassword: ${LDAPAUTH_HASH}
 
-    dn: uid=sslave,ou=people,${LDAP_BASE_DN}
+    dn: uid=slave,ou=people,${LDAP_BASE_DN}
     changetype: modify
     replace: userPassword
-    userPassword: ${SSLAVE_HASH}
+    userPassword: ${SLAVE_HASH}
+
+    dn: uid=slave-reviewer,ou=people,${LDAP_BASE_DN}
+    changetype: modify
+    replace: userPassword
+    userPassword: ${SLAVE_REVIEWER_HASH}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -315,10 +332,11 @@ data:
     }
 
     export ADMIN_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_admin_password)")"
-    export SLDAUTH_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_sldapauth_password)")"
-    export SSLAVE_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_sslave_password)")"
+    export LDAPAUTH_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_ldapauth_password)")"
+    export SLAVE_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_slave_password)")"
+    export SLAVE_REVIEWER_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_slave-reviewer_password)")"
 
-    VARS='${LDAP_BASE_DN}${SHOGGOTH_DOMAIN}${MDB_DN}${ADMIN_HASH}${SLDAUTH_HASH}${SSLAVE_HASH}'
+    VARS='${LDAP_BASE_DN}${SHOGGOTH_DOMAIN}${MDB_DN}${ADMIN_HASH}${LDAPAUTH_HASH}${SLAVE_HASH}${SLAVE_REVIEWER_HASH}'
 
     for tmpl in config.ldif data.ldif memberof_module.ldif memberof_overlay.ldif passwords.ldif; do
         if [ ! -f "${TEMPLATES_DIR}/${tmpl}" ]; then
@@ -403,12 +421,16 @@ spec:
           mountPath: /run/secrets/openldap_admin_password
           subPath: password
           readOnly: true
-        - name: sldapauth-password
-          mountPath: /run/secrets/openldap_sldapauth_password
+        - name: ldapauth-password
+          mountPath: /run/secrets/openldap_ldapauth_password
           subPath: password
           readOnly: true
-        - name: sslave-password
-          mountPath: /run/secrets/openldap_sslave_password
+        - name: slave-password
+          mountPath: /run/secrets/openldap_slave_password
+          subPath: password
+          readOnly: true
+        - name: slave-reviewer-password
+          mountPath: /run/secrets/openldap_slave-reviewer_password
           subPath: password
           readOnly: true
         - name: render-script
@@ -515,10 +537,6 @@ spec:
               - -c
               - 'set -o pipefail
 
-                LOG=/var/lib/ldap/openldap-init.log
-
-                exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
-
                 echo "=== openldap-init start $(date -Iseconds) ==="
 
                 /bin/bash /shoggoth/openldap-init.sh
@@ -572,12 +590,15 @@ spec:
       - name: config-admin-password
         secret:
           secretName: openldap-config-admin-password
-      - name: sldapauth-password
+      - name: ldapauth-password
         secret:
-          secretName: openldap-sldapauth-password
-      - name: sslave-password
+          secretName: openldap-ldapauth-password
+      - name: slave-password
         secret:
-          secretName: openldap-sslave-password
+          secretName: openldap-slave-password
+      - name: slave-reviewer-password
+        secret:
+          secretName: openldap-slave-reviewer-password
       serviceAccountName: openldap
 ---
 apiVersion: v1

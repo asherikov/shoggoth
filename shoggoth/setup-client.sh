@@ -297,32 +297,6 @@ EOF
     chmod 600 "${ENV_FILE}"
 }
 
-generate_redmine_config() {
-    cat >> "${ENV_FILE}" <<EOF
-
-# Redmine CLI
-REDMINE_SERVER=http://api.${DOMAIN}/redmine
-REDMINE_AUTH_METHOD=apikey
-REDMINE_API_KEY=gateway
-REDMINE_NO_UPDATE_CHECK=1
-EOF
-    chmod 600 "${ENV_FILE}"
-}
-
-generate_redmine_cli_conf() {
-    local redmine_config_file="${CLIENT_CONF_DIR}/redmine-config.yml"
-
-    cat > "${redmine_config_file}" <<EOF
-server: http://api.${DOMAIN}/redmine
-auth_method: apikey
-api_key: gateway
-no_color: true
-EOF
-
-    chmod 600 "${redmine_config_file}"
-    echo "Generated ${redmine_config_file}"
-}
-
 generate_client_conf() {
     mkdir -p "${CLIENT_CONF_DIR}"
     chmod 700 "${CLIENT_CONF_DIR}"
@@ -441,9 +415,6 @@ main() {
     if [ "${CONFIGURE_API_GATEWAY}" = "true" ] && [ -n "${CONFIGURE_CLIENT_CONF}" ]; then
         generate_gitea_config
         echo "Gitea configured via environment variables (GITEA_SERVER_URL, GITEA_SERVER_TOKEN)"
-        generate_redmine_config
-        generate_redmine_cli_conf
-        echo "Redmine CLI configured via environment variables (REDMINE_SERVER, REDMINE_AUTH_METHOD, REDMINE_API_KEY)"
     fi
 
     if [ -n "${CONFIGURE_CLIENT_CONF}" ]; then

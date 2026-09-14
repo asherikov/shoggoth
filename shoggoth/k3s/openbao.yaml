@@ -40,8 +40,9 @@ data:
     - path: ai/default-token               | format: base64 | length: 32 | secret-key: token
     - path: openldap/admin-password        | format: base64 | length: 32 | secret-key: password
     - path: openldap/config-admin-password | format: base64 | length: 32 | secret-key: password
-    - path: openldap/sldapauth-password    | format: base64 | length: 32 | secret-key: password
-    - path: openldap/sslave-password       | format: base64 | length: 32 | secret-key: password
+    - path: openldap/ldapauth-password     | format: base64 | length: 32 | secret-key: password
+    - path: openldap/slave-password        | format: base64 | length: 32 | secret-key: password
+    - path: openldap/slave-reviewer-password | format: base64 | length: 32 | secret-key: password
     - path: cdash/app-key                  | format: base64 | length: 32 | secret-key: app-key
     - path: ca/passphrase                  | format: base64 | length: 32 | secret-key: passphrase
     - path: cdash/api-token                | format: base64 | length: 32 | secret-key: token
@@ -350,9 +351,9 @@ data:
     # === Phase B.5: Configure OpenBao LDAP auth (idempotent) ===
     log "Phase B.5: configuring OpenBao LDAP auth"
     LDAP_BASE_DN="dc=$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g')"
-    LDAP_BIND_DN="uid=sldapauth,ou=people,${LDAP_BASE_DN}"
-    LDAP_BIND_PASSWORD=$(bao_get_value "openldap/sldapauth-password" 2>/dev/null) || die "openldap/sldapauth-password missing in OpenBao"
-    [ -z "${LDAP_BIND_PASSWORD}" ] && die "openldap/sldapauth-password is empty in OpenBao"
+    LDAP_BIND_DN="uid=ldapauth,ou=people,${LDAP_BASE_DN}"
+    LDAP_BIND_PASSWORD=$(bao_get_value "openldap/ldapauth-password" 2>/dev/null) || die "openldap/ldapauth-password missing in OpenBao"
+    [ -z "${LDAP_BIND_PASSWORD}" ] && die "openldap/ldapauth-password is empty in OpenBao"
     LDAP_AUTH_ENABLED="$(curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
         "${OPENBAO_ADDR}/v1/sys/auth" 2>/dev/null \
         | grep -q '"ldap/"' && echo true || echo false)"

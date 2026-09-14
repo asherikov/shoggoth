@@ -29,8 +29,8 @@ data:
   phpldapadmin.env: |
     LDAP_HOST=openldap
     LDAP_PORT=389
-    LDAP_USERNAME=uid=sldapauth,ou=people,${LDAP_BASE_DN}
-    LDAP_PASSWORD=${LDAP_SLDAUTH_PASS}
+    LDAP_USERNAME=uid=ldapauth,ou=people,${LDAP_BASE_DN}
+    LDAP_PASSWORD=${LDAP_LDAPAUTH_PASS}
 ---
 apiVersion: v1
 kind: Service
@@ -75,13 +75,13 @@ spec:
         env:
         - name: LDAP_BASE_DN
           value: dc=$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g')
-        - name: LDAP_SLDAUTH_PASS
+        - name: LDAP_LDAPAUTH_PASS
           valueFrom:
             secretKeyRef:
-              name: openldap-sldapauth-password
+              name: openldap-ldapauth-password
               key: password
         - name: RENDER_VARS
-          value: ${LDAP_BASE_DN}${LDAP_SLDAUTH_PASS}
+          value: ${LDAP_BASE_DN}${LDAP_LDAPAUTH_PASS}
         command:
         - bash
         - -c

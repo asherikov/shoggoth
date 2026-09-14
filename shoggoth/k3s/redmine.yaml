@@ -301,7 +301,7 @@ spec:
         - name: LDAP_BIND_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: openldap-sldapauth-password
+              name: openldap-ldapauth-password
               key: password
         - name: SHOGGOTH_ADMIN_PASSWORD
           valueFrom:
@@ -578,7 +578,7 @@ data:
 
     LDAP_HOST=openldap
 
-    LDAP_BIND_DN=uid=sldapauth,ou=people,${LDAP_BASE_DN}
+    LDAP_BIND_DN=uid=ldapauth,ou=people,${LDAP_BASE_DN}
 
     LDAP_BIND_PASSWORD=${LDAP_BIND_PASSWORD}
 

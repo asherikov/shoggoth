@@ -416,11 +416,11 @@ class Redmine:
     def _get_slave_password(self):
         if self._openbao is None:
             self._openbao = OpenBao()
-        password = self._openbao.get_value("openldap/sslave-password")
+        password = self._openbao.get_value("openldap/slave-password")
         if password:
             log("Using Redmine slave password from OpenBao")
             return password
-        die("openldap/sslave-password OpenBao secret is required for session auth")
+        die("openldap/slave-password OpenBao secret is required for session auth")
 
     def _extract_csrf_token(self, html):
         match = re.search(r'name="authenticity_token"\s+value="([^"]+)"', html)
@@ -440,7 +440,7 @@ class Redmine:
                 html = resp.read().decode()
             csrf_token = self._extract_csrf_token(html)
             post_data = urlencode({
-                "username": "sslave",
+                "username": "slave",
                 "password": password,
                 "authenticity_token": csrf_token,
             }).encode()
@@ -704,8 +704,8 @@ class SetupRedmineKestraWebhooks:
         self.errors = 0
 
     def execute(self):
-        # Enumerate projects visible to sslave. Slave's /projects.json scope
-        # only returns projects sslave is a member of (set in redmine-init), so
+        # Enumerate projects visible to slave. Slave's /projects.json scope
+        # only returns projects slave is a member of (set in redmine-init), so
         # projects created after pod start without explicit membership are
         # missed. Trade-off accepted: avoid requiring a Redmine admin API key.
         projects = self.redmine.list_projects()
@@ -980,7 +980,7 @@ class GithubMirrorSync:
 class SlaveAccess:
     def __init__(self, gitea):
         self.gitea = gitea
-        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
         self.errors = 0
 
     def execute(self):
@@ -1041,7 +1041,7 @@ class SshKey:
     def __init__(self, gitea, openbao):
         self.gitea = gitea
         self.openbao = openbao
-        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
         self.errors = 0
 
     def execute(self):
@@ -1154,7 +1154,7 @@ class SlaveToken:
     def __init__(self, gitea, openbao):
         self.gitea = gitea
         self.openbao = openbao
-        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "sslave")
+        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
         self.errors = 0
 
     def _is_token_expired(self, token):
