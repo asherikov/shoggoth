@@ -71,8 +71,22 @@ data:
     NAMESPACE="${NAMESPACE}"
     SEED_PATHS_FILE="${SEED_PATHS_FILE:-/seed/paths.yaml}"
 
-    log() { echo "[openbao-bootstrap] $*" >&2; }
-    die() { echo "[openbao-bootstrap] FATAL: $*" >&2; exit 1; }
+    BOOTSTRAP_LOG="${BAO_DATA}/bootstrap.log"
+    exec 4>>"${BOOTSTRAP_LOG}"
+
+    _now() { date -u +%Y-%m-%dT%H:%M:%S.%3NZ; }
+
+    log() {
+        local msg="[openbao-bootstrap] $*"
+        printf '%s %s\n' "$(_now)" "${msg}" >&2
+        printf '%s %s\n' "$(_now)" "${msg}" >&4
+    }
+    die() {
+        local msg="[openbao-bootstrap] FATAL: $*"
+        printf '%s %s\n' "$(_now)" "${msg}" >&2
+        printf '%s %s\n' "$(_now)" "${msg}" >&4
+        exit 1
+    }
 
     sa_token() { cat /var/run/secrets/kubernetes.io/serviceaccount/token; }
     k8s_ca()   { echo "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"; }
@@ -82,7 +96,7 @@ data:
         local attempt code method
         for attempt in 1 2 3 4 5; do
             method="PUT"
-            code=$(curl -sS --cacert "$(k8s_ca)" \
+            code=$(curl -sS --max-time 15 --cacert "$(k8s_ca)" \
                 -o /tmp/k8s-bootstrap-resp.json \
                 -w '%{http_code}' \
                 -X PUT \
@@ -92,7 +106,7 @@ data:
                 "${K8S_API}/api/v1/namespaces/${NAMESPACE}/secrets/${name}" 2>/tmp/k8s-bootstrap-err.txt) || code="000"
             if [ "${code}" = "404" ]; then
                 method="POST"
-                code=$(curl -sS --cacert "$(k8s_ca)" \
+                code=$(curl -sS --max-time 15 --cacert "$(k8s_ca)" \
                     -o /tmp/k8s-bootstrap-resp.json \
                     -w '%{http_code}' \
                     -X POST \
@@ -126,7 +140,7 @@ data:
     bao_get_value() {
         local path="$1"
         local response http_code
-        response=$(curl -sS -o /tmp/bao-get.json -w '%{http_code}' \
+        response=$(curl -sS --max-time 10 -o /tmp/bao-get.json -w '%{http_code}' \
             -H "X-Vault-Token: ${ROOT_TOKEN}" \
             "${OPENBAO_ADDR}/v1/secret/data/${path}" 2>/dev/null) || true
         if [ "${response}" != "200" ]; then
@@ -140,7 +154,7 @@ data:
         local payload
         payload=$(jq -c -n --arg v "${value}" '{data:{value:$v}}')
         local code
-        code=$(curl -sS -o /tmp/bao-put.json -w '%{http_code}' \
+        code=$(curl -sS --max-time 10 -o /tmp/bao-put.json -w '%{http_code}' \
             -X POST \
             -H "X-Vault-Token: ${ROOT_TOKEN}" \
             -H "Content-Type: application/json" \
@@ -153,7 +167,7 @@ data:
 
     # === Phase A: idempotent init + unseal ===
     log "Phase A: waiting for OpenBao at ${OPENBAO_ADDR}"
-    until code=$(curl -s -o /dev/null -w '%{http_code}' "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null) \
+    until code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null) \
               && [ "${#code}" = "3" ]; do
         sleep 2
     done
@@ -167,7 +181,7 @@ data:
         ROOT_TOKEN=$(cat "${ROOT_TOKEN_FILE}")
     else
         log "Phase A: no unseal key on PVC; trying K8s Secret backup"
-        local_code=$(curl -sS -o /tmp/bao-backup.json -w '%{http_code}' \
+        local_code=$(curl -sS --max-time 10 -o /tmp/bao-backup.json -w '%{http_code}' \
             --cacert "$(k8s_ca)" \
             -H "Authorization: Bearer $(sa_token)" \
             "${K8S_API}/api/v1/namespaces/${NAMESPACE}/secrets/openbao-unseal-key" 2>/dev/null) || true
@@ -181,7 +195,7 @@ data:
             log "Phase A: recovered from K8s Secret backup"
         else
             log "Phase A: no backup; initializing fresh OpenBao"
-            init_code=$(curl -sS -o /tmp/bao-init.json -w '%{http_code}' \
+            init_code=$(curl -sS --max-time 10 -o /tmp/bao-init.json -w '%{http_code}' \
                 -X PUT \
                 -H "Content-Type: application/json" \
                 -d '{"secret_shares":1,"secret_threshold":1}' \
@@ -209,7 +223,7 @@ data:
     k8s_put_secret openbao-unseal-key "${payload}"
 
     # Unseal (idempotent: returns error if already unsealed)
-    unseal_code=$(curl -sS -o /tmp/bao-unseal.json -w '%{http_code}' \
+    unseal_code=$(curl -sS --max-time 10 -o /tmp/bao-unseal.json -w '%{http_code}' \
         -X PUT \
         -H "Content-Type: application/json" \
         -d "{\"key\":\"${UNSEAL_KEY}\"}" \
@@ -221,12 +235,12 @@ data:
     log "Phase A: unsealed (init flag at ${INIT_FLAG})"
 
     # Ensure KV-v2 mount exists (idempotent)
-    mount_check=$(curl -sS -o /dev/null -w '%{http_code}' \
+    mount_check=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
         -H "X-Vault-Token: ${ROOT_TOKEN}" \
         "${OPENBAO_ADDR}/v1/sys/mounts/secret" 2>/dev/null) || true
     if [ "${mount_check}" != "200" ]; then
         log "Phase A: mounting KV-v2 at secret/"
-        curl -sS -o /dev/null -w '%{http_code}' \
+        curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
             -X POST \
             -H "X-Vault-Token: ${ROOT_TOKEN}" \
             -H "Content-Type: application/json" \
@@ -332,7 +346,7 @@ data:
         path="$(echo "${line}"      | sed 's/^.*- path:[[:space:]]*//' | sed 's/[[:space:]]*|.*//' | sed 's/[[:space:]]*$//')"
         secret_key="$(echo "${line}" | sed 's/.*secret-key:[[:space:]]*//' | sed 's/[[:space:]].*//')"
         [ -z "${path}" ] && continue
-        value=$(bao_get_value "${path}" 2>/dev/null)
+        value=$(bao_get_value "${path}" 2>/dev/null) || true
         [ -z "${value}" ] && { log "  skip ${path} (no value)"; continue; }
         # Build K8s Secret name from path: foo/bar-baz -> foo-bar-baz
         secret_name="$(echo "${path}" | tr '/' '-')"
@@ -354,28 +368,28 @@ data:
     LDAP_BIND_DN="uid=ldapauth,ou=people,${LDAP_BASE_DN}"
     LDAP_BIND_PASSWORD=$(bao_get_value "openldap/ldapauth-password" 2>/dev/null) || die "openldap/ldapauth-password missing in OpenBao"
     [ -z "${LDAP_BIND_PASSWORD}" ] && die "openldap/ldapauth-password is empty in OpenBao"
-    LDAP_AUTH_ENABLED="$(curl -sf -H "X-Vault-Token: ${ROOT_TOKEN}" \
+    LDAP_AUTH_ENABLED="$(curl -sf --max-time 10 -H "X-Vault-Token: ${ROOT_TOKEN}" \
         "${OPENBAO_ADDR}/v1/sys/auth" 2>/dev/null \
         | grep -q '"ldap/"' && echo true || echo false)"
     if [ "${LDAP_AUTH_ENABLED}" != "true" ]; then
         log "Phase B.5: enabling auth/ldap"
-        curl -sfS -X POST "${OPENBAO_ADDR}/v1/sys/auth/ldap" \
+        curl -sfS --max-time 10 -X POST "${OPENBAO_ADDR}/v1/sys/auth/ldap" \
             -H "X-Vault-Token: ${ROOT_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{"type":"ldap"}' > /dev/null
     fi
     log "Phase B.5: configuring LDAP backend"
-    curl -sfS -X POST "${OPENBAO_ADDR}/v1/auth/ldap/config" \
+    curl -sfS --max-time 10 -X POST "${OPENBAO_ADDR}/v1/auth/ldap/config" \
         -H "X-Vault-Token: ${ROOT_TOKEN}" \
         -H "Content-Type: application/json" \
         -d "{\"url\":\"ldap://openldap:389\",\"binddn\":\"${LDAP_BIND_DN}\",\"bindpass\":\"${LDAP_BIND_PASSWORD}\",\"userdn\":\"ou=people,${LDAP_BASE_DN}\",\"groupdn\":\"ou=groups,${LDAP_BASE_DN}\",\"userattr\":\"uid\",\"groupattr\":\"cn\",\"groupfilter\":\"(member={{.UserDN}})\",\"username_as_alias\":true,\"deny_null_bind\":true}" > /dev/null
     log "Phase B.5: creating shoggoth-admin ACL policy"
-    curl -sf -X POST "${OPENBAO_ADDR}/v1/sys/policies/acl/shoggoth-admin" \
+    curl -sf --max-time 10 -X POST "${OPENBAO_ADDR}/v1/sys/policies/acl/shoggoth-admin" \
         -H "X-Vault-Token: ${ROOT_TOKEN}" \
         -H "Content-Type: application/json" \
         -d '{"policy":"path \"secret/data/*\" { capabilities = [\"create\",\"read\",\"update\",\"delete\",\"list\"] }\npath \"sys/*\" { capabilities = [\"read\",\"list\"] }"}' > /dev/null 2>&1 || true
     log "Phase B.5: mapping admins group to shoggoth-admin"
-    curl -sf -X POST "${OPENBAO_ADDR}/v1/auth/ldap/groups/admins" \
+    curl -sf --max-time 10 -X POST "${OPENBAO_ADDR}/v1/auth/ldap/groups/admins" \
         -H "X-Vault-Token: ${ROOT_TOKEN}" \
         -H "Content-Type: application/json" \
         -d '{"policies":"shoggoth-admin"}' > /dev/null 2>&1 || true

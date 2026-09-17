@@ -29,7 +29,7 @@ RUN \
 
 USER ccws
 
-ARG PYTHON_PKG=mcp opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http
+ARG PYTHON_PKG="mcp opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http ldap3"
 RUN \
 --mount=type=cache,target=/cache/pip,sharing=locked \
     (test -z "${SHOGGOTH_DOMAIN}" && pip install ${PYTHON_PKG}) \

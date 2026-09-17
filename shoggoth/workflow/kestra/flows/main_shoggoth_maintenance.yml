@@ -21,7 +21,7 @@ tasks:
       networkMode: host
     containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose kestra-webhooks 2>&1
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose kestra-webhooks 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
@@ -36,7 +36,7 @@ tasks:
       networkMode: host
     containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose redmine-webhooks 2>&1
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose redmine-webhooks 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
@@ -51,13 +51,28 @@ tasks:
       networkMode: host
     containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose redmine-kestra-webhooks 2>&1
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose redmine-kestra-webhooks 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       REDMINE_SERVER: "http://redmine.{{ envs.shoggoth_domain }}"
       SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"
       SHOGGOTH_VAULT_TOKEN: "{{ envs.shoggoth_vault_token }}"
       OPENBAO_ADDR: "http://openbao:80"
+
+  - id: gitea_ldap_sync
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+    containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose gitea-ldap-sync 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
+      GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
+      GITEA_ADMIN_TOKEN: "{{ envs.gitea_admin_token }}"
+      SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"
 
   - id: slave_access
     type: io.kestra.plugin.scripts.shell.Commands
@@ -67,7 +82,7 @@ tasks:
       networkMode: host
     containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose slave-access 2>&1
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-access 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
@@ -82,7 +97,7 @@ tasks:
       networkMode: host
     containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose slave-token 2>&1
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-token 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
@@ -99,11 +114,26 @@ tasks:
       networkMode: host
     containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
     commands:
-      - python3 /shoggoth/workflow/scripts/shoggoth_gitea.py --verbose ssh-key 2>&1
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose ssh-key 2>&1
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
       GITEA_ADMIN_TOKEN: "{{ envs.gitea_admin_token }}"
+      SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"
+      SHOGGOTH_VAULT_TOKEN: "{{ envs.shoggoth_vault_token }}"
+      OPENBAO_ADDR: "http://openbao:80"
+
+  - id: redmine_ldap_sync
+    type: io.kestra.plugin.scripts.shell.Commands
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+    containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose redmine-ldap-sync 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
       SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"
       SHOGGOTH_VAULT_TOKEN: "{{ envs.shoggoth_vault_token }}"
       OPENBAO_ADDR: "http://openbao:80"

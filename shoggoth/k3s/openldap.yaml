@@ -394,7 +394,7 @@ spec:
         imagePullPolicy: IfNotPresent
         env:
         - name: LDAP_BASE_DN
-          value: dc=$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g')
+          value: ${LDAP_BASE_DN}
         - name: SHOGGOTH_DOMAIN
           value: ${SHOGGOTH_DOMAIN}
         - name: MDB_DN

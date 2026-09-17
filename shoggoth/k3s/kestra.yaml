@@ -21,12 +21,6 @@ data:
     #!/usr/bin/env sh
     set -eu
 
-    if [ -f /shoggoth/kestra/env ]; then
-        set -a
-        . /shoggoth/kestra/env
-        set +a
-    fi
-
     exec /app/kestra "$@"
 ---
 apiVersion: v1
@@ -250,23 +244,6 @@ spec:
         image: asherikov/shoggoth_tools:alpine
         imagePullPolicy: IfNotPresent
         env:
-        - name: SHOGGOTH_VAULT_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: openbao-unseal-key
-              key: root-token
-        - name: GITEA_ADMIN_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: gitea-server-token
-              key: token
-        - name: GITEA_SLAVE_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: gitea-slave-token
-              key: token
-        - name: SHOGGOTH_GITHUB_ORG
-          value: ${SHOGGOTH_GITHUB_ORG}
         - name: KESTRA_DATASOURCES_POSTGRES_PASSWORD
           valueFrom:
             secretKeyRef:
@@ -278,7 +255,7 @@ spec:
               name: openldap-admin-password
               key: password
         - name: RENDER_VARS
-          value: ${SHOGGOTH_VAULT_TOKEN}${GITEA_ADMIN_TOKEN}${GITEA_SLAVE_TOKEN}${SHOGGOTH_GITHUB_ORG}${KESTRA_DATASOURCES_POSTGRES_PASSWORD}${SHOGGOTH_ADMIN_PASSWORD}
+          value: ${KESTRA_DATASOURCES_POSTGRES_PASSWORD}${SHOGGOTH_ADMIN_PASSWORD}
         command:
         - bash
         - -c
@@ -316,6 +293,21 @@ spec:
           value: ${SHOGGOTH_DOMAIN}
         - name: FLOWENV_SHOGGOTH_GITHUB_ORG
           value: ${SHOGGOTH_GITHUB_ORG}
+        - name: FLOWENV_SHOGGOTH_VAULT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: openbao-unseal-key
+              key: root-token
+        - name: FLOWENV_GITEA_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: gitea-server-token
+              key: token
+        - name: FLOWENV_GITEA_SLAVE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: gitea-slave-token
+              key: token
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: http://otelcol:4317
         command:
@@ -468,15 +460,6 @@ metadata:
   name: kestra-templates
   namespace: ${SHOGGOTH_NAMESPACE}
 data:
-  env: 'FLOWENV_SHOGGOTH_VAULT_TOKEN=${SHOGGOTH_VAULT_TOKEN}
-
-    FLOWENV_GITEA_ADMIN_TOKEN=${GITEA_ADMIN_TOKEN}
-
-    FLOWENV_GITEA_SLAVE_TOKEN=${GITEA_SLAVE_TOKEN}
-
-    FLOWENV_SHOGGOTH_GITHUB_ORG=${SHOGGOTH_GITHUB_ORG}
-
-    '
   config.yaml: |
     datasources:
       postgres:

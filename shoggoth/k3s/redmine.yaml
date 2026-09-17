@@ -51,12 +51,6 @@ data:
         export SECRET_KEY_BASE="$(cat "${REDMINE_SECRET_KEY_BASE_FILE}")"
     fi
 
-    if [ ! -f /shoggoth/rendered/redmine/redmine.env ]; then
-        echo "shoggoth: FATAL: /shoggoth/rendered/redmine/redmine.env not found — bringup may not have completed" >&2
-        exit 1
-    fi
-    . /shoggoth/rendered/redmine/redmine.env
-
     echo "shoggoth: Waiting for Redmine to be ready..."
     for i in $(seq 1 30); do
         if bundle exec rails runner 'puts "ready"' > /dev/null 2>&1; then
@@ -72,9 +66,8 @@ data:
 
     echo "shoggoth: Configuring LDAP auth source"
     for VAR in LDAP_HOST LDAP_BIND_DN LDAP_BIND_PASSWORD LDAP_BASE_DN; do
-        eval "VAL=\${${VAR}:-}"
-        if [ -z "${VAL}" ]; then
-            echo "shoggoth: ERROR: ${VAR} not set — redmine.env may be incomplete" >&2
+        if [ -z "$(eval "echo \"\${${VAR}:-}\"")" ]; then
+            echo "shoggoth: ERROR: ${VAR} not set" >&2
             exit 1
         fi
     done
@@ -98,7 +91,7 @@ data:
 
     echo "shoggoth: Setting local admin password"
     if [ -z "${SHOGGOTH_ADMIN_PASSWORD:-}" ]; then
-        echo "shoggoth: ERROR: SHOGGOTH_ADMIN_PASSWORD not set — redmine.env may be incomplete" >&2
+        echo "shoggoth: ERROR: SHOGGOTH_ADMIN_PASSWORD not set" >&2
         exit 1
     fi
     RESULT="$(SHOGGOTH_ADMIN_PASSWORD="${SHOGGOTH_ADMIN_PASSWORD}" bundle exec rails runner '
@@ -117,6 +110,93 @@ data:
         updated)    echo "shoggoth: admin password updated" ;;
         not_found)  echo "shoggoth: admin user not found, skipping password update" ;;
     esac
+
+    echo "shoggoth: Ensuring slave user and api_key"
+    SLAVE_KEY="$(bundle exec rails runner /shoggoth/redmine/slave_token_init.rb)" || { echo "shoggoth: ERROR: slave api_key init failed" >&2; exit 1; }
+
+    if [ -z "${SLAVE_KEY}" ]; then
+        echo "shoggoth: ERROR: slave token empty; cannot mark ready" >&2
+        exit 1
+    fi
+    echo "shoggoth: slave api_key stored in OpenBao at redmine/slave-token (len=${#SLAVE_KEY})"
+
+    echo "shoggoth: Marking token init as ready"
+    touch /tmp/slave-token-ready
+
+    echo "shoggoth: Syncing slave project memberships"
+    bundle exec rails runner '
+        User.current = User.find_by_login("admin")
+        slave = User.find_by_login("slave")
+        developer_role = Role.find_by(name: "Developer")
+        if slave && developer_role
+            added = 0
+            Project.where(status: Project::STATUS_ACTIVE).each do |project|
+                unless Member.exists?(project_id: project.id, user_id: slave.id)
+                    Member.create!(project_id: project.id, user_id: slave.id, role_ids: [developer_role.id])
+                    added += 1
+                end
+            end
+            puts "added=#{added} total=#{Project.where(status: Project::STATUS_ACTIVE).count}"
+        else
+            puts "skipped"
+        end
+    ' && echo "shoggoth: === redmine slave init complete ===" \
+        || echo "shoggoth: WARNING: membership sync failed"
+  slave_token_init.rb: |
+    require 'net/http'
+    require 'uri'
+    require 'json'
+
+    User.current = User.find_by_login("admin")
+    ldap_auth = AuthSourceLdap.find_by(name: "openldap")
+    slave = User.find_by_login("slave")
+    if slave.nil? && ldap_auth
+        slave = User.new
+        slave.login = "slave"
+        slave.firstname = "Slave"
+        slave.lastname = "User"
+        slave.mail = "slave@localhost"
+        slave.auth_source = ldap_auth
+        slave.language = "en"
+        slave.must_change_passwd = false
+        slave.save!
+    end
+    if slave.nil?
+        STDERR.puts "slave user unavailable"
+        exit 1
+    end
+
+    token = Token.create(user: slave, action: 'api')
+    new_key = token.value
+
+    openbao_addr = ENV['OPENBAO_ADDR'].to_s
+    vault_token = ENV['SHOGGOTH_VAULT_TOKEN'].to_s
+    if openbao_addr.empty? || vault_token.empty?
+        STDERR.puts "OPENBAO_ADDR or SHOGGOTH_VAULT_TOKEN not set"
+        exit 1
+    end
+
+    uri = URI.parse("#{openbao_addr}/v1/secret/data/redmine/slave-token")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = (uri.scheme == 'https')
+    req = Net::HTTP::Post.new(uri.request_uri)
+    req['X-Vault-Token'] = vault_token
+    req['Content-Type'] = 'application/json'
+    req.body = JSON.generate(data: { value: new_key })
+
+    begin
+        resp = http.request(req)
+    rescue => e
+        STDERR.puts "OpenBao write exception: #{e.class}: #{e.message}"
+        exit 1
+    end
+
+    unless resp.code == '200' || resp.code == '204'
+        STDERR.puts "OpenBao write returned HTTP #{resp.code}: #{resp.body}"
+        exit 1
+    end
+
+    print new_key
 ---
 apiVersion: v1
 kind: Service
@@ -294,44 +374,6 @@ spec:
         - svc.cluster.local
         - cluster.local
       initContainers:
-      - name: render-config
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: LDAP_BIND_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: openldap-ldapauth-password
-              key: password
-        - name: SHOGGOTH_ADMIN_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: openldap-admin-password
-              key: password
-        - name: RENDER_VARS
-          value: ${LDAP_BASE_DN}${LDAP_BIND_PASSWORD}${SHOGGOTH_ADMIN_PASSWORD}
-        command:
-        - bash
-        - -c
-        - 'exec /tmpl/render.sh
-
-          '
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
-        volumeMounts:
-        - name: templates
-          mountPath: /templates
-          readOnly: true
-        - name: rendered-config
-          mountPath: /rendered
-        - name: render-script
-          mountPath: /tmpl
-          readOnly: true
       - name: wait-bootstrap
         image: asherikov/shoggoth_tools:alpine
         imagePullPolicy: IfNotPresent
@@ -402,12 +444,35 @@ spec:
           value: /run/secrets/redmine_secret_key_base
         - name: REDMINE_PLUGINS_MIGRATE
           value: 'true'
+        - name: LDAP_BASE_DN
+          value: ${LDAP_BASE_DN}
+        - name: LDAP_HOST
+          value: openldap
+        - name: LDAP_BIND_DN
+          value: uid=ldapauth,ou=people,${LDAP_BASE_DN}
+        - name: LDAP_BIND_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openldap-ldapauth-password
+              key: password
+        - name: SHOGGOTH_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openldap-admin-password
+              key: password
         - name: OTEL_TRACES_EXPORTER
           value: otlp
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: http://otelcol:4318
         - name: SHOGGOTH_DOMAIN
           value: ${SHOGGOTH_DOMAIN}
+        - name: OPENBAO_ADDR
+          value: http://openbao:80
+        - name: SHOGGOTH_VAULT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: openbao-unseal-key
+              key: root-token
         volumeMounts:
         - name: files
           mountPath: /usr/src/redmine/files
@@ -415,12 +480,13 @@ spec:
           mountPath: /usr/local/bundle/cache/
         - name: plugins
           mountPath: /usr/src/redmine/plugins
-        - name: rendered-config
-          mountPath: /shoggoth/rendered
-          readOnly: true
         - name: init-script
           mountPath: /shoggoth/redmine/init.sh
           subPath: init.sh
+          readOnly: true
+        - name: init-script
+          mountPath: /shoggoth/redmine/slave_token_init.rb
+          subPath: slave_token_init.rb
           readOnly: true
         - name: db-password
           mountPath: /run/secrets/redmine_db_password
@@ -457,12 +523,14 @@ spec:
             memory: 512Mi
             cpu: 1000m
         readinessProbe:
-          httpGet:
-            path: /
-            port: 80
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - '[ -f /tmp/slave-token-ready ]'
           initialDelaySeconds: 15
           periodSeconds: 10
-          failureThreshold: 30
+          failureThreshold: 3
         livenessProbe:
           httpGet:
             path: /
@@ -471,8 +539,6 @@ spec:
           periodSeconds: 10
           failureThreshold: 6
       volumes:
-      - name: rendered-config
-        emptyDir: {}
       - name: init-script
         configMap:
           name: redmine-init
@@ -493,13 +559,6 @@ spec:
       - name: secret-key-base
         secret:
           secretName: redmine-secret-key-base
-      - name: templates
-        configMap:
-          name: redmine-templates
-      - name: render-script
-        configMap:
-          name: shoggoth-render-config
-          defaultMode: 493
       serviceAccountName: redmine
 ---
 apiVersion: v1
@@ -567,21 +626,3 @@ subjects:
 - kind: ServiceAccount
   name: redmine-db
   namespace: ${SHOGGOTH_NAMESPACE}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: redmine-templates
-  namespace: ${SHOGGOTH_NAMESPACE}
-data:
-  redmine.env: 'LDAP_BASE_DN=${LDAP_BASE_DN}
-
-    LDAP_HOST=openldap
-
-    LDAP_BIND_DN=uid=ldapauth,ou=people,${LDAP_BASE_DN}
-
-    LDAP_BIND_PASSWORD=${LDAP_BIND_PASSWORD}
-
-    SHOGGOTH_ADMIN_PASSWORD=${SHOGGOTH_ADMIN_PASSWORD}
-
-    '

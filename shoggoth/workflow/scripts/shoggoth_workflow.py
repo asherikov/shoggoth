@@ -407,7 +407,7 @@ class Gitea:
     def resolve_comment(self, repo, comment_id):
         self.post(f"repos/{repo}/pulls/comments/{comment_id}/resolve", {})
 
-    def reply_to_comment(self, repo, pr_number, comment_id, body):
+    def _reply_to_comment(self, repo, pr_number, comment_id, body):
         return self.post(
             f"repos/{repo}/issues/{pr_number}/comments",
             {"body": body})
@@ -1238,11 +1238,18 @@ class PrUpdateCommand(CommandBase):
     def execute(self):
         action = self.gitea.get_pr_action()
         log(f"pr-update: action={action}")
-        if action in ("deleted", "review_request_removed", "synchronize"):
+        if action in ("review_request_removed", "synchronize"):
             return
 
         pr_url = self.gitea.get_pr_url()
+        pr_number = self.gitea.get_pr_number()
         log(f"pr-update: pr_url={pr_url}")
+
+        if action == "deleted":
+            print(f"=== PR COMMENT CHECK AFTER COMMENT DELETION: pr={pr_url} "
+                  f"repo={self.shoggoth.working_repo} ===", flush=True)
+            self._pr_comment(pr_number, pr_url)
+            return
 
         if self.gitea.has_review():
             if self.gitea.is_review_by_slave_user():
@@ -1320,31 +1327,30 @@ class PrUpdateCommand(CommandBase):
                 return issue.get("id")
         return None
 
-    def _commit_and_push_standalone(self, repo_dir, branch, commit_msg):
+    def _commit_only_standalone(self, repo_dir, commit_msg):
         status = run(["git", "-C", repo_dir, "status", "--porcelain"], check=False)
         if status.returncode != 0:
             die(f"git status failed in {repo_dir}: {status.stderr}")
         if not status.stdout.strip():
+            self._pending_modified_repos = []
             return False
 
         run(["git", "-C", repo_dir, "add", "-A"], check=False)
         staged = run(["git", "-C", repo_dir, "diff", "--cached", "--name-only"], check=False)
         if not staged.stdout.strip():
+            self._pending_modified_repos = []
             return False
 
         commit = run(["git", "-C", repo_dir, "commit", "-m", commit_msg], check=False)
         if commit.returncode != 0:
             die(f"git commit failed: {commit.stderr}")
+        self._pending_modified_repos = []
+        return True
 
-        push = run(["git", "-C", repo_dir, "push", "origin", branch], check=False)
-        if push.returncode != 0:
-            die(f"failed to push branch '{branch}': {push.stderr}")
-        sha = run(["git", "-C", repo_dir, "rev-parse", "HEAD"], check=False)
-        return sha.stdout.strip() if sha.returncode == 0 else True
-
-    def _commit_and_push_ccws(self, repo_dir, branch, commit_msg):
+    def _commit_only_ccws(self, repo_dir, commit_msg):
         status = wsh_status(repo_dir, quiet=True)
         if not status.stdout.strip():
+            self._pending_modified_repos = []
             return False
 
         modified_repos = []
@@ -1357,6 +1363,7 @@ class PrUpdateCommand(CommandBase):
             if "M" in flags:
                 modified_repos.append(repo_name)
         if not modified_repos:
+            self._pending_modified_repos = []
             return False
 
         for repo_name in modified_repos:
@@ -1364,34 +1371,30 @@ class PrUpdateCommand(CommandBase):
             run(["git", "-C", repo_path, "add", "-A"], check=False)
 
         wsh(repo_dir, ["commit", commit_msg], check=False)
-        push = wsh(repo_dir, ["-p", "version", "push"] + modified_repos, check=False)
-        if push.returncode != 0:
-            die(f"failed to push branches: {push.stderr}")
-        shas = {}
-        for repo_name in modified_repos:
-            repo_path = os.path.join(repo_dir, repo_name)
-            sha = run(["git", "-C", repo_path, "rev-parse", "HEAD"], check=False)
-            if sha.returncode == 0:
-                shas[repo_name] = sha.stdout.strip()
-        return shas if shas else True
+        self._pending_modified_repos = modified_repos
+        return True
 
-    def _commit_and_push(self, commit_msg=None):
+    def _commit_only(self, commit_msg=None):
         repo_dir = self.shoggoth.repo_dir
-        pr_branch = self.shoggoth.working_branch
         if commit_msg is None:
             commit_msg = f"Address review comments on PR#{self.gitea.get_pr_number()}"
 
         if self.shoggoth.type == "ccws":
-            return self._commit_and_push_ccws(repo_dir, pr_branch, commit_msg)
-        return self._commit_and_push_standalone(repo_dir, pr_branch, commit_msg)
+            return self._commit_only_ccws(repo_dir, commit_msg)
+        return self._commit_only_standalone(repo_dir, commit_msg)
 
     def _push_pending_commits(self):
         repo_dir = self.shoggoth.repo_dir
         pr_branch = self.shoggoth.working_branch
         if self.shoggoth.type == "ccws":
-            wsh(repo_dir, ["-p", "version", "push"], check=False)
+            modified_repos = getattr(self, "_pending_modified_repos", [])
+            push = wsh(repo_dir, ["-p", "version", "push"] + modified_repos, check=False)
+            if push.returncode != 0:
+                die(f"failed to push branches: {push.stderr}")
         else:
-            run(["git", "-C", repo_dir, "push", "origin", pr_branch], check=False)
+            push = run(["git", "-C", repo_dir, "push", "origin", pr_branch], check=False)
+            if push.returncode != 0:
+                die(f"failed to push branch {pr_branch}: {push.stderr}")
 
     def _pr_comment(self, pr_number, pr_url):
         pr_repo = self.shoggoth.working_repo
@@ -1408,141 +1411,111 @@ class PrUpdateCommand(CommandBase):
 
         self.agent.start_session("pr-comment")
 
-        rc = self.agent.prompt(
-            f"Load memories regarding the project {self.shoggoth.project} from basic memory. "
-            f"Proceed if memory is not available.")
-        if rc != 0:
-            die(f"qwen agent exited with code {rc}")
-
-        if task_subject:
+        try:
             rc = self.agent.prompt(
-                f"Load memories regarding task \"{task_subject}\" "
-                f"in project {self.shoggoth.project} from basic memory. "
-                f"Proceed if memory is not available.", resume=True)
+                f"Load memories regarding the project {self.shoggoth.project} from basic memory. "
+                f"Proceed if memory is not available.")
             if rc != 0:
                 die(f"qwen agent exited with code {rc}")
 
-        resolved_comments = []
-        commit_links = []
-        no_change_comments = []
-        for comment in unresolved:
-            c_path = comment.get("path", "unknown")
-            c_line = comment.get("line")
-            c_body = comment.get("body", "")
-            comment_id = comment.get("id")
-            if not c_body:
-                if comment_id is not None:
-                    r = self.gitea.resolve_comment(pr_repo, comment_id)
-                    if r is None:
-                        log(f"pr-comment: WARNING resolve failed for comment {comment_id}")
-                    else:
-                        log(f"pr-comment: resolved empty comment {comment_id}")
-                resolved_comments.append(comment)
-                continue
-            location = f"{c_path}:{c_line}" if c_line is not None else c_path
-            prompt = (
-                f"Address the following review comment on PR {pr_url} "
-                f"(file: {location}): "
-                f"{c_body}. Use the codebase-memory skill to understand "
-                f"the code context around the comment. "
-                f"Leave all changes uncommitted in the working tree. "
-                f"Do not post comments, reviews, or replies via Gitea MCP tools."
-            )
-            rc = self.agent.prompt(prompt, resume=True, timeout=AGENT_TIMEOUT)
+            if task_subject:
+                rc = self.agent.prompt(
+                    f"Load memories regarding task \"{task_subject}\" "
+                    f"in project {self.shoggoth.project} from basic memory. "
+                    f"Proceed if memory is not available.", resume=True)
+                if rc != 0:
+                    die(f"qwen agent exited with code {rc}")
+
+            resolved_comments = []
+            for comment in unresolved:
+                c_path = comment.get("path", "unknown")
+                c_line = comment.get("line")
+                c_body = comment.get("body", "")
+                comment_id = comment.get("id")
+                if not c_body:
+                    if comment_id is not None:
+                        r = self.gitea.resolve_comment(pr_repo, comment_id)
+                        if r is None:
+                            log(f"pr-comment: WARNING resolve failed for comment {comment_id}")
+                        else:
+                            log(f"pr-comment: resolved empty comment {comment_id}")
+                    resolved_comments.append(comment)
+                    continue
+                location = f"{c_path}:{c_line}" if c_line is not None else c_path
+                prompt = (
+                    f"Address the following review comment on PR {pr_url} "
+                    f"(file: {location}): "
+                    f"{c_body}. Use the codebase-memory skill to understand "
+                    f"the code context around the comment. "
+                    f"Leave all changes uncommitted in the working tree. "
+                    f"Do not post comments, reviews, or replies via Gitea MCP tools."
+                )
+                rc = self.agent.prompt(prompt, resume=True, timeout=AGENT_TIMEOUT)
+                if rc == 124:
+                    self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
+                if rc != 0:
+                    die(f"qwen agent exited with code {rc}")
+
+                summary = self.agent.otlp.get_review_text().strip()
+                summary_lines = summary.split("\n") if summary else []
+                body_first_line = c_body.split("\n")[0].strip()
+                commit_subject = body_first_line[:72]
+                comment_link = f"{pr_url}#issuecomment-{comment_id}" if comment_id is not None else pr_url
+                if summary_lines:
+                    commit_body = summary[-1000:]
+                    if len(summary) > 1000:
+                        commit_body = "... (truncated)\n" + commit_body
+                    commit_msg = f"{commit_subject}\n\n{comment_link}\n\n{commit_body}"
+                else:
+                    commit_msg = f"{commit_subject}\n\n{comment_link}"
+                committed = self._commit_only(commit_msg)
+                if committed:
+                    resolved_comments.append(comment)
+                    if comment_id is not None:
+                        r = self.gitea.resolve_comment(pr_repo, comment_id)
+                        if r is None:
+                            log(f"pr-comment: WARNING resolve failed for comment {comment_id}")
+                        else:
+                            log(f"pr-comment: resolved comment {comment_id}")
+
+            rc = self.agent.prompt(
+                f"Finalize all remaining work. Update basic memory with any new information "
+                f"learned about the project {self.shoggoth.project}.",
+                resume=True, timeout=AGENT_TIMEOUT)
             if rc == 124:
                 self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
             if rc != 0:
                 die(f"qwen agent exited with code {rc}")
 
-            summary = self.agent.otlp.get_review_text().strip()
-            summary_lines = summary.split("\n") if summary else []
-            body_first_line = c_body.split("\n")[0].strip()
-            commit_subject = body_first_line[:72]
-            comment_link = f"{pr_url}#issuecomment-{comment_id}" if comment_id is not None else pr_url
-            if summary_lines:
-                commit_body = summary[-1000:]
-                if len(summary) > 1000:
-                    commit_body = "... (truncated)\n" + commit_body
-                commit_msg = f"{commit_subject}\n\n{comment_link}\n\n{commit_body}"
-            else:
-                commit_msg = f"{commit_subject}\n\n{comment_link}"
-            pushed = self._commit_and_push(commit_msg)
-            if pushed:
-                resolved_comments.append(comment)
-                commit_url = None
-                if isinstance(pushed, str):
-                    commit_url = pr_url.rsplit("/pulls/", 1)[0] + f"/commit/{pushed}"
-                elif isinstance(pushed, dict):
-                    first_sha = next(iter(pushed.values()))
-                    commit_url = pr_url.rsplit("/pulls/", 1)[0] + f"/commit/{first_sha}"
-                if commit_url and comment_id is not None:
-                    commit_links.append((comment_link, commit_url, body_first_line))
-                if comment_id is not None:
-                    r = self.gitea.resolve_comment(pr_repo, comment_id)
-                    if r is None:
-                        log(f"pr-comment: WARNING resolve failed for comment {comment_id}")
-                    else:
-                        log(f"pr-comment: resolved comment {comment_id}")
-            elif comment_id is not None:
-                no_change_comments.append(comment_id)
+            if task_subject:
+                rc = self.agent.prompt(
+                    f"Update basic memory with any new information learned about "
+                    f"the task \"{task_subject}\".", resume=True, timeout=AGENT_TIMEOUT)
+                if rc == 124:
+                    self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
+                if rc != 0:
+                    die(f"qwen agent exited with code {rc}")
 
-        if commit_links:
-            reply_body = "\n".join(
-                f"- {clink} → {curl}\n  {first_line}"
-                for clink, curl, first_line in commit_links)
-            r = self.gitea.reply_to_comment(
-                pr_repo, pr_number, None, reply_body)
-            if r is None:
-                log("pr-comment: WARNING bulk reply failed")
-            else:
-                log(f"pr-comment: posted bulk reply with {len(commit_links)} commit links")
+            self.agent.stop_session()
 
-        for cid in no_change_comments:
-            r = self.gitea.reply_to_comment(
-                pr_repo, pr_number, cid,
-                "No changes produced for this comment.")
-            if r is None:
-                log(f"pr-comment: WARNING reply failed for comment {cid}")
-            else:
-                log(f"pr-comment: no changes for comment {cid}, posted note")
+            changes_produced = len(resolved_comments) > 0
+            log(f"pr-comment: resolved_comments={len(resolved_comments)}")
 
-        rc = self.agent.prompt(
-            f"Finalize all remaining work. Update basic memory with any new information "
-            f"learned about the project {self.shoggoth.project}.",
-            resume=True, timeout=AGENT_TIMEOUT)
-        if rc == 124:
-            self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
-        if rc != 0:
-            die(f"qwen agent exited with code {rc}")
-
-        if task_subject:
-            rc = self.agent.prompt(
-                f"Update basic memory with any new information learned about "
-                f"the task \"{task_subject}\".", resume=True, timeout=AGENT_TIMEOUT)
-            if rc == 124:
-                self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
-            if rc != 0:
-                die(f"qwen agent exited with code {rc}")
-
-        self.agent.stop_session()
-
-        changes_produced = len(resolved_comments) > 0
-        log(f"pr-comment: resolved_comments={len(resolved_comments)}")
-
-        redmine_task_id = self._resolve_task(pr_branch)
-        log(f"pr-comment: redmine_task_id={redmine_task_id} changes_produced={changes_produced}")
-        if redmine_task_id:
-            if changes_produced:
-                self.redmine.update_issue(redmine_task_id,
-                     "--status", "Resolved",
-                     "--note", f"Review comments on {pr_url} have been addressed.")
-            else:
-                self.redmine.update_issue(redmine_task_id,
-                     "--note", f"Review comments on {pr_url} have been addressed.")
+            redmine_task_id = self._resolve_task(pr_branch)
+            log(f"pr-comment: redmine_task_id={redmine_task_id} changes_produced={changes_produced}")
+            if redmine_task_id:
+                if changes_produced:
+                    self.redmine.update_issue(redmine_task_id,
+                         "--status", "Resolved",
+                         "--note", f"Review comments on {pr_url} have been addressed.")
+                else:
+                    self.redmine.update_issue(redmine_task_id,
+                         "--note", f"Review comments on {pr_url} have been addressed.")
+        finally:
+            self._push_pending_commits()
 
     def _handle_timeout(self, pr_repo, pr_number, pr_url, resolved_comments):
         log(f"pr-comment: handling timeout, resolved so far={len(resolved_comments)}")
-        self._push_pending_commits()
         self.agent.stop_session()
         resolved_count = len(resolved_comments)
         timeout_msg = (

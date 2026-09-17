@@ -21,8 +21,6 @@ data:
     #!/bin/sh
     set -eu
 
-    . /shoggoth/rendered/gitea/gitea.env
-
     echo "shoggoth: Waiting for Gitea to be ready..."
     for i in $(seq 1 30); do
         if su-exec git gitea admin auth list > /dev/null 2>&1; then
@@ -118,44 +116,6 @@ spec:
         - svc.cluster.local
         - cluster.local
       initContainers:
-      - name: render-config
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: LDAP_BIND_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: openldap-ldapauth-password
-              key: password
-        - name: SHOGGOTH_ADMIN_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: openldap-admin-password
-              key: password
-        - name: RENDER_VARS
-          value: ${LDAP_BASE_DN}${LDAP_BIND_PASSWORD}${SHOGGOTH_ADMIN_PASSWORD}
-        command:
-        - bash
-        - -c
-        - 'exec /tmpl/render.sh
-
-          '
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
-        volumeMounts:
-        - name: templates
-          mountPath: /templates
-          readOnly: true
-        - name: rendered-config
-          mountPath: /rendered
-        - name: render-script
-          mountPath: /tmpl
-          readOnly: true
       - name: wait-bootstrap
         image: asherikov/shoggoth_tools:alpine
         imagePullPolicy: IfNotPresent
@@ -204,6 +164,22 @@ spec:
         env:
         - name: SHOGGOTH_DOMAIN
           value: ${SHOGGOTH_DOMAIN}
+        - name: LDAP_BASE_DN
+          value: ${LDAP_BASE_DN}
+        - name: LDAP_HOST
+          value: openldap
+        - name: LDAP_BIND_DN
+          value: uid=ldapauth,ou=people,${LDAP_BASE_DN}
+        - name: LDAP_BIND_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openldap-ldapauth-password
+              key: password
+        - name: SHOGGOTH_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openldap-admin-password
+              key: password
         - name: OTEL_TRACES_EXPORTER
           value: otlp
         - name: GITEA__overall__APP_NAME
@@ -292,15 +268,10 @@ spec:
         volumeMounts:
         - name: data
           mountPath: /data
-        - name: rendered-config
-          mountPath: /shoggoth/rendered
-          readOnly: true
         - name: gitea-init
           mountPath: /shoggoth/git/gitea
           readOnly: true
       volumes:
-      - name: rendered-config
-        emptyDir: {}
       - name: gitea-init
         configMap:
           name: gitea-init
@@ -308,13 +279,6 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: gitea-data
-      - name: templates
-        configMap:
-          name: gitea-templates
-      - name: render-script
-        configMap:
-          name: shoggoth-render-config
-          defaultMode: 493
       serviceAccountName: gitea
 ---
 apiVersion: apps/v1
@@ -533,24 +497,6 @@ subjects:
 - kind: ServiceAccount
   name: gitea-runner
   namespace: ${SHOGGOTH_NAMESPACE}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: gitea-templates
-  namespace: ${SHOGGOTH_NAMESPACE}
-data:
-  gitea.env: 'LDAP_BASE_DN=${LDAP_BASE_DN}
-
-    LDAP_HOST=openldap
-
-    LDAP_BIND_DN=uid=ldapauth,ou=people,${LDAP_BASE_DN}
-
-    LDAP_BIND_PASSWORD=${LDAP_BIND_PASSWORD}
-
-    SHOGGOTH_ADMIN_PASSWORD=${SHOGGOTH_ADMIN_PASSWORD}
-
-    '
 ---
 apiVersion: v1
 kind: ConfigMap

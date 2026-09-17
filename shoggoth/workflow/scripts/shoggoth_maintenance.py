@@ -2,6 +2,7 @@
 import argparse
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -94,6 +95,29 @@ def http_post_json(url, payload, headers=None, quiet=False):
     except json.JSONDecodeError as e:
         print(f"WARNING: HTTP POST {url} returned invalid JSON: {e}", file=sys.stderr)
         return None
+
+
+def http_post_json_with_status(url, payload, headers=None):
+    data = json.dumps(payload).encode()
+    hdrs = {"Content-Type": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    log(f"POST {url}")
+    req = Request(url, data=data, headers=hdrs, method="POST")
+    try:
+        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            body = resp.read().decode(errors="replace")[:2000]
+            log(f"POST {url} -> {resp.status}")
+            try:
+                return resp.status, body, json.loads(body) if body else None
+            except json.JSONDecodeError:
+                return resp.status, body, None
+    except HTTPError as e:
+        body = e.read().decode(errors="replace")[:2000]
+        log(f"POST {url} -> {e.code}")
+        return e.code, body, None
+    except (URLError, OSError) as e:
+        return 0, str(e), None
 
 
 def http_delete(url, headers=None):
@@ -334,10 +358,40 @@ class Gitea:
             params={"page": page, "limit": limit}))
 
     def create_user_ssh_key(self, username, title, key):
-        return self.post(f"admin/users/{username}/keys", {
-            "title": title,
-            "key": key,
-        })
+        url = f"{self.api_url}/admin/users/{username}/keys"
+        status, body, parsed = http_post_json_with_status(
+            url,
+            {"title": title, "key": key},
+            headers={"Authorization": f"token {self.token}"})
+        if 200 <= status < 300:
+            return True, status, body, parsed
+        print(f"WARNING: HTTP POST {url} failed: {status}: {body}",
+              file=sys.stderr)
+        return False, status, body, parsed
+
+    def ensure_user_active(self, username):
+        if self.patch(f"admin/users/{username}",
+                      {"active": True, "login_name": username}) is None:
+            print(f"WARNING: failed to ensure '{username}' is active",
+                  file=sys.stderr)
+            return False
+        return True
+
+    def list_admin_keys(self):
+        return _paginate(lambda page, limit: self.get(
+            "admin/keys", params={"page": page, "limit": limit}))
+
+    def delete_admin_key(self, key_id):
+        return self.delete(f"admin/keys/{key_id}")
+
+    def list_admin_users(self):
+        first = self.get("admin/users", params={"page": 1, "limit": 1})
+        if not isinstance(first, list):
+            return None
+        if len(first) == 0:
+            return []
+        return _paginate(lambda page, limit: self.get(
+            "admin/users", params={"page": page, "limit": limit}))
 
 
 class OpenBao:
@@ -405,12 +459,22 @@ class Redmine:
         if not self.token:
             # When REDMINE_SERVER is the api service (http://api.<DOMAIN>/redmine),
             # the web-internal proxy injects X-Redmine-API-Key automatically, so a
-            # client token is unnecessary. Allow tokenless mode in that case.
-            log("No Redmine client token configured; relying on api service proxy to inject X-Redmine-API-Key")
+            # client token is unnecessary. For direct redmine access (e.g.
+            # http://redmine.<DOMAIN>) the token is mandatory — fail loudly
+            # rather than silently issuing unauthenticated requests that 401 later.
+            from urllib.parse import urlparse
+            hostname = urlparse(self.api_url).hostname or ""
+            if hostname.startswith("api."):
+                log("No Redmine client token configured; relying on api service proxy to inject X-Redmine-API-Key")
+            else:
+                die(f"Redmine client token is required to access {self.api_url} "
+                    "(set REDMINE_API_TOKEN or ensure redmine/slave-token is in OpenBao)")
         else:
             masked = self.token[:4] + "..." + self.token[-4:] if len(self.token) > 8 else "***"
             log(f"Redmine token: {masked} (len={len(self.token)})")
         self._session_cookie = None
+        self._admin_session_cookie = None
+        self._admin_csrf_token = None
         self._openbao = openbao
 
     def _get_slave_password(self):
@@ -462,6 +526,99 @@ class Redmine:
             log("Redmine session auth established")
         except (HTTPError, URLError, OSError) as e:
             die(f"Redmine login failed: {e}")
+
+    def _admin_login(self):
+        if self._admin_session_cookie is not None:
+            return
+        if self._openbao is None:
+            self._openbao = OpenBao()
+        password = self._openbao.get_value("openldap/admin-password")
+        if not password:
+            die("openldap/admin-password OpenBao secret is required for redmine admin session auth")
+        jar = CookieJar()
+        opener = build_opener(HTTPCookieProcessor(jar))
+        login_url = f"{self.api_url}/login"
+        try:
+            with opener.open(Request(login_url), timeout=HTTP_TIMEOUT) as resp:
+                html = resp.read().decode()
+            csrf_token = self._extract_csrf_token(html)
+            post_data = urlencode({
+                "username": "admin",
+                "password": password,
+                "authenticity_token": csrf_token,
+            }).encode()
+            req = Request(login_url, data=post_data, method="POST",
+                          headers={"Content-Type": "application/x-www-form-urlencoded"})
+            with opener.open(req, timeout=HTTP_TIMEOUT) as resp:
+                if resp.status not in (200, 302):
+                    die(f"Redmine admin login failed: HTTP {resp.status}")
+                post_login_html = resp.read().decode()
+            cookie_header = ""
+            for cookie in jar:
+                if cookie.name == "_redmine_session":
+                    cookie_header = f"_redmine_session={cookie.value}"
+                    break
+            if not cookie_header:
+                die("Redmine admin login succeeded but no session cookie received")
+            self._admin_session_cookie = cookie_header
+            self._admin_csrf_token = self._extract_csrf_token(post_login_html)
+            log("Redmine admin session auth established")
+        except (HTTPError, URLError, OSError) as e:
+            die(f"Redmine admin login failed: {e}")
+
+    def _admin_session_post(self, path, form_fields,
+                            success_url_contains="/users/",
+                            failure_url_contains="/users/new"):
+        url = f"{self.api_url}/{path}"
+        if self._admin_session_cookie is None:
+            self._admin_login()
+        headers = {"Cookie": self._admin_session_cookie,
+                   "X-CSRF-Token": self._admin_csrf_token}
+        form_fields["authenticity_token"] = self._admin_csrf_token
+        data = urlencode(form_fields, doseq=True).encode()
+        log(f"Redmine admin session POST {url}")
+        req = Request(url, data=data, headers=headers, method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        try:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                final_url = resp.geturl() if hasattr(resp, "geturl") else url
+                body = resp.read().decode(errors="replace")
+                log(f"POST {url} -> {resp.status} (final={final_url})")
+                if resp.status in (200, 302) and success_url_contains in final_url and failure_url_contains not in final_url:
+                    return True, body
+                return False, body
+        except HTTPError as e:
+            body = e.read().decode(errors="replace")[:2000]
+            print(f"WARNING: Redmine admin session POST {url} failed: {e.code} {e.reason}: {body}", file=sys.stderr)
+            return False, body
+        except (URLError, OSError) as e:
+            print(f"WARNING: Redmine admin session POST {url} failed: {e}", file=sys.stderr)
+            return False, ""
+
+    def _admin_session_get(self, path, params=None):
+        url = f"{self.api_url}/{path}"
+        if params:
+            url = f"{url}?{urlencode(params)}"
+        if self._admin_session_cookie is None:
+            self._admin_login()
+        headers = {"Cookie": self._admin_session_cookie,
+                   "X-CSRF-Token": self._admin_csrf_token}
+        log(f"Redmine admin session GET {url}")
+        req = Request(url, headers=headers, method="GET")
+        try:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                body = resp.read().decode(errors="replace")
+                log(f"GET {url} -> {resp.status}")
+                return body
+        except HTTPError as e:
+            body = e.read().decode(errors="replace")[:2000]
+            print(f"WARNING: Redmine admin session GET {url} failed: "
+                  f"{e.code} {e.reason}: {body}", file=sys.stderr)
+            return None
+        except (URLError, OSError) as e:
+            print(f"WARNING: Redmine admin session GET {url} failed: {e}",
+                  file=sys.stderr)
+            return None
 
     def _session_headers(self):
         self._login()
@@ -981,16 +1138,19 @@ class SlaveAccess:
     def __init__(self, gitea):
         self.gitea = gitea
         self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        self.reviewer_user = os.environ.get("SHOGGOTH_REVIEWER_USER", "slave-reviewer")
+        self.automation_users = [u for u in (self.slave_user, self.reviewer_user) if u]
         self.errors = 0
 
     def execute(self):
         orgs = self.gitea.list_orgs()
-        self._add_to_orgs(orgs)
-        self._add_to_mirrored_repos(orgs)
+        for user in self.automation_users:
+            self._add_to_orgs(orgs, user)
+            self._add_to_mirrored_repos(orgs, user)
         if self.errors:
             die(f"slave-access completed with {self.errors} error(s)")
 
-    def _add_to_orgs(self, orgs):
+    def _add_to_orgs(self, orgs, user):
         if not orgs:
             print("No organizations found")
             return
@@ -999,15 +1159,15 @@ class SlaveAccess:
             org_name = org.get("username")
             if not org_name:
                 continue
-            print(f"Checking slave user membership in org '{org_name}'")
-            if not self.gitea.is_org_member(org_name, self.slave_user):
-                print(f"Adding {self.slave_user} to org '{org_name}'")
-                if not self.gitea.add_org_member(org_name, self.slave_user):
+            print(f"Checking '{user}' membership in org '{org_name}'")
+            if not self.gitea.is_org_member(org_name, user):
+                print(f"Adding '{user}' to org '{org_name}'")
+                if not self.gitea.add_org_member(org_name, user):
                     self.errors += 1
             else:
-                print(f"  {self.slave_user} is already a member of '{org_name}'")
+                print(f"  '{user}' is already a member of '{org_name}'")
 
-    def _add_to_mirrored_repos(self, orgs):
+    def _add_to_mirrored_repos(self, orgs, user):
         if not orgs:
             print("No organizations found")
             return
@@ -1026,12 +1186,12 @@ class SlaveAccess:
                 if not full_name:
                     continue
 
-                if not self.gitea.is_repo_collaborator(full_name, self.slave_user):
-                    print(f"Adding {self.slave_user} as collaborator to repo '{full_name}'")
-                    if not self.gitea.add_repo_collaborator(full_name, self.slave_user, "write"):
+                if not self.gitea.is_repo_collaborator(full_name, user):
+                    print(f"Adding '{user}' as collaborator to repo '{full_name}'")
+                    if not self.gitea.add_repo_collaborator(full_name, user, "write"):
                         self.errors += 1
                 else:
-                    print(f"  {self.slave_user} already has access to '{full_name}'")
+                    print(f"  '{user}' already has access to '{full_name}'")
 
 
 class SshKey:
@@ -1062,17 +1222,87 @@ class SshKey:
                     print(f"SSH key '{self.KEY_TITLE}' found but content differs, replacing...")
                     key_id = key.get("id")
                     if key_id is not None:
+                        self._attempted_slave_key_id = key_id
                         if not self.gitea.delete(f"admin/users/{self.slave_user}/keys/{key_id}"):
                             self.errors += 1
                     break
 
-        print(f"Registering SSH key '{self.KEY_TITLE}' for user '{self.slave_user}'")
-        if not self.gitea.create_user_ssh_key(self.slave_user, self.KEY_TITLE, public_key):
-            self.errors += 1
+        if self._register(public_key):
+            print(f"ssh-key: public key registered successfully")
 
         if self.errors:
             die(f"ssh-key completed with {self.errors} error(s)")
-        print(f"ssh-key: public key registered successfully")
+
+    def _register(self, public_key):
+        print(f"Registering SSH key '{self.KEY_TITLE}' for user '{self.slave_user}'")
+        ok, status, body, _ = self.gitea.create_user_ssh_key(
+            self.slave_user, self.KEY_TITLE, public_key)
+        if ok:
+            return True
+        if status == 422 and "non-deploy key" in body:
+            if self._cleanup_existing_key(public_key):
+                print(f"Retrying SSH key registration after key cleanup")
+                ok, _, _, _ = self.gitea.create_user_ssh_key(
+                    self.slave_user, self.KEY_TITLE, public_key)
+                if ok:
+                    return True
+        self.errors += 1
+        return False
+
+    def _cleanup_existing_key(self, public_key):
+        target = public_key.strip()
+        removed = 0
+
+        admin_keys = self.gitea.list_admin_keys() or []
+        for entry in admin_keys:
+            entry_key = (entry.get("key") or "").strip()
+            if entry_key != target:
+                continue
+            key_id = entry.get("id")
+            if key_id is None:
+                continue
+            user_obj = entry.get("user")
+            if isinstance(user_obj, dict) and user_obj.get("login"):
+                owner = user_obj["login"]
+                print(f"Removing existing SSH key id={key_id} "
+                      f"title={entry.get('title')!r} from user '{owner}' "
+                      f"matching slave public key")
+                if self.gitea.delete(f"admin/users/{owner}/keys/{key_id}"):
+                    removed += 1
+            elif user_obj is None:
+                print(f"Removing orphan deploy key id={key_id} "
+                      f"title={entry.get('title')!r} matching slave public key")
+                if self.gitea.delete_admin_key(key_id):
+                    removed += 1
+
+        users = self.gitea.list_admin_users() or []
+        for user in users:
+            username = user.get("login")
+            if not username:
+                continue
+            user_keys = self.gitea.list_user_ssh_keys(username) or []
+            for k in user_keys:
+                entry_key = (k.get("key") or "").strip()
+                if entry_key != target:
+                    continue
+                key_id = k.get("id")
+                if key_id is None:
+                    continue
+                if (username == self.slave_user
+                        and k.get("title") == self.KEY_TITLE
+                        and key_id == getattr(self, "_attempted_slave_key_id", None)):
+                    continue
+                print(f"Removing duplicate SSH key id={key_id} "
+                      f"title={k.get('title')!r} from user '{username}' "
+                      f"matching slave public key")
+                if self.gitea.delete(f"admin/users/{username}/keys/{key_id}"):
+                    removed += 1
+
+        if removed == 0:
+            print(f"WARNING: Gitea reports key already exists as a non-deploy key, "
+                  f"but no matching key was found via /admin/keys or per-user scan",
+                  file=sys.stderr)
+        return removed > 0
 
 
 class VerifyApi:
@@ -1211,15 +1441,307 @@ class SlaveToken:
         print(f"slave-token: token created and stored successfully")
 
 
+LDAP_EXCLUDED_LOGINS = ("admin", "ldapauth", "config-admin")
+
+
+class GiteaLdapSync:
+    def __init__(self, gitea):
+        self.gitea = gitea
+        self.errors = 0
+
+    def _user_count(self):
+        users = self.gitea.list_admin_users()
+        if users is None:
+            return None
+        return len(users)
+
+    def _ldap_source_filter(self):
+        exclusions = "".join(f"(!(uid={login}))" for login in LDAP_EXCLUDED_LOGINS)
+        return (f"(&(objectClass=inetOrgPerson)"
+                f"(|(uid=%[1]s)(mail=%[1]s))"
+                f"{exclusions})")
+
+    def _update_ldap_source_filter(self):
+        data = self.gitea.get("admin/ldap")
+        if not isinstance(data, list):
+            print("WARNING: gitea-ldap-sync: could not list LDAP sources",
+                  file=sys.stderr)
+            return
+        source = next((s for s in data if s.get("name") == "openldap"), None)
+        if source is None:
+            log("gitea-ldap-sync: openldap source not found, skipping filter update")
+            return
+        source_id = source.get("id")
+        new_filter = self._ldap_source_filter()
+        if source.get("user_filter") == new_filter:
+            log(f"gitea-ldap-sync: LDAP source filter already excludes "
+                f"{list(LDAP_EXCLUDED_LOGINS)}")
+            return
+        log(f"gitea-ldap-sync: updating LDAP source filter to exclude "
+            f"{list(LDAP_EXCLUDED_LOGINS)}")
+        if self.gitea.patch(f"admin/ldap/{source_id}",
+                            {"user_filter": new_filter}) is None:
+            print("ERROR: gitea-ldap-sync: failed to update LDAP source filter",
+                  file=sys.stderr)
+            self.errors += 1
+
+    def execute(self):
+        self._update_ldap_source_filter()
+        before = self._user_count()
+        log(f"gitea-ldap-sync: user count before sync_external_users: {before}")
+        url = f"{self.gitea.api_url}/admin/cron/sync_external_users"
+        req = Request(url, method="POST",
+                      headers={"Authorization": f"token {self.gitea.token}",
+                               "accept": "application/json"})
+        try:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                log(f"POST {url} -> {resp.status}")
+                if resp.status != 204:
+                    print(f"WARNING: gitea sync_external_users returned HTTP {resp.status}", file=sys.stderr)
+                    self.errors += 1
+        except HTTPError as e:
+            body = e.read().decode(errors="replace")[:500]
+            print(f"ERROR: gitea sync_external_users failed: {e.code} {e.reason}: {body}", file=sys.stderr)
+            self.errors += 1
+        except (URLError, OSError) as e:
+            print(f"ERROR: gitea sync_external_users failed: {e}", file=sys.stderr)
+            self.errors += 1
+        after = self._user_count()
+        log(f"gitea-ldap-sync: user count after sync_external_users: {after}")
+        if before is not None and after is not None:
+            delta = after - before
+            if delta > 0:
+                print(f"gitea-ldap-sync: provisioned {delta} new user(s) (total {before} -> {after})")
+            else:
+                print(f"gitea-ldap-sync: no new users (total {after})")
+        if self.errors:
+            die(f"gitea-ldap-sync completed with {self.errors} error(s)")
+        print("gitea-ldap-sync: done")
+
+
+class RedmineLdapSync:
+    def __init__(self, redmine, ldap_url, ldap_bind_dn, ldap_bind_password, ldap_user_base_dn):
+        import ldap3
+        self._ldap3 = ldap3
+        self.redmine = redmine
+        self.ldap_url = ldap_url
+        self.ldap_bind_dn = ldap_bind_dn
+        self.ldap_bind_password = ldap_bind_password
+        self.ldap_user_base_dn = ldap_user_base_dn
+        self.errors = 0
+
+    def _ldap_search_filter(self):
+        exclusions = "".join(f"(!(uid={login}))" for login in LDAP_EXCLUDED_LOGINS)
+        return f"(&(objectClass=inetOrgPerson){exclusions})"
+
+    def _auth_source_id(self):
+        body = self.redmine._admin_session_get("auth_sources")
+        if body is None:
+            return None
+        if not isinstance(body, str):
+            print(f"WARNING: redmine-ldap-sync: unexpected response type from "
+                  f"/auth_sources: {type(body).__name__}", file=sys.stderr)
+            return None
+        for match in re.finditer(
+                r'<tr[^>]*\bid="auth-source-(\d+)"[^>]*>(.*?)</tr>',
+                body, re.DOTALL):
+            auth_source_id = int(match.group(1))
+            row_html = match.group(2)
+            if re.search(r'>\s*openldap\s*<', row_html):
+                return auth_source_id
+        return None
+
+    def _ldap_users(self):
+        server = self._ldap3.Server(self.ldap_url, get_info=self._ldap3.NONE)
+        conn = self._ldap3.Connection(server,
+                                     user=self.ldap_bind_dn,
+                                     password=self.ldap_bind_password,
+                                     auto_bind=True)
+        try:
+            search_filter = self._ldap_search_filter()
+            ok = conn.search(search_base=self.ldap_user_base_dn,
+                             search_filter=search_filter,
+                             attributes=["uid", "cn", "sn", "mail"],
+                             size_limit=0)
+            if not ok:
+                print(f"WARNING: LDAP search returned no result for base={self.ldap_user_base_dn}", file=sys.stderr)
+                return []
+            users = []
+            for entry in conn.entries:
+                uid = str(entry.uid) if "uid" in entry else ""
+                if not uid:
+                    continue
+                cn = str(entry.cn) if "cn" in entry else ""
+                sn = str(entry.sn) if "sn" in entry else ""
+                mail = str(entry.mail) if "mail" in entry else ""
+                firstname, lastname = (sn or cn or uid), (sn or cn or uid)
+                if cn and sn:
+                    parts = cn.split(None, 1)
+                    firstname = parts[0]
+                    lastname = sn or (parts[1] if len(parts) > 1 else cn)
+                elif cn:
+                    firstname, lastname = cn, cn
+                users.append({
+                    "login": uid,
+                    "firstname": firstname,
+                    "lastname": lastname,
+                    "mail": mail or f"{uid}@{os.environ.get('SHOGGOTH_DOMAIN', 'localhost')}",
+                })
+            return users
+        finally:
+            try:
+                conn.unbind()
+            except Exception:
+                pass
+
+    def _developer_role_id(self):
+        data = self.redmine.get("roles.json")
+        if not isinstance(data, dict):
+            return None
+        for role in data.get("roles", []):
+            if role.get("name") == "Developer":
+                return role.get("id")
+        return None
+
+    def _user_id(self, login):
+        body = self.redmine._admin_session_get("users")
+        if body is None:
+            return None
+        for m in re.finditer(r'href="/users/(\d+)/edit"[^>]*>([^<]+)<', body):
+            if m.group(2).strip() == login:
+                return int(m.group(1))
+        return None
+
+    def _add_to_active_projects(self, user_id, login):
+        role_id = self._developer_role_id()
+        if role_id is None:
+            print(f"WARNING: redmine-ldap-sync: 'Developer' role not found",
+                  file=sys.stderr)
+            self.errors += 1
+            return
+        projects = self.redmine.list_projects()
+        if projects is None:
+            print(f"WARNING: redmine-ldap-sync: could not list projects",
+                  file=sys.stderr)
+            self.errors += 1
+            return
+        active_projects = [p for p in projects if p.get("status") == 1]
+        if not active_projects:
+            print("redmine-ldap-sync: no active projects found")
+            return
+        added = 0
+        already_member = 0
+        for project in active_projects:
+            project_id = project.get("id")
+            if not project_id:
+                continue
+            form_fields = {
+                "membership[user_id]": str(user_id),
+                "membership[role_ids][]": str(role_id),
+            }
+            ok, body = self.redmine._admin_session_post(
+                f"projects/{project_id}/memberships",
+                form_fields,
+                success_url_contains="/settings/members",
+                failure_url_contains="/memberships/new")
+            if ok:
+                added += 1
+                continue
+            if body and re.search(
+                    r'already\s+a\s+member|already\s+exists|already\s+in\s+this\s+project',
+                    body, re.IGNORECASE):
+                already_member += 1
+                continue
+            print(f"WARNING: redmine-ldap-sync: failed to add '{login}' "
+                  f"to project_id={project_id}: "
+                  f"{(body or '')[:200]}", file=sys.stderr)
+            self.errors += 1
+        print(f"redmine-ldap-sync: '{login}' added to {added} active "
+              f"project(s), {already_member} already a member")
+
+    def execute(self):
+        auth_source_id = self._auth_source_id()
+        if auth_source_id is None:
+            die("redmine-ldap-sync: openldap auth source not found in redmine (run redmine-init first?)")
+        log(f"redmine-ldap-sync: AuthSourceLdap id={auth_source_id}")
+
+        try:
+            ldap_users = self._ldap_users()
+        except Exception as e:
+            die(f"redmine-ldap-sync: failed to enumerate LDAP users: {e}")
+        if not ldap_users:
+            print("redmine-ldap-sync: no inetOrgPerson entries found in LDAP")
+            return
+        log(f"redmine-ldap-sync: LDAP has {len(ldap_users)} inetOrgPerson entries: "
+            f"{[u['login'] for u in ldap_users]}")
+
+        created = 0
+        skipped = 0
+        for u in ldap_users:
+            random_pw = secrets.token_urlsafe(24)
+            form_fields = {
+                "user[login]": u["login"],
+                "user[firstname]": u["firstname"],
+                "user[lastname]": u["lastname"],
+                "user[mail]": u["mail"],
+                "user[password]": random_pw,
+                "user[password_confirmation]": random_pw,
+                "user[must_change_passwd]": "0",
+                "user[auth_source_id]": str(auth_source_id),
+                "user[generate_password]": "0",
+            }
+            print(f"redmine-ldap-sync: creating user '{u['login']}' "
+              f"(firstname='{u['firstname']}', mail='{u['mail']}')")
+            ok, response_body = self.redmine._admin_session_post("users", form_fields)
+            if ok:
+                created += 1
+            elif response_body and re.search(r'already\s+taken|has\s+already\s+been\s+taken',
+                                             response_body, re.IGNORECASE):
+                skipped += 1
+                print(f"redmine-ldap-sync: user '{u['login']}' already exists, skipping")
+            else:
+                error_hint = ""
+                if response_body:
+                    err_match = re.search(r'<div[^>]*class="[^"]*error[^"]*"[^>]*>([^<]+)</div>',
+                                          response_body, re.IGNORECASE)
+                    if err_match:
+                        error_hint = f": {err_match.group(1).strip()}"
+                hint = f" (body: {response_body[:200]!r})" if response_body else ""
+                print(f"ERROR: failed to create user '{u['login']}'{error_hint}{hint}",
+                      file=sys.stderr)
+                self.errors += 1
+                continue
+
+            user_id = self._user_id(u["login"])
+            if user_id is None:
+                if ok:
+                    print(f"ERROR: POST /users returned success for '{u['login']}' "
+                          f"but user not found on /users list "
+                          f"(body: {response_body[:200]!r})", file=sys.stderr)
+                else:
+                    print(f"ERROR: 'already taken' detected for '{u['login']}' "
+                          f"but user not found on /users list "
+                          f"(body: {response_body[:200]!r})", file=sys.stderr)
+                self.errors += 1
+                continue
+
+            self._add_to_active_projects(user_id, u["login"])
+        print(f"redmine-ldap-sync: created={created}, skipped={skipped}, ldap_total={len(ldap_users)}")
+        if self.errors:
+            die(f"redmine-ldap-sync completed with {self.errors} error(s)")
+        print("redmine-ldap-sync: done")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        prog="shoggoth_gitea.py",
+        prog="shoggoth_maintenance.py",
         description="Shoggoth Gitea maintenance: webhooks, mirror sync, and slave user access",
     )
     parser.add_argument("command",
                         choices=["kestra-webhooks", "redmine-webhooks", "redmine-kestra-webhooks",
                                  "github-mirror-sync", "slave-access", "slave-token", "ssh-key",
-                                 "verify-api"],
+                                 "verify-api",
+                                 "gitea-ldap-sync", "redmine-ldap-sync"],
                         help="Command to execute")
     parser.add_argument("args", nargs="*", default=[],
                         help="Command arguments (project names for webhooks, github orgs for mirror-sync)")
@@ -1268,6 +1790,28 @@ def main():
     elif parsed.command == "verify-api":
         cmd = VerifyApi()
         cmd.execute(parsed.args or None)
+    elif parsed.command == "gitea-ldap-sync":
+        gitea = Gitea()
+        cmd = GiteaLdapSync(gitea)
+        cmd.execute()
+    elif parsed.command == "redmine-ldap-sync":
+        openbao = OpenBao()
+        redmine = Redmine(openbao)
+        ldap_bind_password = openbao.get_value("openldap/ldapauth-password")
+        if not ldap_bind_password:
+            die("openldap/ldapauth-password OpenBao secret is required for LDAP bind")
+        domain = os.environ.get("SHOGGOTH_DOMAIN", "")
+        if not domain:
+            die("SHOGGOTH_DOMAIN is required")
+        ldap_base_dn = "dc=" + domain.replace(".", ",dc=")
+        ldap_url = os.environ.get("LDAP_URL", "ldap://openldap:389")
+        ldap_bind_dn = f"uid=ldapauth,ou=people,{ldap_base_dn}"
+        ldap_user_base_dn = f"ou=people,{ldap_base_dn}"
+        os.environ.setdefault("LDAP_URL", ldap_url)
+        os.environ.setdefault("LDAP_BIND_DN", ldap_bind_dn)
+        os.environ.setdefault("LDAP_USER_BASE_DN", ldap_user_base_dn)
+        cmd = RedmineLdapSync(redmine, ldap_url, ldap_bind_dn, ldap_bind_password, ldap_user_base_dn)
+        cmd.execute()
 
 
 if __name__ == "__main__":
