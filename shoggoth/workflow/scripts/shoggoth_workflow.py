@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -18,6 +19,98 @@ from urllib.error import URLError, HTTPError
 HTTP_TIMEOUT = 30
 AGENT_TIMEOUT = 1200
 VERBOSE = False
+
+SECRET_ENV_KEYS = frozenset([
+    "GITEA_ADMIN_TOKEN",
+    "SHOGGOTH_VAULT_TOKEN", "REDMINE_TOKEN",
+    "OPENBAO_ADDR", "SHOGGOTH_AI_DEFAULT_TOKEN",
+    "GITHUB_TOKEN", "REDMINE_WEBHOOK_SECRET",
+])
+
+
+def _filter_qwen_env():
+    return {k: v for k, v in os.environ.items() if k not in SECRET_ENV_KEYS}
+
+
+def _format_review_json(review_data, pr_title, pr_url):
+    """Render a qwen review run --json result as a Markdown review body
+    suitable for posting as a single Gitea PR review.
+    """
+    if not isinstance(review_data, dict):
+        return ""
+    findings = review_data.get("findings") or []
+    verdict = review_data.get("verdict") or ""
+    summary = (review_data.get("summary")
+               or review_data.get("summary_md")
+               or review_data.get("body") or "")
+    parts = [f"## Code review: {pr_title}", f"PR: {pr_url}", ""]
+    if verdict:
+        parts.append(f"**Verdict:** {verdict}")
+        parts.append("")
+    if summary and not findings:
+        parts.append(summary.strip())
+        parts.append("")
+    if findings:
+        parts.append("### Findings")
+        parts.append("")
+        for f in findings:
+            sev = (f.get("severity") or "info").upper()
+            path = f.get("path") or "?"
+            line = f.get("line") or f.get("start_line")
+            loc = f"{path}:{line}" if line else path
+            parts.append(f"- **[{sev}]** `{loc}`")
+            body = (f.get("body") or f.get("message") or "").strip()
+            if body:
+                for bl in body.splitlines():
+                    parts.append(f"  {bl}")
+            parts.append("")
+    elif not summary:
+        parts.append("_No issues found._")
+    return "\n".join(parts)
+
+
+def _extract_review_json(text):
+    """Find and parse a JSON review object from agent assistant text.
+
+    Looks for the first ```json ... ``` fenced block (or a bare JSON object
+    ending at the END_OF_REVIEW marker), validates it has the expected
+    shape, and returns the parsed dict. Returns None if nothing usable
+    is found.
+    """
+    if not text:
+        return None
+    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        candidate = m.group(1)
+    else:
+        end = text.find("END_OF_REVIEW")
+        if end != -1:
+            head = text[:end]
+        else:
+            head = text
+        depth = 0
+        start = -1
+        for i, ch in enumerate(head):
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and start != -1:
+                    candidate = head[start:i + 1]
+                    break
+        else:
+            return None
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if "verdict" not in data and "findings" not in data and "summary" not in data:
+        return None
+    return data
 
 
 def log(msg):
@@ -425,6 +518,20 @@ class Gitea:
             f"repos/{repo}/pulls/{pr_number}/commits",
             params={"page": page, "limit": limit}))
 
+    def get_pr_diff_text(self, repo, pr_number):
+        """Fetch the unified diff rendered by Gitea at .diff endpoint.
+        Returns the diff as a string, or None on failure.
+        """
+        url = f"{self.api_url}/repos/{repo}/pulls/{pr_number}.diff"
+        req = Request(url, headers={**self._auth_headers(),
+                                     "accept": "application/vnd.gitea.diff"})
+        try:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                return resp.read().decode()
+        except (HTTPError, URLError, OSError) as e:
+            log(f"get_pr_diff_text: failed to fetch {url}: {e}")
+            return None
+
     def post_pr_review(self, repo, pr_number, body, event="COMMENT"):
         return self.post(f"repos/{repo}/pulls/{pr_number}/reviews", {
             "body": body,
@@ -781,6 +888,262 @@ class Shoggoth:
 
         self.repo_dir = workspace_dir
 
+    def _unshallow(self, repo_dir):
+        """Fetch full history if the local clone is shallow.
+        Idempotent: no-op when the repo already has full history.
+        """
+        if not os.path.isdir(os.path.join(repo_dir, ".git")):
+            log(f"_unshallow: {repo_dir} is not a git repo, skipping")
+            return
+        if not os.path.exists(os.path.join(repo_dir, ".git", "shallow")):
+            log(f"_unshallow: {repo_dir} already full history")
+            return
+        log(f"_unshallow: fetching full history for {repo_dir}")
+        result = run(["git", "-C", repo_dir, "fetch", "origin",
+                      "--unshallow", "--tags"], check=False)
+        if result.returncode != 0:
+            log(f"_unshallow: warning: {result.stderr.strip()[:200]}")
+
+    def _ensure_remote_ref(self, repo_dir, ref_name, pr_number=None):
+        """Ensure refs/remotes/origin/{ref_name} exists locally.
+        For PR head refs, falls back to fetch origin pull/{n}/head:pr-head.
+        Returns True if the ref is available after the call.
+        """
+        if not ref_name:
+            return False
+        safe = re.sub(r"[^A-Za-z0-9_./-]", "-", ref_name)
+        if not safe or safe.startswith("-") or ".." in safe:
+            log(f"_ensure_remote_ref: refusing unsafe ref {ref_name!r}")
+            return False
+        result = run(["git", "-C", repo_dir, "fetch", "origin",
+                      f"{ref_name}:refs/remotes/origin/{safe}"], check=False)
+        if result.returncode == 0:
+            return True
+        if pr_number is not None:
+            log(f"_ensure_remote_ref: trying pull/{pr_number}/head as fallback")
+            result = run(["git", "-C", repo_dir, "fetch", "origin",
+                          f"pull/{pr_number}/head:refs/remotes/origin/pr-{pr_number}"],
+                         check=False)
+            return result.returncode == 0
+        return False
+
+    def _write_pr_diff(self, repo_dir, base_ref, head_ref, diff_path):
+        """Run git diff and write to diff_path. Returns True if non-empty.
+        Tries several candidate specs in order:
+            origin/{base}...{head}
+            origin/{base}...HEAD
+            HEAD~1...HEAD
+        Empty result still creates an empty file at diff_path so the slash
+        command has a target to inspect.
+        """
+        candidates = []
+        if base_ref and head_ref:
+            candidates.append(f"origin/{base_ref}...{head_ref}")
+        if base_ref:
+            candidates.append(f"origin/{base_ref}...HEAD")
+        candidates.append("HEAD~1...HEAD")
+        for spec in candidates:
+            result = run(["git", "-C", repo_dir, "diff", spec,
+                          "--binary", "--no-color"], check=False)
+            if result.returncode == 0 and result.stdout.strip():
+                with open(diff_path, "w") as f:
+                    f.write(result.stdout)
+                log(f"_write_pr_diff: wrote {len(result.stdout)} bytes via {spec}")
+                return True
+        open(diff_path, "w").close()
+        log("_write_pr_diff: diff is empty, wrote empty file")
+        return False
+
+    def _apply_pr_to_worktree(self, repo_dir, base_ref, head_ref,
+                              review_repo_dir, pr_number):
+        """Create a worktree at base_ref and apply the PR diff as uncommitted
+        changes. Returns (worktree_path, diff_source) where diff_source is
+        one of "git-diff", "gitea-api", or "" (empty).
+
+        The worktree is at /tmp/shoggoth-review-<n>-<rand>; cleanup is the
+        caller's responsibility (use _remove_review_worktree).
+
+        For ccws sub-repos, worktrees are created from the sub-repo's own
+        .git (not the manifest) so the resulting tree matches the sub-repo
+        layout the agent will review.
+        """
+        wt_path = (f"/tmp/shoggoth-review-{pr_number}-"
+                   f"{uuid.uuid4().hex[:8]}")
+
+        worktree_source = repo_dir
+        if (review_repo_dir and review_repo_dir != repo_dir
+                and os.path.isdir(os.path.join(review_repo_dir, ".git"))):
+            worktree_source = review_repo_dir
+            log(f"_apply_pr_to_worktree: using sub-repo {review_repo_dir} "
+                f"as worktree source")
+
+        base_sha = None
+        for candidate in ([f"origin/{base_ref}", base_ref]
+                          if base_ref else []):
+            resolved = run(["git", "-C", worktree_source, "rev-parse",
+                            "--verify", candidate], check=False,
+                           capture_output=True, text=True)
+            if resolved.returncode == 0 and resolved.stdout.strip():
+                base_sha = resolved.stdout.strip()
+                break
+
+        if base_sha is None:
+            log(f"_apply_pr_to_worktree: cannot resolve base ref "
+                f"{base_ref!r} from {worktree_source}")
+            return None, ""
+
+        add_wt = run(["git", "-C", worktree_source, "worktree", "add",
+                      "--detach", wt_path, base_sha], check=False,
+                     capture_output=True, text=True)
+        if add_wt.returncode != 0:
+            log(f"_apply_pr_to_worktree: worktree add failed: "
+                f"{add_wt.stderr.strip()[:200]}")
+            return None, ""
+
+        diff_text = None
+        diff_source = ""
+        for spec in ([f"origin/{base_ref}...{head_ref}",
+                      f"origin/{base_ref}...HEAD",
+                      "HEAD~1...HEAD"] if base_ref and head_ref else
+                     [f"origin/{base_ref}...HEAD", "HEAD~1...HEAD"]
+                     if base_ref else ["HEAD~1...HEAD"]):
+            res = run(["git", "-C", worktree_source, "diff", spec,
+                       "--binary", "--no-color"],
+                      check=False, capture_output=True, text=True)
+            if res.returncode == 0 and res.stdout.strip():
+                diff_text = res.stdout
+                diff_source = f"git-diff:{spec}"
+                log(f"_apply_pr_to_worktree: got diff ({len(diff_text)} "
+                    f"bytes) via {spec} (from {worktree_source})")
+                break
+
+        if diff_text is None:
+            log("_apply_pr_to_worktree: trying Gitea .diff fallback")
+            gitea_diff = self.gitea.get_pr_diff_text(
+                self.working_repo, pr_number)
+            if gitea_diff:
+                diff_text = gitea_diff
+                diff_source = "gitea-api"
+
+        if not diff_text or not diff_text.strip():
+            log("_apply_pr_to_worktree: no diff available")
+            self._remove_review_worktree(wt_path)
+            return None, ""
+
+        if review_repo_dir != repo_dir:
+            log(f"_apply_pr_to_worktree: rewriting patch paths "
+                f"(review_repo_dir={review_repo_dir})")
+            diff_text = self._rewrite_patch_paths(
+                diff_text, review_repo_dir)
+
+        apply = run(["git", "-C", wt_path, "apply", "--whitespace=fix",
+                     "--recount", "-"],
+                    check=False, input=diff_text,
+                    capture_output=True, text=True)
+        if apply.returncode != 0:
+            log(f"_apply_pr_to_worktree: git apply failed "
+                f"(will retry with -3): {apply.stderr.strip()[:300]}")
+            apply3 = run(["git", "-C", wt_path, "apply", "--3way",
+                          "--whitespace=fix", "-"],
+                         check=False, input=diff_text,
+                         capture_output=True, text=True)
+            if apply3.returncode != 0:
+                log(f"_apply_pr_to_worktree: git apply --3way also "
+                    f"failed: {apply3.stderr.strip()[:300]}")
+                self._remove_review_worktree(wt_path)
+                return None, ""
+
+        status = run(["git", "-C", wt_path, "status", "--porcelain"],
+                     check=False, capture_output=True, text=True)
+        log(f"_apply_pr_to_worktree: worktree {wt_path} ready; "
+            f"diff_source={diff_source}; "
+            f"changed_files={len([l for l in status.stdout.splitlines() if l.strip()])}")
+        return wt_path, diff_source
+
+    @staticmethod
+    def _rewrite_patch_paths(patch_text, target_dir):
+        """Rewrite `diff --git a/<path> b/<path>` headers so the patch can be
+        applied at target_dir (a sub-repo) instead of the manifest root.
+        Strips the longest common top-level directory prefix.
+        """
+        a_paths = []
+        for line in patch_text.splitlines():
+            if line.startswith("--- a/"):
+                a_paths.append(line[len("--- a/"):])
+        if not a_paths:
+            return patch_text
+        prefixes = {p.split("/", 1)[0] for p in a_paths if "/" in p}
+        if len(prefixes) != 1:
+            return patch_text
+        top = next(iter(prefixes))
+        top_slash = f"{top}/"
+        stripped = []
+        for line in patch_text.splitlines():
+            if line.startswith("diff --git "):
+                rest = line[len("diff --git "):]
+                if rest.startswith("a/") and " b/" in rest:
+                    a_path, b_path_with_marker = rest[2:].split(" b/", 1)
+                    b_path = b_path_with_marker
+                    if a_path.startswith(top_slash):
+                        a_path = a_path[len(top_slash):]
+                    if b_path.startswith(top_slash):
+                        b_path = b_path[len(top_slash):]
+                    line = f"diff --git a/{a_path} b/{b_path}"
+            elif line.startswith(f"--- a/{top_slash}"):
+                line = f"--- a/{line[len('--- a/' + top_slash):]}"
+            elif line.startswith(f"+++ b/{top_slash}"):
+                line = f"+++ b/{line[len('+++ b/' + top_slash):]}"
+            stripped.append(line)
+        return "\n".join(stripped)
+
+    @staticmethod
+    def _remove_review_worktree(wt_path):
+        """Remove a worktree and prune the worktree list."""
+        if not wt_path or not os.path.isdir(wt_path):
+            return
+        repo_dir = None
+        try:
+            with open(os.path.join(wt_path, ".git"), "r") as f:
+                content = f.read().strip()
+            if content.startswith("gitdir:"):
+                gitdir = content[len("gitdir:"):].strip()
+                wt_subdir = os.path.basename(wt_path)
+                worktrees_dir = os.path.dirname(gitdir)
+                repo_git_dir = os.path.dirname(worktrees_dir)
+                repo_dir = os.path.dirname(repo_git_dir)
+        except (OSError, ValueError):
+            pass
+        if repo_dir is None:
+            log(f"_remove_review_worktree: cannot infer repo_dir from "
+                f"{wt_path}; falling back to force remove")
+            shutil.rmtree(wt_path, ignore_errors=True)
+            return
+        run(["git", "-C", repo_dir, "worktree", "remove", "--force",
+             wt_path], check=False)
+        run(["git", "-C", repo_dir, "worktree", "prune"], check=False)
+        if os.path.isdir(wt_path):
+            shutil.rmtree(wt_path, ignore_errors=True)
+
+    def _resolve_review_repo_dir(self, pr_repo, pr_number):
+        """If ccws and the PR touches exactly one sub-repo with its own .git,
+        return that sub-repo's absolute path. Otherwise return self.repo_dir.
+        """
+        if self.type != "ccws":
+            return self.repo_dir
+        files = self.gitea.get_pr_files(pr_repo, pr_number) or []
+        prefixes = {f["path"].split("/", 1)[0]
+                    for f in files if "/" in f.get("path", "")}
+        if len(prefixes) == 1:
+            subrepo = next(iter(prefixes))
+            path = os.path.join(self.repo_dir, subrepo)
+            if os.path.isdir(os.path.join(path, ".git")):
+                log(f"_resolve_review_repo_dir: scoped to {subrepo}")
+                return path
+        if len(prefixes) > 1:
+            log(f"_resolve_review_repo_dir: PR touches {len(prefixes)} "
+                f"sub-repos, reviewing at manifest level")
+        return self.repo_dir
+
 
 class OtlpLogger:
     def __init__(self, endpoint):
@@ -791,15 +1154,26 @@ class OtlpLogger:
         self.last_result = None
         self.last_error = None
         self.assistant_text = []
+        self._pushed_count = 0
+        self._failed_count = 0
+        self._logged_endpoint = False
+        log(f"otlp: OtlpLogger created endpoint={self.endpoint}")
 
     def _push_line(self, line):
+        if not self._logged_endpoint:
+            log(f"otlp: endpoint={self.endpoint} (POST {self.endpoint}/v1/logs)")
+            self._logged_endpoint = True
         ts = str(time.time_ns())
         body = {
             "resourceLogs": [{
                 "resource": {
                     "attributes": [
-                        {"key": "service.name", "value": {"stringValue": self.service_name}},
-                        {"key": "session.id", "value": {"stringValue": self.session_id}},
+                        {"key": "service.name",
+                         "value": {"stringValue": self.service_name}},
+                        {"key": "service",
+                         "value": {"stringValue": self.service_name}},
+                        {"key": "session.id",
+                         "value": {"stringValue": self.session_id}},
                     ]
                 },
                 "scopeLogs": [{
@@ -814,13 +1188,22 @@ class OtlpLogger:
                 }],
             }]
         }
-        http_post_json(f"{self.endpoint}/v1/logs", body, quiet=True)
+        result = http_post_json(f"{self.endpoint}/v1/logs", body, quiet=True)
+        self._pushed_count += 1
+        if result is None:
+            self._failed_count += 1
+            log(f"otlp: POST failed (count={self._pushed_count} "
+                f"failed={self._failed_count}); line: {line[:120]!r}")
 
     def start_session(self, event_type):
         self.session_id = str(uuid.uuid4())
         self.service_name = f"qwen-{event_type}"
         self.reset()
-        log(f"otlp: start_session session_id={self.session_id}")
+        self._pushed_count = 0
+        self._failed_count = 0
+        self._logged_endpoint = False
+        log(f"otlp: start_session session_id={self.session_id} "
+            f"service={self.service_name} endpoint={self.endpoint}")
 
     def reset(self):
         self.last_result = None
@@ -828,8 +1211,9 @@ class OtlpLogger:
         self.assistant_text = []
 
     def stop_session(self):
+        log(f"otlp: stop_session pushed={self._pushed_count} "
+            f"failed={self._failed_count}")
         self.session_id = None
-        log("otlp: stop_session done")
 
     def _capture_stream_json(self, line):
         try:
@@ -872,14 +1256,7 @@ class Agent:
         log(f"start_session: event_type={event_type}")
         self.otlp.start_session(event_type)
 
-        SECRET_ENV_KEYS = frozenset([
-            "GITEA_ADMIN_TOKEN",
-            "SHOGGOTH_VAULT_TOKEN", "REDMINE_TOKEN",
-            "OPENBAO_ADDR", "SHOGGOTH_AI_DEFAULT_TOKEN",
-            "GITHUB_TOKEN", "REDMINE_WEBHOOK_SECRET",
-        ])
-        self.qwen_env = {k: v for k, v in os.environ.items()
-                         if k not in SECRET_ENV_KEYS}
+        self.qwen_env = _filter_qwen_env()
 
         plugin_url = f"http://{self.shoggoth.domain}/plugin.tar.gz"
         log(f"start_session: downloading plugin from {plugin_url}")
@@ -907,11 +1284,14 @@ class Agent:
             print(f"WARNING: codebase-memory-mcp indexing failed: "
                   f"{index_result.stderr.strip()}", file=sys.stderr)
 
-    def prompt(self, text, resume=False, timeout=None):
-        if self.shoggoth.type == "ccws":
-            os.chdir("/ccws")
-        else:
-            os.chdir(self.shoggoth.repo_dir)
+    def prompt(self, text, resume=False, timeout=None, cwd=None):
+        if cwd is None:
+            if self.shoggoth.type == "ccws":
+                cwd = "/ccws"
+            else:
+                cwd = self.shoggoth.repo_dir
+        os.chdir(cwd)
+        log(f"prompt: cwd={cwd}")
 
         cmd = ["qwen", "--yolo", "--output-format", "stream-json"]
         if resume:
@@ -1275,44 +1655,213 @@ class PrUpdateCommand(CommandBase):
         pr_data = self.gitea.get_pr(pr_repo, pr_number)
         pr_title = pr_data.get("title", "") if pr_data else ""
         pr_base = pr_data.get("base", {}).get("ref", "") if pr_data else ""
-
-        repo_dir = self.shoggoth.repo_dir
-        if pr_base:
-            log(f"pr-review: resetting to base '{pr_base}' to produce local diff")
-            run(["git", "-C", repo_dir, "fetch", "origin", pr_base], check=False)
-            run(["git", "-C", repo_dir, "reset", "--soft", f"origin/{pr_base}"], check=False)
+        pr_sha = pr_data.get("head", {}).get("sha", "") if pr_data else ""
 
         self.agent.start_session("pr-review")
+        otlp = self.agent.otlp
+        otlp._push_line(
+            f"pr-review: starting review pr={pr_number} repo={pr_repo} "
+            f"title={pr_title!r} base={pr_base} head={pr_sha}")
 
-        prompt = (
-            f"/review {repo_dir} --effort low\n\n"
-            f"PR: {pr_url}\n"
-            f"Title: {pr_title}\n\n"
-            f"Use the codebase-memory skill to understand the code context and "
-            f"cross-references. Use the basic_memory MCP tools (search, read_note) "
-            f"to consult any relevant project notes and prior decisions."
-        )
+        review_repo_dir = self.shoggoth._resolve_review_repo_dir(pr_repo, pr_number)
+        otlp._push_line(f"pr-review: resolved review_repo_dir={review_repo_dir}")
 
-        rc = self.agent.prompt(prompt)
-        if rc != 0:
-            die(f"qwen agent exited with code {rc}")
+        self.shoggoth._unshallow(review_repo_dir)
+        otlp._push_line(f"pr-review: _unshallow done for {review_repo_dir}")
 
-        review_text = self.agent.otlp.get_review_text()
-        self.agent.stop_session()
+        self.shoggoth._ensure_remote_ref(review_repo_dir, pr_base, pr_number)
+        otlp._push_line(f"pr-review: _ensure_remote_ref base={pr_base} done")
 
-        if review_text:
-            log(f"pr-review: posting review to gitea (length={len(review_text)})")
-            result = self.gitea.post_pr_review_chunked(pr_repo, pr_number, review_text)
-            if result is None:
-                die("pr-review: failed to post review to gitea")
+        if pr_sha:
+            self.shoggoth._ensure_remote_ref(review_repo_dir, pr_sha, pr_number)
+            otlp._push_line(f"pr-review: _ensure_remote_ref head={pr_sha} done")
+
+        diff_path = f"/tmp/shoggoth-pr-{pr_number}-{uuid.uuid4().hex[:8]}.diff"
+        wrote = self.shoggoth._write_pr_diff(review_repo_dir, pr_base, pr_sha, diff_path)
+        diff_size = os.path.getsize(diff_path) if os.path.exists(diff_path) else 0
+        if not wrote:
+            gitea_diff = self.gitea.get_pr_diff_text(pr_repo, pr_number)
+            if gitea_diff:
+                with open(diff_path, "w") as f:
+                    f.write(gitea_diff)
+                diff_size = len(gitea_diff)
+                log(f"pr-review: using Gitea-rendered diff "
+                    f"({diff_size} bytes)")
+                otlp._push_line(
+                    f"pr-review: Gitea .diff fallback wrote {diff_size} bytes")
+            else:
+                log("pr-review: Gitea .diff fallback also empty")
+                otlp._push_line("pr-review: Gitea .diff fallback empty")
         else:
-            log("pr-review: no review text captured from agent")
+            otlp._push_line(
+                f"pr-review: _write_pr_diff wrote {diff_size} bytes "
+                f"to {diff_path}")
+
+        wt_path, diff_source = self.shoggoth._apply_pr_to_worktree(
+            self.shoggoth.repo_dir, pr_base, pr_sha,
+            review_repo_dir, pr_number)
+        if wt_path is None:
+            otlp.last_error = "could not create review worktree with PR diff applied"
+            self.agent.stop_session()
+            die(f"pr-review: failed to set up review worktree")
+        otlp._push_line(
+            f"pr-review: worktree ready at {wt_path} "
+            f"(diff_source={diff_source})")
+
+        try:
+            review_prompt = (
+                f"You are reviewing PR {pr_url} (repo: {pr_repo}, "
+                f"PR #{pr_number}).\n"
+                f"Title: {pr_title}\n"
+                f"Base: {pr_base}\n"
+                f"Head SHA: {pr_sha}\n\n"
+                f"The PR has been applied as UNCOMMITTED changes to a "
+                f"git worktree at: {wt_path}\n"
+                f"This is the source tree you must review. Read files from "
+                f"this path; do NOT read from any other checkout.\n\n"
+                f"The unified diff is also preserved at: {diff_path} "
+                f"({diff_size} bytes) for line-number references.\n\n"
+                f"To inspect the change:\n"
+                f"  - `git -C {wt_path} status` to see modified files\n"
+                f"  - `git -C {wt_path} diff` to see the full diff against "
+                f"the base\n"
+                f"  - read the modified files directly to understand "
+                f"context, callers, and existing patterns\n\n"
+                f"You may use the codebase-memory MCP tools "
+                f"(search_graph, get_code_snippet, trace_path) for context "
+                f"lookups; the indexed code path is "
+                f"{self.shoggoth.repo_dir}, so cross-reference by reading "
+                f"matching files from the worktree path.\n"
+                f"Use basic_memory MCP (search, read_note) for prior "
+                f"project decisions.\n\n"
+                f"Produce a code review focused on:\n"
+                f"- correctness (logic bugs, off-by-one, edge cases)\n"
+                f"- security (input validation, secrets in code, race "
+                f"conditions)\n"
+                f"- maintainability (clarity, naming, coupling)\n"
+                f"- test coverage gaps (does the change add or modify code "
+                f"without tests?)\n"
+                f"- adherence to project conventions (look at neighbouring "
+                f"code in the same files)\n\n"
+                f"Do NOT make code changes. Do NOT post comments or reviews "
+                f"via Gitea MCP tools — only the workflow script posts the "
+                f"final review.\n\n"
+                f"When done, output a single JSON object inside a ```json "
+                f"fenced block, followed by the literal line END_OF_REVIEW "
+                f"on its own line. The JSON shape is:\n"
+                f"```\n"
+                f"{{\n"
+                f'  "verdict": "approve" | "request_changes" | "comment",\n'
+                f'  "summary": "one-paragraph summary of the change",\n'
+                f'  "findings": [\n'
+                f"    {{\n"
+                f'      "severity": "critical" | "high" | "medium" | '
+                f'"low" | "info",\n'
+                f'      "path": "relative/path/to/file (relative to the '
+                f'worktree)",\n'
+                f'      "line": 42,\n'
+                f'      "body": "description of the issue and concrete '
+                f'fix"\n'
+                f"    }}\n"
+                f"  ]\n"
+                f"}}\n"
+                f"```\n\n"
+                f"If the change is sound and small, output verdict "
+                f'"approve" with an empty findings list. If you find any '
+                f"critical or high-severity issue, output verdict "
+                f'"request_changes".\n\n'
+                f"Important: do not skip the END_OF_REVIEW line — it tells "
+                f"the workflow script your review is complete."
+            )
+
+            log(f"pr-review: invoking agent prompt "
+                f"(diff_source={diff_source}, diff={diff_size} bytes)")
+            otlp._push_line(
+                f"pr-review: invoking agent prompt "
+                f"(diff_source={diff_source} diff_size={diff_size} "
+                f"prompt_chars={len(review_prompt)})")
+
+            t0 = time.time()
+            rc = self.agent.prompt(review_prompt, timeout=AGENT_TIMEOUT,
+                                   cwd=wt_path)
+            elapsed = time.time() - t0
+
+            otlp._push_line(
+                f"pr-review: agent prompt finished rc={rc} "
+                f"elapsed={elapsed:.1f}s "
+                f"assistant_chars="
+                f"{sum(len(t) for t in otlp.assistant_text)}")
+
+            if rc == 124:
+                self._handle_timeout(pr_repo, pr_number, pr_url, [])
+                return
+            if rc != 0:
+                otlp.last_error = f"agent prompt exited with code {rc}"
+                otlp._push_line(
+                    f"pr-review: ERROR agent prompt exited with code {rc} "
+                    f"last_error={otlp.last_error}")
+                self.agent.stop_session()
+                die(f"pr-review: agent exited with code {rc}")
+
+            review_text = otlp.get_review_text()
+            otlp.last_result = review_text
+            otlp._push_line(
+                f"pr-review: extracted review_text length={len(review_text)}")
+
+            review_data = _extract_review_json(review_text)
+            if review_data is not None:
+                review_md = _format_review_json(review_data, pr_title,
+                                                pr_url)
+                otlp._push_line(
+                    f"pr-review: parsed JSON review "
+                    f"verdict={review_data.get('verdict', '?')!r} "
+                    f"findings="
+                    f"{len(review_data.get('findings') or [])}")
+            else:
+                otlp._push_line(
+                    "pr-review: no JSON block found in agent output; "
+                    "posting raw assistant text as Markdown")
+                review_md = review_text.strip() if review_text else ""
+
+            if not review_md:
+                log("pr-review: no review text captured from agent")
+                otlp._push_line(
+                    "pr-review: no review text captured from agent")
+                slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+                self.gitea.remove_requested_reviewer(pr_repo, pr_number,
+                                                    slave_user)
+                self.agent.stop_session()
+                return
+
+            log(f"pr-review: posting review to gitea "
+                f"(length={len(review_md)})")
+            otlp._push_line(
+                f"pr-review: posting review to gitea "
+                f"(length={len(review_md)})")
+            result = self.gitea.post_pr_review_chunked(pr_repo, pr_number,
+                                                      review_md)
+            if result is None:
+                otlp.last_error = "failed to post review to gitea"
+                self.agent.stop_session()
+                die("pr-review: failed to post review to gitea")
+            otlp._push_line("pr-review: review posted to gitea")
+        finally:
+            log(f"pr-review: removing review worktree {wt_path}")
+            self.shoggoth._remove_review_worktree(wt_path)
+            otlp._push_line(f"pr-review: removed worktree {wt_path}")
 
         slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
-        reviewer_user = os.environ.get("SHOGGOTH_REVIEWER_USER", "slave-reviewer")
-        log(f"pr-review: removing requested reviewers {slave_user}, {reviewer_user}")
+        reviewer_user = os.environ.get("SHOGGOTH_REVIEWER_USER",
+                                        "slave-reviewer")
+        log(f"pr-review: removing requested reviewers "
+            f"{slave_user}, {reviewer_user}")
         self.gitea.remove_requested_reviewer(pr_repo, pr_number, slave_user)
-        self.gitea.remove_requested_reviewer(pr_repo, pr_number, reviewer_user)
+        self.gitea.remove_requested_reviewer(pr_repo, pr_number,
+                                            reviewer_user)
+        otlp._push_line(
+            f"pr-review: session done elapsed={time.time() - t0:.1f}s "
+            f"review_chars={len(review_md)}")
+        self.agent.stop_session()
 
     def _resolve_task(self, branch):
         issues = self.redmine.list_issues(self.shoggoth.project)
