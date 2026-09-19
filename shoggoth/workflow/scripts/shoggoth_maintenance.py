@@ -1378,7 +1378,7 @@ class VerifyApi:
 
 class SlaveToken:
     TOKEN_NAME = "shoggoth-slave"
-    TOKEN_SCOPES = ["write:repository", "write:issue"]
+    TOKEN_SCOPES = ["write:repository", "write:issue", "read:user"]
     OPENBAO_PATH = "gitea/slave-token"
 
     def __init__(self, gitea, openbao):

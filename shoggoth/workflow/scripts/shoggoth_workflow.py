@@ -27,6 +27,12 @@ SECRET_ENV_KEYS = frozenset([
     "GITHUB_TOKEN", "REDMINE_WEBHOOK_SECRET",
 ])
 
+ANTI_LEAK_DIRECTIVE = (
+    "Do not emit thinking markup (e.g., <thinking>, <thought>, or any "
+    "XML/HTML tags that resemble reasoning traces). Output only the final "
+    "answer.\n\n"
+)
+
 
 def _filter_qwen_env():
     return {k: v for k, v in os.environ.items() if k not in SECRET_ENV_KEYS}
@@ -143,6 +149,26 @@ def die(msg):
 
 
 WSHANDLER_BIN = "/ccws/ccws/tools/bin/wshandler"
+
+
+_QUOTE_TRANSLATION = str.maketrans({
+    "'": "\u2019",
+    '"': "\u201d",
+    "`": "\u2018",
+})
+
+
+def sanitize_commit_msg(msg):
+    """Strip characters that would break the wshandler `commit` command.
+
+    wshandler invokes git as `git commit -a -m '${msg}'` (single-quoted bash
+    string). An unescaped `'` in msg terminates the string early, producing
+    `sh: N: Syntax error: Unterminated quoted string`. Replace ASCII quotes
+    with typographic equivalents so the message remains readable.
+    """
+    if msg is None:
+        return msg
+    return msg.translate(_QUOTE_TRANSLATION)
 
 
 def wsh(repo_dir, args, log_output=False, **kwargs):
@@ -739,6 +765,7 @@ class Shoggoth:
     def __init__(self, redmine, gitea, args):
         self.project = None
         self.domain = os.environ["SHOGGOTH_DOMAIN"]
+        self.github_org = os.environ["SHOGGOTH_GITHUB_ORG"]
         self.type = None
         self.working_repo = None
         self.working_branch = None
@@ -861,7 +888,11 @@ class Shoggoth:
             die(f"git clone failed for {self.clone_url}: {result.stderr}")
 
         if self.type == "ccws":
-            wsh_args = ["-s", f"s|https://github.com|http://git.{self.domain}|g",
+            org_re = self.github_org.replace(".", r"\.")
+            wsh_args = ["-s", f"s|https://github.com/{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
+                        "-s", f"s|git@github.com:{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
+                        "-s", f"s|ssh://git@github.com/{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
+                        "-s", f"s|git+ssh://git@github.com/{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
                         "-p", "shallow"]
             if self.working_branch:
                 wsh_args += ["-P", self.working_branch]
@@ -878,13 +909,22 @@ class Shoggoth:
                 print(apt_update.stdout, file=sys.stderr, flush=True)
             if apt_update.stderr:
                 print(apt_update.stderr, file=sys.stderr, flush=True)
+            if apt_update.returncode != 0:
+                die(f"apt update failed with exit code "
+                    f"{apt_update.returncode}: "
+                    f"{(apt_update.stderr or '').strip()[-500:]}")
 
             log("checkout: running make dep_install")
-            dep_install = run(["sudo", "-S", "make", "dep_install"], cwd="/ccws", input="ccws\n")
+            dep_install = run(["make", "dep_install"], cwd="/ccws",
+                              input="ccws\n", check=False)
             if dep_install.stdout:
                 print(dep_install.stdout, file=sys.stderr, flush=True)
             if dep_install.stderr:
                 print(dep_install.stderr, file=sys.stderr, flush=True)
+            if dep_install.returncode != 0:
+                die(f"make dep_install failed with exit code "
+                    f"{dep_install.returncode}: "
+                    f"{(dep_install.stderr or '').strip()[-500:]}")
 
         self.repo_dir = workspace_dir
 
@@ -1298,11 +1338,11 @@ class Agent:
             cmd.extend(["--resume", self.otlp.session_id])
         else:
             cmd.extend(["--session-id", self.otlp.session_id])
-        cmd.extend(["--prompt", text])
+        cmd.extend(["--prompt", ANTI_LEAK_DIRECTIVE + text])
 
         log(f"prompt: resume={resume} session={self.otlp.session_id} timeout={timeout}")
         log(f"prompt: cmd={' '.join(cmd[:6])}... (prompt length={len(text)})")
-        log(f"prompt: text:\n{text}")
+        log(f"prompt: text:\n{ANTI_LEAK_DIRECTIVE}{text}")
         log("prompt: starting qwen subprocess")
 
         def _pump(stream, label):
@@ -1355,6 +1395,46 @@ class Agent:
             return 125
         return qwen.returncode
 
+    def prompt_with_retry(self, text, resume=False, timeout=None, cwd=None,
+                          max_retries=3, retry_label=None):
+        """Wrap prompt() with retry on leaked-thinking-tag errors.
+
+        The bundled qwen-code parser throws
+        InvalidStreamError("Model response leaked thinking tags.",
+        "PROTOCOL_TAG_LEAK") when the model emits content that resembles an
+        unclosed thinking tag. After the bundled protocolTagLeakMaxRetries=2
+        the error surfaces as
+        [API Error: Model response leaked thinking tags.] in the stream-json
+        result event; qwen then exits non-zero and OtlpLogger.last_error is
+        set. This wrapper catches that, rotates to a fresh qwen session-id
+        so the model has no carryover from the failed run (LLM output is
+        non-deterministic — subsequent attempts usually succeed), and retries.
+        """
+        label = retry_label or "prompt"
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                delay = 2 * attempt
+                self.otlp._push_line(
+                    f"{label}: leaked-thinking-tag error "
+                    f"attempt={attempt}/{max_retries} "
+                    f"delay={delay}s; rotating session and retrying")
+                time.sleep(delay)
+                self.otlp.session_id = str(uuid.uuid4())
+                self.otlp.reset()
+                resume = False
+            rc = self.prompt(text, resume=resume, timeout=timeout, cwd=cwd)
+            if rc == 0:
+                return rc
+            err = str(self.otlp.last_error or "")
+            if "leaked thinking tags" not in err:
+                return rc
+            if attempt >= max_retries:
+                break
+        self.otlp._push_line(
+            f"{label}: gave up after {max_retries + 1} attempts "
+            f"last_error={(str(self.otlp.last_error or ''))[:200]!r}")
+        return rc
+
 
     def stop_session(self):
         log("stop_session")
@@ -1403,12 +1483,16 @@ class TaskCommand(CommandBase):
             print("No local changes, skipping commit and push")
             return False, []
 
-        run(["git", "-C", repo_dir, "checkout", "-B", branch], check=False)
+        checkout = run(["git", "-C", repo_dir, "checkout", "-B", branch], check=False)
+        if checkout.returncode != 0:
+            die(f"git checkout -B {branch} failed: {checkout.stderr}")
         add = run(["git", "-C", repo_dir, "add", "-A"], check=False)
         if add.returncode != 0:
             die(f"failed to stage changes: {add.stderr}")
 
         staged = run(["git", "-C", repo_dir, "diff", "--cached", "--name-only"], check=False)
+        if staged.returncode != 0:
+            die(f"git diff --cached failed: {staged.stderr}")
         if not staged.stdout.strip():
             print("No staged changes, skipping commit and push")
             return False, []
@@ -1458,9 +1542,13 @@ class TaskCommand(CommandBase):
 
         for repo_name in modified_repos:
             repo_path = os.path.join(repo_dir, repo_name)
-            run(["git", "-C", repo_path, "add", "-A"], check=False)
+            add = run(["git", "-C", repo_path, "add", "-A"], check=False)
+            if add.returncode != 0:
+                die(f"failed to stage changes in {repo_name}: {add.stderr}")
 
-        wsh(repo_dir, ["commit", commit_msg], check=False)
+        commit = wsh(repo_dir, ["commit", sanitize_commit_msg(commit_msg)], check=False)
+        if commit.returncode != 0:
+            die(f"git commit failed: {commit.stderr}")
         push = wsh(repo_dir, ["-p", "version", "push"] + modified_repos, check=False)
         if push.returncode != 0:
             die(f"failed to push branches: {push.stderr}")
@@ -1544,7 +1632,7 @@ class TaskCommand(CommandBase):
             f"the project {self.shoggoth.project} and task \"{task_subject}\"."
         )
 
-        rc = self.agent.prompt(prompt)
+        rc = self.agent.prompt_with_retry(prompt)
         if rc != 0:
             die(f"qwen agent exited with code {rc}")
 
@@ -1604,7 +1692,7 @@ class CiFailureCommand(CommandBase):
             f"to the failure. Fix the code, commit, and push."
         )
 
-        rc = self.agent.prompt(prompt)
+        rc = self.agent.prompt_with_retry(prompt)
         if rc != 0:
             die(f"qwen agent exited with code {rc}")
 
@@ -1782,8 +1870,10 @@ class PrUpdateCommand(CommandBase):
                 f"prompt_chars={len(review_prompt)})")
 
             t0 = time.time()
-            rc = self.agent.prompt(review_prompt, timeout=AGENT_TIMEOUT,
-                                   cwd=wt_path)
+            rc = self.agent.prompt_with_retry(review_prompt,
+                                              timeout=AGENT_TIMEOUT,
+                                              cwd=wt_path,
+                                              retry_label="pr-review")
             elapsed = time.time() - t0
 
             otlp._push_line(
@@ -1884,8 +1974,12 @@ class PrUpdateCommand(CommandBase):
             self._pending_modified_repos = []
             return False
 
-        run(["git", "-C", repo_dir, "add", "-A"], check=False)
+        add = run(["git", "-C", repo_dir, "add", "-A"], check=False)
+        if add.returncode != 0:
+            die(f"failed to stage changes in {repo_dir}: {add.stderr}")
         staged = run(["git", "-C", repo_dir, "diff", "--cached", "--name-only"], check=False)
+        if staged.returncode != 0:
+            die(f"git diff --cached failed in {repo_dir}: {staged.stderr}")
         if not staged.stdout.strip():
             self._pending_modified_repos = []
             return False
@@ -1917,9 +2011,13 @@ class PrUpdateCommand(CommandBase):
 
         for repo_name in modified_repos:
             repo_path = os.path.join(repo_dir, repo_name)
-            run(["git", "-C", repo_path, "add", "-A"], check=False)
+            add = run(["git", "-C", repo_path, "add", "-A"], check=False)
+            if add.returncode != 0:
+                die(f"failed to stage changes in {repo_name}: {add.stderr}")
 
-        wsh(repo_dir, ["commit", commit_msg], check=False)
+        commit = wsh(repo_dir, ["commit", sanitize_commit_msg(commit_msg)], check=False)
+        if commit.returncode != 0:
+            die(f"git commit failed: {commit.stderr}")
         self._pending_modified_repos = modified_repos
         return True
 
@@ -1958,24 +2056,31 @@ class PrUpdateCommand(CommandBase):
             print("No unresolved review comments")
             return
 
+        resolved_comments = []
+        deferred_resolves = []
+        redmine_task_id = None
+        redmine_note = None
+        changes_produced = False
+
         self.agent.start_session("pr-comment")
 
         try:
-            rc = self.agent.prompt(
+            rc = self.agent.prompt_with_retry(
                 f"Load memories regarding the project {self.shoggoth.project} from basic memory. "
-                f"Proceed if memory is not available.")
+                f"Proceed if memory is not available.",
+                retry_label="pr-comment-mem-project")
             if rc != 0:
                 die(f"qwen agent exited with code {rc}")
 
             if task_subject:
-                rc = self.agent.prompt(
+                rc = self.agent.prompt_with_retry(
                     f"Load memories regarding task \"{task_subject}\" "
                     f"in project {self.shoggoth.project} from basic memory. "
-                    f"Proceed if memory is not available.", resume=True)
+                    f"Proceed if memory is not available.", resume=True,
+                    retry_label="pr-comment-mem-task")
                 if rc != 0:
                     die(f"qwen agent exited with code {rc}")
 
-            resolved_comments = []
             for comment in unresolved:
                 c_path = comment.get("path", "unknown")
                 c_line = comment.get("line")
@@ -1983,11 +2088,7 @@ class PrUpdateCommand(CommandBase):
                 comment_id = comment.get("id")
                 if not c_body:
                     if comment_id is not None:
-                        r = self.gitea.resolve_comment(pr_repo, comment_id)
-                        if r is None:
-                            log(f"pr-comment: WARNING resolve failed for comment {comment_id}")
-                        else:
-                            log(f"pr-comment: resolved empty comment {comment_id}")
+                        deferred_resolves.append(comment_id)
                     resolved_comments.append(comment)
                     continue
                 location = f"{c_path}:{c_line}" if c_line is not None else c_path
@@ -1999,7 +2100,9 @@ class PrUpdateCommand(CommandBase):
                     f"Leave all changes uncommitted in the working tree. "
                     f"Do not post comments, reviews, or replies via Gitea MCP tools."
                 )
-                rc = self.agent.prompt(prompt, resume=True, timeout=AGENT_TIMEOUT)
+                rc = self.agent.prompt_with_retry(prompt, resume=True,
+                                                  timeout=AGENT_TIMEOUT,
+                                                  retry_label="pr-comment")
                 if rc == 124:
                     self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
                 if rc != 0:
@@ -2010,36 +2113,36 @@ class PrUpdateCommand(CommandBase):
                 body_first_line = c_body.split("\n")[0].strip()
                 commit_subject = body_first_line[:72]
                 comment_link = f"{pr_url}#issuecomment-{comment_id}" if comment_id is not None else pr_url
+                run_url = os.environ.get("SHOGGOTH_KESTRA_RUN_URL", "")
+                run_url_line = f"\nKestra run: {run_url}" if run_url else ""
                 if summary_lines:
                     commit_body = summary[-1000:]
                     if len(summary) > 1000:
                         commit_body = "... (truncated)\n" + commit_body
-                    commit_msg = f"{commit_subject}\n\n{comment_link}\n\n{commit_body}"
+                    commit_msg = f"{commit_subject}\n\n{comment_link}{run_url_line}\n\n{commit_body}"
                 else:
-                    commit_msg = f"{commit_subject}\n\n{comment_link}"
+                    commit_msg = f"{commit_subject}\n\n{comment_link}{run_url_line}"
                 committed = self._commit_only(commit_msg)
                 if committed:
                     resolved_comments.append(comment)
                     if comment_id is not None:
-                        r = self.gitea.resolve_comment(pr_repo, comment_id)
-                        if r is None:
-                            log(f"pr-comment: WARNING resolve failed for comment {comment_id}")
-                        else:
-                            log(f"pr-comment: resolved comment {comment_id}")
+                        deferred_resolves.append(comment_id)
 
-            rc = self.agent.prompt(
+            rc = self.agent.prompt_with_retry(
                 f"Finalize all remaining work. Update basic memory with any new information "
                 f"learned about the project {self.shoggoth.project}.",
-                resume=True, timeout=AGENT_TIMEOUT)
+                resume=True, timeout=AGENT_TIMEOUT,
+                retry_label="pr-comment-finalize")
             if rc == 124:
                 self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
             if rc != 0:
                 die(f"qwen agent exited with code {rc}")
 
             if task_subject:
-                rc = self.agent.prompt(
+                rc = self.agent.prompt_with_retry(
                     f"Update basic memory with any new information learned about "
-                    f"the task \"{task_subject}\".", resume=True, timeout=AGENT_TIMEOUT)
+                    f"the task \"{task_subject}\".", resume=True, timeout=AGENT_TIMEOUT,
+                    retry_label="pr-comment-finalize-task")
                 if rc == 124:
                     self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
                 if rc != 0:
@@ -2053,24 +2156,40 @@ class PrUpdateCommand(CommandBase):
             redmine_task_id = self._resolve_task(pr_branch)
             log(f"pr-comment: redmine_task_id={redmine_task_id} changes_produced={changes_produced}")
             if redmine_task_id:
+                note = f"Review comments on {pr_url} have been addressed."
+                run_url = os.environ.get("SHOGGOTH_KESTRA_RUN_URL", "")
+                if run_url:
+                    note += f" Kestra run: {run_url}."
+                redmine_note = note
+        finally:
+            self._push_pending_commits()
+            for comment_id in deferred_resolves:
+                r = self.gitea.resolve_comment(pr_repo, comment_id)
+                if r is None:
+                    log(f"pr-comment: WARNING resolve failed for comment {comment_id}")
+                else:
+                    log(f"pr-comment: resolved comment {comment_id}")
+            if redmine_task_id and redmine_note is not None:
                 if changes_produced:
                     self.redmine.update_issue(redmine_task_id,
                          "--status", "Resolved",
-                         "--note", f"Review comments on {pr_url} have been addressed.")
+                         "--note", redmine_note)
                 else:
                     self.redmine.update_issue(redmine_task_id,
-                         "--note", f"Review comments on {pr_url} have been addressed.")
-        finally:
-            self._push_pending_commits()
+                         "--note", redmine_note)
 
     def _handle_timeout(self, pr_repo, pr_number, pr_url, resolved_comments):
         log(f"pr-comment: handling timeout, resolved so far={len(resolved_comments)}")
         self.agent.stop_session()
         resolved_count = len(resolved_comments)
+        run_url = os.environ.get("SHOGGOTH_KESTRA_RUN_URL", "")
+        run_url_suffix = f" Kestra run: {run_url}." if run_url else ""
+        self._push_pending_commits()
         timeout_msg = (
             f"Agent timed out after {AGENT_TIMEOUT // 60} minutes. "
             f"Addressed {resolved_count} comment(s) before timeout. "
             f"Committed changes have been pushed."
+            f"{run_url_suffix}"
         )
         self.gitea.post_pr_review_chunked(pr_repo, pr_number, timeout_msg)
         die(timeout_msg)

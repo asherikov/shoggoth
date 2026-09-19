@@ -45,6 +45,8 @@ tasks:
       GITEA_SERVER_URL: "http://api.{{ envs.shoggoth_domain }}/gitea"
       REDMINE_SERVER: "http://api.{{ envs.shoggoth_domain }}/redmine"
       SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"
+      SHOGGOTH_GITHUB_ORG: "{{ envs.shoggoth_github_org }}"
       SHOGGOTH_SLAVE_USER: "slave"
       SHOGGOTH_REVIEWER_USER: "slave-reviewer"
       GITEA_PAYLOAD: "{{ inputs.payload }}"
+      SHOGGOTH_KESTRA_RUN_URL: "http://kestra.{{ envs.shoggoth_domain }}/ui/{{ flow.namespace }}/executions/{{ flow.id }}/{{ execution.id }}"

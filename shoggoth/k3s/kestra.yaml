@@ -12,6 +12,19 @@ spec:
   storageClassName: local-path
 ---
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kestra-db
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: kestra-entrypoint
@@ -102,6 +115,27 @@ spec:
             memory: 64Mi
             cpu: 200m
         volumeMounts: []
+      - name: purge-data
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -eu
+          rm -rf /var/lib/postgresql/* /var/lib/postgresql/.[!.]*
+          echo "purge-data: kestra-db volume wiped"
+        resources:
+          requests:
+            memory: 16Mi
+            cpu: 10m
+          limits:
+            memory: 32Mi
+            cpu: 100m
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql
       containers:
       - name: postgres
         image: postgres:18-alpine
@@ -123,7 +157,7 @@ spec:
         - name: POSTGRES_PASSWORD_FILE
           value: /run/secrets/kestra_db_password
         volumeMounts:
-        - name: tmpdata
+        - name: data
           mountPath: /var/lib/postgresql
         - name: db-password
           mountPath: /run/secrets/kestra_db_password
@@ -148,18 +182,18 @@ spec:
           periodSeconds: 10
         resources:
           requests:
-            memory: 128Mi
+            memory: 512Mi
             cpu: 100m
           limits:
-            memory: 256Mi
+            memory: 1Gi
             cpu: 500m
       volumes:
       - name: db-password
         secret:
           secretName: kestra-db-password
-      - name: tmpdata
-        emptyDir:
-          medium: Memory
+      - name: data
+        persistentVolumeClaim:
+          claimName: kestra-db
       serviceAccountName: kestra-db
 ---
 apiVersion: v1

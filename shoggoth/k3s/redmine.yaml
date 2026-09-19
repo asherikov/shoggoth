@@ -166,9 +166,6 @@ data:
         exit 1
     end
 
-    token = Token.create(user: slave, action: 'api')
-    new_key = token.value
-
     openbao_addr = ENV['OPENBAO_ADDR'].to_s
     vault_token = ENV['SHOGGOTH_VAULT_TOKEN'].to_s
     if openbao_addr.empty? || vault_token.empty?
@@ -179,6 +176,30 @@ data:
     uri = URI.parse("#{openbao_addr}/v1/secret/data/redmine/slave-token")
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = (uri.scheme == 'https')
+
+    req = Net::HTTP::Get.new(uri.request_uri)
+    req['X-Vault-Token'] = vault_token
+    begin
+        resp = http.request(req)
+    rescue => e
+        STDERR.puts "OpenBao read exception: #{e.class}: #{e.message}"
+        exit 1
+    end
+
+    if resp.code == '200'
+        existing = JSON.parse(resp.body).dig('data', 'data', 'value').to_s
+        unless existing.empty?
+            print existing
+            exit 0
+        end
+    elsif resp.code != '404'
+        STDERR.puts "OpenBao read returned HTTP #{resp.code}: #{resp.body}"
+        exit 1
+    end
+
+    token = Token.create(user: slave, action: 'api')
+    new_key = token.value
+
     req = Net::HTTP::Post.new(uri.request_uri)
     req['X-Vault-Token'] = vault_token
     req['Content-Type'] = 'application/json'
@@ -323,10 +344,10 @@ spec:
           periodSeconds: 10
         resources:
           requests:
-            memory: 128Mi
+            memory: 256Mi
             cpu: 100m
           limits:
-            memory: 256Mi
+            memory: 512Mi
             cpu: 500m
       volumes:
       - name: db-password
