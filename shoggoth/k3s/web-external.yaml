@@ -105,6 +105,7 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: web-external
       initContainers:
       - name: wait-bootstrap
         image: asherikov/shoggoth_tools:alpine
@@ -115,30 +116,34 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
+          NS="${SHOGGOTH_NAMESPACE}"
+          wait_for_secret_key() {
+            local name="$1" key="$2"
+            echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
+            local ok=0
+            for i in $(seq 1 60); do
+              # bracket jsonpath: literal key name (Go template treats dots/hyphens as struct descent)
+              if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
+                echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
+                ok=1
+                break
+              fi
+              sleep 10
+            done
+            if [ "${ok}" != "1" ]; then
+              echo "FAIL: secret/${name}.${key} not populated after 10m"
+              echo "      Hint: openbao-bootstrap Job may have failed to write the Secret; check:"
+              echo "            kubectl logs -n ${NS} -l app=openbao -c openbao-bootstrap"
+              return 1
             fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
+            return 0
+          }
+          for s in shoggoth-server shoggoth-ca; do
+            k="tls.crt"
+            [ "${s}" = "shoggoth-ca" ] && k="ca.crt"
+            wait_for_secret_key "${s}" "${k}" || exit 1
           done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
         resources:
           requests:
             memory: 32Mi
@@ -146,10 +151,9 @@ spec:
           limits:
             memory: 64Mi
             cpu: 200m
-        volumeMounts: []
       containers:
       - name: angie
-        image: docker.angie.software/angie:latest
+        image: docker.angie.software/angie:1.11.6
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: ${SHOGGOTH_WEB_EXT_PORT}
@@ -221,7 +225,6 @@ spec:
         hostPath:
           path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/scripts
           type: DirectoryOrCreate
-      serviceAccountName: web-external
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -239,10 +242,11 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - shoggoth-server
+  - shoggoth-ca
   verbs:
   - get
-  resourceNames:
-  - shoggoth-bootstrap-done
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

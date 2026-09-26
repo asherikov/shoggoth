@@ -1,0 +1,21 @@
+---
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: redmine-slave-token
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  secretStoreRefs:
+    - name: shoggoth-openbao-write
+      kind: SecretStore
+  selector:
+    secret:
+      name: redmine-slave-token
+  data:
+    - match:
+        secretKey: token
+        remoteRef:
+          remoteKey: redmine/slave-token
+          property: value
+  refreshInterval: 5m
+  updatePolicy: Replace

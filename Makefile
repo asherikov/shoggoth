@@ -29,7 +29,7 @@ help:
 -include private/*.mk
 
 sync:
-	rsync -e "ssh ${SSH_COMMON_ARGS}" -r shoggoth ${USER}@${HOST_IP}:${REMOTE_PATH}/${INSTANCE} || true
+	rsync -e "ssh ${SSH_COMMON_ARGS}" -rl shoggoth ${USER}@${HOST_IP}:${REMOTE_PATH}/${INSTANCE} || true
 	@K3S_DIR="${INSTANCE}"; \
 	cmds="mkdir -p /var/lib/rancher/k3s/storage/$${K3S_DIR}/coredns-blacklists"; \
 	cmds="$$cmds && cp ./dns/hosts-blacklist/hosts /var/lib/rancher/k3s/storage/$${K3S_DIR}/coredns-blacklists/blocklist.hosts"; \

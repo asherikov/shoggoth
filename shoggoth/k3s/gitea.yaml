@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -20,7 +21,6 @@ data:
   init.sh: |
     #!/bin/sh
     set -eu
-
     echo "shoggoth: Waiting for Gitea to be ready..."
     for i in $(seq 1 30); do
         if su-exec git gitea admin auth list > /dev/null 2>&1; then
@@ -32,10 +32,8 @@ data:
         echo "shoggoth: ERROR: Gitea not ready after 60s: ${AUTH_CHECK}" >&2
         exit 1
     fi
-
     EXISTING="$(su-exec git gitea admin auth list 2>/dev/null \
         | awk -v name="openldap" '$2 == name {print $1; exit}')"
-
     if [ -z "${EXISTING}" ]; then
         su-exec git gitea admin auth add-ldap \
             -name openldap \
@@ -69,12 +67,11 @@ data:
             -email-attribute mail \
             -synchronize-users
     fi
-
     echo "shoggoth: === gitea ldap init complete ==="
-
     echo "shoggoth: Setting local admin password"
     su-exec git gitea admin user change-password --username admin --password "${SHOGGOTH_ADMIN_PASSWORD}" --must-change-password=false 2>/dev/null \
         || echo "shoggoth: admin user not found yet (will be created on first web login)"
+
 ---
 apiVersion: v1
 kind: Service
@@ -106,6 +103,8 @@ spec:
     metadata:
       labels:
         app: gitea
+      annotations:
+        secret.reloader.stakater.com/reload: openldap-ldapauth-password,openldap-admin-password
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -125,30 +124,49 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
-            fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          wait_for_secret_key() {
+            local name="$1" key="$2"
+            echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
+            for i in $(seq 1 60); do
+              if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
+                echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
+                return 0
+              fi
+              sleep 10
+            done
+            echo "FAIL: secret/${name}.${key} not populated after 10m"
+            echo "      Hint: check ExternalSecret status from outside the pod:"
+            echo "            kubectl get externalsecret -n ${NS} <name> -o yaml"
+            echo "      Most common cause: OpenBao unavailable, or SecretStore reference broken."
+            return 1
+          }
+          for pw in openldap-admin-password openldap-ldapauth-password; do
+                    case "${pw}" in
+                      openldap-admin-password) { wait_for_externalsecret openldap-admin-password && wait_for_secret_key openldap-admin-password password; } || exit 1 ;;
+                      openldap-ldapauth-password) { wait_for_externalsecret openldap-ldapauth-password && wait_for_secret_key openldap-ldapauth-password password; } || exit 1 ;;
+                    esac
           done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
         resources:
           requests:
             memory: 32Mi
@@ -159,7 +177,7 @@ spec:
         volumeMounts: []
       containers:
       - name: gitea
-        image: gitea/gitea:latest
+        image: gitea/gitea:1.27.3
         imagePullPolicy: IfNotPresent
         env:
         - name: SHOGGOTH_DOMAIN
@@ -252,19 +270,13 @@ spec:
               command:
               - /bin/bash
               - -c
-              - 'set -o pipefail
-
+              - |
+                set -o pipefail
                 LOG=/data/gitea/gitea-init.log
-
                 exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
-
                 echo "=== gitea-init start $(date -Iseconds) ==="
-
                 /bin/sh /shoggoth/git/gitea/init.sh
-
                 echo "=== gitea-init exit $? $(date -Iseconds) ==="
-
-                '
         volumeMounts:
         - name: data
           mountPath: /data
@@ -295,6 +307,8 @@ spec:
     metadata:
       labels:
         app: gitea-runner
+      annotations:
+        secret.reloader.stakater.com/reload: gitea-runner-token
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -316,9 +330,7 @@ spec:
         command:
         - bash
         - -c
-        - 'exec /tmpl/render.sh
-
-          '
+        - exec /tmpl/render.sh
         resources:
           requests:
             memory: 32Mi
@@ -344,30 +356,46 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
-            fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
-          done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          wait_for_secret_key() {
+            local name="$1" key="$2"
+            echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
+            for i in $(seq 1 60); do
+              if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
+                echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
+                return 0
+              fi
+              sleep 10
+            done
+            echo "FAIL: secret/${name}.${key} not populated after 10m"
+            echo "      Hint: check ExternalSecret status from outside the pod:"
+            echo "            kubectl get externalsecret -n ${NS} gitea-runner-token -o yaml"
+            echo "      Most common cause: OpenBao unavailable, or SecretStore reference broken."
+            return 1
+          }
+          # gitea-runner only needs its registration token; it does not talk to OpenLDAP.
+          # (OpenLDAP Secrets are populated by other consumers' ExternalSecrets.)
+          { wait_for_externalsecret gitea-runner-token && wait_for_secret_key gitea-runner-token token; } || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
         resources:
           requests:
             memory: 32Mi
@@ -378,7 +406,7 @@ spec:
         volumeMounts: []
       containers:
       - name: runner
-        image: gitea/act_runner:latest
+        image: gitea/act_runner:0.6.1
         imagePullPolicy: IfNotPresent
         env:
         - name: SHOGGOTH_DOMAIN
@@ -448,6 +476,18 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - openldap-admin-password
+  - openldap-ldapauth-password
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - openldap-admin-password
+  - openldap-ldapauth-password
   verbs:
   - get
 ---
@@ -481,6 +521,16 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - gitea-runner-token
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - gitea-runner-token
   verbs:
   - get
 ---
@@ -542,3 +592,4 @@ data:
       docker_timeout: 0s
     host:
       workdir_parent: "/cache/gitea/act/"
+

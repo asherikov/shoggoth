@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -33,13 +34,11 @@ data:
   init.sh: |
     #!/usr/bin/env bash
     set -euo pipefail
-
     LDAP_BASE_DN="$(printf '%s' "${LDAP_DOMAIN}" | sed 's/\./,dc=/g; s/^/dc=/')"
     ADMIN_DN="cn=admin,${LDAP_BASE_DN}"
     CONFIG_ADMIN_DN="cn=admin,cn=config"
     LDAP_URL="ldap://localhost:389"
     LDAP_DIR="/shoggoth/openldap"
-
     clean_pw_file() {
         local src="${1}"
         local dst
@@ -47,20 +46,16 @@ data:
         tr -d '\n\r' < "${src}" > "${dst}"
         printf '%s' "${dst}"
     }
-
     get_actual_base_dn() {
         ldapsearch -x -H "${LDAP_URL}" \
             -D "${CONFIG_ADMIN_DN}" -y "${CONFIG_ADMIN_PW}" \
             -b "cn=config" -s sub '(olcSuffix=*)' olcSuffix 2>/dev/null \
             | grep '^olcSuffix:' | awk '{print $2}' | head -1 || true
     }
-
     ADMIN_PW="$(clean_pw_file /run/secrets/openldap_admin_password)"
     CONFIG_ADMIN_PW="$(clean_pw_file /run/secrets/openldap_config_admin_password)"
     trap 'rm -f "${ADMIN_PW}" "${CONFIG_ADMIN_PW}"' EXIT
-
     SENTINEL="/var/lib/ldap/shoggoth-init-done"
-
     if [ -f "${SENTINEL}" ]; then
         echo "shoggoth: LDAP already initialized, re-applying passwords for rotation"
         echo "shoggoth: Waiting for slapd to accept connections..."
@@ -107,7 +102,6 @@ data:
         touch /run/shoggoth-ldap-init-done
         exit 0
     fi
-
     echo "shoggoth: === openldap: checking slapd ==="
     echo "shoggoth: Waiting for slapd to accept connections..."
     for i in $(seq 1 30); do
@@ -123,15 +117,12 @@ data:
         exit 1
     fi
     echo "shoggoth: slapd is ready."
-
     MDB_DN="olcDatabase={1}mdb,cn=config"
-
     echo "shoggoth: === configuring memberof overlay ==="
     MEMBEROF_EXISTS="$(ldapsearch -x -H "${LDAP_URL}" \
         -D "${CONFIG_ADMIN_DN}" -y "${CONFIG_ADMIN_PW}" \
         -b "olcOverlay=memberof,${MDB_DN}" -s base '(objectClass=*)' \
         olcMemberOfGroupOC 2>/dev/null || true)"
-
     if printf '%s\n' "${MEMBEROF_EXISTS}" | grep -q "^olcMemberOfGroupOC:"; then
         echo "shoggoth: memberof overlay already configured"
     else
@@ -152,31 +143,28 @@ data:
         fi
         echo "shoggoth: memberof overlay enabled"
     fi
-
     if [ -f "${LDAP_DIR}/config.ldif" ]; then
         echo "shoggoth: === configuring ACLs ==="
         ldapmodify -x -H "${LDAP_URL}" \
             -D "${CONFIG_ADMIN_DN}" -y "${CONFIG_ADMIN_PW}" \
             -f "${LDAP_DIR}/config.ldif" || true
     fi
-
     if [ -f "${LDAP_DIR}/data.ldif" ]; then
         echo "shoggoth: === provisioning LDAP data ==="
         ldapadd -c -x -H "${LDAP_URL}" \
             -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
             -f "${LDAP_DIR}/data.ldif" 2>&1 | grep -v 'Already exists' || true
     fi
-
     if [ -f "${LDAP_DIR}/passwords.ldif" ]; then
         echo "shoggoth: setting passwords"
         ldapmodify -x -H "${LDAP_URL}" \
             -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
             -f "${LDAP_DIR}/passwords.ldif" || true
     fi
-
     touch "${SENTINEL}"
     touch /run/shoggoth-ldap-init-done
     echo "shoggoth: OpenLDAP initialization complete."
+
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -191,6 +179,7 @@ data:
     olcAccess: {0}to attrs=userPassword by self write by anonymous auth by * none
     olcAccess: {1}to attrs=shadowLastChange by self write by users read
     olcAccess: {2}to * by users read by * none
+
   data.ldif: |
     dn: ou=people,${LDAP_BASE_DN}
     changetype: add
@@ -261,11 +250,13 @@ data:
     objectClass: groupOfNames
     cn: shoggoth-auth
     member: uid=ldapauth,ou=people,${LDAP_BASE_DN}
+
   memberof_module.ldif: |
     dn: cn=module{0},cn=config
     changetype: modify
     add: olcModuleLoad
     olcModuleLoad: memberof
+
   memberof_overlay.ldif: |
     dn: olcOverlay=memberof,${MDB_DN}
     objectClass: olcOverlayConfig
@@ -276,6 +267,7 @@ data:
     olcMemberOfGroupOC: groupOfNames
     olcMemberOfMemberAD: member
     olcMemberOfMemberOfAD: memberOf
+
   passwords.ldif: |
     dn: uid=admin,ou=people,${LDAP_BASE_DN}
     changetype: modify
@@ -306,20 +298,16 @@ data:
   render.sh: |
     #!/usr/bin/env bash
     set -euo pipefail
-
     TEMPLATES_DIR="/templates"
     RENDERED_DIR="/rendered"
-
     read_pw() {
         local f="${1}"
         tr -d '\n\r' < "${f}"
     }
-
     hex_to_raw() {
         local hex="${1}"
         printf '%b' "$(printf '%s' "${hex}" | sed 's/\(..\)/\\x\1/g')"
     }
-
     slappasswd() {
         local pw="${1}"
         local salt_hex salt hash
@@ -330,14 +318,11 @@ data:
         combined="$(hex_to_raw "${hash}${salt_hex}")"
         printf '{SSHA}%s' "$(printf '%s' "${combined}" | openssl base64 -A)"
     }
-
     export ADMIN_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_admin_password)")"
     export LDAPAUTH_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_ldapauth_password)")"
     export SLAVE_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_slave_password)")"
     export SLAVE_REVIEWER_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_slave-reviewer_password)")"
-
     VARS='${LDAP_BASE_DN}${SHOGGOTH_DOMAIN}${MDB_DN}${ADMIN_HASH}${LDAPAUTH_HASH}${SLAVE_HASH}${SLAVE_REVIEWER_HASH}'
-
     for tmpl in config.ldif data.ldif memberof_module.ldif memberof_overlay.ldif passwords.ldif; do
         if [ ! -f "${TEMPLATES_DIR}/${tmpl}" ]; then
             echo "render-ldif: FATAL: missing template ${tmpl}" >&2
@@ -345,9 +330,9 @@ data:
         fi
         envsubst "${VARS}" < "${TEMPLATES_DIR}/${tmpl}" > "${RENDERED_DIR}/${tmpl}"
     done
-
     echo "render-ldif: rendered $(ls ${RENDERED_DIR} | wc -l) LDIF files"
     ls -la "${RENDERED_DIR}"
+
 ---
 apiVersion: v1
 kind: Service
@@ -379,6 +364,8 @@ spec:
     metadata:
       labels:
         app: openldap
+      annotations:
+        secret.reloader.stakater.com/reload: openldap-admin-password,openldap-config-admin-password,openldap-ldapauth-password,openldap-slave-password,openldap-slave-reviewer-password
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -445,30 +432,36 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
-            fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          for pw in openldap-admin-password openldap-config-admin-password openldap-ldapauth-password openldap-slave-password openldap-slave-reviewer-password; do
+                    case "${pw}" in
+                      openldap-admin-password) wait_for_externalsecret openldap-admin-password || exit 1 ;;
+                      openldap-config-admin-password) wait_for_externalsecret openldap-config-admin-password || exit 1 ;;
+                      openldap-ldapauth-password) wait_for_externalsecret openldap-ldapauth-password || exit 1 ;;
+                      openldap-slave-password) wait_for_externalsecret openldap-slave-password || exit 1 ;;
+                      openldap-slave-reviewer-password) wait_for_externalsecret openldap-slave-reviewer-password || exit 1 ;;
+                    esac
           done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
         resources:
           requests:
             memory: 32Mi
@@ -535,7 +528,8 @@ spec:
               command:
               - /bin/bash
               - -c
-              - 'set -o pipefail
+              - |
+                set -o pipefail
 
                 echo "=== openldap-init start $(date -Iseconds) ==="
 
@@ -543,7 +537,6 @@ spec:
 
                 echo "=== openldap-init exit $? $(date -Iseconds) ==="
 
-                '
         resources:
           requests:
             memory: 256Mi
@@ -575,7 +568,7 @@ spec:
       - name: render-script
         configMap:
           name: openldap-render-ldif
-          defaultMode: 0755
+          defaultMode: 493
       - name: rendered-ldif
         emptyDir: {}
       - name: data
@@ -617,6 +610,24 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - openldap-admin-password
+  - openldap-config-admin-password
+  - openldap-ldapauth-password
+  - openldap-slave-password
+  - openldap-slave-reviewer-password
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - openldap-admin-password
+  - openldap-config-admin-password
+  - openldap-ldapauth-password
+  - openldap-slave-password
+  - openldap-slave-reviewer-password
   verbs:
   - get
 ---

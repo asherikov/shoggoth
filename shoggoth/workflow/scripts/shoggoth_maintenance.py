@@ -49,6 +49,36 @@ def run(cmd, **kwargs):
     return result
 
 
+def k8s_upsert_secret(name, namespace, data):
+    """Create or patch a Kubernetes Secret via kubectl.
+
+    `data` is a dict of key -> raw string value; base64 encoding is handled
+    by kubectl. The caller is responsible for RBAC (the
+    shoggoth-maintenance-secret-writer ServiceAccount grants namespaced
+    create/update/patch on the specific Secret names in
+    shoggoth/k3s/maintenance-secret-writer.yaml).
+    """
+    if not name or not namespace:
+        print("ERROR: k8s_upsert_secret requires name and namespace", file=sys.stderr)
+        return False
+    args = ["kubectl", "create", "secret", "generic", name,
+            f"--namespace={namespace}",
+            "--type=Opaque",
+            "--output=json",
+            "--dry-run=client"]
+    for key, value in data.items():
+        args.append(f"--from-literal={key}={value}")
+    create = run(args, check=False)
+    if create.returncode != 0:
+        print(f"ERROR: kubectl create secret (dry-run) failed: {create.stderr.strip()}", file=sys.stderr)
+        return False
+    apply = run(["kubectl", "apply", "-f", "-"], input=create.stdout, check=False)
+    if apply.returncode != 0:
+        print(f"ERROR: kubectl apply secret failed: {apply.stderr.strip()}", file=sys.stderr)
+        return False
+    return True
+
+
 def http_get(url, headers=None, params=None):
     if params:
         url = f"{url}?{urlencode(params)}"
@@ -1379,11 +1409,11 @@ class VerifyApi:
 class SlaveToken:
     TOKEN_NAME = "shoggoth-slave"
     TOKEN_SCOPES = ["write:repository", "write:issue", "read:user"]
-    OPENBAO_PATH = "gitea/slave-token"
+    K8S_SECRET_NAME = "gitea-slave-token"
 
-    def __init__(self, gitea, openbao):
+    def __init__(self, gitea):
         self.gitea = gitea
-        self.openbao = openbao
+        self.namespace = os.environ.get("SHOGGOTH_NAMESPACE", "")
         self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
         self.errors = 0
 
@@ -1431,14 +1461,54 @@ class SlaveToken:
 
         token_value = result["sha1"]
 
-        print(f"Storing token in OpenBao at '{self.OPENBAO_PATH}'")
-        if not self.openbao.put_value(self.OPENBAO_PATH, token_value):
-            print(f"ERROR: Failed to store token in OpenBao", file=sys.stderr)
+        if not self.namespace:
+            print("ERROR: SHOGGOTH_NAMESPACE is required for K8s Secret write", file=sys.stderr)
             self.errors += 1
+        else:
+            print(f"Storing token in K8s Secret '{self.K8S_SECRET_NAME}' in namespace '{self.namespace}'")
+            if not k8s_upsert_secret(self.K8S_SECRET_NAME, self.namespace, {"token": token_value}):
+                print(f"ERROR: Failed to write K8s Secret '{self.K8S_SECRET_NAME}'", file=sys.stderr)
+                self.errors += 1
 
         if self.errors:
             die(f"slave-token completed with {self.errors} error(s)")
         print(f"slave-token: token created and stored successfully")
+
+
+class RunnerToken:
+    K8S_SECRET_NAME = "gitea-runner-token"
+
+    def __init__(self, gitea):
+        self.gitea = gitea
+        self.org = os.environ.get("SHOGGOTH_GITHUB_ORG", "")
+        self.namespace = os.environ.get("SHOGGOTH_NAMESPACE", "")
+        self.errors = 0
+
+    def _fetch_registration_token(self):
+        if not self.org:
+            print("ERROR: SHOGGOTH_GITHUB_ORG is required", file=sys.stderr)
+            return None
+        return self.gitea.post(f"orgs/{self.org}/actions/runners/registration-token", {})
+
+    def execute(self):
+        if not self.namespace:
+            print("ERROR: SHOGGOTH_NAMESPACE is required for K8s Secret write", file=sys.stderr)
+            self.errors += 1
+        else:
+            print(f"Fetching runner registration token for org '{self.org}'")
+            result = self._fetch_registration_token()
+            if result is None or not result.get("token"):
+                print(f"ERROR: Failed to fetch runner registration token", file=sys.stderr)
+                self.errors += 1
+            else:
+                token_value = result["token"]
+                print(f"Storing token in K8s Secret '{self.K8S_SECRET_NAME}' in namespace '{self.namespace}'")
+                if not k8s_upsert_secret(self.K8S_SECRET_NAME, self.namespace, {"token": token_value}):
+                    print(f"ERROR: Failed to write K8s Secret '{self.K8S_SECRET_NAME}'", file=sys.stderr)
+                    self.errors += 1
+        if self.errors:
+            die(f"runner-token completed with {self.errors} error(s)")
+        print(f"runner-token: token fetched and stored successfully")
 
 
 LDAP_EXCLUDED_LOGINS = ("admin", "ldapauth", "config-admin")
@@ -1739,7 +1809,8 @@ def main():
     )
     parser.add_argument("command",
                         choices=["kestra-webhooks", "redmine-webhooks", "redmine-kestra-webhooks",
-                                 "github-mirror-sync", "slave-access", "slave-token", "ssh-key",
+                                 "github-mirror-sync", "slave-access", "slave-token", "runner-token",
+                                 "ssh-key",
                                  "verify-api",
                                  "gitea-ldap-sync", "redmine-ldap-sync"],
                         help="Command to execute")
@@ -1779,8 +1850,11 @@ def main():
         cmd.execute()
     elif parsed.command == "slave-token":
         gitea = Gitea()
-        openbao = OpenBao()
-        cmd = SlaveToken(gitea, openbao)
+        cmd = SlaveToken(gitea)
+        cmd.execute()
+    elif parsed.command == "runner-token":
+        gitea = Gitea()
+        cmd = RunnerToken(gitea)
         cmd.execute()
     elif parsed.command == "ssh-key":
         gitea = Gitea()

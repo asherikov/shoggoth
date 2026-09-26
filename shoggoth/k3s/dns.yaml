@@ -72,7 +72,7 @@ spec:
         - cluster.local
       containers:
       - name: coredns
-        image: rancher/mirrored-coredns-coredns:1.14.0
+        image: rancher/mirrored-coredns-coredns:1.14.7
         args:
         - -conf
         - /etc/coredns/Corefile

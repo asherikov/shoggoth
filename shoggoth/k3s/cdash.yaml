@@ -2,28 +2,28 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-    name: cdash-db
-    namespace: ${SHOGGOTH_NAMESPACE}
+  name: cdash-db
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
-    accessModes:
-        - ReadWriteOnce
-    resources:
-        requests:
-            storage: 5Gi
-    storageClassName: local-path
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-    name: cdash-storage
-    namespace: ${SHOGGOTH_NAMESPACE}
+  name: cdash-storage
+  namespace: ${SHOGGOTH_NAMESPACE}
 spec:
-    accessModes:
-        - ReadWriteOnce
-    resources:
-        requests:
-            storage: 5Gi
-    storageClassName: local-path
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -48,7 +48,6 @@ data:
     unset LDAP_BIND_PASSWORD
 
     exec /cdash/docker/docker-entrypoint.sh "$@"
-
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -59,15 +58,11 @@ data:
   init.sh: |
     #!/usr/bin/env bash
     set -euo pipefail
-
     . /shoggoth/rendered/cdash/cdash.env
-
     export APP_KEY DB_PASSWORD
     export CDASH_AUTHENTICATION_PROVIDER LOGIN_FIELD
     export LDAP_HOSTS LDAP_PORT LDAP_PROVIDER LDAP_LOCATE_USERS_BY LDAP_USERNAME LDAP_PASSWORD LDAP_BASE_DN
-
     cd /cdash
-
     echo "shoggoth: Waiting for CDash to be ready..."
     for i in $(seq 1 30); do
         if php artisan migrate:status > /dev/null 2>&1; then
@@ -80,7 +75,6 @@ data:
         exit 1
     fi
     echo "shoggoth: CDash is ready"
-
     php artisan user:save \
         --email=slave \
         --firstname=Slave \
@@ -89,11 +83,9 @@ data:
         --password="${OPENLDAP_SLAVE_PASSWORD}" \
         --admin=0 \
         || echo "shoggoth: WARNING: user:save failed (may already exist or DB issue)" >&2
-
     CDASH_URL="http://localhost"
     COOKIE_JAR="$(mktemp)"
     trap 'rm -f "${COOKIE_JAR}"' EXIT
-
     echo "shoggoth: Waiting for CDash web server..."
     for i in $(seq 1 30); do
         if curl -s -o /dev/null -w '%{http_code}' "${CDASH_URL}/login" 2>/dev/null | grep -q '^200'; then
@@ -106,19 +98,16 @@ data:
         exit 1
     fi
     echo "shoggoth: CDash web server is ready"
-
     CSRF_PAGE="$(curl -s -c "${COOKIE_JAR}" "${CDASH_URL}/login" 2>/dev/null)" || {
         echo "shoggoth: FATAL: Could not fetch CDash login page" >&2
         exit 1
     }
     CSRF_TOKEN="$(printf '%s' "${CSRF_PAGE}" \
         | sed -n 's/.*name="_token" value="\([^"]*\)".*/\1/p' | head -1)"
-
     if [ -z "${CSRF_TOKEN}" ]; then
         echo "shoggoth: FATAL: Could not get CSRF token from CDash login page" >&2
         exit 1
     fi
-
     LOGIN_RESULT="$(curl -s -b "${COOKIE_JAR}" -c "${COOKIE_JAR}" \
         -X POST "${CDASH_URL}/login" \
         -H "Content-Type: application/x-www-form-urlencoded" \
@@ -135,7 +124,6 @@ data:
         echo "shoggoth: FATAL: CDash login failed for slave (HTTP ${LOGIN_CODE})" >&2
         exit 1
     fi
-
     GRAPHQL_RESPONSE="$(curl -s -b "${COOKIE_JAR}" \
         -X POST "${CDASH_URL}/graphql" \
         -H "Content-Type: application/json" \
@@ -146,10 +134,8 @@ data:
         echo "shoggoth: FATAL: GraphQL query for existing tokens failed" >&2
         exit 1
     }
-
     OLD_TOKEN_IDS="$(printf '%s' "${GRAPHQL_RESPONSE}" \
         | php -r '$d=json_decode(stream_get_contents(STDIN),true);foreach(($d["data"]["authenticationTokens"]["edges"]??[]) as $e){if(($e["node"]["description"]??"")==="shoggoth-slave"){echo $e["node"]["id"]."\n";}}')"
-
     for TOKEN_ID in ${OLD_TOKEN_IDS}; do
         curl -s -b "${COOKIE_JAR}" \
             -X POST "${CDASH_URL}/graphql" \
@@ -158,7 +144,6 @@ data:
             -d "{\"query\": \"mutation DeleteToken(\$input: DeleteAuthenticationTokenInput!) { deleteAuthenticationToken(input: \$input) { message } }\", \"variables\": {\"input\": {\"tokenId\": ${TOKEN_ID}}}}" \
             > /dev/null 2>&1 || true
     done
-
     GRAPHQL_RESPONSE="$(curl -s -b "${COOKIE_JAR}" \
         -X POST "${CDASH_URL}/graphql" \
         -H "Content-Type: application/json" \
@@ -176,23 +161,19 @@ data:
         echo "shoggoth: FATAL: GraphQL createAuthenticationToken request failed" >&2
         exit 1
     }
-
     RAW_TOKEN="$(printf '%s' "${GRAPHQL_RESPONSE}" \
         | php -r '$d=json_decode(stream_get_contents(STDIN),true);echo $d["data"]["createAuthenticationToken"]["rawToken"]??"";')"
-
     if [ -z "${RAW_TOKEN}" ]; then
         echo "shoggoth: FATAL: GraphQL did not return a raw token" >&2
         printf '%s\n' "${GRAPHQL_RESPONSE}" >&2
         exit 1
     fi
-
     OBAO_HEALTH="$(curl -s -o /dev/null -w '%{http_code}' "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null)" || true
     if ! printf '%s' "${OBAO_HEALTH}" | grep -qE '^(200|429|472|473)$'; then
         echo "shoggoth: FATAL: OpenBao not ready (HTTP ${OBAO_HEALTH})" >&2
         exit 1
     fi
     echo "shoggoth: OpenBao is unsealed (HTTP ${OBAO_HEALTH})"
-
     OBAO_RESP="$(mktemp)"
     OBAO_HTTP="$(curl -s -w '%{http_code}' -o "${OBAO_RESP}" -X POST \
         "${OPENBAO_ADDR}/v1/secret/data/cdash/api-token" \
@@ -208,7 +189,6 @@ data:
         exit 1
     fi
     rm -f "${OBAO_RESP}"
-
     echo "shoggoth: CDash slave token created and stored in OpenBao"
     echo "shoggoth: Restart web-internal to pick up the new token"
 
@@ -222,9 +202,9 @@ spec:
   selector:
     app: cdash-db
   ports:
-    - name: postgres
-      port: 5432
-      targetPort: 5432
+  - name: postgres
+    port: 5432
+    targetPort: 5432
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -245,106 +225,125 @@ spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - ${SHOGGOTH_DNS_IP}
+        - ${SHOGGOTH_DNS_IP}
         searches:
-          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
-          - svc.cluster.local
-          - cluster.local
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
       initContainers:
-        - name: wait-bootstrap
-          image: asherikov/shoggoth_tools:alpine
-          imagePullPolicy: IfNotPresent
-          command:
-            - bash
-            - -c
-          args:
-            - |
-              set -euo pipefail
-              K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-              SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-              SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-              for i in $(seq 1 120); do
-                http_code=$(curl -sS --cacert "${SA_CA}" \
-                  -o /dev/null -w '%{http_code}' \
-                  -H "Authorization: Bearer ${SA_TOKEN}" \
-                  "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-                if [ "${http_code}" = "200" ]; then
-                  echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-                  exit 0
-                fi
-                echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-                if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-                  curl -sS --cacert "${SA_CA}" \
-                    -H "Authorization: Bearer ${SA_TOKEN}" \
-                    "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-                fi
-                sleep 5
-              done
-              echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-              echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-              echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-              exit 1
-          resources:
-            requests:
-              memory: "32Mi"
-              cpu: "50m"
-            limits:
-              memory: "64Mi"
-              cpu: "200m"
-      containers:
-        - name: postgres
-          image: postgres:18-alpine
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 5432
-              name: postgres
-          env:
-            - name: POSTGRES_DB
-              value: cdash
-            - name: POSTGRES_USER
-              value: cdash
-            - name: POSTGRES_PASSWORD_FILE
-              value: /run/secrets/cdash_db_password
-            - name: OTEL_TRACES_EXPORTER
-              value: "otlp"
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otelcol:4318"
-            - name: SHOGGOTH_DOMAIN
-              value: "${SHOGGOTH_DOMAIN}"
-          volumeMounts:
-            - name: data
-              mountPath: /var/lib/postgresql
-            - name: db-password
-              mountPath: /run/secrets/cdash_db_password
-              subPath: password
-              readOnly: true
-          readinessProbe:
-            exec:
-              command: ["pg_isready", "-U", "cdash"]
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 60
-          livenessProbe:
-            exec:
-              command: ["pg_isready", "-U", "cdash"]
-            initialDelaySeconds: 30
-            periodSeconds: 10
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
-              memory: "512Mi"
-              cpu: "500m"
-      volumes:
-        - name: db-password
-          secret:
-            secretName: cdash-db-password
-        - name: data
-          persistentVolumeClaim:
-            claimName: cdash-db
-      serviceAccountName: cdash-db
+      - name: wait-bootstrap
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+                    wait_for_secret_key() {
+                      local name="$1" key="$2"
+                      echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: secret/${name}.${key} not populated after 10m"
+                      echo "      Hint: check ExternalSecret status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "      Most common cause: OpenBao unavailable, or SecretStore reference broken."
+                      return 1
+                    }
+          { wait_for_externalsecret cdash-db-password && wait_for_secret_key cdash-db-password password; } || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
 
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+      containers:
+      - name: postgres
+        image: postgres:18-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          value: cdash
+        - name: POSTGRES_USER
+          value: cdash
+        - name: POSTGRES_PASSWORD_FILE
+          value: /run/secrets/cdash_db_password
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4318
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql
+        - name: db-password
+          mountPath: /run/secrets/cdash_db_password
+          subPath: password
+          readOnly: true
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - cdash
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 60
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - cdash
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+      volumes:
+      - name: db-password
+        secret:
+          secretName: cdash-db-password
+      - name: data
+        persistentVolumeClaim:
+          claimName: cdash-db
+      serviceAccountName: cdash-db
 ---
 apiVersion: v1
 kind: Service
@@ -355,9 +354,9 @@ spec:
   selector:
     app: cdash
   ports:
-    - name: http
-      port: 80
-      targetPort: 80
+  - name: http
+    port: 80
+    targetPort: 80
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -373,148 +372,138 @@ spec:
     metadata:
       labels:
         app: cdash
+      annotations:
+        secret.reloader.stakater.com/reload: cdash-db-password
     spec:
       dnsPolicy: None
       dnsConfig:
         nameservers:
-          - ${SHOGGOTH_DNS_IP}
+        - ${SHOGGOTH_DNS_IP}
         searches:
-          - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
-          - svc.cluster.local
-          - cluster.local
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
       initContainers:
-        - name: wait-bringup
-          image: busybox:latest
-          imagePullPolicy: IfNotPresent
-          command: ["sh", "-c"]
-          args:
-            - |
-              echo "wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done"
-              if [ ! -f /shoggoth/rendered/.bringup-done ]; then
-                echo "wait-bringup: sentinel not found, dumping diagnostics:" >&2
-                echo "wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)" >&2
-                if [ -d /shoggoth/rendered ]; then
-                  echo "wait-bringup: contents:" >&2
-                  ls -la /shoggoth/rendered/ >&2 || true
-                fi
-                if [ -f /shoggoth/rendered/bringup.log ]; then
-                  echo "wait-bringup: bringup.log tail:" >&2
-                  tail -20 /shoggoth/rendered/bringup.log >&2 || true
-                fi
-                echo "wait-bringup: exiting, bringup may still be in progress" >&2
-                exit 1
-              fi
-              echo "wait-bringup: sentinel found"
-          resources:
-            requests:
-              memory: "32Mi"
-              cpu: "50m"
-            limits:
-              memory: "64Mi"
-              cpu: "200m"
-          volumeMounts:
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
-      containers:
-        - name: cdash
-          image: kitware/cdash:latest
-          imagePullPolicy: IfNotPresent
-          command: ["/cdash/entrypoint-wrapper.sh"]
-          args: ["start-website"]
-          ports:
-            - containerPort: 80
-              name: http
-          env:
-            - name: APP_URL
-              value: http://cdash.${SHOGGOTH_DOMAIN}
-            - name: DB_HOST
-              value: cdash-db
-            - name: DB_PORT
-              value: "5432"
-            - name: DB_DATABASE
-              value: cdash
-            - name: DB_USERNAME
-              value: cdash
-            - name: QUEUE_CONNECTION
-              value: database
-            - name: OTEL_TRACES_EXPORTER
-              value: "otlp"
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otelcol:4318"
-            - name: SHOGGOTH_DOMAIN
-              value: "${SHOGGOTH_DOMAIN}"
-          volumeMounts:
-            - name: storage
-              mountPath: /cdash/storage
-            - name: rendered
-              mountPath: /shoggoth/rendered
-              readOnly: true
-            - name: entrypoint-script
-              mountPath: /cdash/entrypoint-wrapper.sh
-              subPath: entrypoint-wrapper.sh
-              readOnly: true
-            - name: init-script
-              mountPath: /shoggoth/cdash/init.sh
-              subPath: init.sh
-              readOnly: true
-            - name: db-password
-              mountPath: /run/secrets/cdash_db_password
-              subPath: password
-              readOnly: true
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - /bin/bash
-                  - -c
-                  - |
-                    set -o pipefail
-                    LOG=/shoggoth/rendered/cdash-init.log
-                    exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
-                    echo "=== cdash-init start $(date -Iseconds) ==="
-                    /bin/bash /shoggoth/cdash/init.sh
-                    echo "=== cdash-init exit $? $(date -Iseconds) ==="
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "200m"
-            limits:
-              memory: "512Mi"
-              cpu: "1000m"
-          readinessProbe:
-            httpGet:
-              path: /login
-              port: 80
-            initialDelaySeconds: 15
-            periodSeconds: 10
-            failureThreshold: 30
-          livenessProbe:
-            httpGet:
-              path: /login
-              port: 80
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            failureThreshold: 6
-      volumes:
+      - name: wait-bringup
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        args:
+        - "echo \"wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done\"\nif [ ! -f /shoggoth/rendered/.bringup-done ]; then\n  echo \"wait-bringup: sentinel not found, dumping diagnostics:\" >&2\n  echo \"wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)\" >&2\n  if [ -d /shoggoth/rendered ]; then\n    echo \"wait-bringup: contents:\" >&2\n    ls -la /shoggoth/rendered/ >&2 || true\n  fi\n  if [ -f /shoggoth/rendered/bringup.log ]; then\n    echo \"wait-bringup: bringup.log tail:\" >&2\n    tail -20 /shoggoth/rendered/bringup.log >&2 || true\n  fi\n  echo \"wait-bringup: exiting, bringup may still be in progress\" >&2\n  exit 1\nfi\necho \"wait-bringup: sentinel found\"\n"
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts:
         - name: rendered
-          hostPath:
-            path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
-            type: DirectoryOrCreate
-        - name: entrypoint-script
-          configMap:
-            name: cdash-entrypoint
-            defaultMode: 0755
-        - name: init-script
-          configMap:
-            name: cdash-init
-            defaultMode: 0755
+          mountPath: /shoggoth/rendered
+          readOnly: true
+      containers:
+      - name: cdash
+        image: kitware/cdash:v5.4.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - /cdash/entrypoint-wrapper.sh
+        args:
+        - start-website
+        ports:
+        - containerPort: 80
+          name: http
+        env:
+        - name: APP_URL
+          value: http://cdash.${SHOGGOTH_DOMAIN}
+        - name: DB_HOST
+          value: cdash-db
+        - name: DB_PORT
+          value: '5432'
+        - name: DB_DATABASE
+          value: cdash
+        - name: DB_USERNAME
+          value: cdash
+        - name: QUEUE_CONNECTION
+          value: database
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4318
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        volumeMounts:
         - name: storage
-          persistentVolumeClaim:
-            claimName: cdash-storage
+          mountPath: /cdash/storage
+        - name: rendered
+          mountPath: /shoggoth/rendered
+          readOnly: true
+        - name: entrypoint-script
+          mountPath: /cdash/entrypoint-wrapper.sh
+          subPath: entrypoint-wrapper.sh
+          readOnly: true
+        - name: init-script
+          mountPath: /shoggoth/cdash/init.sh
+          subPath: init.sh
+          readOnly: true
         - name: db-password
-          secret:
-            secretName: cdash-db-password
+          mountPath: /run/secrets/cdash_db_password
+          subPath: password
+          readOnly: true
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - /bin/bash
+              - -c
+              - |
+                set -o pipefail
+                LOG=/shoggoth/rendered/cdash-init.log
+                exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
+                echo "=== cdash-init start $(date -Iseconds) ==="
+                /bin/bash /shoggoth/cdash/init.sh
+                echo "=== cdash-init exit $? $(date -Iseconds) ==="
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 200m
+          limits:
+            memory: 512Mi
+            cpu: 1000m
+        readinessProbe:
+          httpGet:
+            path: /login
+            port: 80
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /login
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 6
+      volumes:
+      - name: rendered
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/rendered
+          type: DirectoryOrCreate
+      - name: entrypoint-script
+        configMap:
+          name: cdash-entrypoint
+          defaultMode: 493
+      - name: init-script
+        configMap:
+          name: cdash-init
+          defaultMode: 493
+      - name: storage
+        persistentVolumeClaim:
+          claimName: cdash-storage
+      - name: db-password
+        secret:
+          secretName: cdash-db-password
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -528,10 +517,22 @@ metadata:
   name: cdash-db-bootstrap-wait
   namespace: ${SHOGGOTH_NAMESPACE}
 rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get"]
-    resourceNames: ["shoggoth-bootstrap-done"]
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  resourceNames:
+  - cdash-db-password
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - cdash-db-password
+  verbs:
+  - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -543,6 +544,6 @@ roleRef:
   kind: Role
   name: cdash-db-bootstrap-wait
 subjects:
-  - kind: ServiceAccount
-    name: cdash-db
-    namespace: ${SHOGGOTH_NAMESPACE}
+- kind: ServiceAccount
+  name: cdash-db
+  namespace: ${SHOGGOTH_NAMESPACE}

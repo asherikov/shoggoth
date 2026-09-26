@@ -1,0 +1,19 @@
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: cdash-app-key
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  secretStoreRef:
+    name: shoggoth-openbao
+    kind: SecretStore
+  target:
+    name: cdash-app-key
+    creationPolicy: Owner
+  data:
+    - secretKey: app-key
+      remoteRef:
+        key: cdash/app-key
+        property: value
+  refreshInterval: 5m

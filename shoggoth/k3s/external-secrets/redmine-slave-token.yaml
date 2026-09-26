@@ -1,0 +1,19 @@
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: redmine-slave-token
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  secretStoreRef:
+    name: shoggoth-openbao
+    kind: SecretStore
+  target:
+    name: redmine-slave-token
+    creationPolicy: Orphan
+  data:
+    - secretKey: token
+      remoteRef:
+        key: redmine/slave-token
+        property: value
+  refreshInterval: 5m

@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -33,19 +34,14 @@ data:
   entrypoint.sh: |
     #!/usr/bin/env sh
     set -eu
-
     DOCKERD_PID=""
     CRED_CACHE_PID=""
     SSH_AGENT_PID=""
     LOGS_PIDS=""
-
     export DOCKER_HOST=unix:///dind/docker.sock
-
     mkdir -p /etc/docker/
     printf '{"insecure-registries":["registry.%s"]}\n' "${SHOGGOTH_DOMAIN}" > /etc/docker/daemon.json
-
     rm -f /var/run/docker.pid
-
     cleanup() {
         echo "shoggoth: Shutting down..." >&2
         for PID in ${LOGS_PIDS}; do
@@ -58,12 +54,10 @@ data:
         [ -n "${DOCKERD_PID}" ] && wait "${DOCKERD_PID}" 2>/dev/null || true
     }
     trap cleanup EXIT
-
     echo "shoggoth: Starting dockerd..." >&2
     cat /etc/docker/daemon.json
     dockerd --host unix:///dind/docker.sock --config-file /etc/docker/daemon.json &
     DOCKERD_PID=$!
-
     echo "shoggoth: Waiting for dockerd to be ready..." >&2
     ATTEMPT=1
     while [ "${ATTEMPT}" -le 60 ]; do
@@ -74,25 +68,20 @@ data:
         sleep 1
         ATTEMPT=$((ATTEMPT + 1))
     done
-
     if ! docker info > /dev/null 2>&1; then
         echo "shoggoth: FATAL: dockerd failed to start" >&2
         exit 1
     fi
-
     BASE_IMAGE="registry.${SHOGGOTH_DOMAIN}/slave_noble"
-
     echo "shoggoth: Pulling base image ${BASE_IMAGE}:latest..." >&2
     if ! docker pull "${BASE_IMAGE}:latest"; then
         echo "shoggoth: FATAL: Failed to pull base image ${BASE_IMAGE}:latest" >&2
         exit 1
     fi
-
     echo "shoggoth: Building shoggoth-slave image..." >&2
     BUILD_DIR="/shoggoth/compose/build"
     rm -rf "${BUILD_DIR}"
     mkdir -p "${BUILD_DIR}/workflow" "${BUILD_DIR}/scripts"
-
     echo "shoggoth: Downloading setup-client.sh and plugin from web-internal..." >&2
     WEB_INTERNAL="http://web-internal.${SHOGGOTH_NAMESPACE}.svc.cluster.local"
     wget --timeout=60 -q "${WEB_INTERNAL}/setup-client.sh" -O "${BUILD_DIR}/setup-client.sh" || { echo "shoggoth: FATAL: failed to download setup-client.sh" >&2; exit 1; }
@@ -100,20 +89,15 @@ data:
     wget --timeout=60 -q "${WEB_INTERNAL}/plugin.tar.gz" -O "${BUILD_DIR}/plugin.tar.gz" || { echo "shoggoth: FATAL: failed to download plugin.tar.gz" >&2; exit 1; }
     "${BUILD_DIR}/setup-client.sh" --client-conf "${BUILD_DIR}/workflow" --domain "${SHOGGOTH_DOMAIN}" --api-gateway --ai-token litellm
     cp -r /host_volumes/workflow-scripts/* "${BUILD_DIR}/scripts/"
-
     DOCKERFILE="${BUILD_DIR}/Dockerfile"
     cat > "${DOCKERFILE}" <<'DOCKERFILE_HEAD'
     FROM registry.__SHOGGOTH_DOMAIN__/slave_noble:latest
-
     COPY workflow/qwen-settings.json /home/ccws/.qwen/settings.json
     COPY workflow/apt-cache.conf /etc/apt/apt.conf.d/00-shoggoth-apt-cache
     COPY scripts/ /shoggoth/workflow/scripts/
-
     RUN sudo chown -R ccws /home/ccws/
     DOCKERFILE_HEAD
-
     sed -i "s|__SHOGGOTH_DOMAIN__|${SHOGGOTH_DOMAIN}|g" "${DOCKERFILE}"
-
     while IFS='=' read -r key value; do
         [ -z "${key}" ] && continue
         case "${key}" in
@@ -121,27 +105,21 @@ data:
         esac
         printf 'ENV %s="%s"\n' "${key}" "${value}" >> "${DOCKERFILE}"
     done < "${BUILD_DIR}/workflow/env"
-
     GITEA_SLAVE_TOKEN="${GITEA_SLAVE_TOKEN:-}"
-
     echo "shoggoth: Creating ci_cache directory..." >&2
     mkdir -p /shoggoth/ci_cache
     chown -R 1000:1000 /shoggoth/ci_cache
-
     CREDENTIAL_TIMEOUT=31536000
     SSH_AUTH_SOCK="/shoggoth/git-cred/ssh_auth_sock"
     GIT_CREDENTIAL_SOCK="/shoggoth/git-cred/git_credential_sock"
     KNOWN_HOSTS="/shoggoth/git-cred/known_hosts"
-
     echo "shoggoth: Preparing git-cred directory..." >&2
     mkdir -p /shoggoth/git-cred
     chmod 0700 /shoggoth/git-cred
     chown 1000:1000 /shoggoth/git-cred
     adduser -D -u 1000 -H -s /bin/sh ccws 2>/dev/null || true
-
     echo "shoggoth: Cleaning up stale sockets..." >&2
     rm -f "${SSH_AUTH_SOCK}" "${GIT_CREDENTIAL_SOCK}"
-
     echo "shoggoth: Scanning Gitea SSH host keys on git.${SHOGGOTH_DOMAIN}..." >&2
     if ! ssh-keyscan "git.${SHOGGOTH_DOMAIN}" > "${KNOWN_HOSTS}.tmp" 2>/dev/null; then
         echo "shoggoth: FATAL: ssh-keyscan failed on git.${SHOGGOTH_DOMAIN}" >&2
@@ -149,22 +127,18 @@ data:
     fi
     mv "${KNOWN_HOSTS}.tmp" "${KNOWN_HOSTS}"
     chmod 644 "${KNOWN_HOSTS}"
-
     echo "shoggoth: Starting SSH agent at ${SSH_AUTH_SOCK}..." >&2
     eval "$(su ccws -c "ssh-agent -a '${SSH_AUTH_SOCK}'")"
     SSH_AGENT_PID="$(echo "${SSH_AGENT_PID}" | head -1)"
     chmod 600 "${SSH_AUTH_SOCK}"
-
     SSH_ID_RSA="${SSH_ID_RSA:-}"
     if [ -z "${SSH_ID_RSA}" ]; then
         echo "shoggoth: FATAL: SSH_ID_RSA env var is empty; ssh-agent would have no identities" >&2
         echo "shoggoth:        expected source: K8s Secret 'ssh-slave-private-key' (key 'ssh-id-rsa') in namespace '${SHOGGOTH_NAMESPACE}'" >&2
-        echo "shoggoth:        if the Secret exists, run: kubectl get secret -n ${SHOGGOTH_NAMESPACE} ssh-slave-private-key -o jsonpath='{.data.ssh-id-rsa}' | base64 -d" >&2
+        echo "shoggoth:        if the Secret exists, run: kubectl get secret -n ${SHOGGOTH_NAMESPACE} ssh-slave-private-key -o json | jq -r --arg k ssh-id-rsa '.data[$k]' | base64 -d" >&2
         exit 1
     fi
-
     echo "shoggoth: SSH_ID_RSA received (${#SSH_ID_RSA} bytes)" >&2
-
     FIRST_LINE=$(printf '%s' "${SSH_ID_RSA}" | head -n 1)
     case "${FIRST_LINE}" in
         "-----BEGIN"*)
@@ -174,7 +148,6 @@ data:
             exit 1
             ;;
     esac
-
     LAST_LINE=$(printf '%s' "${SSH_ID_RSA}" | awk 'NF{last=$0} END{print last}')
     case "${LAST_LINE}" in
         "-----END"*)
@@ -184,30 +157,25 @@ data:
             exit 1
             ;;
     esac
-
     LAST_CHAR_DEC=$(printf '%s' "${SSH_ID_RSA}" | tail -c 1 | od -An -tu1 | tr -d ' \n')
     case "${LAST_CHAR_DEC}" in
         10) TRAILING_NL="yes" ;;
         *)  TRAILING_NL="no"  ;;
     esac
     echo "shoggoth: SSH_ID_RSA looks like an OpenSSH key (trailing_newline=${TRAILING_NL}, last_byte=${LAST_CHAR_DEC})" >&2
-
     echo "shoggoth: Adding SSH identity..." >&2
     printf '%s\n' "${SSH_ID_RSA}" > "${SSH_AUTH_SOCK}.key"
     WRITTEN_SIZE=$(wc -c < "${SSH_AUTH_SOCK}.key")
     LAST_BYTE_HEX=$(tail -c 1 "${SSH_AUTH_SOCK}.key" | od -An -tx1 | tr -d ' \n')
     echo "shoggoth: wrote key file size=${WRITTEN_SIZE} last_byte=0x${LAST_BYTE_HEX}" >&2
-
     chmod 400 "${SSH_AUTH_SOCK}.key"
     chown 1000:1000 "${SSH_AUTH_SOCK}.key"
-
     if ! su ccws -c "ssh-add '${SSH_AUTH_SOCK}.key'" 2>&1; then
         echo "shoggoth: FATAL: ssh-add failed for ${SSH_AUTH_SOCK}.key" >&2
         rm -f "${SSH_AUTH_SOCK}.key"
         exit 1
     fi
     rm -f "${SSH_AUTH_SOCK}.key"
-
     echo "shoggoth: SSH agent identities:" >&2
     if ! su ccws -c "SSH_AUTH_SOCK='${SSH_AUTH_SOCK}' ssh-add -l" >&2; then
         echo "shoggoth: FATAL: ssh-add -l failed" >&2
@@ -219,23 +187,17 @@ data:
         echo "shoggoth: FATAL: ssh-agent has no identities; subsequent SSH clones will fail" >&2
         exit 1
     fi
-
     echo "shoggoth: Starting git credential cache daemon at ${GIT_CREDENTIAL_SOCK}..." >&2
     git credential-cache--daemon "${GIT_CREDENTIAL_SOCK}" &
     CRED_CACHE_PID=$!
     sleep 1
     chmod 600 "${GIT_CREDENTIAL_SOCK}"
-
     echo "shoggoth: Storing Gitea HTTP credentials..." >&2
     printf 'protocol=http\nhost=git.%s\nusername=token\npassword=%s\n' "${SHOGGOTH_DOMAIN}" "${GITEA_SLAVE_TOKEN}" | git credential-cache --socket "${GIT_CREDENTIAL_SOCK}" --timeout "${CREDENTIAL_TIMEOUT}" store
-
     chown -R 1000:1000 /shoggoth/git-cred
-
     echo "shoggoth: slave-dind setup complete" >&2
-
     COMPOSE_DIR="/shoggoth/compose"
     mkdir -p "${COMPOSE_DIR}"
-
     cat > "${COMPOSE_DIR}/docker-compose.yml" <<EOF
     services:
         slave-term:
@@ -250,15 +212,12 @@ data:
                 - /shoggoth/ci_cache:/cache
             command: ttyd --max-clients 1 --port 80 --writable -t disableReconnect=true --once tmux -u new-session bash
     EOF
-
     docker compose -f "${COMPOSE_DIR}/docker-compose.yml" up -d --build
-
     LOGS_PIDS=""
     for service in $(docker compose -f "${COMPOSE_DIR}/docker-compose.yml" config --services); do
         docker compose -f "${COMPOSE_DIR}/docker-compose.yml" logs -f "${service}" &
         LOGS_PIDS="${LOGS_PIDS} $!"
     done
-
     wait "${DOCKERD_PID}" || true
 
 ---
@@ -290,6 +249,8 @@ spec:
     metadata:
       labels:
         app: slave-dind
+      annotations:
+        secret.reloader.stakater.com/reload: gitea-slave-token,ssh-slave-private-key
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -304,33 +265,38 @@ spec:
         image: asherikov/shoggoth_tools:alpine
         imagePullPolicy: IfNotPresent
         env:
-          - name: SHOGGOTH_NAMESPACE
-            value: "${SHOGGOTH_NAMESPACE}"
+        - name: SHOGGOTH_NAMESPACE
+          value: ${SHOGGOTH_NAMESPACE}
         command:
         - bash
         - -c
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${SA_TOKEN}" "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
-            fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" -H "Authorization: Bearer ${SA_TOKEN}" "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
-          done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          echo "wait-bootstrap: waiting for secret/gitea-slave-token.token in namespace ${NS}..."
+                    wait_for_externalsecret gitea-slave-token || exit 1
+          echo "wait-bootstrap: waiting for secret/ssh-slave-private-key.ssh-id-rsa in namespace ${NS}..."
+                    wait_for_externalsecret ssh-slave-private-key || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
 
         resources:
           requests:
@@ -342,7 +308,7 @@ spec:
         volumeMounts: []
       containers:
       - name: dind
-        image: docker:dind
+        image: docker:29.8.1-dind
         imagePullPolicy: IfNotPresent
         securityContext:
           privileged: true
@@ -358,7 +324,7 @@ spec:
         - name: DOCKER_TLS_CERTDIR
           value: ''
         - name: SHOGGOTH_REGISTRY_PORT
-          value: '${SHOGGOTH_REGISTRY_PORT}'
+          value: "${SHOGGOTH_REGISTRY_PORT}"
         - name: SSH_ID_RSA
           valueFrom:
             secretKeyRef:
@@ -460,6 +426,18 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
   verbs:
   - get
 ---
@@ -472,6 +450,46 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: slave-dind-bootstrap-wait
+subjects:
+- kind: ServiceAccount
+  name: slave-dind
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+# Required by Kestra's Docker task runner when the maintenance flow's
+# slave_token / runner_token tasks run inside a container spawned on the
+# slave-dind Docker daemon (networkMode: host + bind-mount of the daemon's
+# SA-token path /var/run/secrets/kubernetes.io/serviceaccount). The spawned
+# container's kubectl resolves credentials from the bind-mounted token,
+# which is slave-dind's; without this Role, `k8s_upsert_secret` would 403
+# on create/update/patch of the maintenance Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: slave-dind-secret-bootstrap
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  resourceNames:
+  - gitea-slave-token
+  - gitea-runner-token
+  verbs:
+  - get
+  - create
+  - update
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: slave-dind-secret-bootstrap
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: slave-dind-secret-bootstrap
 subjects:
 - kind: ServiceAccount
   name: slave-dind

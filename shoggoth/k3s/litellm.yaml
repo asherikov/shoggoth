@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -38,6 +39,8 @@ spec:
     metadata:
       labels:
         app: litellm
+      annotations:
+        secret.reloader.stakater.com/reload: gitea-slave-token,ai-default-token
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -57,30 +60,33 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
-            fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          for tok in ai-default-token gitea-slave-token; do
+                    case "${tok}" in
+                      ai-default-token) wait_for_externalsecret ai-default-token || exit 1 ;;
+                      gitea-slave-token) wait_for_externalsecret gitea-slave-token || exit 1 ;;
+                    esac
           done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
         resources:
           requests:
             memory: 32Mi
@@ -108,9 +114,7 @@ spec:
         command:
         - bash
         - -c
-        - 'exec /tmpl/render.sh
-
-          '
+        - exec /tmpl/render.sh
         resources:
           requests:
             memory: 32Mi
@@ -129,7 +133,7 @@ spec:
           readOnly: true
       containers:
       - name: litellm
-        image: ghcr.io/berriai/litellm:main-stable
+        image: ghcr.io/berriai/litellm:v1.102.0
         imagePullPolicy: IfNotPresent
         args:
         - --config
@@ -208,6 +212,18 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - ai-default-token
+  - gitea-slave-token
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - ai-default-token
+  - gitea-slave-token
   verbs:
   - get
 ---
@@ -279,3 +295,4 @@ data:
             transport: "http"
             description: "Basic Memory MCP server"
             allow_all_keys: true
+

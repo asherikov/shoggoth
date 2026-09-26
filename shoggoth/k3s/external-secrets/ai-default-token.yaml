@@ -1,0 +1,19 @@
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: ai-default-token
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  secretStoreRef:
+    name: shoggoth-openbao
+    kind: SecretStore
+  target:
+    name: ai-default-token
+    creationPolicy: Orphan
+  data:
+    - secretKey: token
+      remoteRef:
+        key: ai/default-token
+        property: value
+  refreshInterval: 5m

@@ -1,0 +1,19 @@
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: ssh-slave-private-key
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  secretStoreRef:
+    name: shoggoth-openbao
+    kind: SecretStore
+  target:
+    name: ssh-slave-private-key
+    creationPolicy: Owner
+  data:
+    - secretKey: ssh-id-rsa
+      remoteRef:
+        key: ssh/slave-private-key
+        property: value
+  refreshInterval: 5m

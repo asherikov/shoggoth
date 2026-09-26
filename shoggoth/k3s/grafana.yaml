@@ -280,6 +280,23 @@ data:
                     "overrides": []
                 },
                 "options": {"showHeader": true}
+            },
+            {
+                "title": "Pod Network I/O",
+                "type": "timeseries",
+                "gridPos": {"h": 9, "w": 24, "x": 0, "y": 78},
+                "datasource": {"uid": "vm"},
+                "targets": [
+                    {"expr": "sum by(service) (rate(k8s_pod_network_io_bytes_total{direction=\"receive\"}[5m]))", "legendFormat": "↓ Receive {{service}}", "refId": "A"},
+                    {"expr": "sum by(service) (rate(k8s_pod_network_io_bytes_total{direction=\"transmit\"}[5m]))", "legendFormat": "↑ Transmit {{service}}", "refId": "B"}
+                ],
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "Bps",
+                        "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                    },
+                    "overrides": []
+                }
             }
         ],
         "refresh": "30s",
@@ -1649,6 +1666,8 @@ spec:
     metadata:
       labels:
         app: grafana
+      annotations:
+        secret.reloader.stakater.com/reload: grafana-admin-password
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -1668,30 +1687,28 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
-            fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
-          done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          wait_for_externalsecret grafana-admin-password || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
         resources:
           requests:
             memory: 32Mi
@@ -1752,7 +1769,8 @@ spec:
               command:
               - /bin/bash
               - -c
-              - 'set -o pipefail
+              - |
+                set -o pipefail
 
                 LOG=/var/log/shoggoth-grafana-init.log
 
@@ -1765,7 +1783,6 @@ spec:
 
                 echo "=== grafana-init exit $? $(date -Iseconds) ==="
 
-                '
         resources:
           requests:
             memory: 256Mi
@@ -1832,7 +1849,15 @@ rules:
   resources:
   - secrets
   resourceNames:
-  - shoggoth-bootstrap-done
+  - grafana-admin-password
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - grafana-admin-password
   verbs:
   - get
 ---

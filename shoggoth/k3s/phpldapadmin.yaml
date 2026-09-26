@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -9,10 +10,10 @@ data:
     set -euo pipefail
 
     : "${LDAP_BASE_DN:=dc=$(printf '%s' "${SHOGGOTH_DOMAIN}" | sed 's/\./,dc=/g')}"
+
     export LDAP_BASE_DN
 
     exec /sbin/init-docker --config /etc/caddy/Caddyfile --adapter caddyfile
-
 ---
 apiVersion: v1
 kind: Service
@@ -41,6 +42,8 @@ spec:
     metadata:
       labels:
         app: phpldapadmin
+      annotations:
+        secret.reloader.stakater.com/reload: openldap-ldapauth-password
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -60,30 +63,29 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
-            fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
-          done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          echo "wait-bootstrap: waiting for secret/openldap-ldapauth-password.password in namespace ${NS}..."
+                    wait_for_externalsecret openldap-ldapauth-password || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
         resources:
           requests:
             memory: 32Mi
@@ -94,7 +96,7 @@ spec:
         volumeMounts: []
       containers:
       - name: phpldapadmin
-        image: phpldapadmin/phpldapadmin:latest
+        image: phpldapadmin/phpldapadmin:2.3.11
         imagePullPolicy: IfNotPresent
         command:
         - /bin/bash
@@ -173,6 +175,16 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - openldap-ldapauth-password
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - openldap-ldapauth-password
   verbs:
   - get
 ---

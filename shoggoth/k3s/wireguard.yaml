@@ -1,35 +1,27 @@
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: wireguard-entrypoint
   namespace: ${SHOGGOTH_NAMESPACE}
 data:
-  entrypoint.sh: '#!/usr/bin/env bash
+  entrypoint.sh: |
+    #!/usr/bin/env bash
 
     set -euo pipefail
 
-
     ln -sf /usr/sbin/iptables-nft /etc/alternatives/iptables
-
     ln -sf /usr/sbin/iptables-nft-restore /etc/alternatives/iptables-restore
-
     ln -sf /usr/sbin/iptables-nft-save /etc/alternatives/iptables-save
-
     ln -sf /usr/sbin/ip6tables-nft /etc/alternatives/ip6tables
-
     ln -sf /usr/sbin/ip6tables-nft-restore /etc/alternatives/ip6tables-restore
-
     ln -sf /usr/sbin/ip6tables-nft-save /etc/alternatives/ip6tables-save
 
-
     sysctl -w net.ipv4.ip_forward=1
-
     sysctl -w net.ipv4.conf.all.src_valid_mark=1
-
 
     exec "$@"
 
-    '
 ---
 apiVersion: v1
 kind: Service
@@ -60,6 +52,8 @@ spec:
     metadata:
       labels:
         app: wireguard
+      annotations:
+        secret.reloader.stakater.com/reload: wireguard-admin-password
     spec:
       hostNetwork: true
       dnsPolicy: None
@@ -80,30 +74,27 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
-            fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
-          done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          NS="${SHOGGOTH_NAMESPACE}"
+          wait_for_externalsecret() {
+            local name="$1"
+            echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+            for i in $(seq 1 60); do
+              if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                return 0
+              fi
+              sleep 10
+            done
+            echo "FAIL: externalsecret/${name} not Ready after 10m"
+            echo "      Hint: check status from outside the pod:"
+            echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+            echo "            kubectl describe externalsecret -n ${NS} ${name}"
+            echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+            echo "      or remote secret missing (Orphan policies require a value in the source store)."
+            return 1
+          }
+          wait_for_externalsecret wireguard-admin-password || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
         resources:
           requests:
             memory: 32Mi
@@ -114,7 +105,7 @@ spec:
         volumeMounts: []
       containers:
       - name: wireguard
-        image: ghcr.io/wg-easy/wg-easy:15
+        image: ghcr.io/wg-easy/wg-easy:15.4.0
         ports:
         - containerPort: ${SHOGGOTH_WG_PORT}
           hostPort: ${SHOGGOTH_WG_PORT}
@@ -232,6 +223,16 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - wireguard-admin-password
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - wireguard-admin-password
   verbs:
   - get
 ---

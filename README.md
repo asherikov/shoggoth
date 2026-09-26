@@ -16,6 +16,7 @@
   - [Service Usage Examples](#service-usage-examples)
   - [Server Management](#server-management)
 - [Troubleshooting](#troubleshooting)
+- [Known issues](#known-issues)
 - [References](#references)
   - [Agentic coding](#agentic-coding)
 
@@ -454,6 +455,31 @@ Troubleshooting
 - cmake builds fail to find packages in Ubuntu due to missing system
   information, e.g., `CMAKE_LIBRARY_ARCHITECTURE`: check that build cache is
   operational.
+
+Known issues
+============
+
+- `kubectl` jsonpath extraction broken for several common forms in Alpine's
+  `kubectl` 1.32 (the version packaged in `tools` and used by every
+  `wait-bootstrap` init container). The forms
+  `{.data.tls.crt}` (dot notation for keys with dots), `{.data["X"]}`
+  (double-quoted bracket form for any key), and bare `jsonpath='{.data[K]}'`
+  inside a YAML literal block scalar (bash strips the inner quotes via
+  word-splitting, leaving `{.data[K]}` with an unquoted key) either crash or
+  silently return empty. Symptom: `wait-bootstrap` polls 60 times × 10 s and
+  then `FAIL`s even though the Secret is populated.
+
+  Convention: all `wait-bootstrap` loops must read Secret data keys via `jq`:
+
+  ```bash
+  kubectl get secret X -n N -o json 2>/dev/null \
+      | jq -e --arg k KEY '(.data[$k] // "") | length > 0' >/dev/null 2>&1
+  ```
+
+  Do not reintroduce `kubectl get secret ... -o jsonpath=...` in any new
+  `wait-bootstrap` loop. To diagnose a similar failure without restarting a
+  deployment, run
+  `make k3s_diag_wait_bootstrap_pod SERVICE=<name>` from this repository.
 
 References
 ==========

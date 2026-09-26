@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: reloader
+  namespace: ${SHOGGOTH_NAMESPACE}
+  labels:
+    app: reloader
+    app.kubernetes.io/name: reloader
+    app.kubernetes.io/part-of: external-secrets
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: reloader
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - statefulsets
+  - daemonsets
+  verbs:
+  - get
+  - list
+  - watch
+  - update
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: reloader
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: reloader
+subjects:
+- kind: ServiceAccount
+  name: reloader
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reloader
+  namespace: ${SHOGGOTH_NAMESPACE}
+  labels:
+    app: reloader
+    app.kubernetes.io/name: reloader
+    app.kubernetes.io/part-of: external-secrets
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: reloader
+      app.kubernetes.io/name: reloader
+      app.kubernetes.io/part-of: external-secrets
+  template:
+    metadata:
+      labels:
+        app: reloader
+        app.kubernetes.io/name: reloader
+        app.kubernetes.io/part-of: external-secrets
+    spec:
+      serviceAccountName: reloader
+      automountServiceAccountToken: true
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - ${SHOGGOTH_DNS_IP}
+        searches:
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+      containers:
+      - name: reloader
+        image: ghcr.io/stakater/reloader:v1.4.22
+        imagePullPolicy: IfNotPresent
+        args:
+        - --namespaces=${SHOGGOTH_NAMESPACE}
+        - --resources-to-ignore=configmaps
+        ports:
+        - containerPort: 9090
+          name: http
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+          limits:
+            memory: 128Mi
+            cpu: 200m
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          failureThreshold: 6

@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -83,30 +84,29 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
-            fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
-          done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          wait_for_externalsecret kestra-db-password || exit 1
+          wait_for_externalsecret openldap-admin-password || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
         resources:
           requests:
             memory: 32Mi
@@ -223,6 +223,8 @@ spec:
     metadata:
       labels:
         app: kestra
+      annotations:
+        secret.reloader.stakater.com/reload: kestra-db-password,openldap-admin-password,gitea-server-token,openbao-unseal-key
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -242,30 +244,52 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          wait_for_secret_key() {
+            local name="$1" key="$2"
+            echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
+            local ok=0
+            for i in $(seq 1 60); do
+              if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
+                echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
+                ok=1
+                break
+              fi
+              sleep 10
+            done
+            if [ "${ok}" != "1" ]; then
+              echo "FAIL: secret/${name}.${key} not populated after 10m"
+              echo "      Hint: check ExternalSecret status from outside the pod:"
+              echo "            kubectl get externalsecret -n ${NS} <name> -o yaml"
+              echo "      Most common cause: OpenBao unavailable, or SecretStore reference broken."
+              return 1
             fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
-          done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+            return 0
+          }
+          wait_for_externalsecret kestra-db-password || exit 1
+          wait_for_externalsecret openldap-admin-password || exit 1
+          wait_for_externalsecret gitea-server-token || exit 1
+          wait_for_secret_key openbao-unseal-key root-token || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
         resources:
           requests:
             memory: 32Mi
@@ -293,9 +317,7 @@ spec:
         command:
         - bash
         - -c
-        - 'exec /tmpl/render.sh
-
-          '
+        - exec /tmpl/render.sh
         resources:
           requests:
             memory: 32Mi
@@ -314,7 +336,7 @@ spec:
           readOnly: true
       containers:
       - name: kestra
-        image: kestra/kestra:latest
+        image: kestra/kestra:v1.3.40
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
@@ -325,6 +347,8 @@ spec:
           value: otlp
         - name: FLOWENV_SHOGGOTH_DOMAIN
           value: ${SHOGGOTH_DOMAIN}
+        - name: FLOWENV_SHOGGOTH_NAMESPACE
+          value: ${SHOGGOTH_NAMESPACE}
         - name: FLOWENV_SHOGGOTH_GITHUB_ORG
           value: ${SHOGGOTH_GITHUB_ORG}
         - name: FLOWENV_SHOGGOTH_VAULT_TOKEN
@@ -336,11 +360,6 @@ spec:
           valueFrom:
             secretKeyRef:
               name: gitea-server-token
-              key: token
-        - name: FLOWENV_GITEA_SLAVE_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: gitea-slave-token
               key: token
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: http://otelcol:4317
@@ -391,6 +410,9 @@ spec:
         - name: rendered-config
           mountPath: /shoggoth/kestra
           readOnly: true
+        - name: workflow-scripts
+          mountPath: /shoggoth/workflow/scripts
+          readOnly: true
       volumes:
       - name: rendered-config
         emptyDir: {}
@@ -412,6 +434,10 @@ spec:
       - name: dind-socket
         hostPath:
           path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/dind-socket
+          type: DirectoryOrCreate
+      - name: workflow-scripts
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/workflow-scripts
           type: DirectoryOrCreate
       - name: templates
         configMap:
@@ -438,6 +464,21 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - kestra-db-password
+  - openldap-admin-password
+  - gitea-server-token
+  - openbao-unseal-key
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - kestra-db-password
+  - openldap-admin-password
+  - gitea-server-token
   verbs:
   - get
 ---
@@ -471,6 +512,18 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - kestra-db-password
+  - openldap-admin-password
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - kestra-db-password
+  - openldap-admin-password
   verbs:
   - get
 ---
@@ -563,3 +616,4 @@ data:
         enabled: false
         health:
           enabled: false
+

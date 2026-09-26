@@ -412,6 +412,37 @@ records on start/stop.
 
 - **[basic-memory](https://basicmemory.com)** (selected)
   - <https://docs.basicmemory.com/reference/docker>
+- <https://github.com/smaramwbc/statewave> (Apache-2.0)
+  - Postgres+pgvector + LiteLLM; compile-then-bundle determinism; signed ULID-addressable receipts (`POST /v1/receipts/{id}/replay`); sensitivity labels + policy engine; MCP connector + GitHub/Slack/Notion/Gmail/n8n/Zapier/Markdown connectors
+  - + strongest **provenance and determinism** in this category — same query + same time → same bytes
+  - + CPU-only API (no GPU), self-hosted on the user's Postgres
+  - + REST + Python/TS SDKs; Apache-2.0; Docker Hub `statewavedev/statewave`
+  - + receipt/replay model fits `shoggoth_workflow.py`'s existing `Update basic memory with any new information` post-step as an auditable decision log
+  - - compile-then-bundle model reshapes the write path the agent uses today
+  - - no UI surface advertised; relies on operator-built UI or external MCP clients
+  - - separate Postgres+pgvector cluster adds an ops surface shoggoth doesn't have today
+- <https://github.com/caura-ai/caura> (Apache-2.0, formerly MemClaw)
+  - FastAPI + Postgres 16 + pgvector + optional Redis; native MCP at `/mcp` (Streamable HTTP); hybrid search (semantic + keyword + 2-hop knowledge graph); 8-status lifecycle (`candidate → staged → active`, plus `rejected/quarantined/stale/deprecated`); contradiction detection + crystallization; trust tiers and `scope_agent`/`team`/`org` governance
+  - + by far the most sophisticated governance and contradiction control in this category
+  - + native MCP at `/mcp` slots into LiteLLM the same way basic-memory does
+  - + Apache-2.0, GHCR images, air-gappable
+  - - fleet-shaped (cited production reference: 300+ agents, 26k+ memories); shoggoth currently has ~1 agent (`shoggoth_workflow.py`) — most fleet features are unused
+  - - reads more naturally as the source-of-truth for *many* agents than as the persistent notes of one
+  - - OSS UI is the MCP/API only; the graph/timeline inspectors live in the Cloud tier
+- <https://docs.cognee.ai/> (Cognee, Apache-2.0)
+  - Python SDK (`pip install cognee`) plus MCP server; first-party integrations with Claude Code, Cursor, Codex, LangGraph, OpenAI Agents SDK; hosted platform at `platform.cognee.ai`
+  - + explicit MCP support slots cleanly into the LiteLLM MCP gateway shoggoth already runs
+  - + Apache-2.0, well-marketed in the AI-agent-memory space
+  - - OSS release does not advertise a bundled UI / visualization — same observation gap as basic-memory
+  - - the hosted "platform" appears to gate the UI behind Cloud, which is not shoggoth's open pattern
+  - - default ingest pipeline requires an LLM call — couples memory writes to model availability
+- <https://github.com/letta-ai/letta> (Letta, Apache-2.0; former MemGPT)
+  - Self-improving agent whose memory, identity, and capabilities evolve with experience; npm-installable agent (`@letta-ai/letta-code`); Postgres-backed server
+  - + most established research pedigree in the agent-memory category
+  - + Apache-2.0
+  - - merges memory layer into the agent runtime — shoggoth's `basic-memory` is intentionally decoupled from the agent runtime
+  - - homepage does not advertise a UI for inspecting memory contents — humans would still read memory via API
+  - - npm-first delivery shape is a mismatch for shoggoth's Python/Kestra pipeline
 - <https://github.com/doobidoo/mcp-memory-service>
   - very sloppy
 - <https://github.com/rohitg00/agentmemory>
@@ -679,6 +710,213 @@ Collected by the OpenTelemetry Collector's [dockerstatsreceiver](https://github.
   - - shared secrets between different-UID services need separate copies with correct ownership
   - - each new service requires UID knowledge and mkdir/chown/chmod boilerplate in bringup
   - - no web UI for operators to view or rotate secrets
+
+## Backup
+
+shoggoth is single-node k3s with stateful PVCs (Gitea repos, Redmine DB+files,
+OpenBao KV, Kestra state, basic-memory markdown) and several databases behind
+them. A single-layer backup is fragile — the practical posture is layered:
+storage-layer snapshots for fast restore, cluster-level for resources+secrets,
+app-aware dumps for Gitea/Redmine, and at least one encrypted off-host copy.
+
+### Storage-layer (PV snapshots)
+
+- **[Longhorn](https://github.com/longhorn/longhorn)** (recommended)
+  - In-cluster CSI for k3s; per-volume snapshots + S3/NFS backup target; fast per-volume restore
+  - + one tool handles provisioning and snapshot/restore — fewer moving parts than a CSI + Velero split
+  - + rwx/single-node mode fits shoggoth's topology
+  - + snapshots ship to any S3-compatible bucket (B2, Wasabi, MinIO, S3), independent of Velero
+  - - backs up PVs only — does not cover Deployments, ConfigMaps, secrets, or Kestra flows
+  - - storage class `local-path` is **not** snapshot-capable; migrating PVCs onto a Longhorn StorageClass is required to cover everything
+- <https://github.com/openebs/openebs> (Apache-2.0)
+  - Mayastor and cstor engines; snapshot+clone stories; more engine choice than Longhorn
+  - - more moving parts for the same outcome; smaller community
+- <https://github.com/kastenhq/kasten-k10> (free ≤10 nodes / commercial)
+  - + richer policy-based orchestration across apps
+  - - closed-source platform for the paid tier; smaller on-prem footprint than Velero
+
+### Cluster-level (resources + secrets)
+
+- **[Velero](https://github.com/vmware-tanzu/velero)** (recommended)
+  - + exports Deployments, ConfigMaps, Secrets, CRDs, and PVs (via Restic integration or CSI snapshots)
+  - + `velero restore --from-backup` is a single command; Kestra flows and Grafana dashboard provisioning become recoverable from versioned archives
+  - - **license fence**: confirm current Velero license and release activity after the Vmware/Broadcom ownership change before committing
+- <https://github.com/kanisterio/kanister> (Apache-2.0)
+  - Generic blueprints for app-aware snapshot/restore
+  - - smaller ecosystem; per-app blueprint authoring
+
+### File-level (mounted volumes)
+
+- **[Restic](https://github.com/restic/restic)** (recommended)
+  - + client-side encrypted, deduplicated, S3-compatible (B2, Wasabi, Storj, S3, MinIO, Hetzner Storage Box)
+  - + single static binary; fits the existing `slave_noble:dind` Kestra task runner pattern
+  - + automatic pruning/retention; bucket credentials stored in OpenBao
+  - + natively orchestratable as new tasks in `main_shoggoth_maintenance.yml`
+  - - no GUI; CLI + Restic REST server only
+- <https://github.com/kopia/kopia> (Apache-2.0)
+  - + GUI client; same encryption/dedup story as Restic
+  - - less Docker-deployment culture than Restic
+- <https://github.com/borgbackup/borg> (BSD-3-Clause)
+  - + battle-tested deduplication; mature ecosystem
+  - - newer B2/Wasabi paths less field-tested than Restic's
+- <https://github.com/borgbackup/borgmatic> (GPL-3.0)
+  - Configuration wrapper for Borg with sensible retention defaults
+  - - thin layer over Borg; value is mostly configurability
+
+### Database-aware
+
+- **[pgBackRest](https://github.com/pgbackrest/pgbackrest)** / [Barman](https://github.com/EnterpriseDB/barman)
+  - + dedicated Postgres PITR + WAL streaming; reliable incremental restores
+  - - confirm DB engine (Postgres / MySQL / MariaDB / SQLite) for Gitea / Redmine / CDash before picking
+- <https://github.com/MariaDB/MariaBackup> / [Percona XtraBackup](https://github.com/percona/percona-xtrabackup)
+  - Hot backups for MySQL/MariaDB; equivalent PITR story for those engines
+- <https://github.com/benbjohnson/litestream> (MIT)
+  - + continuous WAL streaming of SQLite to S3/NFS — ideal for any SQLite DB inside shoggoth (CDash and similar)
+  - + near-zero overhead; runs as a sidecar
+  - - SQLite only; amd64 upstream default
+- [`gitea dump`](https://docs.gitea.io/en-us/command-line/#dump)
+  - Version-aware repos + DB + avatars tar; ships in Gitea itself, no extra dependency
+  - + simplest single-shot backup for the Gitea pod; pairs naturally with Restic inside a Kestra task
+- [Redmine backup recipe](https://www.redmine.org/projects/redmine/wiki/RedmineBackup)
+  - DB dump + files tar; same pattern as `gitea dump`
+
+### Off-host targets
+
+shoggoth is single-node; an off-host copy is what makes a snapshot an actual backup.
+
+- **[Backblaze B2](https://www.backblaze.com/b2/)** (recommended default)
+  - + cheapest S3-compat with long-tail storage tiers (`B2 Cloud Storage`)
+  - + Cloudflare Bandwidth Alliance egress — free restore behind Restic
+  - + compatible with Restic, Kopia, Borg (`s3` endpoint), Longhorn backup target, Velero backup target
+- <https://wasabi.com/> — no egress fees, predictable pricing, S3-compat
+- <https://www.storj.io/> — decentralized, EU residency, S3-compat
+- <https://www.hetzner.com/storage/storage-box> — cheap EU B2-style box (rsync, borg, sftp, sshfs)
+- <https://rsync.net/> — managed borg space; durable, restore-friendly
+- <https://www.tarsnap.com/> — managed encrypted borg-style archive
+- <https://www.borgbase.com/> — managed borg space with a small UI
+- <https://min.io/> — self-hostable S3-compat target; in-house bucket but **not** off-host by itself
+
+### Layered posture for shoggoth
+
+The intended posture (no tool selected today):
+
+1. Longhorn to snapshot PVCs and ship snapshots to B2/Wasabi
+2. Velero for cluster resources (Deployments, ConfigMaps, Secrets, Kestra flows, Grafana provisioning)
+3. Restic orchestrated as Kestra tasks using `slave_noble:dind` — daily `gitea dump` + DB dumps + `/shoggoth/data` files tar to B2
+4. Litestream on any SQLite PVC (CDash and similar)
+5. Periodic second off-host copy to Hetzner Storage Box (cheap)
+6. OpenBao unseal keys stored out-of-band (paper or second human); OpenBao has `bao operator raft snapshot` for the consensus store
+
+Open items:
+- migrate `local-path` PVCs onto a Longhorn StorageClass so all PVs become snapshot-capable
+- confirm DB engine for Gitea/Redmine/CDash before locking the DB-aware tool
+- store Restic/Velero bucket credentials in OpenBao, not in plain env on the workflow runner
+
+## Notifications
+
+shoggoth's services already produce a rich event stream (Kestra executions,
+Gitea PR/CI webhooks, Redmine issues, OpenBao unseal events, basic-memory
+write events), but humans currently have no aggregated view — failures
+only land in OTel/Loki traces. The Kestra flow skill's `## Example prompts`
+list (embedded in `shoggoth/k3s/web-internal.yaml` as the
+`kestra-flow-skill.md` ConfigMap data key, around line 669) contains a
+string used as an LLM-prompt example —
+`"Add a Slack notification task to this existing flow when any task fails"` —
+that effectively describes the same notification gap, but no `# TODO`
+comment or work-item exists in the codebase behind it; this exact gap
+remains open with no in-tree tracker.
+
+The practical posture is a **notification router** (Apprise) feeding
+**one chat platform** as the primary destination, with the chat platform
+selected per the team's threading/search needs.
+
+### Notification routers (fan-out)
+
+- **[Apprise](https://github.com/caronc/apprise)** (MIT, recommended)
+  - + Python + CLI; 100+ targets (Zulip, Slack, Discord, Mattermost, Teams, XMPP, email, SMS, push, webhooks)
+  - + one CLI call (`apprise -t SUBJECT -b BODY --tag shoggoth`) fits the existing `slave_noble:dind` Kestra runner
+  - + destinations declared in `apprise.yml`, stored in OpenBao; chat-platform choice is *not* baked into workflow code
+  - - no GUI; CLI only
+- <https://ntfy.sh/> (Apache-2.0)
+  - + HTTP pub-sub only, very lightweight, mobile + web clients
+  - - no thread/archive model; useful as a *secondary* destination (mobile push), not as the primary chat
+- <https://gotify.net/> (MIT)
+  - + server + Android client + CLI
+  - - one-way push; same shape as ntfy with a smaller ecosystem
+
+### Self-hosted chat platforms (CI/DevOps notifications)
+
+- **[Zulip](https://zulip.com)** (Apache-2.0, recommended)
+  - + Apache-2.0, Docker deploy (`zulip/docker-zulip`), admin console; mature bot API and incoming webhooks
+  - + **stream × topic** two-axis model is purpose-built for CI notifications: one stream per source service (`#kestra`, `#gitea-pr`, `#gitea-ci`, `#redmine`, `#openbao`, `#basic-memory`, `#backup`), one topic per incident
+  - + strong search across projects; mobile + desktop clients; full message history
+  - - integrations catalog covers GitHub/GitLab/Jenkins/Sentry/etc. but **no first-party Gitea integration** — wiring goes through Apprise + generic webhooks
+- <https://mattermost.com/> (MIT server, proprietary mobile SDKs)
+  - + Slack-compatible UI; familiar to most operators; voice channels in recent versions
+  - + Apache-2.0-equivalent server, Docker deploy, broad integrations
+  - - mobile clients use proprietary SDKs
+  - - threading is bolted on to Slack channels; less native than Zulip's stream × topic for CI
+- <https://element.io/> (Apache-2.0)
+  - + Matrix is federated (server-to-server); E2EE by default for rooms; rich mobile clients
+  - + bridging to Slack/Discord/XMPP/IRC available
+  - - persistent thread/search UX is not as first-class as Zulip
+- <https://rocket.chat/> (SSPL newest / MIT older)
+  - + Slack-compatible + customer-support livechat built in (omnichannel routing)
+  - - SSPL license restricts SaaS distribution; redeploy-the-license checks apply
+
+### XMPP / Jabber (federated alternative)
+
+- <https://prosody.im/> (MIT/X11, recommended among XMPP servers)
+  - + MIT; ships in Debian/Ubuntu; lightweight Lua module API
+  - + mature XEP support: MUC (rooms), MAM (history), PubSub (fan-out), OMEMO (E2EE), MUC sub (room topics)
+  - + actively maintained (13.x line shipped 2026); most-used Prosody deployment is `meet.jit.si` (Jitsi)
+  - + same Prosody instance can back Jitsi Meet if shoggoth later adds audio/video
+  - - channel-style threading in the Zulip sense is built from MUC + MUC sub; workable but not first-class
+  - - mobile clients vary (Conversations, Gajim, Dino, Monal) — pick-and-test rather than get one polished triple
+  - - Apprise reaches XMPP through a server-side XMPP bot, not a plain incoming webhook
+- <https://github.com/igniterealtime/Openfire> (Apache 2.0)
+  - + Java XMPP server; admin web UI; long-running enterprise deployments
+  - - Java overhead; community-maintained only; less momentum than Prosody
+- <https://github.com/processone/ejabberd> (GPL-2.0)
+  - + Erlang XMPP server; very high concurrency; commercial MongooseIM fork exists
+  - - GPL-2.0 (not MIT/Apache); MongooseIM is AGPL-3.0
+- <https://github.com/tigase/tigase-server> (AGPL-3.0)
+  - + Java XMPP server with cluster-friendly design
+  - - AGPL-3.0; heavier configuration footprint
+
+### IM backend (embeddable chat, not a Slack replacement)
+
+- <https://github.com/juggleim/im-server> (Apache-2.0)
+  - + Go IM backend with multi-tenant `appkey` design; WebSocket + Protobuf long-connection; SDKs for Web/iOS/Android/PC/Flutter/HarmonyOS
+  - + Apache-2.0, Docker Compose shipped, admin console on `:8090`, MySQL or MongoDB storage
+  - - **not a Slack-substitute notification target** — it's an embeddable chat *engine* for an external app
+  - - no first-party Slack-style incoming webhook; sending requires the server-side REST API on `:9001`
+  - - desktop SDK (`imsdk-pc`) is not open-sourced yet
+  - - cluster/horizontal scaling (>1 node) is gated behind the paid *Professional Edition*
+
+### Live meetings (complementary)
+
+- <https://jitsi.org/> (Apache-2.0)
+  - + Jitsi Meet + Jitsi Videobridge + Jicofo + Jigasi; web + mobile; no account required
+  - + complements a chat platform for "let's hop on a call about this incident"
+  - - text chat is in-call only — **not** a persistent channel model; pair with a chat platform rather than replace
+  - - uses Prosody internally as the XMPP signaling server (`meet.jit.si`)
+
+### Layered posture for shoggoth
+
+The intended posture (no chat platform deployed today):
+
+1. **Apprise** as the fan-out router inside each Kestra task runner (`slave_noble:dind`); tag config in OpenBao as `shoggoth/apprise/tags.yml`
+2. **Zulip** as the first destination — one stream per source service, one topic per incident; this addresses the notification gap noted above (no in-tree TODO exists at `web-internal.yaml:669` — only an LLM-prompt example string in the `kestra-flow-skill.md` ConfigMap data key).
+3. **`shoggoth_maintenance.py` extension** — new step `setup_notification_streams` (alongside `setup_kestra_webhooks`) to provision the stream set on first bringup
+4. **`main_shoggoth_maintenance.yml` extension** — a final task running `apprise --tag shoggoth ...` after each maintenance step; same runner, same OTel env block, no edits to existing tasks
+5. **`onFailure` notification tasks** on `gitea-pr-update`, `gitea-ci-failure`, `redmine-task-processor` — flows where the `kestra-flow-skill.md` example prompt expects a Slack-style task
+6. Apprise tag config in OpenBao (`shoggoth/apprise/tags.yml`) keeps the chat-platform choice swappable: switching to Mattermost or XMPP later is a one-config change, not a refactor of Kestra flows
+
+Open items:
+- pick Zulip vs Mattermost vs XMPP+Prosody based on team preference; Apprise stays as the bus regardless
+- confirm whether local LDAP users need to be mirrored into the chat platform; OpenBao already stores the admin token per service so the same flow can be reused
+- if audio/video incident response is later wanted, pair Prosody (XMPP) with Jitsi Meet — Prosody can serve both the chat and the Jitsi signaling
 
 # Agentic Workflows
 

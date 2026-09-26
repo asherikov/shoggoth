@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -46,11 +47,9 @@ data:
   init.sh: |
     #!/bin/sh
     set -eu
-
     if [ -n "${REDMINE_SECRET_KEY_BASE_FILE:-}" ] && [ -z "${SECRET_KEY_BASE:-}" ]; then
         export SECRET_KEY_BASE="$(cat "${REDMINE_SECRET_KEY_BASE_FILE}")"
     fi
-
     echo "shoggoth: Waiting for Redmine to be ready..."
     for i in $(seq 1 30); do
         if bundle exec rails runner 'puts "ready"' > /dev/null 2>&1; then
@@ -63,7 +62,6 @@ data:
         exit 1
     fi
     echo "shoggoth: Redmine is ready for LDAP configuration"
-
     echo "shoggoth: Configuring LDAP auth source"
     for VAR in LDAP_HOST LDAP_BIND_DN LDAP_BIND_PASSWORD LDAP_BASE_DN; do
         if [ -z "$(eval "echo \"\${${VAR}:-}\"")" ]; then
@@ -88,7 +86,6 @@ data:
         auth.save!
     ' && echo "shoggoth: === redmine ldap init complete ===" \
         || { echo "shoggoth: FATAL: LDAP auth source configuration failed" >&2; exit 1; }
-
     echo "shoggoth: Setting local admin password"
     if [ -z "${SHOGGOTH_ADMIN_PASSWORD:-}" ]; then
         echo "shoggoth: ERROR: SHOGGOTH_ADMIN_PASSWORD not set" >&2
@@ -110,19 +107,15 @@ data:
         updated)    echo "shoggoth: admin password updated" ;;
         not_found)  echo "shoggoth: admin user not found, skipping password update" ;;
     esac
-
     echo "shoggoth: Ensuring slave user and api_key"
     SLAVE_KEY="$(bundle exec rails runner /shoggoth/redmine/slave_token_init.rb)" || { echo "shoggoth: ERROR: slave api_key init failed" >&2; exit 1; }
-
     if [ -z "${SLAVE_KEY}" ]; then
         echo "shoggoth: ERROR: slave token empty; cannot mark ready" >&2
         exit 1
     fi
-    echo "shoggoth: slave api_key stored in OpenBao at redmine/slave-token (len=${#SLAVE_KEY})"
-
+    echo "shoggoth: slave api_key stored in K8s Secret redmine-slave-token (len=${#SLAVE_KEY})"
     echo "shoggoth: Marking token init as ready"
     touch /tmp/slave-token-ready
-
     echo "shoggoth: Syncing slave project memberships"
     bundle exec rails runner '
         User.current = User.find_by_login("admin")
@@ -142,11 +135,13 @@ data:
         end
     ' && echo "shoggoth: === redmine slave init complete ===" \
         || echo "shoggoth: WARNING: membership sync failed"
+
   slave_token_init.rb: |
     require 'net/http'
     require 'uri'
     require 'json'
-
+    require 'base64'
+    require 'openssl'
     User.current = User.find_by_login("admin")
     ldap_auth = AuthSourceLdap.find_by(name: "openldap")
     slave = User.find_by_login("slave")
@@ -165,59 +160,99 @@ data:
         STDERR.puts "slave user unavailable"
         exit 1
     end
-
-    openbao_addr = ENV['OPENBAO_ADDR'].to_s
-    vault_token = ENV['SHOGGOTH_VAULT_TOKEN'].to_s
-    if openbao_addr.empty? || vault_token.empty?
-        STDERR.puts "OPENBAO_ADDR or SHOGGOTH_VAULT_TOKEN not set"
+    namespace = ENV['SHOGGOTH_NAMESPACE'].to_s
+    if namespace.empty?
+        STDERR.puts "SHOGGOTH_NAMESPACE not set"
         exit 1
     end
-
-    uri = URI.parse("#{openbao_addr}/v1/secret/data/redmine/slave-token")
-    http = Net::HTTP.new(uri.host, uri.port)
-    http.use_ssl = (uri.scheme == 'https')
-
-    req = Net::HTTP::Get.new(uri.request_uri)
-    req['X-Vault-Token'] = vault_token
+    secret_name = 'redmine-slave-token'
+    sa_token_path = '/var/run/secrets/kubernetes.io/serviceaccount/token'
+    ca_cert_path = '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+    api_host = ENV['KUBERNETES_SERVICE_HOST'].to_s
+    api_port = ENV['KUBERNETES_SERVICE_PORT'].to_s
+    if api_host.empty? || api_port.empty?
+        STDERR.puts "KUBERNETES_SERVICE_HOST or KUBERNETES_SERVICE_PORT not set"
+        exit 1
+    end
+    unless File.exist?(sa_token_path)
+        STDERR.puts "service account token not mounted at #{sa_token_path}"
+        exit 1
+    end
+    unless File.exist?(ca_cert_path)
+        STDERR.puts "CA certificate not mounted at #{ca_cert_path}"
+        exit 1
+    end
+    sa_token = File.read(sa_token_path).strip
+    http = Net::HTTP.new(api_host, api_port.to_i)
+    http.use_ssl = true
+    http.ca_file = ca_cert_path
+    http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+    http.open_timeout = 10
+    http.read_timeout = 15
+    def k8s_url_for(http, namespace, secret_name)
+        base = http.address.to_s
+        port = http.port
+        ns_enc = URI.encode_www_form_component(namespace)
+        sn_enc = URI.encode_www_form_component(secret_name)
+        URI("https://#{base}:#{port}/api/v1/namespaces/#{ns_enc}/secrets/#{sn_enc}")
+    end
+    def k8s_post_url_for(http, namespace)
+        base = http.address.to_s
+        port = http.port
+        ns_enc = URI.encode_www_form_component(namespace)
+        URI("https://#{base}:#{port}/api/v1/namespaces/#{ns_enc}/secrets")
+    end
+    get_url = k8s_url_for(http, namespace, secret_name)
+    get_req = Net::HTTP::Get.new(get_url.request_uri)
+    get_req['Authorization'] = "Bearer #{sa_token}"
+    get_req['Accept'] = 'application/json'
     begin
-        resp = http.request(req)
+        get_res = http.request(get_req)
     rescue => e
-        STDERR.puts "OpenBao read exception: #{e.class}: #{e.message}"
+        STDERR.puts "K8s GET secret exception: #{e.class}: #{e.message}"
         exit 1
     end
-
-    if resp.code == '200'
-        existing = JSON.parse(resp.body).dig('data', 'data', 'value').to_s
-        unless existing.empty?
-            print existing
+    case get_res
+    when Net::HTTPSuccess
+        body = JSON.parse(get_res.body) rescue {}
+        token_b64 = body['data'] && body['data']['token']
+        if token_b64 && !token_b64.empty?
+            print Base64.decode64(token_b64)
             exit 0
         end
-    elsif resp.code != '404'
-        STDERR.puts "OpenBao read returned HTTP #{resp.code}: #{resp.body}"
+    when Net::HTTPNotFound
+        # fall through to create
+    else
+        STDERR.puts "K8s GET secret failed: HTTP #{get_res.code}: #{get_res.body[0, 200]}"
         exit 1
     end
-
     token = Token.create(user: slave, action: 'api')
     new_key = token.value
-
-    req = Net::HTTP::Post.new(uri.request_uri)
-    req['X-Vault-Token'] = vault_token
-    req['Content-Type'] = 'application/json'
-    req.body = JSON.generate(data: { value: new_key })
-
+    manifest = JSON.generate(
+        'apiVersion' => 'v1',
+        'kind' => 'Secret',
+        'metadata' => { 'name' => secret_name, 'namespace' => namespace },
+        'type' => 'Opaque',
+        'data' => { 'token' => Base64.strict_encode64(new_key) }
+    )
+    post_url = k8s_post_url_for(http, namespace)
+    post_req = Net::HTTP::Post.new(post_url.request_uri)
+    post_req['Authorization'] = "Bearer #{sa_token}"
+    post_req['Content-Type'] = 'application/json'
+    post_req['Accept'] = 'application/json'
+    post_req.body = manifest
     begin
-        resp = http.request(req)
+        post_res = http.request(post_req)
     rescue => e
-        STDERR.puts "OpenBao write exception: #{e.class}: #{e.message}"
+        STDERR.puts "K8s POST secret exception: #{e.class}: #{e.message}"
         exit 1
     end
-
-    unless resp.code == '200' || resp.code == '204'
-        STDERR.puts "OpenBao write returned HTTP #{resp.code}: #{resp.body}"
+    unless post_res.is_a?(Net::HTTPSuccess)
+        STDERR.puts "K8s POST secret failed: HTTP #{post_res.code}: #{post_res.body[0, 200]}"
         exit 1
     end
-
     print new_key
+
 ---
 apiVersion: v1
 kind: Service
@@ -266,30 +301,34 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
-            fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          for pw in redmine-db-password redmine-secret-key-base; do
+            key="password"
+                    case "${pw}" in
+                      redmine-db-password) wait_for_externalsecret redmine-db-password || exit 1 ;;
+                      redmine-secret-key-base) wait_for_externalsecret redmine-secret-key-base || exit 1 ;;
+                    esac
           done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
         resources:
           requests:
             memory: 32Mi
@@ -385,6 +424,8 @@ spec:
     metadata:
       labels:
         app: redmine
+      annotations:
+        secret.reloader.stakater.com/reload: redmine-db-password,redmine-secret-key-base,openldap-ldapauth-password
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -404,30 +445,61 @@ spec:
         args:
         - |
           set -euo pipefail
-          K8S_API="${K8S_API:-https://kubernetes.default.svc}"
-          SA_TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-          SA_CA="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
-          for i in $(seq 1 120); do
-            http_code=$(curl -sS --cacert "${SA_CA}" \
-              -o /dev/null -w '%{http_code}' \
-              -H "Authorization: Bearer ${SA_TOKEN}" \
-              "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" || true)
-            if [ "${http_code}" = "200" ]; then
-              echo "wait-bootstrap: shoggoth-bootstrap-done Secret found"
-              exit 0
+          NS="${SHOGGOTH_NAMESPACE}"
+                    wait_for_externalsecret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                          return 0
+                        fi
+                        sleep 10
+                      done
+                      echo "FAIL: externalsecret/${name} not Ready after 10m"
+                      echo "      Hint: check status from outside the pod:"
+                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
+                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
+                      return 1
+                    }
+          wait_for_secret_key() {
+            local name="$1" key="$2"
+            echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
+            local ok=0
+            for i in $(seq 1 60); do
+              if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
+                echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
+                ok=1
+                break
+              fi
+              sleep 10
+            done
+            if [ "${ok}" != "1" ]; then
+              echo "FAIL: secret/${name}.${key} not populated after 10m"
+              echo "      Hint: check ExternalSecret status from outside the pod:"
+              echo "            kubectl get externalsecret -n ${NS} <name> -o yaml"
+              echo "      Most common cause: OpenBao unavailable, or SecretStore reference broken."
+              return 1
             fi
-            echo "wait-bootstrap: waiting for shoggoth-bootstrap-done Secret (attempt $i/120, http=${http_code})..."
-            if [ $((i % 12)) -eq 0 ] && [ "${http_code}" != "404" ]; then
-              curl -sS --cacert "${SA_CA}" \
-                -H "Authorization: Bearer ${SA_TOKEN}" \
-                "${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/shoggoth-bootstrap-done" >&2 || true
-            fi
-            sleep 5
+            return 0
+          }
+          for pw in redmine-db-password redmine-secret-key-base; do
+                    case "${pw}" in
+                      redmine-db-password) wait_for_externalsecret redmine-db-password || exit 1 ;;
+                      redmine-secret-key-base) wait_for_externalsecret redmine-secret-key-base || exit 1 ;;
+                    esac
           done
-          echo "wait-bootstrap: FATAL: shoggoth-bootstrap-done Secret not found after 600s"
-          echo "wait-bootstrap: openbao-bootstrap may have failed; check:"
-          echo "  kubectl logs -n ${SHOGGOTH_NAMESPACE} -l app=openbao -c openbao-bootstrap"
-          exit 1
+          for pw in openldap-admin-password openldap-ldapauth-password; do
+                    case "${pw}" in
+                      openldap-admin-password) wait_for_externalsecret openldap-admin-password || exit 1 ;;
+                      openldap-ldapauth-password) wait_for_externalsecret openldap-ldapauth-password || exit 1 ;;
+                    esac
+          done
+          wait_for_secret_key openbao-unseal-key root-token || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
         resources:
           requests:
             memory: 32Mi
@@ -438,7 +510,7 @@ spec:
         volumeMounts: []
       containers:
       - name: redmine
-        image: redmine:7.0.0-alpine3.23
+        image: redmine:7.0.1-alpine3.24
         imagePullPolicy: IfNotPresent
         args:
         - rails
@@ -487,13 +559,10 @@ spec:
           value: http://otelcol:4318
         - name: SHOGGOTH_DOMAIN
           value: ${SHOGGOTH_DOMAIN}
-        - name: OPENBAO_ADDR
-          value: http://openbao:80
-        - name: SHOGGOTH_VAULT_TOKEN
+        - name: SHOGGOTH_NAMESPACE
           valueFrom:
-            secretKeyRef:
-              name: openbao-unseal-key
-              key: root-token
+            fieldRef:
+              fieldPath: metadata.namespace
         volumeMounts:
         - name: files
           mountPath: /usr/src/redmine/files
@@ -523,19 +592,13 @@ spec:
               command:
               - /bin/bash
               - -c
-              - 'set -o pipefail
-
+              - |
+                set -o pipefail
                 LOG=/usr/src/redmine/files/redmine-init.log
-
                 exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
-
                 echo "=== redmine-init start $(date -Iseconds) ==="
-
                 /bin/sh /shoggoth/redmine/init.sh
-
                 echo "=== redmine-init exit $? $(date -Iseconds) ==="
-
-                '
         resources:
           requests:
             memory: 256Mi
@@ -598,6 +661,23 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - redmine-db-password
+  - redmine-secret-key-base
+  - openldap-admin-password
+  - openldap-ldapauth-password
+  - openbao-unseal-key
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - redmine-db-password
+  - redmine-secret-key-base
+  - openldap-admin-password
+  - openldap-ldapauth-password
   verbs:
   - get
 ---
@@ -631,6 +711,18 @@ rules:
   - ''
   resources:
   - secrets
+  resourceNames:
+  - redmine-db-password
+  - redmine-secret-key-base
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - redmine-db-password
+  - redmine-secret-key-base
   verbs:
   - get
 ---

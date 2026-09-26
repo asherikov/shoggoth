@@ -35,7 +35,7 @@ host_install_nixos:
 
 pull_registry_image:
 	@echo "Pulling registry image on ${HOST} (bypassing containerd mirror)..."
-	${K3S_SSH} 'sudo k3s ctr images pull ghcr.io/project-zot/zot:latest'
+	${K3S_SSH} 'sudo k3s ctr images pull ghcr.io/project-zot/zot:v2.1.21'
 
 client_install_alpine:
 	su -c 'apk add kubectl helm k9s'
@@ -209,6 +209,11 @@ up: tunnel_up
 		echo "ERROR: '${INSTANCE}' exceeds 53 chars (namespace limit)"; exit 1; \
 	fi
 	@echo "=== Starting all shoggoth K3s services (namespace: ${INSTANCE}) ==="
+	@# Stale-VWC cleanup is done by the upgrade-cleanup init container in
+	@# shoggoth/k3s/external-secrets.yaml (Deployment and CRD staleness is
+	@# handled by --force-conflicts in Pass 1/2). The register-vwc init
+	@# container waits for the Service object to exist before applying the
+	@# VWC from the external-secrets-webhooks-vwc ConfigMap.
 	@export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_GITHUB_ORG="${GITHUB_ORG}" \
 		SHOGGOTH_NAMESPACE="${INSTANCE}" \
 		SHOGGOTH_INSTANCE_DIR="${INSTANCE}" \
@@ -221,10 +226,28 @@ up: tunnel_up
 		SHOGGOTH_AI_DEFAULT_TOKEN_FILE="${AI_DEFAULT_TOKEN_FILE}" \
 		SHOGGOTH_GITEA_SERVER_TOKEN_FILE="${GITEA_SERVER_TOKEN_FILE}" \
 		LDAP_BASE_DN="${LDAP_BASE_DN}"; \
-		for f in ${K3S_ALL_MANIFESTS}; do \
-			envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${SHOGGOTH_DNS_IP}$${SHOGGOTH_WEB_EXT_PORT}$${SHOGGOTH_WG_PORT}$${SHOGGOTH_REGISTRY_PORT}$${SHOGGOTH_WG_UI_PORT}$${SHOGGOTH_AI_DEFAULT_MODEL}$${SHOGGOTH_AI_DEFAULT_API}$${SHOGGOTH_AI_DEFAULT_TOKEN_FILE}$${SHOGGOTH_GITEA_SERVER_TOKEN_FILE}$${LDAP_BASE_DN}' < $$f; \
-			printf "\n---\n"; \
-		done | kubectl apply -f -
+	ENV_VARS='$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${SHOGGOTH_DNS_IP}$${SHOGGOTH_WEB_EXT_PORT}$${SHOGGOTH_WG_PORT}$${SHOGGOTH_REGISTRY_PORT}$${SHOGGOTH_WG_UI_PORT}$${SHOGGOTH_AI_DEFAULT_MODEL}$${SHOGGOTH_AI_DEFAULT_API}$${SHOGGOTH_AI_DEFAULT_TOKEN_FILE}$${SHOGGOTH_GITEA_SERVER_TOKEN_FILE}$${LDAP_BASE_DN}'; \
+	echo "=== Pass 1: applying CRDs (server-side, >262144-byte annotation cap) ==="; \
+	CRD_FILES="$$(for f in ${K3S_ALL_MANIFESTS}; do grep -l '^kind: CustomResourceDefinition$$' "$$f" 2>/dev/null; done)"; \
+	if [ -z "$$CRD_FILES" ]; then echo "FAIL: no CRD files found in shoggoth/k3s/"; exit 1; fi; \
+	for f in $$CRD_FILES; do envsubst "$${ENV_VARS}" < "$$f"; printf "\n---\n"; done | kubectl apply --server-side=true --force-conflicts -f - || { echo "FAIL: CRD apply failed"; exit 1; }; \
+	echo "Waiting for CRDs to become Established..."; \
+	CRD_NAMES="$$(grep -h '^  name: ' $$CRD_FILES 2>/dev/null | sed 's/^  name: //' | sort -u)"; \
+	for crd in $$CRD_NAMES; do \
+		if ! timeout 60 kubectl wait --for=condition=Established customresourcedefinition $$crd --timeout=45s 2>&1; then \
+			echo "FAIL: CRD $$crd not Established within 60s."; \
+			kubectl get customresourcedefinition $$crd -o yaml 2>&1 | tail -20; \
+			exit 1; \
+		fi; \
+	done; \
+	echo "All CRDs Established."; \
+	echo "=== Pass 2: applying remaining manifests (init containers handle stale-state cleanup and VWC registration) ==="; \
+	for f in ${K3S_ALL_MANIFESTS}; do \
+		case "$$f" in \
+			shoggoth/k3s/external-secrets-crds.yaml) ;; \
+			*) envsubst "$${ENV_VARS}" < $$f; printf "\n---\n" ;; \
+		esac; \
+	done | kubectl apply --server-side=true --force-conflicts -f - || { echo "FAIL: apply failed"; exit 1; }
 
 # Stop a single service by name: make stop SERVICE=web-external
 # Deletes deployment, statefulset, and job with matching name, plus its service.
@@ -301,22 +324,29 @@ log: tunnel_up
 		echo \"  [\$$cname] (\$${sz} bytes):\"; \
 		if [ \"\$$sz\" -gt 0 ]; then tail -3000 \"\$$1\" 2>&1 | grep -v kube-probe; fi; \
 		echo \"\"; \
-	' _ {} \;" 2>&1 || echo "No pod logs found on host for $(SERVICE)"
+		' _ {} \;" 2>&1 || echo "No pod logs found on host for $(SERVICE)"
 
 status: tunnel_up
-	@echo "=== K3s shoggoth services (namespace: ${INSTANCE}) ==="
-	kubectl get pods,svc,deployment,statefulset,job,pvc -n ${INSTANCE} -o wide
-	@echo ""
 	@echo "=== Recent events ==="
 	@kubectl -n ${INSTANCE} get events --sort-by=.lastTimestamp 2>&1 | tail -20 || true
+	@echo ""
+	@echo "=== External Secrets Operator (namespace: ${INSTANCE}) ==="
+	@CA="$$(kubectl get validatingwebhookconfiguration externalsecret-validate -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null)"; \
+	if [ -n "$$CA" ]; then printf "caBundle injected:    yes\n"; else printf "caBundle injected:    no\n"; fi
+	@CERT=$$(kubectl -n ${INSTANCE} get secret external-secrets-webhook -o name 2>/dev/null | wc -l); \
+	if [ "$$CERT" -gt 0 ]; then printf "cert Secret present:  yes\n"; else printf "cert Secret present:  no\n"; fi
+	@printf "SecretStores:         %s\n" "$$(kubectl get secretstore -n ${INSTANCE} --no-headers 2>/dev/null | wc -l)"
+	@printf "ExternalSecrets:      %s\n" "$$(kubectl get externalsecret -n ${INSTANCE} --no-headers 2>/dev/null | wc -l)"
 	@echo ""
 	@echo "=== CoreDNS ==="
 	kubectl get pods -n kube-system -l k8s-app=kube-dns
 	@echo ""
+	@echo "=== K3s shoggoth services (namespace: ${INSTANCE}) ==="
+	kubectl get pods,svc,deployment,statefulset,job,pvc -n ${INSTANCE} -o wide
 	@echo "=== Pod readiness ==="
 	@kubectl get pods -n ${INSTANCE} \
-		-o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,STATUS:.status.phase \
-		2>&1 || true
+	    -o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,STATUS:.status.phase \
+        2>&1 || true
 
 # Drop a tag from the local zot registry cache.
 #

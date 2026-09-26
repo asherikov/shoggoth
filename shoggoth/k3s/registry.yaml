@@ -67,6 +67,12 @@ data:
             { "urls": ["https://docker.angie.software"], "onDemand": true },
             { "urls": ["https://public.ecr.aws"], "onDemand": true }
           ]
+        },
+        "ui": {
+          "enable": true
+        },
+        "search": {
+          "enable": true
         }
       }
     }
@@ -88,9 +94,39 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      initContainers:
+      - name: cleanup-sync-staging
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          DATA_DIR="${ZOT_DATA_DIR:-/var/lib/zot}"
+          if [ -d "${DATA_DIR}" ]; then
+            while IFS= read -r -d '' dir; do
+              echo "cleanup-sync-staging: removing ${dir}"
+              rm -rf -- "${dir}"
+            done < <(find "${DATA_DIR}" -type d -name .sync -print0)
+            echo "cleanup-sync-staging: done"
+          else
+            echo "cleanup-sync-staging: ${DATA_DIR} not present, skipping"
+          fi
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/zot
       containers:
       - name: registry
-        image: ghcr.io/project-zot/zot:latest
+        image: ghcr.io/project-zot/zot:v2.1.21
         imagePullPolicy: IfNotPresent
         args:
         - serve
