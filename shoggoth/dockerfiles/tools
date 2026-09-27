@@ -1,7 +1,6 @@
 ARG BASE_IMAGE=alpine:3.22
 FROM ${BASE_IMAGE}
 
-ARG PYTHON_PKG="ldap3"
 RUN apk add --no-cache \
         bash \
         ca-certificates \
@@ -15,5 +14,4 @@ RUN apk add --no-cache \
         openssl \
         openssh-client \
         python3 \
-        py3-pip \
-    && pip install --no-cache-dir --break-system-packages ${PYTHON_PKG}
+        py3-ldap3

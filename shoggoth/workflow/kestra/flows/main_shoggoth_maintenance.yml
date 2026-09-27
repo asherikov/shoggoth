@@ -184,12 +184,9 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    # TEMPORARY: temporarily run this task in slave_noble:dind to test the
-    # pipeline end-to-end while the shoggoth_tools image is missing ldap3.
-    # switch back to `asherikov/shoggoth_tools:alpine` + workflow-scripts
-    # bind-mount once the tools image has been rebuilt with ldap3 installed
-    # (see shoggoth/dockerfiles/tools).
-    containerImage: registry.{{ envs.shoggoth_domain }}/slave_noble:dind
+      volumes:
+        - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
+    containerImage: asherikov/shoggoth_tools:alpine
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose redmine-ldap-sync 2>&1
     env:
