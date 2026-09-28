@@ -326,6 +326,36 @@ log: tunnel_up
 		echo \"\"; \
 		' _ {} \;" 2>&1 || echo "No pod logs found on host for $(SERVICE)"
 
+# Open an interactive shell in a shoggoth pod, or run a command inside it.
+# Default pod is the first match of label app=slave-dind.
+#
+# Usage:
+#   make shell                              # interactive sh in slave-dind
+#   make shell APP=kestra                   # first pod labeled app=kestra
+#   make shell POD=slave-dind-0-abcde       # explicit pod name (overrides APP)
+#   make shell CMD="ls -la /shoggoth"       # run a command instead of an interactive shell
+#   make shell APP=gitea CMD="id"           # combine APP and CMD
+shell: tunnel_up
+	@APP_VAL=$(if $(APP),$(APP),slave-dind); \
+	CMD_VAL=$(if $(CMD),$(CMD),sh); \
+	if [ -n "${POD}" ]; then \
+		POD_VAL="${POD}"; \
+		echo "=== Using POD=$${POD_VAL} (namespace: ${INSTANCE}) ==="; \
+	else \
+		POD_VAL=$$(kubectl get pod -n ${INSTANCE} -l app=$${APP_VAL} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
+		if [ -z "$${POD_VAL}" ]; then \
+			echo "FAIL: no pod found for label app=$${APP_VAL} in namespace ${INSTANCE}"; \
+			echo "      Available pods:"; \
+			kubectl get pod -n ${INSTANCE} --no-headers -o custom-columns=NAME:.metadata.name,APP:.metadata.labels.app 2>/dev/null | sed 's/^/        /'; \
+			exit 1; \
+		fi; \
+		echo "=== Resolved app=$${APP_VAL} -> pod $${POD_VAL} (namespace: ${INSTANCE}) ==="; \
+	fi; \
+	TTY_FLAGS="-i"; \
+	if [ -t 0 ]; then TTY_FLAGS="-it"; fi; \
+	echo "=== Executing '$${CMD_VAL}' in $${POD_VAL} ==="; \
+	exec kubectl exec -n ${INSTANCE} $${TTY_FLAGS} $${POD_VAL} -- $${CMD_VAL}
+
 status: tunnel_up
 	@echo "=== Recent events ==="
 	@kubectl -n ${INSTANCE} get events --sort-by=.lastTimestamp 2>&1 | tail -20 || true

@@ -2,19 +2,6 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: slave-dind-data
-  namespace: ${SHOGGOTH_NAMESPACE}
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
-  storageClassName: local-path
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
   name: slave-dind-ci-cache
   namespace: ${SHOGGOTH_NAMESPACE}
 spec:
@@ -40,7 +27,7 @@ data:
     LOGS_PIDS=""
     export DOCKER_HOST=unix:///dind/docker.sock
     mkdir -p /etc/docker/
-    printf '{"insecure-registries":["registry.%s"]}\n' "${SHOGGOTH_DOMAIN}" > /etc/docker/daemon.json
+    printf '{"insecure-registries":["registry.%s"],"registry-mirrors":["http://registry.%s:%s"]}\n' "${SHOGGOTH_DOMAIN}" "${SHOGGOTH_DOMAIN}" "${SHOGGOTH_REGISTRY_PORT}" > /etc/docker/daemon.json
     rm -f /var/run/docker.pid
     cleanup() {
         echo "shoggoth: Shutting down..." >&2
@@ -56,7 +43,7 @@ data:
     trap cleanup EXIT
     echo "shoggoth: Starting dockerd..." >&2
     cat /etc/docker/daemon.json
-    dockerd --host unix:///dind/docker.sock --config-file /etc/docker/daemon.json &
+    dockerd --host unix:///dind/docker.sock --config-file /etc/docker/daemon.json --log-level info &
     DOCKERD_PID=$!
     echo "shoggoth: Waiting for dockerd to be ready..." >&2
     ATTEMPT=1
@@ -406,8 +393,8 @@ spec:
         persistentVolumeClaim:
           claimName: slave-dind-ci-cache
       - name: dind-data
-        persistentVolumeClaim:
-          claimName: slave-dind-data
+        emptyDir:
+          sizeLimit: 10Gi
       serviceAccountName: slave-dind
 ---
 apiVersion: v1

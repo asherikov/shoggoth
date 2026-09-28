@@ -157,9 +157,12 @@ data:
     fi
     if [ -f "${LDAP_DIR}/passwords.ldif" ]; then
         echo "shoggoth: setting passwords"
-        ldapmodify -x -H "${LDAP_URL}" \
+        ldapmodify -c -x -H "${LDAP_URL}" \
             -D "${ADMIN_DN}" -y "${ADMIN_PW}" \
-            -f "${LDAP_DIR}/passwords.ldif" || true
+            -f "${LDAP_DIR}/passwords.ldif" || {
+            echo "shoggoth: FATAL: passwords.ldif apply failed" >&2
+            exit 1
+        }
     fi
     touch "${SENTINEL}"
     touch /run/shoggoth-ldap-init-done
@@ -304,24 +307,15 @@ data:
         local f="${1}"
         tr -d '\n\r' < "${f}"
     }
-    hex_to_raw() {
-        local hex="${1}"
-        printf '%b' "$(printf '%s' "${hex}" | sed 's/\(..\)/\\x\1/g')"
-    }
-    slappasswd() {
-        local pw="${1}"
-        local salt_hex salt hash
-        salt_hex="$(openssl rand -hex 4)"
-        salt="$(hex_to_raw "${salt_hex}")"
-        hash="$(printf '%s%s' "${pw}" "${salt}" | openssl dgst -sha1 -hex | awk '{print $NF}')"
-        local combined
-        combined="$(hex_to_raw "${hash}${salt_hex}")"
-        printf '{SSHA}%s' "$(printf '%s' "${combined}" | openssl base64 -A)"
-    }
-    export ADMIN_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_admin_password)")"
-    export LDAPAUTH_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_ldapauth_password)")"
-    export SLAVE_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_slave_password)")"
-    export SLAVE_REVIEWER_HASH="$(slappasswd "$(read_pw /run/secrets/openldap_slave-reviewer_password)")"
+    ssha() { python3 -c 'import sys,hashlib,base64,os;salt=os.urandom(4);sys.stdout.write("{SSHA}"+base64.b64encode(hashlib.sha1(sys.argv[1].encode()+salt).digest()+salt).decode())' "$1"; }
+    export ADMIN_HASH="$(ssha "$(read_pw /run/secrets/openldap_admin_password)")"
+    export LDAPAUTH_HASH="$(ssha "$(read_pw /run/secrets/openldap_ldapauth_password)")"
+    export SLAVE_HASH="$(ssha "$(read_pw /run/secrets/openldap_slave_password)")"
+    export SLAVE_REVIEWER_HASH="$(ssha "$(read_pw /run/secrets/openldap_slave-reviewer_password)")"
+    [ -n "${ADMIN_HASH}" ] || { echo "render-ldif: FATAL: ADMIN_HASH empty" >&2; exit 1; }
+    [ -n "${LDAPAUTH_HASH}" ] || { echo "render-ldif: FATAL: LDAPAUTH_HASH empty" >&2; exit 1; }
+    [ -n "${SLAVE_HASH}" ] || { echo "render-ldif: FATAL: SLAVE_HASH empty" >&2; exit 1; }
+    [ -n "${SLAVE_REVIEWER_HASH}" ] || { echo "render-ldif: FATAL: SLAVE_REVIEWER_HASH empty" >&2; exit 1; }
     VARS='${LDAP_BASE_DN}${SHOGGOTH_DOMAIN}${MDB_DN}${ADMIN_HASH}${LDAPAUTH_HASH}${SLAVE_HASH}${SLAVE_REVIEWER_HASH}'
     for tmpl in config.ldif data.ldif memberof_module.ldif memberof_overlay.ldif passwords.ldif; do
         if [ ! -f "${TEMPLATES_DIR}/${tmpl}" ]; then
