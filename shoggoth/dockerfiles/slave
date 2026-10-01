@@ -12,7 +12,10 @@ USER root
 RUN git config --system credential.helper 'cache --socket=/shoggoth/git-cred/git_credential_sock' \
     && git config --system user.email 'slave@shoggoth.local' \
     && git config --system user.name 'shoggoth' \
-    && printf 'Host *\n  UserKnownHostsFile /shoggoth/git-cred/known_hosts\n' > /etc/ssh/ssh_config.d/shoggoth.conf
+    && printf 'Host *\n  UserKnownHostsFile /shoggoth/git-cred/known_hosts\n' > /etc/ssh/ssh_config.d/shoggoth.conf \
+    && mkdir -p /home/ccws/.qwen \
+    && printf '{\n  "telemetry": {\n    "enabled": true,\n    "target": "local",\n    "otlpEndpoint": "http://otelcol:4317",\n    "otlpProtocol": "grpc",\n    "logPrompts": false,\n    "includeSensitiveSpanAttributes": false\n  }\n}\n' > /home/ccws/.qwen/settings.json \
+    && chown -R ccws /home/ccws/
 
 RUN \
 --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -36,3 +39,8 @@ RUN \
     || (test -n "${SHOGGOTH_DOMAIN}" && \
         env PIP_INDEX_URL=http://python-cache.${SHOGGOTH_DOMAIN}/index/ PIP_TRUSTED_HOST=python-cache.${SHOGGOTH_DOMAIN} \
         pip install ${PYTHON_PKG})
+
+RUN printf 'Acquire::http::Proxy "http://apt-cache";\nAcquire::https::Proxy "false";\n' > /etc/apt/apt.conf.d/00-shoggoth-apt-cache
+
+ENV PIP_INDEX_URL="http://python-cache/index/"
+ENV PIP_TRUSTED_HOST="python-cache"

@@ -1,0 +1,186 @@
+id: slave-verify
+namespace: shoggoth
+disabled: false
+
+concurrency:
+  limit: 1
+  behavior: CANCEL
+
+# Verifies the internal services and credentials consumed by slaves:
+# Gitea API + git https (slave token), git ssh (ssh/slave-private-key),
+# Redmine API (redmine/slave-token), embeddings (litellm nomic-embed-text),
+# MCP servers (mcp-gitea with bearer slave token, basic-memory),
+# telemetry (otelcol OTLP gRPC port + HTTP trace export),
+# pip cache (python-cache proxy via image PIP_* env).
+# All tasks use the slave image: the slave-dind image store is an emptyDir
+# (wiped on every pod restart) and only slave_noble:latest is
+# re-pulled by the dind entrypoint; any Docker Hub image
+# (e.g. asherikov/shoggoth_tools:alpine) triggers a pull that stalls the
+# task runner silently.
+# Every check has allowFailure: true, so a failed check ends in WARNING
+# and the remaining checks still run (git-https and git-ssh share the
+# scratch repo, so the listed order matters); the final Assert task fails
+# the execution if any check exited non-zero.
+
+tasks:
+  - id: gitea_api
+    type: io.kestra.plugin.scripts.shell.Commands
+    allowFailure: true
+    timeout: PT5M
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+      volumes:
+        - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
+    containerImage: registry.s.local/slave_noble:latest
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify gitea-api 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+      GITEA_SERVER_URL: 'http://git.{{ envs.shoggoth_domain }}'
+      SHOGGOTH_DOMAIN: '{{ envs.shoggoth_domain }}'
+      SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
+      OPENBAO_ADDR: http://openbao:80
+
+  - id: redmine_api
+    type: io.kestra.plugin.scripts.shell.Commands
+    allowFailure: true
+    timeout: PT5M
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+      volumes:
+        - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
+    containerImage: registry.s.local/slave_noble:latest
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify redmine-api 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+      REDMINE_SERVER: 'http://redmine.{{ envs.shoggoth_domain }}'
+      SHOGGOTH_DOMAIN: '{{ envs.shoggoth_domain }}'
+      SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
+      OPENBAO_ADDR: http://openbao:80
+
+  - id: git_https
+    type: io.kestra.plugin.scripts.shell.Commands
+    allowFailure: true
+    timeout: PT5M
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+      volumes:
+        - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
+    containerImage: registry.s.local/slave_noble:latest
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify git-https 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+      GITEA_SERVER_URL: 'http://git.{{ envs.shoggoth_domain }}'
+      GITEA_ADMIN_TOKEN: '{{ envs.gitea_admin_token }}'
+      SHOGGOTH_DOMAIN: '{{ envs.shoggoth_domain }}'
+      SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
+      OPENBAO_ADDR: http://openbao:80
+
+  - id: git_ssh
+    type: io.kestra.plugin.scripts.shell.Commands
+    allowFailure: true
+    timeout: PT5M
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+      volumes:
+        - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
+    containerImage: registry.s.local/slave_noble:latest
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify git-ssh 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+      GITEA_SERVER_URL: 'http://git.{{ envs.shoggoth_domain }}'
+      GITEA_SSH_HOST: 'git.{{ envs.shoggoth_domain }}'
+      GITEA_ADMIN_TOKEN: '{{ envs.gitea_admin_token }}'
+      SHOGGOTH_DOMAIN: '{{ envs.shoggoth_domain }}'
+      SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
+      OPENBAO_ADDR: http://openbao:80
+
+  - id: embeddings
+    type: io.kestra.plugin.scripts.shell.Commands
+    allowFailure: true
+    timeout: PT5M
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+      volumes:
+        - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
+    containerImage: registry.s.local/slave_noble:latest
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify embeddings 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+
+  - id: mcp_servers
+    type: io.kestra.plugin.scripts.shell.Commands
+    allowFailure: true
+    timeout: PT5M
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+      volumes:
+        - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
+    containerImage: registry.s.local/slave_noble:latest
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify mcp 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+      SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
+      OPENBAO_ADDR: http://openbao:80
+
+  - id: telemetry
+    type: io.kestra.plugin.scripts.shell.Commands
+    allowFailure: true
+    timeout: PT5M
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+      volumes:
+        - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
+    containerImage: registry.s.local/slave_noble:latest
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify telemetry 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+
+  - id: pip_cache
+    type: io.kestra.plugin.scripts.shell.Commands
+    allowFailure: true
+    timeout: PT5M
+    taskRunner:
+      type: io.kestra.plugin.scripts.runner.docker.Docker
+      #pullPolicy: ALWAYS
+      networkMode: host
+      volumes:
+        - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
+    containerImage: registry.s.local/slave_noble:latest
+    commands:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify pip-cache 2>&1
+    env:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+
+  - id: assert_all_passed
+    type: io.kestra.plugin.core.execution.Assert
+    conditions:
+      - '{{ (outputs.gitea_api.exitCode ?? 1) == 0 }}'
+      - '{{ (outputs.redmine_api.exitCode ?? 1) == 0 }}'
+      - '{{ (outputs.git_https.exitCode ?? 1) == 0 }}'
+      - '{{ (outputs.git_ssh.exitCode ?? 1) == 0 }}'
+      - '{{ (outputs.embeddings.exitCode ?? 1) == 0 }}'
+      - '{{ (outputs.mcp_servers.exitCode ?? 1) == 0 }}'
+      - '{{ (outputs.telemetry.exitCode ?? 1) == 0 }}'
+      - '{{ (outputs.pip_cache.exitCode ?? 1) == 0 }}'
+    errorMessage: 'slave-verify: one or more checks failed, see WARNING tasks above'

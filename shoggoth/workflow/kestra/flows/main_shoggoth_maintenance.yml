@@ -126,8 +126,10 @@ tasks:
       SHOGGOTH_DOMAIN: '{{ envs.shoggoth_domain }}'
       SHOGGOTH_NAMESPACE: '{{ envs.shoggoth_namespace }}'
       SHOGGOTH_GITHUB_ORG: '{{ envs.shoggoth_github_org }}'
+      SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
+      OPENBAO_ADDR: http://openbao:80
       KUBERNETES_SERVICE_HOST: kubernetes.default.svc
-      KUBERNETES_SERVICE_PORT: 443
+      KUBERNETES_SERVICE_PORT: '443'
 
   - id: runner_token
     type: io.kestra.plugin.scripts.shell.Commands

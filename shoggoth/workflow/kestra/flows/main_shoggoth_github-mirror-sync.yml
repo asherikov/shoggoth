@@ -13,7 +13,11 @@ tasks:
       type: io.kestra.plugin.scripts.runner.docker.Docker
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: registry.s.local/slave_noble:dind
+      volumes:
+        - "/shoggoth/git-cred:/shoggoth/git-cred"
+        - "/shoggoth/ci_cache:/cache"
+        - "/host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro"
+    containerImage: registry.s.local/slave_noble:latest
     commands:
       - 'python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose github-mirror-sync $(echo "{{ envs.shoggoth_github_org }}" | tr "," " ") 2>&1'
     env:

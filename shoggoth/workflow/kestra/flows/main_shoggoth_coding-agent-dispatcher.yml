@@ -35,14 +35,24 @@ tasks:
       volumes:
         - "/shoggoth/git-cred:/shoggoth/git-cred"
         - "/shoggoth/ci_cache:/cache"
+        - "/host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro"
       #pullPolicy: ALWAYS
       networkMode: host
-    containerImage: registry.s.local/slave_noble:dind
+    containerImage: registry.s.local/slave_noble:latest
     commands:
       - "export PATH=\"/shoggoth/workflow/scripts:${PATH}\" && {{ inputs.script }} --verbose {{ inputs.task_id }} 2>&1"
     env:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
+      OPENAI_API_KEY: "litellm"
+      OPENAI_BASE_URL: "http://litellm.{{ envs.shoggoth_domain }}/v1/"
+      OPENAI_MODEL: "shoggoth-default"
+      BM_MCP_URL: "http://litellm.{{ envs.shoggoth_domain }}/mcp"
+      CCACHE_REMOTE_STORAGE: "http://build-cache.{{ envs.shoggoth_domain }}"
+      CCACHE_REMOTE_ONLY: "true"
+      KESTRA_HOST: "kestra.{{ envs.shoggoth_domain }}"
       GITEA_SERVER_URL: "http://api.{{ envs.shoggoth_domain }}/gitea"
+      GITEA_SERVER_TOKEN: "gateway"
+      GITEA_INSTANCE_SSH_HOST: "git.{{ envs.shoggoth_domain }}"
       REDMINE_SERVER: "http://api.{{ envs.shoggoth_domain }}/redmine"
       SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"
       SHOGGOTH_GITHUB_ORG: "{{ envs.shoggoth_github_org }}"

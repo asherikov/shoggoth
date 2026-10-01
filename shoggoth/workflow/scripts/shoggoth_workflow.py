@@ -24,7 +24,7 @@ SECRET_ENV_KEYS = frozenset([
     "GITEA_ADMIN_TOKEN",
     "SHOGGOTH_VAULT_TOKEN", "REDMINE_TOKEN",
     "OPENBAO_ADDR", "SHOGGOTH_AI_DEFAULT_TOKEN",
-    "GITHUB_TOKEN", "REDMINE_WEBHOOK_SECRET",
+    "REDMINE_WEBHOOK_SECRET",
 ])
 
 ANTI_LEAK_DIRECTIVE = (
@@ -32,6 +32,43 @@ ANTI_LEAK_DIRECTIVE = (
     "XML/HTML tags that resemble reasoning traces). Output only the final "
     "answer.\n\n"
 )
+
+
+TOOL_PROFILES = {
+    "full": [],
+    "pr-review": [
+        "edit",
+        "write_file",
+        "notebook_edit",
+    ],
+    "pr-comment": [],
+}
+
+QWEN_DENY_PATTERNS = [
+    "Bash(git commit*)",
+    "Bash(git commit)",
+    "Bash(git push*)",
+    "Bash(git push)",
+    "Bash(git tag*)",
+    "Bash(git tag)",
+    "Bash(git -C * commit*)",
+    "Bash(git -C * push*)",
+    "Bash(git -C * tag*)",
+    "Bash(wsh *commit*)",
+    "Bash(wsh *push*)",
+    "Bash(wsh *tag*)",
+    "Bash(wshandler commit*)",
+    "Bash(wshandler push*)",
+    "Bash(wshandler tag*)",
+    "Bash(wshandler tag)",
+]
+
+TOOL_PROFILE_BY_SESSION = {
+    "task": "full",
+    "ci-failure": "full",
+    "pr-review": "pr-review",
+    "pr-comment": "pr-comment",
+}
 
 
 def _filter_qwen_env():
@@ -249,12 +286,23 @@ def http_patch_json(url, payload, headers=None):
     hdrs = {"Content-Type": "application/json"}
     if headers:
         hdrs.update(headers)
+    log(f"PATCH {url}")
     req = Request(url, data=data, headers=hdrs, method="PATCH")
-    with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-        body = resp.read().decode()
-        if not body:
-            return {}
-        return json.loads(body)
+    try:
+        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            body = resp.read().decode()
+            log(f"PATCH {url} -> {resp.status}")
+            if not body:
+                return {}
+            return json.loads(body)
+    except HTTPError as e:
+        body = e.read().decode(errors="replace")[:500]
+        print(f"WARNING: HTTP PATCH {url} failed: {e.code} {e.reason}: {body}",
+              file=sys.stderr)
+        raise
+    except (URLError, OSError) as e:
+        print(f"WARNING: HTTP PATCH {url} failed: {e}", file=sys.stderr)
+        raise
 
 
 def http_put_json(url, payload, headers=None):
@@ -262,12 +310,23 @@ def http_put_json(url, payload, headers=None):
     hdrs = {"Content-Type": "application/json"}
     if headers:
         hdrs.update(headers)
+    log(f"PUT {url}")
     req = Request(url, data=data, headers=hdrs, method="PUT")
-    with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-        body = resp.read().decode()
-        if not body:
-            return {}
-        return json.loads(body)
+    try:
+        with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            body = resp.read().decode()
+            log(f"PUT {url} -> {resp.status}")
+            if not body:
+                return {}
+            return json.loads(body)
+    except HTTPError as e:
+        body = e.read().decode(errors="replace")[:500]
+        print(f"WARNING: HTTP PUT {url} failed: {e.code} {e.reason}: {body}",
+              file=sys.stderr)
+        raise
+    except (URLError, OSError) as e:
+        print(f"WARNING: HTTP PUT {url} failed: {e}", file=sys.stderr)
+        raise
 
 
 def http_delete_json(url, payload, headers=None):
@@ -464,7 +523,11 @@ class Gitea:
         if data.get("has_pull_requests"):
             return
         log(f"ensure_pull_requests_enabled: enabling pulls on {repo_full}")
-        self.patch(f"repos/{repo_full}", {"has_pull_requests": True})
+        result = self.patch(f"repos/{repo_full}", {"has_pull_requests": True})
+        if result is None:
+            print(f"WARNING: failed to enable pulls on {repo_full}", file=sys.stderr)
+            return
+        return result
 
     def get_unresolved_review_comments(self, repo, pr_number):
         slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
@@ -652,6 +715,14 @@ class Redmine:
 
     def _put(self, path, payload):
         url = f"{self.api_url}/{path}"
+        logged = payload
+        if isinstance(payload, dict) and isinstance(payload.get("issue"), dict):
+            notes = payload["issue"].get("notes")
+            if isinstance(notes, str) and len(notes) > 200:
+                logged = {**payload,
+                          "issue": {**payload["issue"],
+                                    "notes": notes[:200] + "…"}}
+        log(f"PUT {url} payload={logged}")
         return http_put_json(url, payload, headers=self._headers())
 
     def _resolve_status_id(self, name):
@@ -1291,12 +1362,32 @@ class Agent:
     def __init__(self, shoggoth):
         self.shoggoth = shoggoth
         self.otlp = OtlpLogger(os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"])
+        self.tool_profile = "full"
+        self._qwen_restrict_path = None
 
     def start_session(self, event_type):
-        log(f"start_session: event_type={event_type}")
+        self.tool_profile = TOOL_PROFILE_BY_SESSION.get(event_type, "full")
+        log(f"start_session: event_type={event_type} "
+            f"tool_profile={self.tool_profile}")
         self.otlp.start_session(event_type)
 
         self.qwen_env = _filter_qwen_env()
+
+        deny_rules = QWEN_DENY_PATTERNS
+        if deny_rules:
+            settings_path = f"/tmp/qwen-restrict-{self.otlp.session_id}.json"
+            try:
+                with open(settings_path, "w") as f:
+                    json.dump({"permissions": {"deny": deny_rules}}, f)
+                self.qwen_env["QWEN_CODE_SYSTEM_SETTINGS_PATH"] = settings_path
+                self._qwen_restrict_path = settings_path
+                log(f"start_session: wrote qwen restrictions to {settings_path} "
+                    f"({len(deny_rules)} deny rules)")
+            except OSError as e:
+                print(f"WARNING: failed to write qwen restriction file "
+                      f"{settings_path}: {e}", file=sys.stderr)
+        else:
+            self._qwen_restrict_path = None
 
         plugin_url = f"http://{self.shoggoth.domain}/plugin.tar.gz"
         log(f"start_session: downloading plugin from {plugin_url}")
@@ -1334,13 +1425,16 @@ class Agent:
         log(f"prompt: cwd={cwd}")
 
         cmd = ["qwen", "--yolo", "--output-format", "stream-json"]
+        for excluded in TOOL_PROFILES.get(self.tool_profile, []):
+            cmd.extend(["--exclude-tools", excluded])
         if resume:
             cmd.extend(["--resume", self.otlp.session_id])
         else:
             cmd.extend(["--session-id", self.otlp.session_id])
         cmd.extend(["--prompt", ANTI_LEAK_DIRECTIVE + text])
 
-        log(f"prompt: resume={resume} session={self.otlp.session_id} timeout={timeout}")
+        log(f"prompt: resume={resume} session={self.otlp.session_id} "
+            f"timeout={timeout} tool_profile={self.tool_profile}")
         log(f"prompt: cmd={' '.join(cmd[:6])}... (prompt length={len(text)})")
         log(f"prompt: text:\n{ANTI_LEAK_DIRECTIVE}{text}")
         log("prompt: starting qwen subprocess")
@@ -1439,6 +1533,15 @@ class Agent:
     def stop_session(self):
         log("stop_session")
         self.otlp.stop_session()
+        if self._qwen_restrict_path:
+            try:
+                os.unlink(self._qwen_restrict_path)
+                log(f"stop_session: removed qwen restrictions file "
+                    f"{self._qwen_restrict_path}")
+            except OSError as e:
+                print(f"WARNING: failed to remove qwen restriction file "
+                      f"{self._qwen_restrict_path}: {e}", file=sys.stderr)
+            self._qwen_restrict_path = None
 
 
 class CommandBase:
@@ -1447,6 +1550,83 @@ class CommandBase:
         self.redmine = redmine
         self.agent = agent
         self.shoggoth = shoggoth
+
+    def _commit_only_standalone(self, repo_dir, commit_msg):
+        status = run(["git", "-C", repo_dir, "status", "--porcelain"], check=False)
+        if status.returncode != 0:
+            die(f"git status failed in {repo_dir}: {status.stderr}")
+        if not status.stdout.strip():
+            self._pending_modified_repos = []
+            return False
+
+        add = run(["git", "-C", repo_dir, "add", "-A"], check=False)
+        if add.returncode != 0:
+            die(f"failed to stage changes in {repo_dir}: {add.stderr}")
+        staged = run(["git", "-C", repo_dir, "diff", "--cached", "--name-only"], check=False)
+        if staged.returncode != 0:
+            die(f"git diff --cached failed in {repo_dir}: {staged.stderr}")
+        if not staged.stdout.strip():
+            self._pending_modified_repos = []
+            return False
+
+        commit = run(["git", "-C", repo_dir, "commit", "-m", commit_msg], check=False)
+        if commit.returncode != 0:
+            die(f"git commit failed: {commit.stderr}")
+        self._pending_modified_repos = []
+        return True
+
+    def _commit_only_ccws(self, repo_dir, commit_msg):
+        status = wsh_status(repo_dir, quiet=True)
+        if not status.stdout.strip():
+            self._pending_modified_repos = []
+            return False
+
+        modified_repos = []
+        for line in status.stdout.strip().splitlines():
+            parts = line.split()
+            if len(parts) < 5:
+                continue
+            repo_name = parts[0]
+            flags = parts[3]
+            if "M" in flags:
+                modified_repos.append(repo_name)
+        if not modified_repos:
+            self._pending_modified_repos = []
+            return False
+
+        for repo_name in modified_repos:
+            repo_path = os.path.join(repo_dir, repo_name)
+            add = run(["git", "-C", repo_path, "add", "-A"], check=False)
+            if add.returncode != 0:
+                die(f"failed to stage changes in {repo_name}: {add.stderr}")
+
+        commit = wsh(repo_dir, ["commit", sanitize_commit_msg(commit_msg)], check=False)
+        if commit.returncode != 0:
+            die(f"git commit failed: {commit.stderr}")
+        self._pending_modified_repos = modified_repos
+        return True
+
+    def _commit_only(self, commit_msg=None):
+        repo_dir = self.shoggoth.repo_dir
+        if commit_msg is None:
+            commit_msg = f"Address review comments on PR#{self.gitea.get_pr_number()}"
+
+        if self.shoggoth.type == "ccws":
+            return self._commit_only_ccws(repo_dir, commit_msg)
+        return self._commit_only_standalone(repo_dir, commit_msg)
+
+    def _push_pending_commits(self):
+        repo_dir = self.shoggoth.repo_dir
+        pr_branch = self.shoggoth.working_branch
+        if self.shoggoth.type == "ccws":
+            modified_repos = getattr(self, "_pending_modified_repos", [])
+            push = wsh(repo_dir, ["-p", "version", "push"] + modified_repos, check=False)
+            if push.returncode != 0:
+                die(f"failed to push branches: {push.stderr}")
+        else:
+            push = run(["git", "-C", repo_dir, "push", "origin", pr_branch], check=False)
+            if push.returncode != 0:
+                die(f"failed to push branch {pr_branch}: {push.stderr}")
 
 
 class TaskCommand(CommandBase):
@@ -1689,7 +1869,8 @@ class CiFailureCommand(CommandBase):
             f"Run URL: {ci_run_url}\n\n"
             f"CI logs:\n{ci_logs}\n\n"
             f"Use the codebase-memory skill to understand the code related "
-            f"to the failure. Fix the code, commit, and push."
+            f"to the failure. Fix the code. Leave all changes uncommitted "
+            f"in the working tree; the workflow script handles commit and push."
         )
 
         rc = self.agent.prompt_with_retry(prompt)
@@ -1697,6 +1878,20 @@ class CiFailureCommand(CommandBase):
             die(f"qwen agent exited with code {rc}")
 
         self.agent.stop_session()
+
+        commit_subject = f"Fix CI failure in {ci_workflow}"
+        commit_msg = (
+            f"{commit_subject}\n\n"
+            f"Resolves CI failure on {ci_repo}@{ci_sha[:12]} "
+            f"(branch {ci_branch}).\n"
+            f"Run URL: {ci_run_url}"
+        )
+        committed = self._commit_only(commit_msg)
+        if committed:
+            log(f"ci-failure: committed fix on branch {ci_branch}")
+            self._push_pending_commits()
+        else:
+            log(f"ci-failure: no source changes to commit")
 
 
 class PrUpdateCommand(CommandBase):
@@ -1965,83 +2160,6 @@ class PrUpdateCommand(CommandBase):
             if normalize_for_branch(issue.get("subject", "")) == branch_subject:
                 return issue.get("id")
         return None
-
-    def _commit_only_standalone(self, repo_dir, commit_msg):
-        status = run(["git", "-C", repo_dir, "status", "--porcelain"], check=False)
-        if status.returncode != 0:
-            die(f"git status failed in {repo_dir}: {status.stderr}")
-        if not status.stdout.strip():
-            self._pending_modified_repos = []
-            return False
-
-        add = run(["git", "-C", repo_dir, "add", "-A"], check=False)
-        if add.returncode != 0:
-            die(f"failed to stage changes in {repo_dir}: {add.stderr}")
-        staged = run(["git", "-C", repo_dir, "diff", "--cached", "--name-only"], check=False)
-        if staged.returncode != 0:
-            die(f"git diff --cached failed in {repo_dir}: {staged.stderr}")
-        if not staged.stdout.strip():
-            self._pending_modified_repos = []
-            return False
-
-        commit = run(["git", "-C", repo_dir, "commit", "-m", commit_msg], check=False)
-        if commit.returncode != 0:
-            die(f"git commit failed: {commit.stderr}")
-        self._pending_modified_repos = []
-        return True
-
-    def _commit_only_ccws(self, repo_dir, commit_msg):
-        status = wsh_status(repo_dir, quiet=True)
-        if not status.stdout.strip():
-            self._pending_modified_repos = []
-            return False
-
-        modified_repos = []
-        for line in status.stdout.strip().splitlines():
-            parts = line.split()
-            if len(parts) < 5:
-                continue
-            repo_name = parts[0]
-            flags = parts[3]
-            if "M" in flags:
-                modified_repos.append(repo_name)
-        if not modified_repos:
-            self._pending_modified_repos = []
-            return False
-
-        for repo_name in modified_repos:
-            repo_path = os.path.join(repo_dir, repo_name)
-            add = run(["git", "-C", repo_path, "add", "-A"], check=False)
-            if add.returncode != 0:
-                die(f"failed to stage changes in {repo_name}: {add.stderr}")
-
-        commit = wsh(repo_dir, ["commit", sanitize_commit_msg(commit_msg)], check=False)
-        if commit.returncode != 0:
-            die(f"git commit failed: {commit.stderr}")
-        self._pending_modified_repos = modified_repos
-        return True
-
-    def _commit_only(self, commit_msg=None):
-        repo_dir = self.shoggoth.repo_dir
-        if commit_msg is None:
-            commit_msg = f"Address review comments on PR#{self.gitea.get_pr_number()}"
-
-        if self.shoggoth.type == "ccws":
-            return self._commit_only_ccws(repo_dir, commit_msg)
-        return self._commit_only_standalone(repo_dir, commit_msg)
-
-    def _push_pending_commits(self):
-        repo_dir = self.shoggoth.repo_dir
-        pr_branch = self.shoggoth.working_branch
-        if self.shoggoth.type == "ccws":
-            modified_repos = getattr(self, "_pending_modified_repos", [])
-            push = wsh(repo_dir, ["-p", "version", "push"] + modified_repos, check=False)
-            if push.returncode != 0:
-                die(f"failed to push branches: {push.stderr}")
-        else:
-            push = run(["git", "-C", repo_dir, "push", "origin", pr_branch], check=False)
-            if push.returncode != 0:
-                die(f"failed to push branch {pr_branch}: {push.stderr}")
 
     def _pr_comment(self, pr_number, pr_url):
         pr_repo = self.shoggoth.working_repo

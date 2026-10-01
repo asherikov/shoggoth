@@ -29,7 +29,7 @@ data:
             use_temp_path=off;
         server {
             listen 80;
-            server_name python-cache.${SHOGGOTH_DOMAIN};
+            server_name python-cache.${SHOGGOTH_DOMAIN} python-cache;
             location = / {
                 return 302 /index/;
             }
@@ -39,7 +39,7 @@ data:
                 proxy_set_header Host pypi.org;
                 proxy_set_header Accept-Encoding "";
                 sub_filter_once off;
-                sub_filter 'https://files.pythonhosted.org/' 'http://python-cache.${SHOGGOTH_DOMAIN}/files/';
+                sub_filter 'https://files.pythonhosted.org/' '/files/';
                 sub_filter_types text/html application/vnd.pypi.simple.v1+json application/vnd.pypi.simple.latest+json application/vnd.pypi.simple.v1+html;
                 proxy_cache pypi_cache;
                 proxy_cache_valid 200 10m;
@@ -246,6 +246,20 @@ data:
         </div>
     </body>
     </html>
+
+  nomic-embed-text-v1.5.yaml: |
+    name: "nomic-embed-text-v1.5"
+    description: |
+        Nomic Embed v1.5 embedding model in GGUF format.
+    license: "Apache 2.0"
+    backend: llama-cpp
+    embeddings: true
+    context_size: 2048
+    parameters:
+        model: nomic-embed-text-v1.5.f16.gguf
+    gpu_layers: 99999999
+    options:
+        - gpu
 
 ---
 apiVersion: v1

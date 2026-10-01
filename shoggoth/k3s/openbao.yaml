@@ -248,6 +248,22 @@ data:
     SEEDED=0
     SKIPPED=0
     OVERRIDDEN=0
+    # ai/default-token: when the token file is provided it is the source of
+    # truth — the OpenBao value is ALWAYS overwritten from it so that token
+    # rotation in the file propagates on every bootstrap run. Only when the
+    # file is absent does the skip-if-exists / random-seed logic apply.
+    AI_TOKEN_FILE="${SHOGGOTH_AI_DEFAULT_TOKEN_FILE:-}"
+    if [ -n "${AI_TOKEN_FILE}" ] && [ -f "${AI_TOKEN_FILE}" ]; then
+        AI_TOKEN="$(tr -d '\n\r' < "${AI_TOKEN_FILE}")"
+        [ -z "${AI_TOKEN}" ] && die "AI default token file is empty: ${AI_TOKEN_FILE}"
+        bao_put_value "ai/default-token" "${AI_TOKEN}"
+        OVERRIDDEN=$((OVERRIDDEN + 1))
+    elif bao_get_value "ai/default-token" >/dev/null 2>&1; then
+        SKIPPED=$((SKIPPED + 1))
+    else
+        bao_put_value "ai/default-token" "$(openssl rand -base64 32 | tr -d '\n')"
+        SEEDED=$((SEEDED + 1))
+    fi
     for path in \
         kestra/db-password \
         redmine/db-password \
@@ -297,15 +313,6 @@ data:
                     OVERRIDDEN=$((OVERRIDDEN + 1))
                 else
                     bao_put_value "$path" "$(openssl rand -base64 32 | tr -d '\n\r')"
-                fi
-                ;;
-            ai/default-token)
-                if [ -f "${SHOGGOTH_AI_DEFAULT_TOKEN_FILE:-}" ] && [ -n "${SHOGGOTH_AI_DEFAULT_TOKEN_FILE:-}" ]; then
-                    OVERRIDE=$(tr -d '\n' < "${SHOGGOTH_AI_DEFAULT_TOKEN_FILE}")
-                    bao_put_value "$path" "${OVERRIDE}"
-                    OVERRIDDEN=$((OVERRIDDEN + 1))
-                else
-                    bao_put_value "$path" "$(openssl rand -base64 32 | tr -d '\n')"
                 fi
                 ;;
             *)
@@ -691,6 +698,69 @@ spec:
               mountPath: /openbao/file
           securityContext:
             runAsUser: 0
+        - name: unseal
+          image: asherikov/shoggoth_tools:alpine
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              NS="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)"
+              KEY_FILE="/openbao/file/.shoggoth-unseal-key"
+              get_key() {
+                  if [ -r "${KEY_FILE}" ]; then
+                      cat "${KEY_FILE}"
+                      return 0
+                  fi
+                  kubectl get secret openbao-unseal-key -n "${NS}" \
+                      -o jsonpath='{.data.unseal-key}' 2>/dev/null | base64 -d
+              }
+              echo "unseal: watching http://127.0.0.1:80/v1/sys/health"
+              while true; do
+                  CODE=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' \
+                      http://127.0.0.1:80/v1/sys/health 2>/dev/null) || CODE=000
+                  case "${CODE}" in
+                      200)
+                          sleep 30
+                          ;;
+                      501)
+                          sleep 10
+                          ;;
+                      503)
+                          KEY="$(get_key)"
+                          if [ -z "${KEY}" ]; then
+                              echo "unseal: no unseal key (PVC file and K8s Secret both missing/unreadable)"
+                              sleep 10
+                              continue
+                          fi
+                          UNSEAL_PAYLOAD="$(jq -nc --arg k "${KEY}" '{key: $k}')"
+                          R=$(curl -s --max-time 10 -o /tmp/unseal.json -w '%{http_code}' \
+                              -X PUT -H "Content-Type: application/json" \
+                              -d "${UNSEAL_PAYLOAD}" \
+                              http://127.0.0.1:80/v1/sys/unseal 2>/dev/null) || R=000
+                          if [ "${R}" = "200" ]; then
+                              echo "unseal: OpenBao unsealed (sys/health was 503)"
+                          else
+                              echo "unseal: PUT /v1/sys/unseal HTTP ${R}: $(head -c 200 /tmp/unseal.json 2>/dev/null)"
+                              sleep 10
+                          fi
+                          ;;
+                      *)
+                          sleep 2
+                          ;;
+                  esac
+              done
+          resources:
+            requests:
+              memory: 32Mi
+              cpu: 50m
+            limits:
+              memory: 64Mi
+              cpu: 200m
+          volumeMounts:
+            - name: data
+              mountPath: /openbao/file
       containers:
         - name: openbao
           image: openbao/openbao:2.6.2

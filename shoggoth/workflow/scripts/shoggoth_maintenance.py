@@ -3,14 +3,16 @@ import argparse
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import shutil
 import base64
 from datetime import datetime, timezone
 from http.cookiejar import CookieJar
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen, HTTPCookieProcessor, build_opener
 from urllib.error import URLError, HTTPError
 
@@ -283,6 +285,14 @@ class Gitea:
     def list_user_repos(self, username):
         return _paginate(lambda page, limit: self.get(
             f"users/{username}/repos", params={"page": page, "limit": limit}))
+
+    def list_branches(self, repo_full):
+        return _paginate(lambda page, limit: self.get(
+            f"repos/{repo_full}/branches", params={"page": page, "limit": limit}))
+
+    def list_tags(self, repo_full):
+        return _paginate(lambda page, limit: self.get(
+            f"repos/{repo_full}/tags", params={"page": page, "limit": limit}))
 
     def is_org_member(self, org, username):
         return self.status(f"orgs/{org}/members/{username}") == 204
@@ -747,37 +757,67 @@ class Redmine:
 
 
 class Github:
+    # Unauthenticated GitHub REST access is capped at 60 requests/hour per
+    # IP: requests are paced and retried once on quota responses; per-repo
+    # branch/tag listing is done via `git ls-remote` (see GithubMirrorSync),
+    # which does not count against the REST quota.
+    RATE_LIMIT_MAX_WAIT = 900
+
     def __init__(self):
         self.api_url = "https://api.github.com"
-        self.token = os.environ.get("GITHUB_TOKEN")
-        self._headers_cache = None
-
-    def _headers(self):
-        if self._headers_cache is None:
-            hdrs = {"accept": "application/json"}
-            if self.token:
-                hdrs["Authorization"] = f"token {self.token}"
-            self._headers_cache = hdrs
-        return self._headers_cache
+        self.api_delay = float(os.environ.get("SHOGGOTH_GITHUB_API_DELAY", "2"))
 
     def get(self, path, params=None):
-        return http_get(f"{self.api_url}/{path}", headers=self._headers(), params=params)
-
-    def status(self, path):
         url = f"{self.api_url}/{path}"
-        req = Request(url, headers=self._headers(), method="GET")
+        if params:
+            url = f"{url}?{urlencode(params)}"
+        for attempt in (1, 2):
+            time.sleep(self.api_delay)
+            log(f"GET {url}")
+            req = Request(url, headers={"accept": "application/json"})
+            try:
+                with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                    data = json.loads(resp.read().decode())
+                    log(f"GET {url} -> {resp.status}")
+                    return data
+            except HTTPError as e:
+                if attempt == 1 and e.code in (403, 429) and self._wait_for_quota(e, url):
+                    continue
+                body = e.read().decode(errors="replace")[:2000]
+                print(f"WARNING: HTTP GET {url} failed: {e.code} {e.reason}: {body}", file=sys.stderr)
+                return None
+            except (URLError, OSError) as e:
+                print(f"WARNING: HTTP GET {url} failed: {e}", file=sys.stderr)
+                return None
+            except json.JSONDecodeError as e:
+                print(f"WARNING: HTTP GET {url} returned invalid JSON: {e}", file=sys.stderr)
+                return None
+        return None
+
+    def _wait_for_quota(self, error, url):
+        headers = error.headers or {}
+        retry_after = headers.get("Retry-After")
+        reset = headers.get("X-RateLimit-Reset")
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-                return resp.status
-        except HTTPError as e:
-            return e.code
-        except (URLError, OSError):
-            return 0
+            if retry_after is not None:
+                wait = float(retry_after)
+            elif reset is not None:
+                wait = max(0.0, int(reset) - time.time())
+            else:
+                return False
+        except ValueError:
+            return False
+        if wait > self.RATE_LIMIT_MAX_WAIT:
+            return False
+        print(f"GitHub rate limit hit, waiting {wait:.0f}s before retrying {url}",
+              file=sys.stderr, flush=True)
+        time.sleep(wait)
+        return True
 
     def list_repos(self, account, account_type):
         return _paginate(lambda page, limit: self.get(
             f"{account_type}/{account}/repos",
-            params={"page": page, "per_page": limit, "type": "public"}))
+            params={"page": page, "per_page": limit, "type": "public"}), limit=100)
 
 
 class SetupKestraWebhooks:
@@ -951,26 +991,27 @@ class GithubMirrorSync:
     def _sync_org(self, github_org):
         print(f"=== Syncing GitHub '{github_org}' to Gitea org '{github_org}' ===")
 
-        if self.github.status(f"orgs/{github_org}") == 200:
-            account_type = "orgs"
-        elif self.github.status(f"users/{github_org}") == 200:
-            account_type = "users"
-        else:
-            msg = "GitHub account is neither an organization nor a user"
+        account = self.github.get(f"users/{github_org}")
+        if account is None:
+            msg = "GitHub account lookup failed (not found or rate limited)"
             print(f"ERROR: {msg}")
             self._record_failure(github_org, msg)
             return
+        account_type = "orgs" if account.get("type") == "Organization" else "users"
 
         print(f"GitHub account type: {account_type}")
 
         repos = self.github.list_repos(github_org, account_type)
         if not repos:
-            print(f"WARNING: No repos found for GitHub {account_type} '{github_org}'")
+            print(f"WARNING: No repos found for GitHub {account_type} '{github_org}' "
+                  f"(or the repo listing failed)")
             return
 
         self.tmpdir = tempfile.mkdtemp()
         try:
-            for repo in repos:
+            for idx, repo in enumerate(repos):
+                if idx:
+                    time.sleep(self.github.api_delay)
                 self._sync_repo(github_org, repo)
         finally:
             shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -982,7 +1023,6 @@ class GithubMirrorSync:
     def _sync_repo(self, github_org, repo_info):
         repo_name = repo_info.get("name", "")
         repo_desc = repo_info.get("description") or ""
-        repo_pushed_at = repo_info.get("pushed_at") or ""
         gitea_repo = f"{github_org}/{repo_name}"
 
         self.repos_total += 1
@@ -1003,7 +1043,7 @@ class GithubMirrorSync:
             else:
                 self.repos_failed += 1
         else:
-            status = self._sync_existing_repo(github_org, repo_name, repo_pushed_at, repo_data)
+            status = self._sync_existing_repo(github_org, repo_name, repo_data)
             if status == "ok":
                 self.repos_succeeded += 1
             elif status == "skipped":
@@ -1027,16 +1067,70 @@ class GithubMirrorSync:
         self._record_failure(f"{github_org}/{repo_name}", "migration to Gitea failed")
         return False
 
-    def _sync_existing_repo(self, github_org, repo_name, repo_pushed_at, repo_data):
-        gitea_repo = f"{github_org}/{repo_name}"
-        gitea_updated_at = repo_data.get("updated_at", "") if repo_data else ""
+    def _github_refs(self, github_org, repo_name):
+        """Branch and tag heads from GitHub via `git ls-remote`.
 
-        if repo_pushed_at and gitea_updated_at and repo_pushed_at <= gitea_updated_at:
+        One unauthenticated git request replaces the per-repo branches/tags
+        REST calls, which exhausted the GitHub API quota for orgs with more
+        than ~30 repos (2 unauthenticated calls per repo, 60/hour limit).
+        """
+        ls_remote = run(["git", "ls-remote",
+                         f"https://github.com/{github_org}/{repo_name}.git"], check=False)
+        if ls_remote.returncode != 0:
+            return None
+        branches, tags = {}, {}
+        for line in ls_remote.stdout.splitlines():
+            sha, _, ref = line.partition("\t")
+            if ref.startswith("refs/heads/"):
+                branches[ref[len("refs/heads/"):]] = sha
+            elif ref.startswith("refs/tags/"):
+                ref = ref[len("refs/tags/"):]
+                if ref.endswith("^{}"):
+                    tags[ref[:-len("^{}")]] = sha
+                else:
+                    tags.setdefault(ref, sha)
+        return branches, tags
+
+    def _sync_existing_repo(self, github_org, repo_name, repo_data):
+        gitea_repo = f"{github_org}/{repo_name}"
+
+        github_refs = self._github_refs(github_org, repo_name)
+        if github_refs is None:
+            self._record_failure(gitea_repo, "failed to list refs from GitHub (git ls-remote)")
+            return "failed"
+        github_by_name, github_tag_sha = github_refs
+
+        gitea_branches = self.gitea.list_branches(gitea_repo) or []
+
+        if not github_by_name:
+            self._record_failure(gitea_repo, "GitHub repository has no branches")
+            return "failed"
+        if not gitea_branches:
+            self._record_failure(gitea_repo, "Gitea list_branches returned no branches")
+            return "failed"
+
+        gitea_tags = self.gitea.list_tags(gitea_repo) or []
+
+        gitea_by_name = {b["name"]: b["commit"]["id"] for b in gitea_branches}
+        gitea_tag_sha = {t["name"]: t["commit"]["sha"] for t in gitea_tags}
+
+        out_of_sync = [
+            name for name in github_by_name
+            if github_by_name[name] != gitea_by_name.get(name)
+        ]
+        out_of_sync += [
+            name for name in github_tag_sha
+            if github_tag_sha[name] != gitea_tag_sha.get(name)
+        ]
+
+        if not out_of_sync:
             print(f"Repository {github_org}/{repo_name} is up to date "
-                  f"(GitHub pushed {repo_pushed_at} <= Gitea updated {gitea_updated_at}), skipping")
+                  f"({len(github_by_name)} branch(es), {len(github_tag_sha)} tag(s) match), "
+                  f"skipping")
             return "skipped"
 
-        print(f"Repository {github_org}/{repo_name} exists, syncing branches and tags...")
+        print(f"Repository {github_org}/{repo_name}: {len(out_of_sync)} branch(es) differ "
+              f"from Gitea, syncing...")
 
         clone_url = f"http://{self.gitea_host}/{github_org}/{repo_name}.git"
         clone_dir = os.path.join(self.tmpdir, repo_name)
@@ -1406,10 +1500,352 @@ class VerifyApi:
         print("\nverify-api: all checks passed")
 
 
+class SlaveVerify:
+    SCRATCH_REPO = "slave-verify-scratch"
+    SSH_BRANCH = "slave-verify-ssh"
+
+    def __init__(self):
+        self.errors = 0
+        self._openbao = None
+        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        self.gitea_url = (os.environ.get("GITEA_SERVER_URL") or "").rstrip("/")
+        self.ssh_host = os.environ.get("GITEA_SSH_HOST", "git")
+        self.ssh_port = os.environ.get("GITEA_SSH_PORT", "22")
+        self.checks = {
+            "gitea-api": self._check_gitea_api,
+            "redmine-api": self._check_redmine_api,
+            "git-https": self._check_git_https,
+            "git-ssh": self._check_git_ssh,
+            "embeddings": self._check_embeddings,
+            "mcp": self._check_mcp,
+            "telemetry": self._check_telemetry,
+            "pip-cache": self._check_pip_cache,
+        }
+
+    @property
+    def openbao(self):
+        if self._openbao is None:
+            self._openbao = OpenBao()
+        return self._openbao
+
+    def _fail(self, msg):
+        print(f"FAIL: {msg}", file=sys.stderr, flush=True)
+        self.errors += 1
+
+    def _slave_token(self):
+        token = self.openbao.get_value("gitea/slave-token")
+        if not token:
+            die("gitea/slave-token is missing in OpenBao (run 'slave-token' maintenance first)")
+        return token
+
+    def _slave_headers(self, token):
+        return {"Authorization": f"token {token}"}
+
+    def _git_env(self, extra=None):
+        env = dict(os.environ)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GIT_CONFIG_COUNT"] = "2"
+        env["GIT_CONFIG_KEY_0"] = "user.name"
+        env["GIT_CONFIG_VALUE_0"] = self.slave_user
+        env["GIT_CONFIG_KEY_1"] = "user.email"
+        env["GIT_CONFIG_VALUE_1"] = f"{self.slave_user}@shoggoth"
+        if extra:
+            for key, value in extra.items():
+                idx = int(env["GIT_CONFIG_COUNT"])
+                env[f"GIT_CONFIG_KEY_{idx}"] = key
+                env[f"GIT_CONFIG_VALUE_{idx}"] = value
+                env["GIT_CONFIG_COUNT"] = str(idx + 1)
+        return env
+
+    def _git(self, args, env):
+        result = run(["git"] + args, env=env, check=False)
+        if result.returncode != 0:
+            self._fail(f"git {args[0]}: {result.stderr.strip()[:400]}")
+        return result
+
+    def _ensure_scratch_repo(self, token):
+        if not self.gitea_url:
+            die("GITEA_SERVER_URL is required")
+        headers = self._slave_headers(token)
+        repo_full = f"{self.slave_user}/{self.SCRATCH_REPO}"
+        status = http_status(f"{self.gitea_url}/api/v1/repos/{repo_full}", headers=headers)
+        if status == 200:
+            print(f"scratch repo '{repo_full}' exists")
+            return True
+        if status != 404:
+            self._fail(f"GET repos/{repo_full} with slave token: HTTP {status}")
+            return False
+        admin_token = os.environ.get("GITEA_ADMIN_TOKEN")
+        if not admin_token:
+            self._fail("GITEA_ADMIN_TOKEN is required to create the scratch repo "
+                       "(the slave token deliberately has no write:user scope)")
+            return False
+        created = http_post_json(f"{self.gitea_url}/api/v1/admin/users/{self.slave_user}/repos",
+                                 {"name": self.SCRATCH_REPO, "private": True, "auto_init": False},
+                                 headers={"Authorization": f"token {admin_token}"})
+        if created is None:
+            self._fail(f"cannot create scratch repo '{repo_full}' with admin token")
+            return False
+        print(f"scratch repo '{repo_full}' created")
+        return True
+
+    def _check_gitea_api(self):
+        if not self.gitea_url:
+            die("GITEA_SERVER_URL is required")
+        token = self._slave_token()
+        headers = self._slave_headers(token)
+        print(f"Gitea API URL: {self.gitea_url}")
+        user = http_get(f"{self.gitea_url}/api/v1/user", headers=headers)
+        if user is None:
+            self._fail("GET /api/v1/user with slave token")
+            return
+        login = user.get("login", "?")
+        if login != self.slave_user:
+            self._fail(f"slave token authenticates as '{login}', expected '{self.slave_user}'")
+        else:
+            print(f"OK: authenticated as '{login}' (id={user.get('id', '?')})")
+
+    def _check_redmine_api(self):
+        redmine = Redmine(self.openbao)
+        print(f"Redmine API URL: {redmine.api_url}")
+        account = redmine.get("my/account.json")
+        if account is None:
+            self._fail("GET /my/account.json with redmine/slave-token")
+            return
+        user = account.get("user", {})
+        print(f"OK: authenticated as '{user.get('login', '?')}' (id={user.get('id', '?')})")
+        projects = redmine.list_projects()
+        if projects is None:
+            self._fail("GET /projects.json")
+        else:
+            print(f"OK: {len(projects)} project(s) visible")
+
+    def _check_git_https(self):
+        token = self._slave_token()
+        if not self._ensure_scratch_repo(token):
+            return
+        clone_url = f"{self.gitea_url}/{self.slave_user}/{self.SCRATCH_REPO}.git"
+        workdir = tempfile.mkdtemp(prefix="slave-verify-https-")
+        repo_dir = os.path.join(workdir, "repo")
+        env = self._git_env({"http.extraheader": f"Authorization: token {token}"})
+        if self._git(["clone", clone_url, repo_dir], env).returncode != 0:
+            return
+        branch = "main"
+        for args in (["checkout", "-B", branch],
+                     ["commit", "--allow-empty", "-m", "slave-verify git-https"],
+                     ["push", "origin", branch]):
+            if self._git(["-C", repo_dir] + args, env).returncode != 0:
+                return
+        result = run(["git", "ls-remote", clone_url, f"refs/heads/{branch}"], env=env, check=False)
+        if result.returncode != 0 or not result.stdout.strip():
+            self._fail(f"git ls-remote over https: pushed branch '{branch}' not found")
+            return
+        print(f"OK: clone + commit + push + ls-remote over https ({branch} -> {result.stdout.split()[0][:12]})")
+
+    def _check_git_ssh(self):
+        key = self.openbao.get_value("ssh/slave-private-key")
+        if not key:
+            self._fail("ssh/slave-private-key is missing in OpenBao (run 'ssh-key' maintenance first)")
+            return
+        token = self._slave_token()
+        if not self._ensure_scratch_repo(token):
+            return
+        workdir = tempfile.mkdtemp(prefix="slave-verify-ssh-")
+        key_file = os.path.join(workdir, "slave_key")
+        with open(key_file, "w") as f:
+            f.write(key if key.endswith("\n") else key + "\n")
+        os.chmod(key_file, 0o600)
+        known_hosts = os.path.join(workdir, "known_hosts")
+        scan = run(["ssh-keyscan", "-p", self.ssh_port, self.ssh_host], check=False)
+        if scan.returncode != 0 or not scan.stdout.strip():
+            self._fail(f"ssh-keyscan {self.ssh_host}:{self.ssh_port}: {scan.stderr.strip()[:200]}")
+            return
+        with open(known_hosts, "w") as f:
+            f.write(scan.stdout)
+        clone_url = f"ssh://git@{self.ssh_host}:{self.ssh_port}/{self.slave_user}/{self.SCRATCH_REPO}.git"
+        env = self._git_env()
+        env["GIT_SSH_COMMAND"] = (f"ssh -i {key_file} -o IdentitiesOnly=yes "
+                                  f"-o UserKnownHostsFile={known_hosts} -o StrictHostKeyChecking=yes")
+        repo_dir = os.path.join(workdir, "repo")
+        if self._git(["clone", clone_url, repo_dir], env).returncode != 0:
+            return
+        for args in (["checkout", "-B", self.SSH_BRANCH],
+                     ["commit", "--allow-empty", "-m", "slave-verify git-ssh"],
+                     ["push", "--force", "origin", self.SSH_BRANCH]):
+            if self._git(["-C", repo_dir] + args, env).returncode != 0:
+                return
+        result = run(["git", "ls-remote", clone_url, f"refs/heads/{self.SSH_BRANCH}"], env=env, check=False)
+        if result.returncode != 0 or not result.stdout.strip():
+            self._fail(f"git ls-remote over ssh: pushed branch '{self.SSH_BRANCH}' not found")
+            return
+        print(f"OK: clone + commit + push + ls-remote over ssh ({self.SSH_BRANCH} -> {result.stdout.split()[0][:12]})")
+
+    def _check_embeddings(self):
+        api = os.environ.get("EMBEDDINGS_API", "http://litellm:80/v1").rstrip("/")
+        model = os.environ.get("EMBEDDINGS_MODEL", "nomic-embed-text")
+        api_key = os.environ.get("EMBEDDINGS_API_KEY", "localai")
+        print(f"Embeddings API: {api} (model={model})")
+        resp = http_post_json(f"{api}/embeddings",
+                              {"model": model, "input": "shoggoth slave verify"},
+                              headers={"Authorization": f"Bearer {api_key}"})
+        if not resp:
+            self._fail(f"POST {api}/embeddings (model={model})")
+            return
+        try:
+            embedding = resp["data"][0]["embedding"]
+        except (KeyError, IndexError, TypeError):
+            self._fail(f"embeddings response has no vector: {json.dumps(resp)[:300]}")
+            return
+        if not embedding:
+            self._fail("embeddings vector is empty")
+            return
+        print(f"OK: embedding dim={len(embedding)} head={[round(v, 6) for v in embedding[:4]]}")
+
+    def _mcp_post(self, url, payload, headers, session_id=None):
+        hdrs = dict(headers)
+        if session_id:
+            hdrs["Mcp-Session-Id"] = session_id
+        req = Request(url, data=json.dumps(payload).encode(), headers=hdrs, method="POST")
+        try:
+            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                return resp.status, resp.headers.get("Mcp-Session-Id"), resp.read().decode(errors="replace")
+        except HTTPError as e:
+            body = e.read().decode(errors="replace")[:2000]
+            return e.code, e.headers.get("Mcp-Session-Id"), body
+        except (URLError, OSError) as e:
+            return 0, None, str(e)
+
+    def _mcp_parse(self, body):
+        body = body.strip()
+        if not body:
+            return None
+        if body.startswith("{"):
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                return None
+        parsed = None
+        for line in body.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                try:
+                    parsed = json.loads(line[len("data:"):].strip())
+                except json.JSONDecodeError:
+                    continue
+        return parsed
+
+    def _check_mcp_server(self, name, url, token=None):
+        print(f"\n--- MCP {name}: {url} ---")
+        headers = {"Content-Type": "application/json",
+                   "Accept": "application/json, text/event-stream"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        status, session, body = self._mcp_post(url, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                       "clientInfo": {"name": "shoggoth-slave-verify", "version": "1"}}}, headers)
+        if status != 200:
+            self._fail(f"MCP {name}: initialize HTTP {status}: {body[:300]}")
+            return
+        server_info = (((self._mcp_parse(body) or {}).get("result") or {}).get("serverInfo")) or {}
+        print(f"OK: initialize (server={server_info.get('name', '?')} {server_info.get('version', '?')}, "
+              f"session={'yes' if session else 'none'})")
+        if session:
+            self._mcp_post(url, {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                           headers, session)
+        status, _, body = self._mcp_post(url, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                                         headers, session)
+        if status != 200:
+            self._fail(f"MCP {name}: tools/list HTTP {status}: {body[:300]}")
+            return
+        tools = (((self._mcp_parse(body) or {}).get("result") or {}).get("tools")) or []
+        if not tools:
+            self._fail(f"MCP {name}: no tools returned: {body[:300]}")
+            return
+        print(f"OK: {len(tools)} tool(s): {', '.join(t.get('name', '?') for t in tools[:10])}")
+
+    def _check_mcp(self):
+        token = self._slave_token()
+        self._check_mcp_server("mcp-gitea",
+                               os.environ.get("MCP_GITEA_URL", "http://mcp-gitea:80/mcp"), token)
+        self._check_mcp_server("basic-memory",
+                               os.environ.get("MCP_BASIC_MEMORY_URL", "http://basic-memory:80/mcp"))
+
+    def _check_telemetry(self):
+        endpoint = (os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or "http://otelcol:4318").rstrip("/")
+        print(f"OTLP endpoint: {endpoint}")
+        host = urlsplit(endpoint).hostname or "otelcol"
+        grpc_port = int(os.environ.get("OTEL_GRPC_PORT", "4317"))
+        print(f"\n--- OTLP gRPC connect {host}:{grpc_port} ---")
+        try:
+            with socket.create_connection((host, grpc_port), timeout=HTTP_TIMEOUT):
+                print(f"OK: {host}:{grpc_port} accepts connections")
+        except OSError as e:
+            self._fail(f"cannot connect to OTLP gRPC {host}:{grpc_port}: {e}")
+        print(f"\n--- OTLP/HTTP POST {endpoint}/v1/traces ---")
+        now_ns = time.time_ns()
+        trace_id = secrets.token_bytes(16)
+        payload = {
+            "resourceSpans": [{
+                "resource": {"attributes": [
+                    {"key": "service.name", "value": {"stringValue": "shoggoth-slave-verify"}}]},
+                "scopeSpans": [{
+                    "scope": {"name": "shoggoth-slave-verify"},
+                    "spans": [{
+                        "traceId": trace_id.hex(),
+                        "spanId": secrets.token_bytes(8).hex(),
+                        "name": "slave-verify telemetry",
+                        "kind": 1,
+                        "startTimeUnixNano": str(now_ns),
+                        "endTimeUnixNano": str(now_ns + 1000000),
+                    }],
+                }],
+            }],
+        }
+        status, body, _ = http_post_json_with_status(f"{endpoint}/v1/traces", payload)
+        if status != 200:
+            self._fail(f"POST {endpoint}/v1/traces: HTTP {status}: {body[:300]}")
+            return
+        print(f"OK: trace exported (traceId={trace_id.hex()})")
+
+    def _check_pip_cache(self):
+        index_url = (os.environ.get("PIP_INDEX_URL") or "").rstrip("/")
+        print(f"Pip index URL: {index_url or '(unset)'}")
+        if "python-cache" not in index_url:
+            self._fail("PIP_INDEX_URL is not set or does not point to the python-cache proxy")
+            return
+        workdir = tempfile.mkdtemp(prefix="slave-verify-pip-")
+        result = run(["pip", "download", "--no-deps", "--disable-pip-version-check",
+                      "--no-cache-dir", "--quiet", "-d", workdir, "six"], check=False)
+        files = sorted(os.listdir(workdir)) if os.path.isdir(workdir) else []
+        shutil.rmtree(workdir, ignore_errors=True)
+        if result.returncode != 0:
+            self._fail(f"pip download via {index_url}: {result.stderr.strip()[-300:]}")
+            return
+        if not files:
+            self._fail(f"pip download via {index_url} produced no files")
+            return
+        print(f"OK: pip download through python-cache ({files[0]})")
+
+    def execute(self, services=None):
+        selected = services or list(self.checks)
+        for name in selected:
+            if name not in self.checks:
+                die(f"unknown slave-verify service '{name}' (valid: {', '.join(self.checks)})")
+        for name in selected:
+            print(f"\n=== slave-verify: {name} ===")
+            self.checks[name]()
+        print(f"\nslave-verify: {len(selected) - self.errors}/{len(selected)} check(s) passed")
+        if self.errors:
+            die(f"slave-verify completed with {self.errors} error(s)")
+        print("slave-verify: all checks passed")
+
+
 class SlaveToken:
     TOKEN_NAME = "shoggoth-slave"
     TOKEN_SCOPES = ["write:repository", "write:issue", "read:user"]
     K8S_SECRET_NAME = "gitea-slave-token"
+    OPENBAO_PATH = "gitea/slave-token"
 
     def __init__(self, gitea):
         self.gitea = gitea
@@ -1436,13 +1872,33 @@ class SlaveToken:
                 return tok
         return None
 
+    def _has_outdated_scopes(self, token):
+        return sorted(token.get("scopes") or []) != sorted(self.TOKEN_SCOPES)
+
+    def _stored_token_is_usable(self):
+        stored = OpenBao().get_value(self.OPENBAO_PATH)
+        if not stored:
+            return True
+        status = http_status(f"{self.gitea.api_url}/api/v1/user",
+                             headers={"Authorization": f"token {stored}"})
+        if status == 200:
+            return True
+        print(f"Token stored in OpenBao is not usable: GET /api/v1/user -> HTTP {status}")
+        return False
+
     def execute(self):
         existing_tok = self._find_existing_token()
         if existing_tok is not None:
-            if self._is_token_expired(existing_tok):
+            expired = self._is_token_expired(existing_tok)
+            outdated = self._has_outdated_scopes(existing_tok)
+            unusable = not self._stored_token_is_usable()
+            if expired or outdated or unusable:
                 tok_id = existing_tok.get("id")
                 if tok_id is not None:
-                    print(f"Deleting expired token '{self.TOKEN_NAME}' (id={tok_id})")
+                    reason = ("expired" if expired
+                              else "with outdated scopes" if outdated
+                              else "with unusable stored value")
+                    print(f"Deleting token '{self.TOKEN_NAME}' {reason} (id={tok_id})")
                     if not self.gitea.delete_user_token(self.slave_user, tok_id):
                         self.errors += 1
                         return
@@ -1460,6 +1916,11 @@ class SlaveToken:
             return
 
         token_value = result["sha1"]
+
+        print(f"Storing token in OpenBao '{self.OPENBAO_PATH}'")
+        if not OpenBao().put_value(self.OPENBAO_PATH, token_value):
+            print(f"ERROR: Failed to write OpenBao '{self.OPENBAO_PATH}'", file=sys.stderr)
+            self.errors += 1
 
         if not self.namespace:
             print("ERROR: SHOGGOTH_NAMESPACE is required for K8s Secret write", file=sys.stderr)
@@ -1811,7 +2272,7 @@ def main():
                         choices=["kestra-webhooks", "redmine-webhooks", "redmine-kestra-webhooks",
                                  "github-mirror-sync", "slave-access", "slave-token", "runner-token",
                                  "ssh-key",
-                                 "verify-api",
+                                 "verify-api", "slave-verify",
                                  "gitea-ldap-sync", "redmine-ldap-sync"],
                         help="Command to execute")
     parser.add_argument("args", nargs="*", default=[],
@@ -1863,6 +2324,9 @@ def main():
         cmd.execute()
     elif parsed.command == "verify-api":
         cmd = VerifyApi()
+        cmd.execute(parsed.args or None)
+    elif parsed.command == "slave-verify":
+        cmd = SlaveVerify()
         cmd.execute(parsed.args or None)
     elif parsed.command == "gitea-ldap-sync":
         gitea = Gitea()

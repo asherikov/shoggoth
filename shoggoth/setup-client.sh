@@ -229,7 +229,7 @@ ${hosts_entries}EOF"
 
 generate_apt_cache_conf() {
     cat <<EOF
-Acquire::http::Proxy "http://apt-cache.${DOMAIN}:3142";
+Acquire::http::Proxy "http://apt-cache.${DOMAIN}";
 Acquire::https::Proxy "false";
 EOF
 }

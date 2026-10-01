@@ -60,38 +60,11 @@ data:
         exit 1
     fi
     BASE_IMAGE="registry.${SHOGGOTH_DOMAIN}/slave_noble"
-    echo "shoggoth: Pulling base image ${BASE_IMAGE}:latest..." >&2
+    echo "shoggoth: Pulling slave image ${BASE_IMAGE}:latest..." >&2
     if ! docker pull "${BASE_IMAGE}:latest"; then
-        echo "shoggoth: FATAL: Failed to pull base image ${BASE_IMAGE}:latest" >&2
+        echo "shoggoth: FATAL: Failed to pull slave image ${BASE_IMAGE}:latest" >&2
         exit 1
     fi
-    echo "shoggoth: Building shoggoth-slave image..." >&2
-    BUILD_DIR="/shoggoth/compose/build"
-    rm -rf "${BUILD_DIR}"
-    mkdir -p "${BUILD_DIR}/workflow" "${BUILD_DIR}/scripts"
-    echo "shoggoth: Downloading setup-client.sh and plugin from web-internal..." >&2
-    WEB_INTERNAL="http://web-internal.${SHOGGOTH_NAMESPACE}.svc.cluster.local"
-    wget --timeout=60 -q "${WEB_INTERNAL}/setup-client.sh" -O "${BUILD_DIR}/setup-client.sh" || { echo "shoggoth: FATAL: failed to download setup-client.sh" >&2; exit 1; }
-    chmod 0755 "${BUILD_DIR}/setup-client.sh"
-    wget --timeout=60 -q "${WEB_INTERNAL}/plugin.tar.gz" -O "${BUILD_DIR}/plugin.tar.gz" || { echo "shoggoth: FATAL: failed to download plugin.tar.gz" >&2; exit 1; }
-    "${BUILD_DIR}/setup-client.sh" --client-conf "${BUILD_DIR}/workflow" --domain "${SHOGGOTH_DOMAIN}" --api-gateway --ai-token litellm
-    cp -r /host_volumes/workflow-scripts/* "${BUILD_DIR}/scripts/"
-    DOCKERFILE="${BUILD_DIR}/Dockerfile"
-    cat > "${DOCKERFILE}" <<'DOCKERFILE_HEAD'
-    FROM registry.__SHOGGOTH_DOMAIN__/slave_noble:latest
-    COPY workflow/qwen-settings.json /home/ccws/.qwen/settings.json
-    COPY workflow/apt-cache.conf /etc/apt/apt.conf.d/00-shoggoth-apt-cache
-    COPY scripts/ /shoggoth/workflow/scripts/
-    RUN sudo chown -R ccws /home/ccws/
-    DOCKERFILE_HEAD
-    sed -i "s|__SHOGGOTH_DOMAIN__|${SHOGGOTH_DOMAIN}|g" "${DOCKERFILE}"
-    while IFS='=' read -r key value; do
-        [ -z "${key}" ] && continue
-        case "${key}" in
-            \#*) continue ;;
-        esac
-        printf 'ENV %s="%s"\n' "${key}" "${value}" >> "${DOCKERFILE}"
-    done < "${BUILD_DIR}/workflow/env"
     GITEA_SLAVE_TOKEN="${GITEA_SLAVE_TOKEN:-}"
     echo "shoggoth: Creating ci_cache directory..." >&2
     mkdir -p /shoggoth/ci_cache
@@ -188,18 +161,28 @@ data:
     cat > "${COMPOSE_DIR}/docker-compose.yml" <<EOF
     services:
         slave-term:
-            build:
-                context: ${BUILD_DIR}
-            image: registry.${SHOGGOTH_DOMAIN}/slave_noble:dind
+            image: registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
             container_name: slave-term
             restart: unless-stopped
             network_mode: host
+            environment:
+                - SHOGGOTH_DOMAIN=${SHOGGOTH_DOMAIN}
+                - OPENAI_API_KEY=litellm
+                - OPENAI_BASE_URL=http://litellm.${SHOGGOTH_DOMAIN}/v1/
+                - OPENAI_MODEL=shoggoth-default
+                - BM_MCP_URL=http://litellm.${SHOGGOTH_DOMAIN}/mcp
+                - CCACHE_REMOTE_STORAGE=http://build-cache.${SHOGGOTH_DOMAIN}
+                - CCACHE_REMOTE_ONLY=true
+                - KESTRA_HOST=kestra.${SHOGGOTH_DOMAIN}
+                - GITEA_SERVER_URL=http://api.${SHOGGOTH_DOMAIN}/gitea
+                - GITEA_SERVER_TOKEN=gateway
+                - GITEA_INSTANCE_SSH_HOST=git.${SHOGGOTH_DOMAIN}
             volumes:
                 - /shoggoth/git-cred:/shoggoth/git-cred
                 - /shoggoth/ci_cache:/cache
             command: ttyd --max-clients 1 --port 80 --writable -t disableReconnect=true --once tmux -u new-session bash
     EOF
-    docker compose -f "${COMPOSE_DIR}/docker-compose.yml" up -d --build
+    docker compose -f "${COMPOSE_DIR}/docker-compose.yml" up -d
     LOGS_PIDS=""
     for service in $(docker compose -f "${COMPOSE_DIR}/docker-compose.yml" config --services); do
         docker compose -f "${COMPOSE_DIR}/docker-compose.yml" logs -f "${service}" &
@@ -302,10 +285,6 @@ spec:
         env:
         - name: SHOGGOTH_DOMAIN
           value: ${SHOGGOTH_DOMAIN}
-        - name: OTEL_TRACES_EXPORTER
-          value: otlp
-        - name: OTEL_EXPORTER_OTLP_ENDPOINT
-          value: http://otelcol:4318
         - name: DOCKER_HOST
           value: unix:///dind/docker.sock
         - name: DOCKER_TLS_CERTDIR
@@ -342,7 +321,7 @@ spec:
             command:
             - sh
             - -c
-            - docker info > /dev/null 2>&1 && docker image inspect registry.${SHOGGOTH_DOMAIN}/slave_noble:dind > /dev/null 2>&1 && test -S /shoggoth/git-cred/ssh_auth_sock
+            - docker info > /dev/null 2>&1 && docker container inspect --format '{{.State.Running}}' slave-term | grep -q true && test -S /shoggoth/git-cred/ssh_auth_sock
           initialDelaySeconds: 30
           periodSeconds: 10
           failureThreshold: 30
@@ -394,7 +373,7 @@ spec:
           claimName: slave-dind-ci-cache
       - name: dind-data
         emptyDir:
-          sizeLimit: 10Gi
+          sizeLimit: 20Gi
       serviceAccountName: slave-dind
 ---
 apiVersion: v1

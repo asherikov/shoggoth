@@ -294,7 +294,6 @@ The script generates the following files when `--client-conf` is used:
 |----|----|
 | `env` | Environment variables for all services |
 | `apt-cache.conf` | APT cache configuration |
-| `resolv.conf` | DNS resolver configuration |
 | `qwen-settings.json` | Qwen Code telemetry configuration |
 
 MCP server configuration and skills are provided by the shoggoth Qwen Code

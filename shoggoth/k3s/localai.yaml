@@ -43,23 +43,33 @@ metadata:
   name: localai-preload
   namespace: ${SHOGGOTH_NAMESPACE}
 data:
-  # Use the LocalAI gallery `id` (reference to the canonical entry in
-  # github:mudler/LocalAI/gallery/index.yaml@master) rather than an inline
-  # `url:` / `files:` / `config_file:` block. The inline-block path in this
-  # LocalAI binary (sha-36d800e-gpu-vulkan) calls
-  # `installModelFromRemoteConfig` -> `GetGalleryConfigFromURLWithContext`
-  # unconditionally, which aborts with `Get "": unsupported protocol scheme ""`
-  # when no `url:` is present. The gallery-id path uses `InstallModelFromGallery`
-  # which honors `overrides`, downloads the GGUF via the canonical HF URI
-  # (mradermacher's mirror; sha256 verified), and persists it to the localai-models
-  # PVC across restarts.
+  # Use the `url:` form (no gallery `id`) so preload works with
+  # AUTOLOAD_GALLERIES=false. The URL is `file://` (not http://) because
+  # LocalAI's `validateGalleryConfigURL` (core/gallery/gallery.go) refuses
+  # any `http(s)://` URL whose hostname ends in `.local` — which blocks
+  # all in-cluster service DNS. The file is mounted from the
+  # web-internal-html ConfigMap into `/models/` (the trusted root for
+  # `file://` URLs, controlled by `MODELS_PATH`); files mounted outside
+  # `/models/` trigger `InTrustedRoot` (pkg/utils/path.go) and fail.
+  # The `files:` entry downloads the GGUF from HuggingFace into the
+  # localai-models PVC; the file persists across restarts.
+  # This preload file itself is mounted OUTSIDE `/models/` (PRELOAD_MODELS_
+  # CONFIG=/etc/localai/...): LocalAI parses every non-dot `*.yaml` under
+  # MODELS_PATH as model configs (core/config/model_config_loader.go), and
+  # this array-format gallery file registers its entry as a bare model
+  # config — `url:`/`files:` are not ModelConfig fields — shadowing the real
+  # config with one lacking `parameters.model`, so model loads resolve to
+  # the `/models` directory itself ("gguf_init_from_reader: failed to read
+  # magic").
   preload-models.yaml: |
-    - id: nomic-embed-text-v1.5
-      overrides:
-        embeddings: true
-        gpu_layers: 99999999
-        options:
-          - gpu
+    - name: "nomic-embed-text-v1.5"
+      description: |
+          Nomic Embed v1.5 embedding model in GGUF format.
+      license: "Apache 2.0"
+      url: "file:///models/nomic-embed-text-v1.5.yaml"
+      files:
+          - filename: "nomic-embed-text-v1.5.f16.gguf"
+            uri: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf"
 ---
 apiVersion: v1
 kind: Service
@@ -114,7 +124,13 @@ spec:
         - name: SINGLE_ACTIVE_BACKEND
           value: 'true'
         - name: PRELOAD_MODELS_CONFIG
-          value: /models/preload-models.yaml
+          value: /etc/localai/preload-models.yaml
+        - name: AUTOLOAD_GALLERIES
+          value: 'false'
+        - name: AUTOLOAD_BACKEND_GALLERIES
+          value: 'false'
+        - name: AUTO_UPGRADE_BACKENDS
+          value: 'false'
         - name: OTEL_TRACES_EXPORTER
           value: otlp
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -129,8 +145,12 @@ spec:
         - name: data
           mountPath: /data
         - name: preload-config
-          mountPath: /models/preload-models.yaml
+          mountPath: /etc/localai/preload-models.yaml
           subPath: preload-models.yaml
+          readOnly: true
+        - name: model-configs
+          mountPath: /models/nomic-embed-text-v1.5.yaml
+          subPath: nomic-embed-text-v1.5.yaml
           readOnly: true
         - name: dri
           mountPath: /dev/dri
@@ -192,6 +212,12 @@ spec:
       - name: preload-config
         configMap:
           name: localai-preload
+      - name: model-configs
+        configMap:
+          name: web-internal-html
+          items:
+            - key: nomic-embed-text-v1.5.yaml
+              path: nomic-embed-text-v1.5.yaml
       - name: dri
         hostPath:
           path: /dev/dri

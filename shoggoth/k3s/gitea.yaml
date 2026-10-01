@@ -569,9 +569,9 @@ data:
       fetch_interval: 2s
       github_mirror: ''
       labels:
-        - "ubuntu-latest:docker://registry.${SHOGGOTH_DOMAIN}/slave_noble:dind"
-        - "ubuntu-24.04:docker://registry.${SHOGGOTH_DOMAIN}/slave_noble:dind"
-        - "ubuntu-22.04:docker://registry.${SHOGGOTH_DOMAIN}/slave_jammy:dind"
+        - "ubuntu-latest:docker://registry.${SHOGGOTH_DOMAIN}/slave_noble:latest"
+        - "ubuntu-24.04:docker://registry.${SHOGGOTH_DOMAIN}/slave_noble:latest"
+        - "ubuntu-22.04:docker://registry.${SHOGGOTH_DOMAIN}/slave_jammy:latest"
     cache:
       enabled: true
       dir: "/cache/gitea/actcache/"
