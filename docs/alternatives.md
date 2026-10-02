@@ -461,7 +461,7 @@ records on start/stop.
 
 ## CI runner
 
-- **[act_runner](https://docs.gitea.com/next/usage/actions/act-runner)** (selected)
+- **[Gitea Runner](https://docs.gitea.com/runner/)** (selected)
 - <https://github.com/harness/harness>
 
 ## MCP for Gitea

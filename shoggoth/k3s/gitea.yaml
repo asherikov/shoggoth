@@ -406,7 +406,7 @@ spec:
         volumeMounts: []
       containers:
       - name: runner
-        image: gitea/act_runner:0.6.1
+        image: gitea/runner:4.1.0
         imagePullPolicy: IfNotPresent
         env:
         - name: SHOGGOTH_DOMAIN
@@ -419,8 +419,9 @@ spec:
           value: http://git.${SHOGGOTH_NAMESPACE}.svc.cluster.local
         - name: GITEA_RUNNER_NAME
           value: shoggoth-runner
-        - name: GITEA_RUNNER_LABELS
-          value: ubuntu-latest,ubuntu-24.04
+        # GITEA_RUNNER_LABELS overrides config file, should not be set
+        # - name: GITEA_RUNNER_LABELS
+        #   value: ""
         - name: GITEA_RUNNER_REGISTRATION_TOKEN_FILE
           value: /run/secrets/gitea_runner_token
         - name: CONFIG_FILE
@@ -567,7 +568,9 @@ data:
       insecure: false
       fetch_timeout: 5s
       fetch_interval: 2s
+      fetch_interval_max: 30s
       github_mirror: ''
+      default_image: ""
       labels:
         - "ubuntu-latest:docker://registry.${SHOGGOTH_DOMAIN}/slave_noble:latest"
         - "ubuntu-24.04:docker://registry.${SHOGGOTH_DOMAIN}/slave_noble:latest"
@@ -578,6 +581,9 @@ data:
       host: "gitea-runner"
       port: 0
       external_server: ""
+      # offline_mode reuses a cached action checkout instead of
+      # git-cloning actions from github.com every run.
+      offline_mode: true
     container:
       network: "host"
       privileged: false

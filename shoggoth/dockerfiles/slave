@@ -30,6 +30,8 @@ RUN \
         docker-buildx-plugin \
         ttyd
 
+RUN printf 'Acquire::http::Proxy "http://apt-cache";\nAcquire::https::Proxy "false";\n' > /etc/apt/apt.conf.d/00-shoggoth-apt-cache
+
 USER ccws
 
 ARG PYTHON_PKG="mcp opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp-proto-http"
@@ -39,8 +41,6 @@ RUN \
     || (test -n "${SHOGGOTH_DOMAIN}" && \
         env PIP_INDEX_URL=http://python-cache.${SHOGGOTH_DOMAIN}/index/ PIP_TRUSTED_HOST=python-cache.${SHOGGOTH_DOMAIN} \
         pip install ${PYTHON_PKG})
-
-RUN printf 'Acquire::http::Proxy "http://apt-cache";\nAcquire::https::Proxy "false";\n' > /etc/apt/apt.conf.d/00-shoggoth-apt-cache
 
 ENV PIP_INDEX_URL="http://python-cache/index/"
 ENV PIP_TRUSTED_HOST="python-cache"

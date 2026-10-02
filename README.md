@@ -106,9 +106,11 @@ configurable domain, set to `s.local` by default.
       <https://docs.gitea.com/next/usage/actions/act-runner>.
   - `kestra.` — Kestra workflow orchestration <https://kestra.io/>.
   - `slave-dind.` – Docker-in-Docker service for CI and workflow executors:
-    - `slave-term.` — interactive web terminal:
-      <https://github.com/tsl0922/ttyd> + tmux + Qwen Code. Runs inside
-      `slave-dind.`
+    DinD daemon + ci-cache + git-cred sidecar (ssh-agent + git-credential-cache
+    for every CI container).
+  - `slave-term.` — interactive web terminal:
+    <https://github.com/tsl0922/ttyd> + tmux + Qwen Code. Separate Deployment
+    that shares the git-cred-bootstrap sidecar with `slave-dind.`
   - `cdash.` — CDash test result dashboard <https://github.com/Kitware/CDash>.
 - Project management:
   - `redmine.` — Redmine project management server <https://www.redmine.org/>.

@@ -120,9 +120,9 @@ spec:
         - name: THREADS
           value: '4'
         - name: MAX_ACTIVE_BACKENDS
-          value: '1'
+          value: '2'
         - name: SINGLE_ACTIVE_BACKEND
-          value: 'true'
+          value: 'false'
         - name: PRELOAD_MODELS_CONFIG
           value: /etc/localai/preload-models.yaml
         - name: AUTOLOAD_GALLERIES
@@ -174,8 +174,8 @@ spec:
             memory: 1Gi
             cpu: 500m
           limits:
-            memory: 8Gi
-            cpu: 4000m
+            memory: 16Gi
+            cpu: 8000m
         # startupProbe and livenessProbe are `exec: ["true"]` so kubelet never
         # kills the container during long backend downloads — the first-run
         # vulkan-llama-cpp fetch can take well over the previous 90 min budget,

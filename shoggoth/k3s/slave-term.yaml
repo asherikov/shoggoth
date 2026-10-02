@@ -1,0 +1,294 @@
+---
+# slave-term — interactive web terminal (ttyd + tmux + Qwen Code).
+#
+# Replaces the privileged `slave-dind` service entirely (no dockerd, no DinD).
+# Uses the shared git-cred-bootstrap sidecar (same one slave-dind mounts) so
+# ssh-agent + git-credential-cache are initialized in one place and live for
+# the lifetime of the pod.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: slave-term
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: slave-term-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: slave-term-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: slave-term-bootstrap-wait
+subjects:
+- kind: ServiceAccount
+  name: slave-term
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: slave-term-ci-cache
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: slave-term
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  selector:
+    app: slave-term
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slave-term
+  namespace: ${SHOGGOTH_NAMESPACE}
+  labels:
+    app: slave-term
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: slave-term
+  template:
+    metadata:
+      labels:
+        app: slave-term
+      annotations:
+        secret.reloader.stakater.com/reload: gitea-slave-token,ssh-slave-private-key
+    spec:
+      serviceAccountName: slave-term
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - ${SHOGGOTH_DNS_IP}
+        searches:
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+      initContainers:
+      - name: wait-bootstrap
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SHOGGOTH_NAMESPACE
+          value: ${SHOGGOTH_NAMESPACE}
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          NS="${SHOGGOTH_NAMESPACE}"
+          wait_for_externalsecret() {
+            local name="$1"
+            echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+            for i in $(seq 1 60); do
+              if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                return 0
+              fi
+              sleep 10
+            done
+            echo "FAIL: externalsecret/${name} not Ready after 10m"
+            return 1
+          }
+          wait_for_externalsecret gitea-slave-token || exit 1
+          wait_for_externalsecret ssh-slave-private-key || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+      - name: init-git-cred-perms
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        args:
+        - |
+          set -eu
+          # kubelet mounts the emptyDir as root:root with default perms;
+          # the git-cred sidecar runs as uid 1000 (securityContext.runAsUser)
+          # and needs to chmod the mountpoint to 0700 so git-credential-cache
+          # accepts the directory (it refuses any mode looser than 0700 with
+          # "permissions on your socket directory are too loose"). uid 1000
+          # cannot chmod a root-owned directory, so we chown+chmod here as
+          # root before the sidecar starts. The sidecar re-applies chmod 0700
+          # defensively, which is now a no-op (it owns the directory).
+          chown 1000:1000 /shoggoth/git-cred
+          chmod 0700 /shoggoth/git-cred
+        volumeMounts:
+        - name: git-cred
+          mountPath: /shoggoth/git-cred
+        resources:
+          requests:
+            memory: 16Mi
+            cpu: 10m
+          limits:
+            memory: 32Mi
+            cpu: 50m
+      containers:
+      - name: git-cred
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - /git-cred/bootstrap.sh
+        env:
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: SHOGGOTH_NAMESPACE
+          value: ${SHOGGOTH_NAMESPACE}
+        - name: SSH_ID_RSA
+          valueFrom:
+            secretKeyRef:
+              name: ssh-slave-private-key
+              key: ssh-id-rsa
+              optional: true
+        - name: GITEA_SLAVE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: gitea-slave-token
+              key: token
+              optional: true
+        volumeMounts:
+        - name: git-cred
+          mountPath: /shoggoth/git-cred
+        - name: git-cred-bootstrap
+          mountPath: /git-cred
+          readOnly: true
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 20m
+          limits:
+            memory: 64Mi
+            cpu: 100m
+        securityContext:
+          runAsUser: 1000
+      - name: term
+        image: registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: SSH_AUTH_SOCK
+          value: /shoggoth/git-cred/ssh_auth_sock
+        - name: GITEA_SSH_HOST
+          value: git.${SHOGGOTH_DOMAIN}
+        - name: GITEA_INSTANCE_SSH_HOST
+          value: git.${SHOGGOTH_DOMAIN}
+        - name: GITEA_SERVER_URL
+          value: http://api.${SHOGGOTH_DOMAIN}/gitea
+        - name: GITEA_SERVER_TOKEN
+          value: gateway
+        - name: KESTRA_HOST
+          value: kestra.${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - name: OPENAI_API_KEY
+          value: litellm
+        - name: OPENAI_BASE_URL
+          value: http://litellm.${SHOGGOTH_DOMAIN}/v1/
+        - name: OPENAI_MODEL
+          value: shoggoth-default
+        - name: BM_MCP_URL
+          value: http://litellm.${SHOGGOTH_DOMAIN}/mcp
+        - name: CCACHE_REMOTE_STORAGE
+          value: http://build-cache.${SHOGGOTH_DOMAIN}
+        - name: CCACHE_REMOTE_ONLY
+          value: "true"
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # User exit is expected behavior, not a fault. ttyd --once exits
+          # when the browser WebSocket closes; tmux's session also ends.
+          # Force exit 0 so kubelet restarts the container without
+          # CrashLoopBackOff (any non-zero exit triggers exponential
+          # backoff: 10s, 20s, 40s, 80s, 160s, 300s). With this wrapper
+          # the pod is back to Ready in ~1s after the WebSocket closes.
+          exec ttyd --max-clients 1 --port 80 --writable -t disableReconnect=true --once tmux -u new-session bash || true
+          exit 0
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 200m
+          limits:
+            memory: 1Gi
+            cpu: '1'
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          failureThreshold: 6
+        volumeMounts:
+        - name: git-cred
+          mountPath: /shoggoth/git-cred
+        - name: ci-cache
+          mountPath: /cache
+      volumes:
+      - name: git-cred
+        emptyDir: {}
+      - name: git-cred-bootstrap
+        configMap:
+          name: git-cred-bootstrap
+          defaultMode: 493
+      - name: ci-cache
+        persistentVolumeClaim:
+          claimName: slave-term-ci-cache
