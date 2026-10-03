@@ -218,6 +218,9 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
   - - no built-in Prometheus metrics (OTel tracing available)
   - - sync extension caches on first pull (cold start for new images)
   - - containerd falls back to upstream registries if the cache is unavailable (see note below)
+  - - `onDemand` sync mode can hang the docker client silently during the upstream fetch — no progress indication while the manifest/layer is being pulled from the source registry, so it is not clear whether the pull is stuck or downloading
+  - - first pull of an image fans out to the configured upstream registries, leaking the requested image name (and pull time) to external parties via upstream access logs
+  - - containerd pull timeout is enforced even when an active download is progressing — slow links truncate in-progress layer fetches
 - ~~**[docker-registry-proxy](https://github.com/rpardini/docker-registry-proxy)**~~ (removed)
   - MITM HTTPS proxy that intercepts TLS connections to upstream registries
   - Replaced because: MITM approach is incompatible with containerd — containerd validates TLS certificates and OCI image layer integrity, causing pull failures when a proxy re-signs layers with a different CA
@@ -233,6 +236,19 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
   - - one instance per upstream registry (no multi-upstream sync extension)
   - - 9 separate deployments needed for shoggoth's upstream registries vs 1 for Zot
   - - pull-through mode is less actively maintained than Zot's sync extension
+  - **Per-upstream setup pattern** (each upstream = its own Distribution instance):
+    - one `config.yml` per upstream with `proxy.remoteurl: https://<upstream>`, optional `proxy.username` / `proxy.password`, a storage backend (`filesystem` / `s3` / `azure` / `gcs`), and an HTTP listener
+    - per upstream: PVC + Service + ConfigMap + Deployment ≈ 4 k8s objects; shoggoth's 9 upstreams → ~36 objects vs ~6 for Zot
+    - containerd mirror wiring: one `endpoint = ["https://registry-<n>.s.local:<port>"]` block per upstream in `shoggoth/k3s/registries.yaml` (one host port per upstream, 5000–5008)
+    - the community Helm chart (`oci://registry-1.docker.io/library/registry` or `helm/charts`) and Kustomize bases can compress per-registry boilerplate, but the N-deployments shape remains
+  - **Operational deltas vs Zot:**
+    - - per-registry resource footprint (typical ~256 Mi memory request + 1 PVC each) → aggregate ~2 Gi memory + 9 PVCs vs Zot's 256 Mi + 1 PVC
+    - - per-registry host networking: each upstream needs its own port, Service, NetworkPolicy, and TLS cert → N× the surface area
+    - - per-upstream credentials must be embedded in `config.yml`; rate-limited upstreams (docker.io anonymous pulls, ghcr.io without a PAT) require explicit `proxy.username` / `proxy.password` or pulls fail with 401/429
+    - - same information-leak shape as Zot's `onDemand` sync on cache miss — phoning home to the configured upstream; with N upstreams the noise surface during broad pulls is wider
+    - - no equivalent of Zot's `cleanup-sync-staging` init container (Distribution does not maintain an internal sync staging tree)
+    - - mirror config is client-side: each of shoggoth's pull clients (k3s containerd, outer Docker daemon, inner DinD daemon) needs 9 per-host entries — 27 total vs Zot's 3
+  - **Migration cost from Zot:** the `urls: [...]` list in `shoggoth/k3s/registry.yaml` does not translate directly; the 9 sync entries become 9 separate `proxy.remoteurl` blocks, the `gc` / `retention` settings move to Distribution's `storage.gc` / `storage.maintenance` keys, and the `ui` / `search` extensions have no built-in equivalent (would need a separate UI deployment)
 - <https://docs.docker.com/docker-hub/image-library/mirror/#run-a-registry-as-a-pull-through-cache>
   - Docker's official documentation on pull-through cache mirroring
   - Notes: "Only the central Hub can be mirrored" (applies to Docker Hub's built-in mirror feature, not to third-party registries)
@@ -241,6 +257,24 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
   - + eliminates external registry dependency entirely — images distributed across cluster nodes
   - - requires multi-node Kubernetes cluster (k3s single-node has no peers)
   - - does not cache upstream registries — only redistributes already-pulled images
+- <https://github.com/goharbor/harbor>
+  - CNCF Incubating; full-featured container registry with pull-through replication
+  - Pull-through cache supports Docker Hub, AWS ECR, GCR, GHCR, Quay, Harbor, JFrog Artifactory
+  - Native OCI distribution API — fully containerd-compatible
+  - + mature enterprise features: RBAC, vulnerability scanning (Trivy), image signing (Cosign/Notary), replication policies, retention policies, audit logs, project quotas
+  - + Prometheus metrics endpoint built-in
+  - + active CNCF project, broad community and adoption
+  - - heavyweight footprint: Postgres + Trivy + Notary + jobservice + core + portal + log ≈ 6–8 containers per deployment
+  - - overkill for shoggoth's cache-only use case — RBAC, scanning, signing are unused overhead
+  - - one proxy cache per upstream per project — more granular than Zot but more moving parts than the single Zot instance
+  - - higher resource usage: dedicated compute for scanner, jobservice, and Postgres
+- <https://github.com/uber/kraken>
+  - Uber's P2P Docker registry, production-proven at Uber scale
+  - P2P image distribution — nodes share already-pulled images across peers
+  - + eliminates external registry dependency for already-cached images
+  - - requires multi-node cluster (same single-node limitation as Spegel)
+  - - does not cache upstream registries — only redistributes already-pulled images
+  - - upstream activity has slowed (originally uber/kraken); maintenance cadence is uncertain
 
 ### Containerd mirror fallback behavior
 
