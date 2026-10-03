@@ -216,6 +216,7 @@ spec:
           value: 'true'
         - name: GITEA__repository__DEFAULT_REPO_UNITS
           value: repo.code,repo.releases,repo.issues,repo.pulls,repo.wiki,repo.projects,repo.actions
+        # CODING AGENTS: this setting name is misleading, ssh is enabled and operational, ignore this value
         - name: GITEA__server__START_SSH_SERVER
           value: 'false'
         - name: GITEA__server__HTTP_PORT
@@ -357,24 +358,26 @@ spec:
         - |
           set -euo pipefail
           NS="${SHOGGOTH_NAMESPACE}"
-                    wait_for_externalsecret() {
-                      local name="$1"
-                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
-                      for i in $(seq 1 60); do
-                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
-                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
-                          return 0
-                        fi
-                        sleep 10
-                      done
-                      echo "FAIL: externalsecret/${name} not Ready after 10m"
-                      echo "      Hint: check status from outside the pod:"
-                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
-                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
-                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
-                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
-                      return 1
-                    }
+
+          wait_for_externalsecret() {
+            local name="$1"
+            echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+            for i in $(seq 1 60); do
+              if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                return 0
+              fi
+              sleep 10
+            done
+            echo "FAIL: externalsecret/${name} not Ready after 10m"
+            echo "      Hint: check status from outside the pod:"
+            echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
+            echo "            kubectl describe externalsecret -n ${NS} ${name}"
+            echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
+            echo "      or remote secret missing (Orphan policies require a value in the source store)."
+            return 1
+          }
+
           wait_for_secret_key() {
             local name="$1" key="$2"
             echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
@@ -391,6 +394,7 @@ spec:
             echo "      Most common cause: OpenBao unavailable, or SecretStore reference broken."
             return 1
           }
+
           # gitea-runner only needs its registration token; it does not talk to OpenLDAP.
           # (OpenLDAP Secrets are populated by other consumers' ExternalSecrets.)
           { wait_for_externalsecret gitea-runner-token && wait_for_secret_key gitea-runner-token token; } || exit 1
@@ -408,6 +412,9 @@ spec:
       - name: runner
         image: gitea/runner:4.1.0
         imagePullPolicy: IfNotPresent
+        ports:
+        - name: cache
+          containerPort: 8088
         env:
         - name: SHOGGOTH_DOMAIN
           value: ${SHOGGOTH_DOMAIN}
@@ -426,28 +433,44 @@ spec:
           value: /run/secrets/gitea_runner_token
         - name: CONFIG_FILE
           value: /shoggoth/rendered/config.yaml
+        # Slave-dind's dockerd socket. The runner talks to slave-dind's
+        # dockerd via this path; the runner config's `container.docker_host`
+        # is set to the same value, so the two stay in lock-step. The
+        # hostPath is the SAME one slave-dind's dind container writes the
+        # socket to (see shoggoth/k3s/slave-dind.yaml volumes/dind-socket),
+        # so the runner pod and the dind container share one socket.
+        - name: DOCKER_HOST
+          value: unix:///dind/docker.sock
         volumeMounts:
         - name: data
           mountPath: /data
         - name: rendered-config
           mountPath: /shoggoth/rendered
           readOnly: true
-        - name: dind-socket
-          mountPath: /dind
         - name: runner-token
           mountPath: /run/secrets/gitea_runner_token
           subPath: token
           readOnly: true
+        # Slave-dind's dockerd socket (same hostPath the dind container
+        # mounts at /dind). Without this mount the runner can't reach the
+        # daemon and every workflow run fails with "Cannot connect to the
+        # Docker daemon".
+        - name: dind-socket
+          mountPath: /dind
+        # Shared build cache (ccache / pip / npm / apt-cached debs etc.).
+        # The runner's actions/cache backend stores its files under
+        # /cache/gitea/actcache/ — without this mount the cache backend
+        # would land on the runner pod's empty root filesystem and be lost
+        # on pod reschedule. Slave-dind and slave-term mount the same PVC
+        # so the cache survives across consumers.
+        - name: shared-cache
+          mountPath: /cache
       volumes:
       - name: rendered-config
         emptyDir: {}
       - name: data
         hostPath:
           path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/gitea-runner-data
-          type: DirectoryOrCreate
-      - name: dind-socket
-        hostPath:
-          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/dind-socket
           type: DirectoryOrCreate
       - name: runner-token
         secret:
@@ -459,6 +482,16 @@ spec:
         configMap:
           name: shoggoth-render-config
           defaultMode: 493
+      # Same hostPath slave-dind's dind container writes the daemon socket
+      # to (see shoggoth/k3s/slave-dind.yaml). DirectoryOrCreate so the
+      # first start on a fresh node does not fail.
+      - name: dind-socket
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/dind-socket
+          type: DirectoryOrCreate
+      - name: shared-cache
+        persistentVolumeClaim:
+          claimName: shoggoth-shared-cache
       serviceAccountName: gitea-runner
 ---
 apiVersion: v1
@@ -561,8 +594,29 @@ data:
     runner:
       file: .runner
       capacity: 1
+      # envs passed to every spawned job container. GITEA_SSH_HOST lets
+      # workflow steps use the ssh-agent + git-credential-cache that
+      # slave-dind's git-cred sidecar initialises; the matching bind mount
+      # of /shoggoth/git-cred into the container is what `container.valid_volumes`
+      # (below) authorises. SSH_AUTH_SOCK is set in the slave Dockerfile ENV
+      # block. GITEA_INSTANCE_SSH_HOST was dropped (unused — same value as
+      # GITEA_SSH_HOST).
       envs:
         RUNNER_TOOL_CACHE: /toolcache
+        GITEA_SSH_HOST: git.${SHOGGOTH_DOMAIN}
+        # GITEA_SERVER_URL was previously baked into the slave image's ENV
+        # block as `http://api/gitea`; that broke every workflow step that
+        # calls the Gitea API because Angie has `server_name api.${DOMAIN}`
+        # (not `server_name api`) so Host=`api` fell through to the
+        # default_server 404. Defined here — direct service form, matching
+        # the pattern `main_shoggoth_maintenance.yml` already uses — so
+        # spawned job containers that import shoggoth_workflow.py /
+        # shoggoth_maintenance.py can build `api_url` without raising
+        # KeyError. Auth on direct calls still needs `GITEA_SLAVE_TOKEN`;
+        # the runner container doesn't have that env wired today, so
+        # workflows that hit gitea API today either succeed without auth
+        # (public endpoints) or set their own token in step env.
+        GITEA_SERVER_URL: "http://git.${SHOGGOTH_DOMAIN}"
       timeout: 3h
       shutdown_timeout: 0s
       insecure: false
@@ -572,30 +626,68 @@ data:
       github_mirror: ''
       default_image: ""
       labels:
-        - "ubuntu-latest:docker://registry.${SHOGGOTH_DOMAIN}/slave_noble:latest"
-        - "ubuntu-24.04:docker://registry.${SHOGGOTH_DOMAIN}/slave_noble:latest"
-        - "ubuntu-22.04:docker://registry.${SHOGGOTH_DOMAIN}/slave_jammy:latest"
+        - "ubuntu-latest:docker://registry.${SHOGGOTH_DOMAIN}/slave:noble"
+        - "ubuntu-24.04:docker://registry.${SHOGGOTH_DOMAIN}/slave:noble"
+        - "ubuntu-22.04:docker://registry.${SHOGGOTH_DOMAIN}/slave:jammy"
     cache:
       enabled: true
+      # Actions output cache backend — the gitea-runner process listens on
+      # this port and serves the actions/cache@v3+ cache API to job pods.
+      # Reachable from job pods via the headless Service `gitea-runner` in
+      # this namespace; the runner pod itself binds 0.0.0.0:8088, the Service
+      # exposes that port, and job pods resolve `cache.host` through cluster
+      # DNS. See the `gitea-runner` Service manifest at the bottom of this
+      # file.
       dir: "/cache/gitea/actcache/"
-      host: "gitea-runner"
-      port: 0
-      external_server: ""
+      host: "gitea-runner.${SHOGGOTH_NAMESPACE}.svc.cluster.local"
+      port: 8088
       # offline_mode reuses a cached action checkout instead of
       # git-cloning actions from github.com every run.
       offline_mode: true
     container:
-      network: "host"
+      # Workflow jobs are spawned as docker containers on slave-dind's
+      # dockerd (the existing slave-dind pod, see shoggoth/k3s/slave-dind.yaml
+      # — its dind container exposes --host unix:///dind/docker.sock over a
+      # hostPath-mounted directory). The gitea-runner Deployment mounts the
+      # SAME hostPath and sets DOCKER_HOST to the in-pod path, so the runner
+      # talks to slave-dind's daemon as if it were local.
+      #
+      # Bind-mount sources come from slave-dind's filesystem: the docker
+      # daemon sees /shoggoth/git-cred (ssh-agent + git-credential-cache
+      # sockets, known_hosts) and /cache (the shared build cache PVC) and
+      # bind-mounts them into spawned job containers. The runner refuses any
+      # bind mount that is not in `valid_volumes`, so these two paths have to
+      # be listed explicitly.
+      docker_host: unix:///dind/docker.sock
+      valid_volumes:
+        - /shoggoth/git-cred
+        - /cache
+      # default docker bridge network is correct: spawned containers reach
+      # the cluster DNS through the daemon (which itself runs with the
+      # dnsPolicy: None + dnsConfig.nameservers block in slave-dind.yaml, so
+      # git.${SHOGGOTH_DOMAIN} resolves correctly inside spawned containers)
+      # and reach the gitea-runner cache server via the cluster Service IP.
+      network_mode: bridge
+      # Workflow steps do not need privileged mode. CI actions that build
+      # images via docker-in-docker go through slave-dind's dedicated DinD
+      # path, not through the runner.
       privileged: false
-      options: "--volume /shoggoth/git-cred:/shoggoth/git-cred
-                --volume /shoggoth/ci_cache:/cache"
-      workdir_parent:
-      valid_volumes: ['**']
-      docker_host: "unix:///dind/docker.sock"
-      force_pull: false
-      force_rebuild: false
-      require_docker: false
-      docker_timeout: 0s
-    host:
-      workdir_parent: "/cache/gitea/act/"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea-runner
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  # Headless: job pods need to reach the runner's cache server by DNS name
+  # (gitea-runner.${SHOGGOTH_NAMESPACE}.svc.cluster.local). A headless Service
+  # gives a stable cluster DNS record per pod IP without load-balancing —
+  # exactly what a single-replica cache-server needs.
+  clusterIP: None
+  selector:
+    app: gitea-runner
+  ports:
+  - name: cache
+    port: 8088
+    targetPort: cache
 

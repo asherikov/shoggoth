@@ -508,3 +508,18 @@ Agentic coding
 - <https://github.com/shanraisshan/claude-code-best-practice#%EF%B8%8F-development-workflows>
 - <https://github.com/ai-boost/awesome-harness-engineering>
 - <https://github.com/alibaba/open-code-review>
+
+TODO
+====
+
+Gitea
+-----
+
+- Migration of gitea action runner to kubernetes backend. New feature,
+  presumably buggy, currently fails with
+```
+Run actions/checkout@v7
+Error: extract to /: Process completed with exit code 2.: tar:
+var/run/act/actions/.../.gitattributes attributes: Cannot open: Invalid
+cross-device link
+```

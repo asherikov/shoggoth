@@ -1,16 +1,8 @@
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: slave-dind-ci-cache
-  namespace: ${SHOGGOTH_NAMESPACE}
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
-  storageClassName: local-path
+---
+# The /cache persistent storage is shared across all CI consumers
+# (gitea-runner job pods, slave-term, and Kestra workflows via slave-dind's
+# DinD). See shoggoth/k3s/shared-cache.yaml for the single PVC definition.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -24,7 +16,7 @@ data:
     DOCKERD_PID=""
     export DOCKER_HOST=unix:///dind/docker.sock
     mkdir -p /etc/docker/
-    printf '{"insecure-registries":["registry.%s"],"registry-mirrors":["http://registry.%s:%s"]}\n' "${SHOGGOTH_DOMAIN}" "${SHOGGOTH_DOMAIN}" "${SHOGGOTH_REGISTRY_PORT}" > /etc/docker/daemon.json
+    printf '{"insecure-registries":["registry.%s"],"registry-mirrors":["http://registry.%s"]}\n' "${SHOGGOTH_DOMAIN}" "${SHOGGOTH_DOMAIN}" > /etc/docker/daemon.json
     rm -f /var/run/docker.pid
     cleanup() {
         echo "shoggoth: Shutting down..." >&2
@@ -50,10 +42,10 @@ data:
         echo "shoggoth: FATAL: dockerd failed to start" >&2
         exit 1
     fi
-    BASE_IMAGE="registry.${SHOGGOTH_DOMAIN}/slave_noble"
-    echo "shoggoth: Pulling slave image ${BASE_IMAGE}:latest..." >&2
-    if ! docker pull "${BASE_IMAGE}:latest"; then
-        echo "shoggoth: FATAL: Failed to pull slave image ${BASE_IMAGE}:latest" >&2
+    BASE_IMAGE="registry.${SHOGGOTH_DOMAIN}/slave:noble"
+    echo "shoggoth: Pulling slave image ${BASE_IMAGE}..." >&2
+    if ! docker pull "${BASE_IMAGE}"; then
+        echo "shoggoth: FATAL: Failed to pull slave image ${BASE_IMAGE}" >&2
         exit 1
     fi
     echo "shoggoth: Preparing ci_cache directory..." >&2
@@ -192,6 +184,16 @@ spec:
           limits:
             memory: 64Mi
             cpu: 100m
+        # Sibling of `image:` and `securityContext:`, not a field inside
+        # securityContext (kube-apiserver rejects the latter with "field not
+        # declared in schema"). On non-zero exit kubelet normally leaves
+        # containerState.Terminated.Message empty, so the FATAL stderr line
+        # bootstrap.sh writes (e.g. "git-cred-bootstrap: FATAL: ssh-keyscan
+        # failed on git.s.local") is invisible from `kubectl describe pod`.
+        # FallbackToLogsOnError makes kubelet populate the message from the
+        # last 2048 bytes / 80 lines of the container's log on exit.
+        # https://kubernetes.io/docs/tasks/debug/debug-application/determine-reason-pod-failure/
+        terminationMessagePolicy: FallbackToLogsOnError
         securityContext:
           runAsUser: 1000
       - name: dind
@@ -200,14 +202,10 @@ spec:
         securityContext:
           privileged: true
         env:
-        - name: SHOGGOTH_DOMAIN
-          value: ${SHOGGOTH_DOMAIN}
         - name: DOCKER_HOST
           value: unix:///dind/docker.sock
         - name: DOCKER_TLS_CERTDIR
           value: ''
-        - name: SHOGGOTH_REGISTRY_PORT
-          value: "${SHOGGOTH_REGISTRY_PORT}"
         command:
         - /bin/sh
         - /entrypoint/entrypoint.sh
@@ -248,7 +246,7 @@ spec:
           mountPath: /host_volumes/workflow-scripts
           readOnly: true
         - name: ci-cache
-          mountPath: /shoggoth/ci_cache
+          mountPath: /cache
         - name: git-cred
           mountPath: /shoggoth/git-cred
         - name: dind-data
@@ -268,7 +266,7 @@ spec:
           type: DirectoryOrCreate
       - name: ci-cache
         persistentVolumeClaim:
-          claimName: slave-dind-ci-cache
+          claimName: shoggoth-shared-cache
       - name: git-cred
         emptyDir: {}
       - name: git-cred-bootstrap

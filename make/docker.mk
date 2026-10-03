@@ -1,5 +1,4 @@
 DOCKER_DISTRO?=noble
-DOCKER_TAG_SUFFIX?=_${DOCKER_DISTRO}
 
 
 docker_build:
@@ -7,7 +6,7 @@ docker_build:
 		&& docker build \
 			--build-arg BASE_IMAGE=${BASE_IMAGE} \
 			-f dockerfiles/${IMAGE} \
-			-t registry.${DOMAIN}/${IMAGE}${DOCKER_TAG_SUFFIX}:latest \
+			-t registry.${DOMAIN}/${IMAGE}:${DOCKER_DISTRO} \
 			--progress plain \
 			${DOCKER_BUILD_ADD_HOST} \
 			./

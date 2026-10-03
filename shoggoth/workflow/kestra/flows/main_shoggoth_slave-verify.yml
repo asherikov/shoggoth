@@ -13,7 +13,7 @@ concurrency:
 # telemetry (otelcol OTLP gRPC port + HTTP trace export),
 # pip cache (python-cache proxy via image PIP_* env).
 # All tasks use the slave image: the slave-dind image store is an emptyDir
-# (wiped on every pod restart) and only slave_noble:latest is
+# (wiped on every pod restart) and only `slave:noble` is
 # re-pulled by the dind entrypoint; any Docker Hub image
 # (e.g. asherikov/shoggoth_tools:alpine) triggers a pull that stalls the
 # task runner silently.
@@ -33,15 +33,17 @@ tasks:
       networkMode: host
       volumes:
         - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
-    containerImage: registry.s.local/slave_noble:latest
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave:noble
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify gitea-api 2>&1
     env:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
-      GITEA_SERVER_URL: 'http://git.{{ envs.shoggoth_domain }}'
+      # git-https + gitea-api checks need GITEA_SERVER_URL (was previously
+      # inherited as `http://api/gitea` from the slave image, but that
+      # sent Host=`api` which Angie's `server_name api.${DOMAIN}` rejects).
+      # Direct service form matches main_shoggoth_maintenance.yml.
+      GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
       SHOGGOTH_DOMAIN: '{{ envs.shoggoth_domain }}'
       SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
-      OPENBAO_ADDR: http://openbao:80
 
   - id: redmine_api
     type: io.kestra.plugin.scripts.shell.Commands
@@ -53,15 +55,15 @@ tasks:
       networkMode: host
       volumes:
         - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
-    containerImage: registry.s.local/slave_noble:latest
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave:noble
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify redmine-api 2>&1
     env:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
-      REDMINE_SERVER: 'http://redmine.{{ envs.shoggoth_domain }}'
+      # shoggoth_maintenance.Redmine() (line 167) reads REDMINE_SERVER
+      # via os.environ.get with no default and dies if missing.
+      REDMINE_SERVER: "http://redmine.{{ envs.shoggoth_domain }}"
       SHOGGOTH_DOMAIN: '{{ envs.shoggoth_domain }}'
       SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
-      OPENBAO_ADDR: http://openbao:80
 
   - id: git_https
     type: io.kestra.plugin.scripts.shell.Commands
@@ -73,16 +75,15 @@ tasks:
       networkMode: host
       volumes:
         - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
-    containerImage: registry.s.local/slave_noble:latest
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave:noble
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify git-https 2>&1
     env:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
-      GITEA_SERVER_URL: 'http://git.{{ envs.shoggoth_domain }}'
       GITEA_ADMIN_TOKEN: '{{ envs.gitea_admin_token }}'
+      # git-https clones via self.gitea_url + admin token.
+      GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
       SHOGGOTH_DOMAIN: '{{ envs.shoggoth_domain }}'
       SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
-      OPENBAO_ADDR: http://openbao:80
 
   - id: git_ssh
     type: io.kestra.plugin.scripts.shell.Commands
@@ -94,17 +95,13 @@ tasks:
       networkMode: host
       volumes:
         - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
-    containerImage: registry.s.local/slave_noble:latest
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave:noble
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify git-ssh 2>&1
     env:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
-      GITEA_SERVER_URL: 'http://git.{{ envs.shoggoth_domain }}'
-      GITEA_SSH_HOST: 'git.{{ envs.shoggoth_domain }}'
       GITEA_ADMIN_TOKEN: '{{ envs.gitea_admin_token }}'
       SHOGGOTH_DOMAIN: '{{ envs.shoggoth_domain }}'
       SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
-      OPENBAO_ADDR: http://openbao:80
 
   - id: embeddings
     type: io.kestra.plugin.scripts.shell.Commands
@@ -116,11 +113,10 @@ tasks:
       networkMode: host
       volumes:
         - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
-    containerImage: registry.s.local/slave_noble:latest
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave:noble
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify embeddings 2>&1
-    env:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+    env: {}
 
   - id: mcp_servers
     type: io.kestra.plugin.scripts.shell.Commands
@@ -132,13 +128,11 @@ tasks:
       networkMode: host
       volumes:
         - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
-    containerImage: registry.s.local/slave_noble:latest
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave:noble
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify mcp 2>&1
     env:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
       SHOGGOTH_VAULT_TOKEN: '{{ envs.shoggoth_vault_token }}'
-      OPENBAO_ADDR: http://openbao:80
 
   - id: telemetry
     type: io.kestra.plugin.scripts.shell.Commands
@@ -150,11 +144,10 @@ tasks:
       networkMode: host
       volumes:
         - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
-    containerImage: registry.s.local/slave_noble:latest
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave:noble
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify telemetry 2>&1
-    env:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+    env: {}
 
   - id: pip_cache
     type: io.kestra.plugin.scripts.shell.Commands
@@ -166,11 +159,10 @@ tasks:
       networkMode: host
       volumes:
         - /host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro
-    containerImage: registry.s.local/slave_noble:latest
+    containerImage: registry.${SHOGGOTH_DOMAIN}/slave:noble
     commands:
       - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-verify pip-cache 2>&1
-    env:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
+    env: {}
 
   - id: assert_all_passed
     type: io.kestra.plugin.core.execution.Assert

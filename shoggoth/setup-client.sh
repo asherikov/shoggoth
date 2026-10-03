@@ -291,8 +291,6 @@ generate_gitea_config() {
 
 # Gitea
 GITEA_SERVER_URL=http://api.${DOMAIN}/gitea
-GITEA_SERVER_TOKEN=gateway
-GITEA_INSTANCE_SSH_HOST=git.${DOMAIN}
 EOF
     chmod 600 "${ENV_FILE}"
 }

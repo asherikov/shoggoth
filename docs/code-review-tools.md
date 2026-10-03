@@ -328,7 +328,7 @@ Stored in `~/.config/opencodereview/`. No changes to LiteLLM config needed.
 OCR exposes MCP **client** integration via `Config.MCPServers`. The same MCP
 servers qwen-code uses today (`codebase-memory-mcp`, `basic-memory`) can be
 listed in OCR's config — they appear as agent tools during review. shoggoth's
-`slave_noble:dind` image already installs both.
+`slave:noble` image already installs both.
 
 Caveat: OCR's MCP integration is "extend the review agent with external
 tools" — useful but not the same as qwen-code's "agent invokes MCP tools as a
@@ -338,7 +338,7 @@ just decides *what* to flag.
 
 ### Container image
 
-Add OCR to `slave_noble:dind`:
+Add OCR to `slave:noble`:
 
 ```dockerfile
 RUN npm install -g @alibaba-group/open-code-review

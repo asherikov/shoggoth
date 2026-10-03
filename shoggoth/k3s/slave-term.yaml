@@ -51,18 +51,9 @@ subjects:
   name: slave-term
   namespace: ${SHOGGOTH_NAMESPACE}
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: slave-term-ci-cache
-  namespace: ${SHOGGOTH_NAMESPACE}
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
-  storageClassName: local-path
+# The /cache persistent storage is shared across all CI consumers
+# (gitea-runner job pods, slave-term, and Kestra workflows via slave-dind's
+# DinD). See shoggoth/k3s/shared-cache.yaml for the single PVC definition.
 ---
 apiVersion: v1
 kind: Service
@@ -209,38 +200,46 @@ spec:
           limits:
             memory: 64Mi
             cpu: 100m
+        # Sibling of `image:` and `securityContext:`, not a field inside
+        # securityContext (kube-apiserver rejects the latter with "field not
+        # declared in schema"). On non-zero exit kubelet normally leaves
+        # containerState.Terminated.Message empty, so the FATAL stderr line
+        # bootstrap.sh writes (e.g. "git-cred-bootstrap: FATAL: ssh-keyscan
+        # failed on git.s.local") is invisible from `kubectl describe pod`.
+        # FallbackToLogsOnError makes kubelet populate the message from the
+        # last 2048 bytes / 80 lines of the container's log on exit.
+        # https://kubernetes.io/docs/tasks/debug/debug-application/determine-reason-pod-failure/
+        terminationMessagePolicy: FallbackToLogsOnError
         securityContext:
           runAsUser: 1000
       - name: term
-        image: registry.${SHOGGOTH_DOMAIN}/slave_noble:latest
+        image: registry.${SHOGGOTH_DOMAIN}/slave:noble
         imagePullPolicy: IfNotPresent
         env:
         - name: SHOGGOTH_DOMAIN
           value: ${SHOGGOTH_DOMAIN}
-        - name: SSH_AUTH_SOCK
-          value: /shoggoth/git-cred/ssh_auth_sock
+        # Slave image's ENV hardcodes GITEA_SSH_HOST="git" so it works without
+        # a templated Dockerfile. The bare service resolves in DNS via the pod's
+        # `dnsConfig.searches`, but the git-cred-bootstrap sidecar keyscans
+        # only `git.${SHOGGOTH_DOMAIN}` — if the user's known_hosts file is
+        # populated for `git.${SHOGGOTH_DOMAIN}` but git then uses `git`,
+        # StrictHostKeyChecking refuses the connection. Override here so
+        # `git clone` from the terminal builds the URL against the same
+        # hostname the sidecar keyscanned.
         - name: GITEA_SSH_HOST
           value: git.${SHOGGOTH_DOMAIN}
-        - name: GITEA_INSTANCE_SSH_HOST
-          value: git.${SHOGGOTH_DOMAIN}
+        # Direct service access (bypasses Angie `server_name api.${DOMAIN}`
+        # routing). Picked over `http://api.${DOMAIN}/gitea` because the
+        # maintenance flow already uses this form and the term user has
+        # GITEA_SLAVE_TOKEN set above for Authorization headers. Same logic
+        # for REDMINE_SERVER — the Angie proxy path would need a separate
+        # REDMINE_TOKEN env var wired here, and shoggoth_maintenance.py
+        # already handles the direct form by reading REDMINE_SERVER and
+        # SHOGGOTH_DOMAIN separately.
         - name: GITEA_SERVER_URL
-          value: http://api.${SHOGGOTH_DOMAIN}/gitea
-        - name: GITEA_SERVER_TOKEN
-          value: gateway
-        - name: KESTRA_HOST
-          value: kestra.${SHOGGOTH_NAMESPACE}.svc.cluster.local
-        - name: OPENAI_API_KEY
-          value: litellm
-        - name: OPENAI_BASE_URL
-          value: http://litellm.${SHOGGOTH_DOMAIN}/v1/
-        - name: OPENAI_MODEL
-          value: shoggoth-default
-        - name: BM_MCP_URL
-          value: http://litellm.${SHOGGOTH_DOMAIN}/mcp
-        - name: CCACHE_REMOTE_STORAGE
-          value: http://build-cache.${SHOGGOTH_DOMAIN}
-        - name: CCACHE_REMOTE_ONLY
-          value: "true"
+          value: http://git.${SHOGGOTH_DOMAIN}
+        - name: REDMINE_SERVER
+          value: http://redmine.${SHOGGOTH_DOMAIN}
         command:
         - /bin/sh
         - -c
@@ -291,4 +290,4 @@ spec:
           defaultMode: 493
       - name: ci-cache
         persistentVolumeClaim:
-          claimName: slave-term-ci-cache
+          claimName: shoggoth-shared-cache

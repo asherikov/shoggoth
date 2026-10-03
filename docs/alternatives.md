@@ -496,6 +496,15 @@ records on start/stop.
 ## CI runner
 
 - **[Gitea Runner](https://docs.gitea.com/runner/)** (selected)
+  - Runs jobs as ephemeral kubernetes pods (`kubernetes://` labels) — each workflow run is its own pod, scheduled by the cluster; no DinD socket, no privileged container, no per-registry host bind-mount on the runner
+  - Job pod template in `shoggoth/k3s/gitea.yaml` (`gitea-runner-templates` ConfigMap) ships the shared `git-cred-bootstrap` sidecar + `init-git-cred-perms` initContainer from `slave-dind` / `slave-term` so ssh-agent + git-credential-cache are available inside every job pod via `SSH_AUTH_SOCK=/shoggoth/git-cred/ssh_auth_sock`
+  - Job pods get `app.kubernetes.io/managed-by: gitea-runner` and the runner's UUID label so the idle cleanup pass can remove orphans; the runner ServiceAccount holds only the `gitea-runner-bootstrap-wait` Role (`get` on the `gitea-runner-token` secret + externalsecret, used by the `wait-bootstrap` initContainer) — no `pods` / `pods/exec` / `pods/log` verbs, no access to other secrets. The runner reaches its own `gitea-runner-token` via a Secret volume mount, not the Kubernetes API; a runner-pod compromise cannot wipe `ssh-slave-private-key` or `openldap-admin-password`
+  - + eliminates the privileged DinD that the Gitea runner previously required (DinD stays in place for Kestra's Docker task runner)
+  - + containerd pulls job images via the existing Zot mirror wiring — first cold pull still fans out to upstream registries (see Zot cons), but the runner pod itself is unaffected
+  - + job pods share the same persistent `/cache` as `slave-term` and `slave-dind` (the single `shoggoth-shared-cache` PVC in `shoggoth/k3s/shared-cache.yaml`) — pip wheels, ccache, and `CCWS_CACHE` state survive between runs; actions/cache steps reach the runner's cache server via the headless `gitea-runner` Service in this namespace
+  - + job pod runs with the project's standard hardening: `runAsNonRoot: true`, `runAsUser: 1000`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault` — same shape as `external-secrets.yaml` and `reloader.yaml`
+  - - docker actions, `docker://` steps, and job-container `volumes` / `credentials` are unsupported; such workflows would need a separate DinD runner
+  - - secrets/job logs visible to anyone with `get pods` / `get pods/log` in the namespace while a run is active (no DinD boundary)
 - <https://github.com/harness/harness>
 
 ## MCP for Gitea
@@ -783,7 +792,7 @@ app-aware dumps for Gitea/Redmine, and at least one encrypted off-host copy.
 
 - **[Restic](https://github.com/restic/restic)** (recommended)
   - + client-side encrypted, deduplicated, S3-compatible (B2, Wasabi, Storj, S3, MinIO, Hetzner Storage Box)
-  - + single static binary; fits the existing `slave_noble:dind` Kestra task runner pattern
+  - + single static binary; fits the existing `slave:noble` Kestra task runner pattern
   - + automatic pruning/retention; bucket credentials stored in OpenBao
   - + natively orchestratable as new tasks in `main_shoggoth_maintenance.yml`
   - - no GUI; CLI + Restic REST server only
@@ -836,7 +845,7 @@ The intended posture (no tool selected today):
 
 1. Longhorn to snapshot PVCs and ship snapshots to B2/Wasabi
 2. Velero for cluster resources (Deployments, ConfigMaps, Secrets, Kestra flows, Grafana provisioning)
-3. Restic orchestrated as Kestra tasks using `slave_noble:dind` — daily `gitea dump` + DB dumps + `/shoggoth/data` files tar to B2
+3. Restic orchestrated as Kestra tasks using `slave:noble` — daily `gitea dump` + DB dumps + `/shoggoth/data` files tar to B2
 4. Litestream on any SQLite PVC (CDash and similar)
 5. Periodic second off-host copy to Hetzner Storage Box (cheap)
 6. OpenBao unseal keys stored out-of-band (paper or second human); OpenBao has `bao operator raft snapshot` for the consensus store
@@ -868,7 +877,7 @@ selected per the team's threading/search needs.
 
 - **[Apprise](https://github.com/caronc/apprise)** (MIT, recommended)
   - + Python + CLI; 100+ targets (Zulip, Slack, Discord, Mattermost, Teams, XMPP, email, SMS, push, webhooks)
-  - + one CLI call (`apprise -t SUBJECT -b BODY --tag shoggoth`) fits the existing `slave_noble:dind` Kestra runner
+  - + one CLI call (`apprise -t SUBJECT -b BODY --tag shoggoth`) fits the existing `slave:noble` Kestra runner
   - + destinations declared in `apprise.yml`, stored in OpenBao; chat-platform choice is *not* baked into workflow code
   - - no GUI; CLI only
 - <https://ntfy.sh/> (Apache-2.0)
@@ -940,7 +949,7 @@ selected per the team's threading/search needs.
 
 The intended posture (no chat platform deployed today):
 
-1. **Apprise** as the fan-out router inside each Kestra task runner (`slave_noble:dind`); tag config in OpenBao as `shoggoth/apprise/tags.yml`
+1. **Apprise** as the fan-out router inside each Kestra task runner (`slave:noble`); tag config in OpenBao as `shoggoth/apprise/tags.yml`
 2. **Zulip** as the first destination — one stream per source service, one topic per incident; this addresses the notification gap noted above (no in-tree TODO exists at `web-internal.yaml:669` — only an LLM-prompt example string in the `kestra-flow-skill.md` ConfigMap data key).
 3. **`shoggoth_maintenance.py` extension** — new step `setup_notification_streams` (alongside `setup_kestra_webhooks`) to provision the stream set on first bringup
 4. **`main_shoggoth_maintenance.yml` extension** — a final task running `apprise --tag shoggoth ...` after each maintenance step; same runner, same OTel env block, no edits to existing tasks

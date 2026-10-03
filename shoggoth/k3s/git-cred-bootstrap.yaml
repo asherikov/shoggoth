@@ -47,6 +47,35 @@ data:
     GIT_CRED_SOCK="/shoggoth/git-cred/git_credential_sock"
     KNOWN_HOSTS="/shoggoth/git-cred/known_hosts"
     CRED_TIMEOUT=31536000
+    # The git-cred sidecar carries terminationMessagePolicy:
+    # FallbackToLogsOnError (see shoggoth/k3s/{gitea,slave-term,slave-dind}.yaml).
+    # On non-zero exit kubelet copies the contents of /dev/termination-log into
+    # containerState.terminated.message, which `kubectl describe pod` and `kubectl
+    # get events` then expose — and which a future gitea-runner patch can pipe
+    # into the runner log. Writing the FATAL line here explicitly is more
+    # reliable than relying on the log-fallback (which is truncated to 2048
+    # bytes / 80 lines and can be empty if the runtime rotated the log buffer
+    # between the FATAL write and the exit).
+    TERMINATION_LOG="${TERMINATION_LOG:-/dev/termination-log}"
+
+    fatal() {
+        # Single-line FATAL that survives a kubelet log rotation and lands in
+        # the container's termination message verbatim. Keep it one line so
+        # the whole diagnostic surfaces in a single `kubectl describe` row.
+        local msg="git-cred-bootstrap: FATAL: $*"
+        echo "${msg}" >&2
+        # Append the same line to /dev/termination-log so kubelet's
+        # terminationMessage (FallbackToLogsOnError) and `kubectl describe`
+        # expose it even if the log buffer rotated. The `2>/dev/null` and
+        # trailing `|| true` swallow ENOENT when the device isn't present
+        # on the image (e.g. shoggoth_tools:alpine before mount wiring);
+        # we are already on the FATAL path so the surrounding `exit 1`
+        # below is what we care about.
+        echo "${msg}" 2>/dev/null >> "${TERMINATION_LOG}" || true
+        exit 1
+    }
+
+    echo "git-cred-bootstrap: starting (pod=$(hostname -s 2>/dev/null || echo unknown), domain=${SHOGGOTH_DOMAIN:-<unset>})" >&2
 
     mkdir -p /shoggoth/git-cred
     chmod 0700 /shoggoth/git-cred
@@ -57,15 +86,40 @@ data:
     rm -f "${SSH_AUTH_SOCK}" "${GIT_CRED_SOCK}"
 
     if [ -z "${SHOGGOTH_DOMAIN:-}" ]; then
-        echo "git-cred-bootstrap: FATAL: SHOGGOTH_DOMAIN env var is empty" >&2
-        exit 1
+        fatal "SHOGGOTH_DOMAIN env var is empty (pod $(hostname -s 2>/dev/null || echo unknown))"
     fi
 
+    # Scan both `git.${SHOGGOTH_DOMAIN}` (used by workflows and the
+    # explicit override on the term container) and the bare `git` (used
+    # by the slave image's hardcoded GITEA_SSH_HOST="git" when no
+    # per-container env is injected). They route to the same SSH endpoint
+    # via the `git` ClusterIP Service, but known_hosts is keyed by
+    # hostname — ssh-keyscan only writes the hostname it was given, so
+    # a single keyscan leaves StrictHostKeyChecking rejecting whichever
+    # form the client uses that wasn't scanned. Two keyscans into the
+    # same file dedupe on key fingerprint (the host column differs but
+    # the key column matches), so the resulting known_hosts file has
+    # one entry per (hostname, key-type) pair covering both forms.
     echo "git-cred-bootstrap: scanning git.${SHOGGOTH_DOMAIN} SSH host keys..." >&2
-    if ! ssh-keyscan "git.${SHOGGOTH_DOMAIN}" > "${KNOWN_HOSTS}" 2>/dev/null; then
-        echo "git-cred-bootstrap: FATAL: ssh-keyscan failed on git.${SHOGGOTH_DOMAIN}" >&2
-        exit 1
+    KEYSCAN_OUT="$(mktemp)"
+    if ! ssh-keyscan "git.${SHOGGOTH_DOMAIN}" "git" > "${KNOWN_HOSTS}" 2> "${KEYSCAN_OUT}"; then
+        # ssh-keyscan emits CRLF-terminated lines on stderr and typically
+        # repeats the same error 5 times (once per address family / retry).
+        # Normalize CRLF→LF, dedupe identical lines, then collapse everything
+        # to single-spaced tokens so the FATAL line fits on one row in
+        # `kubectl describe pod` and stays well under the 4096-byte pod-
+        # termination message budget. Capturing the actual stderr is the
+        # entire point of this rewrite — the previous version piped stderr
+        # to /dev/null, which is exactly why the failure mode was invisible
+        # until somebody ran `kubectl describe pod` manually.
+        KEYSCAN_ERR="$(head -c 1500 "${KEYSCAN_OUT}" \
+            | tr -d '\r' \
+            | awk 'NF && !seen[$0]++ { printf "%s ", $0 }' \
+            | tr -s '[:space:]' ' ')"
+        rm -f "${KEYSCAN_OUT}"
+        fatal "ssh-keyscan failed on git.${SHOGGOTH_DOMAIN}: ${KEYSCAN_ERR:-<no stderr>} (check DNS resolves git.${SHOGGOTH_DOMAIN} inside the pod, and port 22/TCP)"
     fi
+    rm -f "${KEYSCAN_OUT}"
     chmod 644 "${KNOWN_HOSTS}"
 
     echo "git-cred-bootstrap: starting ssh-agent at ${SSH_AUTH_SOCK}..." >&2
@@ -75,35 +129,38 @@ data:
 
     SSH_ID_RSA="${SSH_ID_RSA:-}"
     if [ -z "${SSH_ID_RSA}" ]; then
-        echo "git-cred-bootstrap: FATAL: SSH_ID_RSA env var is empty" >&2
-        echo "git-cred-bootstrap:        expected source: K8s Secret 'ssh-slave-private-key' (key 'ssh-id-rsa') in namespace '${SHOGGOTH_NAMESPACE:-}'" >&2
-        exit 1
+        fatal "SSH_ID_RSA env var is empty (expected source: K8s Secret 'ssh-slave-private-key' key 'ssh-id-rsa' in namespace '${SHOGGOTH_NAMESPACE:-<unset>}')"
     fi
 
     FIRST_LINE=$(printf '%s' "${SSH_ID_RSA}" | head -n 1)
     case "${FIRST_LINE}" in
         "-----BEGIN"*) ;;
-        *) echo "git-cred-bootstrap: FATAL: SSH_ID_RSA does not start with a BEGIN marker (first line: ${FIRST_LINE})" >&2; exit 1 ;;
+        *) fatal "SSH_ID_RSA does not start with a BEGIN marker (first line: ${FIRST_LINE})" ;;
     esac
     LAST_LINE=$(printf '%s' "${SSH_ID_RSA}" | awk 'NF{last=$0} END{print last}')
     case "${LAST_LINE}" in
         "-----END"*) ;;
-        *) echo "git-cred-bootstrap: FATAL: SSH_ID_RSA does not end with an END marker (last line: ${LAST_LINE})" >&2; exit 1 ;;
+        *) fatal "SSH_ID_RSA does not end with an END marker (last line: ${LAST_LINE})" ;;
     esac
 
     printf '%s\n' "${SSH_ID_RSA}" > /tmp/git-cred-bootstrap-key
     chmod 400 /tmp/git-cred-bootstrap-key
-    if ! ssh-add /tmp/git-cred-bootstrap-key 2>&1; then
-        echo "git-cred-bootstrap: FATAL: ssh-add failed" >&2
-        rm -f /tmp/git-cred-bootstrap-key
-        exit 1
+    # Capture both streams atomically: ssh-add's exit code depends on whether
+    # the agent accepted the key, and the error message we want lives on its
+    # stderr (e.g. "Could not add identity: agent refused operation"). The
+    # if-condition runs ssh-add once; the captured variable holds its merged
+    # stdout/stderr so the FATAL line includes it verbatim.
+    SSH_ADD_ERR_FILE="$(mktemp)"
+    if ! ssh-add /tmp/git-cred-bootstrap-key > "${SSH_ADD_ERR_FILE}" 2>&1; then
+        SSH_ADD_ERR="$(head -c 800 "${SSH_ADD_ERR_FILE}" | tr '\n' ' ' | tr -s ' ')"
+        rm -f /tmp/git-cred-bootstrap-key "${SSH_ADD_ERR_FILE}"
+        fatal "ssh-add failed: ${SSH_ADD_ERR:-<no stderr>}"
     fi
-    rm -f /tmp/git-cred-bootstrap-key
+    rm -f /tmp/git-cred-bootstrap-key "${SSH_ADD_ERR_FILE}"
 
     IDENTITY_COUNT=$(ssh-add -l | wc -l | tr -d ' \n')
     if [ "${IDENTITY_COUNT}" -lt 1 ]; then
-        echo "git-cred-bootstrap: FATAL: ssh-agent has no identities" >&2
-        exit 1
+        fatal "ssh-agent has no identities after ssh-add (agent says: $(ssh-add -l 2>&1 | head -c 400))"
     fi
     echo "git-cred-bootstrap: ssh-agent has ${IDENTITY_COUNT} identity(ies)" >&2
 

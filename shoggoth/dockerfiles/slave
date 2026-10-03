@@ -3,8 +3,6 @@ FROM ${BASE_IMAGE}
 
 ARG SHOGGOTH_DOMAIN=
 
-ENV SSH_AUTH_SOCK="/shoggoth/git-cred/ssh_auth_sock"
-ENV CCWS_CACHE="/cache/ccws/"
 ENV PIP_CACHE_DIR="/cache/ccws/pip"
 
 USER root
@@ -14,7 +12,7 @@ RUN git config --system credential.helper 'cache --socket=/shoggoth/git-cred/git
     && git config --system user.name 'shoggoth' \
     && printf 'Host *\n  UserKnownHostsFile /shoggoth/git-cred/known_hosts\n' > /etc/ssh/ssh_config.d/shoggoth.conf \
     && mkdir -p /home/ccws/.qwen \
-    && printf '{\n  "telemetry": {\n    "enabled": true,\n    "target": "local",\n    "otlpEndpoint": "http://otelcol:4317",\n    "otlpProtocol": "grpc",\n    "logPrompts": false,\n    "includeSensitiveSpanAttributes": false\n  }\n}\n' > /home/ccws/.qwen/settings.json \
+    && printf '{\n  "telemetry": {\n    "enabled": true,\n    "target": "local",\n    "logPrompts": false,\n    "includeSensitiveSpanAttributes": false\n  }\n}\n' > /home/ccws/.qwen/settings.json \
     && chown -R ccws /home/ccws/
 
 RUN \
@@ -42,5 +40,22 @@ RUN \
         env PIP_INDEX_URL=http://python-cache.${SHOGGOTH_DOMAIN}/index/ PIP_TRUSTED_HOST=python-cache.${SHOGGOTH_DOMAIN} \
         pip install ${PYTHON_PKG})
 
+ENV SSH_AUTH_SOCK="/shoggoth/git-cred/ssh_auth_sock"
+ENV CCWS_CACHE="/cache/ccws/"
 ENV PIP_INDEX_URL="http://python-cache/index/"
 ENV PIP_TRUSTED_HOST="python-cache"
+ENV KESTRA_HOST="kestra"
+ENV GITEA_SSH_HOST="git"
+ENV OPENAI_BASE_URL="http://litellm/v1/"
+ENV OPENAI_MODEL="shoggoth-default"
+ENV OPENAI_API_KEY="litellm"
+ENV BM_MCP_URL="http://litellm/mcp"
+ENV CCACHE_REMOTE_STORAGE="http://build-cache"
+ENV CCACHE_REMOTE_ONLY="true"
+ENV OPENBAO_ADDR="http://openbao:80"
+ENV SHOGGOTH_SLAVE_USER="slave"
+ENV SHOGGOTH_REVIEWER_USER="slave-reviewer"
+ENV OTEL_EXPORTER_OTLP_ENDPOINT="http://otelcol:4318"
+ENV QWEN_TELEMETRY_OTLP_PROTOCOL="http"
+ENV OTEL_SERVICE_NAME="slave"
+

@@ -15,13 +15,17 @@ tasks:
       networkMode: host
       volumes:
         - "/shoggoth/git-cred:/shoggoth/git-cred"
-        - "/shoggoth/ci_cache:/cache"
+        - "/cache:/cache"
         - "/host_volumes/workflow-scripts:/shoggoth/workflow/scripts:ro"
-    containerImage: registry.s.local/slave_noble:latest
+    containerImage: registry.s.local/slave:noble
     commands:
       - 'python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose github-mirror-sync $(echo "{{ envs.shoggoth_github_org }}" | tr "," " ") 2>&1'
     env:
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otelcol:4318"
-      GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
       GITEA_ADMIN_TOKEN: "{{ envs.gitea_admin_token }}"
+      # Override the slave image's baked-in `GITEA_SERVER_URL=http://api/gitea`
+      # (which would send Host=`api` and miss Angie `server_name api.${SHOGGOTH_DOMAIN}`).
+      # Bypass Angie and hit the gitea Service directly — same pattern
+      # `main_shoggoth_maintenance.yml` uses for `setup_*` tasks; matches
+      # the script's expectation of an admin-token-authenticated direct call.
+      GITEA_SERVER_URL: "http://git.{{ envs.shoggoth_domain }}"
       SHOGGOTH_DOMAIN: "{{ envs.shoggoth_domain }}"

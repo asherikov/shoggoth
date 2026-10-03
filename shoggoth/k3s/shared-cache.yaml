@@ -1,0 +1,31 @@
+---
+# shoggoth-shared-cache — single PVC shared across CI consumers:
+#   - gitea-runner job pods (mount at /cache; slave:noble image's
+#     CCWS_CACHE=/cache/ccws/ + PIP_CACHE_DIR=/cache/ccws/pip expect it)
+#   - slave-term interactive web terminal (mount at /cache)
+#   - kestra workflows (mount at /cache on slave-dind so Kestra-spawned
+#     containers that reference /cache via Docker task runner bind-mount it)
+#
+# Replaces the per-consumer PVCs that this file obsoletes:
+#   - slave-dind-ci-cache (still in slave-dind.yaml's manifest but no longer
+#     claimed; the slave-dind Deployment now points its `ci-cache` volume at
+#     this PVC)
+#   - slave-term-ci-cache (still in slave-term.yaml's manifest but no longer
+#     claimed; the slave-term Deployment now points its `ci-cache` volume at
+#     this PVC)
+#
+# Capacity: 30Gi (covers pip wheels for ~all shoggoth projects plus ccws cache
+# state with headroom). Bump via storageClass.resources.patch if a project
+# outgrows this; do not re-create per-consumer PVCs.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shoggoth-shared-cache
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi
+  storageClassName: local-path
