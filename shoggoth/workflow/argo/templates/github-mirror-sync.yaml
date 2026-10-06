@@ -1,0 +1,120 @@
+---
+# github-mirror-sync — equivalent to kestra's main_shoggoth_github-mirror-sync.yml.
+# Invoked manually via `argo submit` from a developer shell.
+#
+# Replaces the old concurrency:limit:1 / behavior:CANCEL with Argo's
+# SynchronizationType. Note the semantic difference: Kestra's
+# `behavior: CANCEL` cancelled the running execution when a new one
+# arrived; Argo's `synchronization.mutex` queues the new submission
+# in Pending until the holder completes. This is intentional — the
+# maintainer prefers the holder to finish rather than be aborted.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: github-mirror-sync
+  namespace: shoggoth
+  labels:
+    app.kubernetes.io/part-of: shoggoth-argo
+spec:
+  entrypoint: sync
+  synchronization:
+    mutexes:
+      - name: github-mirror-sync-mutex
+  arguments:
+    parameters:
+    - name: github_orgs
+      # Default to SHOGGOTH_GITHUB_ORG from the ConfigMap so a bare
+      # `argo submit --from workflowtemplate/github-mirror-sync` (no
+      # `-p github_orgs=...`) mirrors the configured org instead of
+      # failing with "requires at least one github organization name".
+      # Override with `-p github_orgs="orgA orgB"` to mirror an
+      # explicit list. The python script (shoggoth_maintenance.py:
+      # github-mirror-sync branch) falls back to os.environ
+      # ['SHOGGOTH_GITHUB_ORG'] when no positional args are passed,
+      # matching the template default.
+      value: "{{workflow.parameters.SHOGGOTH_GITHUB_ORG}}"
+    # Required by the submit-time validator (workflow/validate/validate.go):
+    # templates referencing {{workflow.parameters.SHOGGOTH_*}} must resolve
+    # to a declared parameter here. Values are fetched from the
+    # shoggoth-workflow-config ConfigMap at admission time.
+    - name: SHOGGOTH_DOMAIN
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_DOMAIN
+    - name: SHOGGOTH_GITHUB_ORG
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_GITHUB_ORG
+    - name: SHOGGOTH_INSTANCE_DIR
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_INSTANCE_DIR
+  templates:
+  - name: sync
+    inputs:
+      parameters:
+      - name: github_orgs
+        # `github_orgs` is space-separated (e.g. `orgA orgB orgC`).
+        # The deleted Kestra flow normalized comma-separated input
+        # with `tr ',' ' '`; Argo's `bash -lc` word-splits on
+        # whitespace only, so a comma-separated value would be passed
+        # as a single organization name and the GitHub API 404s.
+    container:
+      image: registry.{{workflow.parameters.SHOGGOTH_DOMAIN}}/slave:noble
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      args:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose github-mirror-sync {{inputs.parameters.github_orgs}} 2>&1
+      env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://otelcol:4318"
+      - name: GITEA_SERVER_URL
+        value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: GITEA_ADMIN_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: gitea-slave-token
+            key: token
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: SHOGGOTH_GITHUB_ORG
+        value: "{{workflow.parameters.SHOGGOTH_GITHUB_ORG}}"
+      volumeMounts:
+      - name: workflow-scripts
+        mountPath: /shoggoth/workflow/scripts
+        readOnly: true
+      - name: workflow-config
+        mountPath: /shoggoth/workflow-config
+        readOnly: true
+      - name: git-cred
+        mountPath: /shoggoth/git-cred
+      - name: ci-cache
+        mountPath: /cache
+    volumes:
+    - name: workflow-scripts
+      hostPath:
+        path: /var/lib/rancher/k3s/storage/{{workflow.parameters.SHOGGOTH_INSTANCE_DIR}}/workflow-scripts
+        type: DirectoryOrCreate
+    # Mount the shoggoth-workflow-config ConfigMap so the script can
+    # read SHOGGOTH_GITHUB_ORG from /shoggoth/workflow-config/ without
+    # relying on the template's parameter/env system being up to date.
+    # The ConfigMap is created by `make up` and populated from
+    # shoggoth.env at deploy time. This is the most robust source for
+    # SHOGGOTH_GITHUB_ORG: it works even if the cluster's
+    # WorkflowTemplate is stale and missing the env wiring above (the
+    # apply-workflows init container only refreshes the template on
+    # controller pod restart).
+    - name: workflow-config
+      configMap:
+        name: shoggoth-workflow-config
+    - name: git-cred
+      emptyDir: {}
+    - name: ci-cache
+      persistentVolumeClaim:
+        claimName: shoggoth-shared-cache
+    activeDeadlineSeconds: 1800

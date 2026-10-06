@@ -202,8 +202,9 @@ data:
         fi
     fi
 
-    # Always (re)write the K8s Secret backup so downstream pods (kestra render-config,
-    # etc.) can read root-token regardless of which branch above produced UNSEAL_KEY.
+    # Always (re)write the K8s Secret backup so downstream pods (workflow
+    # maintainers, etc.) can read root-token regardless of which branch above
+    # produced UNSEAL_KEY.
     payload=$(jq -c -n \
         --arg uk "$(printf '%s' "${UNSEAL_KEY}" | base64 -w0)" \
         --arg rt "$(printf '%s' "${ROOT_TOKEN}" | base64 -w0)" \
@@ -265,7 +266,6 @@ data:
         SEEDED=$((SEEDED + 1))
     fi
     for path in \
-        kestra/db-password \
         redmine/db-password \
         cdash/db-password \
         redmine/secret-key-base \

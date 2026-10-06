@@ -1,0 +1,1145 @@
+---
+# Workflows for shoggoth run as native k8s pods spawned by the workflow-controller.
+# No DinD, no external DB: workflows are stored as CRDs and managed by the
+# in-cluster controller. Webhooks from Gitea/Redmine hit the argo-server's
+# events endpoint (signature verification is skipped because the cluster is
+# VPN-only; see alternatives.md "Workflow/orchestration engine" for the
+# trade-off).
+#
+# Replaces kestra.yaml (workflows only). slave-dind.yaml remains
+# for gitea-runner DinD (gitea.yaml mounts it as the dockerd socket
+# for Action Runner job pods).
+#
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo
+  namespace: ${SHOGGOTH_NAMESPACE}
+  annotations:
+    workflows.argoproj.io/description: |
+        ServiceAccount used by Argo Workflows to spawn workflow pods and to
+        read shoggoth secrets (git-rev0 token, OpenBao root token, SSH key).
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-workflow-executor
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - pods/log
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  - openbao-unseal-key
+  - gitea-runner-token
+  - gitea-server-token
+  verbs:
+  - get
+- apiGroups:
+  - ''
+  resources:
+  - configmaps
+  resourceNames:
+  - argo-workflow-controller-configmap
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  - openbao-unseal-key
+  - gitea-runner-token
+  verbs:
+  - get
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflows
+  - workflows/finalizers
+  - workflowtaskresults
+  - workflowtemplates
+  - workflowtemplates/finalizers
+  # workfloweventbindings: argo-server's event_server
+  # (server/event/event_server.go) does an in-cluster LIST on the
+  # WorkflowEventBinding matching the discriminator in
+  # /api/v1/events/{ns}/{discriminator}, using its OWN SA
+  # (argo-server) — not the caller's bearer token. The bearer token
+  # injected by web-internal (shoggoth/k3s/argo-webhook-receiver.yaml)
+  # only authenticates the HTTP request through argo's gatekeeper;
+  # the kube API call is still made by argo-server. Without this
+  # grant, gitea/redmine webhook delivery 403s with
+  # "User system:serviceaccount:shoggoth:argo-server cannot list
+  # resource workfloweventbindings". The argo SA (workflow pods)
+  # inherits the same Role, but workfloweventbindings is a benign
+  # read — equivalent to reading workflowtemplates (already granted).
+  - workfloweventbindings
+  - cronworkflows
+  - cronworkflows/finalizers
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-workflow-executor
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-workflow-executor
+subjects:
+- kind: ServiceAccount
+  name: argo
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+# Cluster-scoped permissions required by the workflow-controller AND
+# argo-server (both bound to this same ClusterRole):
+#   - workflow-controller: create/exec pods in any namespace where workflows
+#     run, watch/delete workflow pods it spawned, read configmaps
+#   - argo-server: needs cluster-scoped access to ClusterWorkflowTemplates
+#     even with --namespaced, because the reflector still sets up a watch
+#     for the cluster-scoped resource. Bound via the argo-workflow-server
+#     ClusterRoleBinding below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argo-workflow-controller
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - pods/log
+  - pods/exec
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - configmaps
+  - events
+  - persistentvolumeclaims
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflows
+  - workflows/finalizers
+  - workflowtaskresults
+  - workflowtemplates
+  - workflowtemplates/finalizers
+  - clusterworkflowtemplates
+  - clusterworkflowtemplates/finalizers
+  - workfloweventbindings
+  - cronworkflows
+  - cronworkflows/finalizers
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflowtaskresults
+  verbs:
+  - list
+  - watch
+  - deletecollection
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-workflow-controller
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argo-workflow-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argo-workflow-controller
+subjects:
+- kind: ServiceAccount
+  name: argo-workflow-controller
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+# argo-server uses a separate SA + minimal ClusterRole (R2-2): the
+# workflow-controller ClusterRole grants cluster-wide pods create/exec
+# which is appropriate for the controller but NOT for argo-server, and
+# binding workflow pods (which inherit `serviceAccountName: argo` via
+# workflowDefaults below) to the same ClusterRole gives any compromised
+# workflow step cluster-admin. argo-server's only cluster-scoped need
+# is the ClusterWorkflowTemplates reflector watch; everything else is
+# already in the namespace-scoped Role.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-server
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argo-server-clusterworkflowtemplates-watcher
+rules:
+- apiGroups:
+  - argoproj.io
+  resources:
+  - clusterworkflowtemplates
+  - clusterworkflowtemplates/finalizers
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argo-workflow-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argo-server-clusterworkflowtemplates-watcher
+subjects:
+- kind: ServiceAccount
+  name: argo-server
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-workflow-executor-server
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-workflow-executor
+subjects:
+- kind: ServiceAccount
+  name: argo-server
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+# Required by the wait-bootstrap initContainer in the argo-workflow-controller
+# Deployment, which polls `kubectl get externalsecret` for the four
+# ExternalSecrets workflows reference (gitea-slave-token,
+# ssh-slave-private-key, gitea-runner-token, openbao-unseal-key) before the
+# git-cred sidecar starts reading the corresponding K8s Secrets. Without
+# `get` on the externalsecrets, kubectl 403s and the initContainer silently
+# retries for the full 10m window (the `if … ; then … fi` in wait_for_externalsecret
+# keeps `set -e` from tripping on the forbidden error), so the symptom is a
+# stuck pod, not an immediate crash.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-workflow-controller-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+# `kubectl wait` does an internal LIST + WATCH, not just GET. The
+# initial LIST establishes the resourceVersion, the subsequent
+# WATCH streams Ready-condition status changes until the condition
+# flips true. Without `list` + `watch` the wait fails with
+# `Failed to watch ... cannot list resource externalsecrets`
+# (reflector.go:200) and the init container sits at 403 for the
+# full 10-minute timeout. Resource-name-scoped so the bound SAs
+# (`argo-workflow-controller`, `argo` via
+# argo-workflow-pod-bootstrap-wait) can only watch the four
+# externalsecrets workflows actually reference.
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  - openbao-unseal-key
+  - gitea-runner-token
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  - openbao-unseal-key
+  - gitea-runner-token
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-workflow-controller-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-workflow-controller-bootstrap-wait
+subjects:
+- kind: ServiceAccount
+  name: argo-workflow-controller
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+# Workflow pods use the `argo` SA (see workflowDefaults below). The
+# wait-bootstrap init container in podSpecPatch polls
+# `kubectl get externalsecret` for the same ExternalSecrets the
+# controller's wait-bootstrap polls, ensuring the corresponding K8s
+# Secrets (`ssh-slave-private-key`, `gitea-slave-token`) are populated
+# before the kubelet resolves the secretKeyRef env vars on the
+# git-cred sidecar. Without this RoleBinding, the workflow's
+# wait-bootstrap would 403 on the externalsecret GET and silently
+# retry until its 10-minute timeout — symptom would be a stuck pod
+# in InitContainerWait state, not an immediate failure.
+# Reuses the `argo-workflow-controller-bootstrap-wait` Role (same
+# scoped get on the same externalsecret resourceNames).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-workflow-pod-bootstrap-wait
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-workflow-controller-bootstrap-wait
+subjects:
+- kind: ServiceAccount
+  name: argo
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+# argo-workflow-controller's secret-source informer (argo workflows v3.7+, still applies in v4)
+# LIST/WATCHes every ExternalSecret AND the K8s Secrets they produce in
+# the namespace to track the source of secrets workflows reference via
+# secretKeyRef (e.g. gitea-slave-token, ssh-slave-private-key,
+# openbao-unseal-key, gitea-runner-token). Without list/watch the
+# controller logs `Failed to watch ... is forbidden` every relist
+# interval. Separate Role from the bootstrap-wait get-only grant because
+# the controller's runtime informer has different scope than the init
+# container's poll.
+# `secrets` is left un-name-scoped because the informer must follow
+# secretKeyRefs introduced by newly-applied WorkflowTemplates at runtime;
+# restricting to a known list breaks as soon as a new template references
+# a new secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-workflow-controller-secret-source
+  namespace: ${SHOGGOTH_NAMESPACE}
+rules:
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflowartifactgctasks
+  - workflowtasksets
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-workflow-controller-secret-source
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argo-workflow-controller-secret-source
+subjects:
+- kind: ServiceAccount
+  name: argo-workflow-controller
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+# argo-workflow-controller's namespace informer resolves workflow target
+# namespaces by name (required even in --namespaced mode to render the
+# namespace selector correctly). Cluster-scoped; cannot be expressed as
+# a Role.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: argo-workflow-controller-namespace-watcher
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argo-workflow-controller-namespace-watcher
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argo-workflow-controller-namespace-watcher
+subjects:
+- kind: ServiceAccount
+  name: argo-workflow-controller
+  namespace: ${SHOGGOTH_NAMESPACE}
+---
+# workflow-controller — watches Workflow/CronJob/WorkflowTemplate CRDs and
+# spawns pods per step. Single replica is sufficient for shoggoth's volume.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argo-workflow-controller
+  namespace: ${SHOGGOTH_NAMESPACE}
+  labels:
+    app: argo-workflow-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: argo-workflow-controller
+  template:
+    metadata:
+      labels:
+        app: argo-workflow-controller
+    spec:
+      serviceAccountName: argo-workflow-controller
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - ${SHOGGOTH_DNS_IP}
+        searches:
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+      initContainers:
+      - name: wait-bootstrap
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SHOGGOTH_NAMESPACE
+          value: ${SHOGGOTH_NAMESPACE}
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          NS="${SHOGGOTH_NAMESPACE}"
+          TIMEOUT="600s"
+          echo "wait-bootstrap: waiting for K8s Secrets in namespace ${NS}..."
+          # ExternalSecrets: wait for status.conditions[type=Ready]=True.
+          # openbao-unseal-key is NOT an ExternalSecret — the openbao init
+          # container writes the K8s Secret directly via k8s_put_secret
+          # (shoggoth/k3s/openbao.yaml:213), so wait on the Secret's
+          # data.root-token key instead. Same pattern as shoggoth/k3s/redmine.yaml.
+          #
+          # kubectl wait uses one process per resource and an internal watch;
+          # the previous polling loop (`kubectl get -o json | jq`) re-forked
+          # kubectl + jq every 10s and was OOMing at 128Mi.
+          kubectl wait --for=condition=Ready --timeout="${TIMEOUT}" \
+              -n "${NS}" externalsecret/gitea-slave-token \
+              || { echo "FAIL: externalsecret/gitea-slave-token not Ready after ${TIMEOUT}"; exit 1; }
+          echo "wait-bootstrap: externalsecret/gitea-slave-token Ready"
+          kubectl wait --for=condition=Ready --timeout="${TIMEOUT}" \
+              -n "${NS}" externalsecret/ssh-slave-private-key \
+              || { echo "FAIL: externalsecret/ssh-slave-private-key not Ready after ${TIMEOUT}"; exit 1; }
+          echo "wait-bootstrap: externalsecret/ssh-slave-private-key Ready"
+          kubectl wait --for=condition=Ready --timeout="${TIMEOUT}" \
+              -n "${NS}" externalsecret/gitea-runner-token \
+              || { echo "FAIL: externalsecret/gitea-runner-token not Ready after ${TIMEOUT}"; exit 1; }
+          echo "wait-bootstrap: externalsecret/gitea-runner-token Ready"
+          kubectl wait --for=jsonpath='{.data.root-token}' --timeout="${TIMEOUT}" \
+              -n "${NS}" secret/openbao-unseal-key \
+              || { echo "FAIL: secret/openbao-unseal-key.root-token not populated after ${TIMEOUT}"; \
+                   echo "      openbao init/unseal is the writer; check:"; \
+                   echo "      kubectl logs -n ${NS} deploy/openbao --no-color | tail -n 200"; \
+                   exit 1; }
+          echo "wait-bootstrap: secret/openbao-unseal-key.root-token populated"
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+      - name: apply-workflows
+        # Apply WorkflowTemplate and WorkflowEventBinding CRDs from the
+        # host-mounted directory. The 'make sync' target rsyncs
+        # shoggoth/workflow/argo/ to /var/lib/rancher/k3s/storage/${INSTANCE}/argo/
+        # before the controller pod starts.
+        #
+        # On every controller restart this init container hard-resets the
+        # shoggoth-argo WorkflowTemplate / WorkflowEventBinding CRDs from
+        # the host-mounted directory: delete (force, no grace period) ->
+        # wait for absence -> apply fresh. This is a delete+apply, not
+        # `kubectl apply` alone, because `kubectl apply` uses a 3-way
+        # merge against last-applied-configuration and can fail to remove
+        # fields when the on-disk and on-cluster specs diverge across many
+        # sync_restart cycles. A retry loop with verification (the final
+        # API-server snapshot must match the on-disk sha256) prevents
+        # partial failure modes where the init container exits 0 but the
+        # cluster is still stale. If verification still fails, the pod
+        # fails to start (set -e) so the controller never comes up with
+        # drifted templates.
+        #
+        # Runs as the controller's SA (argo-workflow-controller), which
+        # has create/get/update/delete on workflowtemplates and
+        # workfloweventbindings (see ClusterRole argo-workflow-controller).
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SHOGGOTH_NAMESPACE
+          value: ${SHOGGOTH_NAMESPACE}
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          NS="${SHOGGOTH_NAMESPACE}"
+          SRC="/workflow/argo"
+          LABEL="app.kubernetes.io/part-of=shoggoth-argo"
+          shopt -s nullglob
+          templates=( "${SRC}/templates"/*.{yaml,yml} )
+          bindings=( "${SRC}/bindings"/*.{yaml,yml} )
+          shopt -u nullglob
+          if [ "${#templates[@]}" -eq 0 ] || [ "${#bindings[@]}" -eq 0 ]; then
+            echo "FAIL: ${SRC}/templates or ${SRC}/bindings has no .yaml files (run 'make sync' to populate)"
+            exit 1
+          fi
+
+          # Per-kind hard reset: delete every object with the label, wait
+          # for full absence, then apply fresh from disk. Loops on
+          # transient API errors (network blips, apiserver momentarily
+          # unavailable) but exits non-zero on persistent failure so the
+          # controller pod fails to start instead of coming up stale.
+          reset_kind() {
+            local kind="$1"; shift
+            local src_dir="$1"; shift
+            local max_attempts=5
+            local attempt=1
+            while [ "$attempt" -le "$max_attempts" ]; do
+              echo "apply-workflows: ${kind} reset attempt ${attempt}/${max_attempts}"
+              if kubectl delete "${kind}" -n "${NS}" -l "${LABEL}" \
+                    --ignore-not-found=true --wait=true --force --grace-period=0 >/dev/null 2>&1; then
+                if kubectl get "${kind}" -n "${NS}" -l "${LABEL}" -o name 2>/dev/null | grep -q .; then
+                  echo "apply-workflows: ${kind} still present after delete; retrying"
+                else
+                  if kubectl apply -n "${NS}" -f "${src_dir}" >/dev/null 2>&1; then
+                    echo "apply-workflows: ${kind} reset OK"
+                    return 0
+                  fi
+                  echo "apply-workflows: ${kind} apply failed; retrying"
+                fi
+              else
+                echo "apply-workflows: ${kind} delete failed; retrying"
+              fi
+              attempt=$((attempt + 1))
+              sleep 3
+            done
+            echo "FAIL: ${kind} reset did not converge after ${max_attempts} attempts"
+            return 1
+          }
+
+          reset_kind workflowtemplate "${SRC}/templates/"
+          reset_kind workfloweventbinding "${SRC}/bindings/"
+
+          # Verification: the live cluster spec must contain no DAG task
+          # that has BOTH `continueOn` and `depends` set. The previous
+          # error message ("templates.<name> cannot use 'continueOn'
+          # when using 'depends'") fires whenever argo-server validates
+          # a WorkflowTemplate that contains such a task. We re-grep the
+          # cluster API-server snapshot for the offending pair; if any
+          # task still has both, fail the init container so the pod
+          # doesn't come up with a stale spec. (kubectl itself doesn't
+          # enforce this rule — only argo-server's submit-time validator
+          # does — so it's the cluster state that has to be clean.)
+          echo "apply-workflows: verifying no task has both continueOn and depends..."
+          set +e
+          bad=$(kubectl get workflowtemplate -n "${NS}" -l "${LABEL}" -o json 2>/dev/null \
+              | python3 -c '
+          import json
+          import sys
+          data = json.load(sys.stdin)
+          for wt in data.get("items", []):
+              wt_name = wt.get("metadata", {}).get("name", "?")
+              for t in wt.get("spec", {}).get("templates", []):
+                  for task in t.get("dag", {}).get("tasks", []):
+                      if task.get("continueOn") is not None and "depends" in task:
+                          sys.stderr.write("    " + wt_name + "/" + task.get("name", "?") + "\n")
+                          sys.exit(1)
+          ')
+          verify_rc=$?
+          set -e
+          if [ "$verify_rc" -ne 0 ]; then
+            echo "FAIL: cluster still has WorkflowTemplate tasks with both continueOn and depends:"
+            echo "$bad"
+            exit 1
+          fi
+
+          echo "apply-workflows: WorkflowTemplate CRDs:"
+          kubectl get workflowtemplate -n "${NS}" --no-headers -o custom-columns=NAME:.metadata.name
+          echo "apply-workflows: WorkflowEventBinding CRDs:"
+          kubectl get workfloweventbinding -n "${NS}" --no-headers -o custom-columns=NAME:.metadata.name
+        volumeMounts:
+        - name: workflow-argo
+          mountPath: /workflow/argo
+          readOnly: true
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+          limits:
+            # kubectl apply --prune lists every existing object matching the
+            # label selector, then applies the directory contents. The peak
+            # (kubectl process + parsed YAMLs + LIST response) overflows
+            # smaller limits on first run. register-vwc in shoggoth/k3s/external-secrets.yaml
+            # (same image, same kind of work) uses 128Mi, but argo-workflows'
+            # apply-workflows hits higher peaks here — bumped to 512Mi to
+            # clear Init:OOMKilled.
+            memory: 512Mi
+            cpu: 1000m
+      containers:
+      - name: controller
+        image: quay.io/argoproj/workflow-controller:v4.1.4
+        imagePullPolicy: IfNotPresent
+        args:
+        - --configmap
+        - argo-workflow-controller-configmap
+        - --executor-image
+        - quay.io/argoproj/argoexec:v4.1.4
+        - --namespaced
+        - --namespace
+        - ${SHOGGOTH_NAMESPACE}
+        - --workflow-workers
+        - "32"
+        env:
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4317
+        - name: ARGO_TRACE
+          value: "1"
+        - name: LEADER_ELECTION_DISABLE
+          value: "true"
+        ports:
+        - containerPort: 9090
+          name: metrics
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 5
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: metrics
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          failureThreshold: 6
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 200m
+          limits:
+            memory: 1Gi
+            cpu: '1'
+        securityContext:
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: workflow-argo
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/argo
+          type: Directory
+---
+# Workflow parameter values used by WorkflowTemplate spec.arguments.parameters
+# via valueFrom.configMapKeyRef (see each template's spec). The submit-time
+# validator in workflow/validate/validate.go merges the WorkflowTemplate's
+# spec.arguments.parameters into the Workflow's spec.arguments.parameters
+# before validation and requires each declared parameter to have either
+# `value` or `valueFrom` — and `{{workflow.parameters.X}}` references in the
+# templates must resolve to one of those declared parameters. So instead of
+# baking literal values into the templates (which would have to be re-rendered
+# by `make sync` / `make up` on every env-var change), we point at this
+# ConfigMap; the controller fetches each key at admission time. The four
+# `${SHOGGOTH_*}` placeholders below are substituted to actual values by
+# `make up`'s envsubst pass (make/k3s.mk), so the ConfigMap in the cluster
+# holds the literal domain, namespace, github org, and instance dir.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shoggoth-workflow-config
+  namespace: ${SHOGGOTH_NAMESPACE}
+  # v4's controller discovers parameter-sourcing ConfigMaps via this label
+  # (workflow/controller/controller.go: typedConfigMapInformer sets
+  # LabelSelector = common.LabelKeyConfigMapType at the API-server level,
+  # then distinguishes Parameter vs ExecutorPlugin in handler-side filters).
+  # ConfigMaps without this label are invisible to parameter resolution and
+  # produce the error "ConfigMap '...' does not exist. Please make sure it
+  # has the label workflows.argoproj.io/configmap-type: Parameter to be
+  # detectable by the controller".
+  labels:
+    workflows.argoproj.io/configmap-type: Parameter
+data:
+  SHOGGOTH_DOMAIN: ${SHOGGOTH_DOMAIN}
+  SHOGGOTH_NAMESPACE: ${SHOGGOTH_NAMESPACE}
+  SHOGGOTH_GITHUB_ORG: ${SHOGGOTH_GITHUB_ORG}
+  SHOGGOTH_INSTANCE_DIR: ${SHOGGOTH_INSTANCE_DIR}
+---
+# Controller configuration — workflow defaults that apply to every Workflow
+# created in the namespace.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argo-workflow-controller-configmap
+  namespace: ${SHOGGOTH_NAMESPACE}
+data:
+  resourceRateLimit: |
+    limit: 32
+    burst: 64
+  # Disable TLS on the controller's metrics server (port 9090). v3.7.0+
+  # defaults Secure: true and generates a fresh self-signed cert on every
+  # startup, so kubelet probes (plaintext HTTP) get 400 and OTel scrapers
+  # either need to skip verification or carry the cert. Plaintext on the
+  # pod-local metrics port is fine; only the workflow-defaults content
+  # below crosses the network and that's already TLS-protected by the
+  # node-level control plane.
+  metricsConfig: |
+    secure: false
+    path: /metrics
+    port: 9090
+  workflowDefaults: |
+    spec:
+      # Default arguments for every workflow. v4 dropped v3's
+      # controller-side `$VAR` / `${VAR}` substitution from its env
+      # into workflow specs (the substitution engine in
+      # util/template/template.go uses fasttemplate's `{{...}}` syntax
+      # only). So workflow templates now reference these via
+      # `{{workflow.parameters.SHOGGOTH_DOMAIN}}` etc. and the values
+      # below — `${SHOGGOTH_*}` is substituted to actual values by
+      # `make up`'s envsubst pass (make/k3s.mk), so what lands in
+      # the cluster is the literal domain, namespace, etc. The four
+      # parameters cover every `${SHOGGOTH_*}` reference in
+      # shoggoth/workflow/argo/templates/*.yaml (image references,
+      # env values, URL fragments, and hostPath volumes).
+      arguments:
+        parameters:
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: SHOGGOTH_NAMESPACE
+          value: ${SHOGGOTH_NAMESPACE}
+        - name: SHOGGOTH_GITHUB_ORG
+          value: ${SHOGGOTH_GITHUB_ORG}
+        - name: SHOGGOTH_INSTANCE_DIR
+          value: ${SHOGGOTH_INSTANCE_DIR}
+      serviceAccountName: argo
+      # No podGC: pods are NOT deleted by argo-server's per-workflow
+      # podGC garbage collector. The previous OnWorkflowSuccess strategy
+      # deleted pods the moment a workflow succeeded, which made logs
+      # unreliable and surfaced the UI warning
+      # "Your pod GC settings will delete pods immediately on
+      # completion. Logs may not appear ...". Without podGC, pods stick
+      # around until ttlStrategy expires (secondsAfterCompletion: 86400
+      # below), which keeps them alive for 24h after workflow completion
+      # — plenty of time for the workflow-logs-viewer / argo-server API
+      # to serve their logs, and the UI warning goes away. Resource
+      # cost: completed workflow pods occupy cluster capacity for 24h;
+      # acceptable for shoggoth's workflow profile (a handful per day,
+      # each a single short-lived container).
+      ttlStrategy:
+        secondsAfterCompletion: 86400
+      # podSpecPatch adds the git-cred sidecar (and its init container)
+      # to every workflow pod so SSH/HTTPS git operations in
+      # coding-agent-dispatcher, slave-test, and github-mirror-sync have
+      # access to ssh-agent + known_hosts + git-credential-cache at
+      # /shoggoth/git-cred. The init container must run first: kubelet
+      # mounts the emptyDir as root:root with default perms, the sidecar
+      # runs as uid 1000 (securityContext.runAsUser below), and
+      # git-credential-cache refuses the directory if it's looser than
+      # 0700 — so we chown+chmod the mountpoint to 1000:1000/0700 as
+      # root before the sidecar starts. Without this, the sidecar's
+      # own `chmod 0700 /shoggoth/git-cred` leaves the dir
+      # `drwx------ root:root` and the workflow main container
+      # (ccws / uid 1000) cannot traverse it, breaking every SSH clone
+      # and HTTPS push. terminationMessagePolicy: FallbackToLogsOnError
+      # makes the sidecar's FATAL line (e.g. `git-cred-bootstrap: FATAL:
+      # ssh-keyscan failed on git.s.local`) land in
+      # `containerState.terminated.message` so `kubectl describe pod`
+      # surfaces it on failure instead of leaving it in the truncated
+      # log buffer. Mirrors shoggoth/k3s/{slave-dind,slave-term}.yaml.
+      #
+      # `restartPolicy: "Always"` makes git-cred a native sidecar
+      # (long-running, restart on failure, started before any non-sidecar
+      # container). K8s 1.28+ also exposes a `startOrder` field on
+      # Container that would gate the workflow's main container on
+      # git-cred's readinessProbe; we intentionally do not set it
+      # because shoggoth's running k3s build (v1.34.3+k3s3) does not
+      # expose `startOrder` in its apiserver OpenAPI v2 — `kubectl apply`
+      # rejects it with "field not declared in schema", and even if
+      # accepted, the kubelet would not honour it. Instead, the per-check
+      # `_wait_for_git_cred` loops in shoggoth_maintenance.py are the
+      # gate. The readinessProbe is purely diagnostic (kubectl describe
+      # pod, Events). failureThreshold 60 s is 2× the 30 s sidecar
+      # bootstrap budget to absorb ssh-keyscan retries against a
+      # freshly-started gitea-ssh pod.
+      #
+      # The readinessProbe checks for /shoggoth/git-cred/ready — the
+      # single flag the sidecar touch()es after ssh-agent + credential-
+      # cache are both alive (with a 3 s grace — see
+      # shoggoth/k3s/git-cred-bootstrap.yaml "Ready flag"). Consumers
+      # (workflow main containers via _wait_for_git_cred, the term
+      # container in slave-term.yaml) wait on this same flag rather
+      # than polling the three pre-flag outputs (known_hosts,
+      # ssh_auth_sock, git_credential_sock).
+      podSpecPatch: |
+        {
+          "dnsPolicy": "None",
+          "dnsConfig": {
+            "nameservers": ["${SHOGGOTH_DNS_IP}"],
+            "searches": [
+              "${SHOGGOTH_NAMESPACE}.svc.cluster.local",
+              "svc.cluster.local",
+              "cluster.local"
+            ]
+          },
+          "initContainers": [
+            {
+              "name": "wait-bootstrap",
+              "image": "asherikov/shoggoth_tools:alpine",
+              "imagePullPolicy": "IfNotPresent",
+              "env": [
+                {"name": "SHOGGOTH_NAMESPACE", "value": "${SHOGGOTH_NAMESPACE}"}
+              ],
+              "command": ["bash", "-c"],
+              "args": ["set -euo pipefail\nNS=\"${SHOGGOTH_NAMESPACE}\"\nTIMEOUT=\"600s\"\n# Wait for the externalsecrets the git-cred sidecar reads via\n# secretKeyRef to be Ready (= the K8s Secret is populated).\n# Without this wait the workflow pod can start before the\n# external-secrets controller has synced, the kubelet sees an\n# empty Secret data field, and SSH_ID_RSA reaches the sidecar as\n# \"\" — bootstrap.sh then fatal()s on the empty-key check and the\n# git-cred container CrashLoopBackOffs while ssh-add -l in the main\n# container returns \"The agent has no identities.\".\n# Mirrors the controller's wait-bootstrap (which protects the\n# argo-workflow-controller Deployment itself) so workflow pods have\n# the same gate. RBAC for the `argo` SA is granted by the\n# `argo-workflow-pod-bootstrap-wait` RoleBinding.\nkubectl wait --for=condition=Ready --timeout=\"${TIMEOUT}\" -n \"${NS}\" externalsecret/gitea-slave-token || { echo \"FAIL: externalsecret/gitea-slave-token not Ready after ${TIMEOUT}\"; exit 1; }\necho \"wait-bootstrap: externalsecret/gitea-slave-token Ready\"\nkubectl wait --for=condition=Ready --timeout=\"${TIMEOUT}\" -n \"${NS}\" externalsecret/ssh-slave-private-key || { echo \"FAIL: externalsecret/ssh-slave-private-key not Ready after ${TIMEOUT}\"; exit 1; }\necho \"wait-bootstrap: externalsecret/ssh-slave-private-key Ready\""],
+              "resources": {
+                "requests": {"memory": "32Mi", "cpu": "50m"},
+                "limits": {"memory": "64Mi", "cpu": "200m"}
+              }
+            },
+            {
+              "name": "init-git-cred-perms",
+              "image": "asherikov/shoggoth_tools:alpine",
+              "imagePullPolicy": "IfNotPresent",
+              "command": ["sh", "-c"],
+              "args": ["set -eu\nchown 1000:1000 /shoggoth/git-cred\nchmod 0700 /shoggoth/git-cred"],
+              "volumeMounts": [
+                {"name": "git-cred", "mountPath": "/shoggoth/git-cred"}
+              ],
+              "resources": {
+                "requests": {"memory": "16Mi", "cpu": "10m"},
+                "limits": {"memory": "32Mi", "cpu": "50m"}
+              }
+            }
+          ],
+          "containers": [
+            {
+              "name": "git-cred",
+              "image": "asherikov/shoggoth_tools:alpine",
+              "imagePullPolicy": "IfNotPresent",
+              "command": ["/bin/bash", "/git-cred/bootstrap.sh"],
+              "env": [
+                {"name": "SHOGGOTH_DOMAIN", "value": "${SHOGGOTH_DOMAIN}"},
+                {"name": "SHOGGOTH_NAMESPACE", "value": "${SHOGGOTH_NAMESPACE}"},
+                {"name": "SSH_ID_RSA", "valueFrom": {"secretKeyRef": {"name": "ssh-slave-private-key", "key": "ssh-id-rsa"}}},
+                {"name": "GITEA_SLAVE_TOKEN", "valueFrom": {"secretKeyRef": {"name": "gitea-slave-token", "key": "token"}}}
+              ],
+              "volumeMounts": [
+                {"name": "git-cred", "mountPath": "/shoggoth/git-cred"},
+                {"name": "git-cred-bootstrap", "mountPath": "/git-cred", "readOnly": true}
+              ],
+              "resources": {
+                "requests": {"memory": "32Mi", "cpu": "20m"},
+                "limits": {"memory": "64Mi", "cpu": "100m"}
+              },
+              "securityContext": {
+                "runAsUser": 1000
+              },
+              "terminationMessagePolicy": "FallbackToLogsOnError",
+              "restartPolicy": "Always",
+              "readinessProbe": {
+                "exec": {
+                  "command": ["sh", "-c", "test -f /shoggoth/git-cred/ready"]
+                },
+                "initialDelaySeconds": 0,
+                "periodSeconds": 1,
+                "timeoutSeconds": 1,
+                "successThreshold": 1,
+                "failureThreshold": 60
+              }
+            },
+            {
+              "name": "main"
+            }
+          ],
+          "volumes": [
+            {"name": "git-cred", "emptyDir": {}},
+            {"name": "git-cred-bootstrap", "configMap": {"name": "git-cred-bootstrap", "defaultMode": 493}}
+          ]
+        }
+---
+# argo-server — REST + UI endpoint. Server-mode auth: callers pass a ServiceAccount
+# token; the server validates against the k8s API. shoggoth uses bearer
+# tokens from gitea-slave-token / gitea-runner-token for workflow triggers.
+apiVersion: v1
+kind: Service
+metadata:
+  name: argo
+  namespace: ${SHOGGOTH_NAMESPACE}
+spec:
+  selector:
+    app: argo-server
+  ports:
+  - name: webhooks
+    port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: argo-server
+  namespace: ${SHOGGOTH_NAMESPACE}
+  labels:
+    app: argo-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: argo-server
+  template:
+    metadata:
+      labels:
+        app: argo-server
+    spec:
+      serviceAccountName: argo-server
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - ${SHOGGOTH_DNS_IP}
+        searches:
+        - ${SHOGGOTH_NAMESPACE}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+      containers:
+      - name: argo-server
+        image: quay.io/argoproj/argocli:v4.1.4
+        imagePullPolicy: IfNotPresent
+        command:
+        # --secure=false is REQUIRED for the Gitea/Redmine webhook path.
+        # v3.7.0 used cmux, which demuxed plaintext HTTP and TLS on the
+        # same port by first byte. v4.x replaced cmux with Go's
+        # http.Server.Protocols, but the protocol demuxer sits *under*
+        # tls.NewListener (server/apiserver/argoserver.go), so once
+        # --secure=true (the default since v3) the listener refuses any
+        # plaintext HTTP and resets the connection with a TLS fatal
+        # alert. The gitea/redmine webhook URLs registered by
+        # shoggoth_maintenance.py now point at
+        # api.<DOMAIN>/argo/api/v1/events/{ns}/{discriminator}, which
+        # web-internal (shoggoth/k3s/web-internal.yaml) proxies to
+        # argo:80 as plaintext HTTP — web-internal injects the
+        # argo-webhook-receiver SA token (shoggoth/k3s/
+        # argo-webhook-receiver.yaml) so the v4 interceptor
+        # short-circuits on the Authorization header and argo's
+        # gatekeeper does bearer validation. Without --secure=false the
+        # hop from web-internal to argo-server trips the same TLS fatal
+        # alert as a direct plaintext POST.
+        #
+        # --auth-mode=server does NOT force TLS in v4 (the two flags
+        # are independent in cmd/argo/commands/server.go), so
+        # server-mode bearer-token validation still runs through the
+        # gatekeeper. Webhook endpoints require either an
+        # Authorization: Bearer header (gatekeeper validates against
+        # k8s) OR an `argo-workflows-webhook-clients` Secret with
+        # per-provider signature matchers (bitbucket/github/gitlab only
+        # — gitea is not in v4's webhookParsers map at server/auth/
+        # webhook/interceptor.go). shoggoth takes the bearer-token
+        # route via web-internal, so neither the Secret nor a gitea
+        # matcher patch is needed.
+        #
+        # Probes use tcpSocket because the cluster's K8s version is too
+        # old for httpGet.insecureSkipTLSVerify (added in K8s 1.24 GA);
+        # TCP accept on port 80 is a sufficient "pod responsive"
+        # signal — listener is up means http.Protocols is demuxing
+        # connections to the right handler (v3.x) or the gRPC gateway
+        # is bound (v4.x).
+        - argo
+        - server
+        - --auth-mode
+        - server
+        - --secure=false
+        - --port
+        - "80"
+        - --configmap
+        - argo-workflow-controller-configmap
+        - --namespaced
+        - --namespace
+        - ${SHOGGOTH_NAMESPACE}
+        # --loglevel debug + --log-format json surface TLS handshake
+        # errors ("first record does not look like a TLS handshake"),
+        # interceptor failures ("Failed to process webhook request"),
+        # and access-log lines for every /api/ request, including ones
+        # that fail before reaching the handler (the accesslog
+        # middleware is innermost, but TLS rejects happen before any
+        # handler runs so the request never reaches it). Increase to
+        # debug when investigating webhook delivery failures; drop
+        # back to info in steady state to keep the log volume sane.
+        - --loglevel
+        - debug
+        - --log-format
+        - json
+        env:
+        - name: SHOGGOTH_DOMAIN
+          value: ${SHOGGOTH_DOMAIN}
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4317
+        - name: ARGO_TRACE
+          value: "1"
+        # Defensive: argo-server's pflag parses --port from args first, but
+        # viper.AutomaticEnv() with prefix ARGO reads ARGO_PORT and overrides
+        # any --port NOT explicitly set on the command line. Setting it here
+        # ensures the right value is in env even if --port is removed/ignored
+        # downstream. If the cluster's apiserver injects a conflicting
+        # ARGO_PORT (e.g. via a MutatingWebhook), pod creation will fail with
+        # a duplicate-key error, surfacing the source.
+        - name: ARGO_PORT
+          value: "80"
+        # Disable the "Welcome / Tell us what you want to use Argo for" FTU
+        # modal that argo-server shows on first UI access. The check in
+        # server/info/info_server.go (GetInfo) is the literal-string compare
+        # `os.Getenv("FIRST_TIME_USER_MODAL") != "false"`, so any other
+        # value leaves it on. Once a user has dismissed the modal in their
+        # browser, ui/src/modals/modal-switch.tsx remembers it via
+        # localStorage["modal/ftu"] and will not show again regardless of
+        # this env var — this setting only suppresses the first access.
+        # FEEDBACK_MODAL and NEW_VERSION_MODAL are gated the same way and
+        # disabled for the same reason.
+        - name: FIRST_TIME_USER_MODAL
+          value: "false"
+        - name: FEEDBACK_MODAL
+          value: "false"
+        - name: NEW_VERSION_MODAL
+          value: "false"
+        ports:
+        - containerPort: 80
+          name: webhooks
+        readinessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          failureThreshold: 6
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 200m
+          limits:
+            memory: 1Gi
+            cpu: '1'
+        securityContext:
+          runAsNonRoot: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            # Required to bind HTTP server to TCP/80 (privileged port) when
+            # running as root with all other capabilities dropped.
+            - NET_BIND_SERVICE
+---
+# Argo Events sensor-equivalent is not used: the workflow-controller's
+# /api/v1/events/{namespace}/{discriminator} endpoint is hit directly by
+# webhook deliveries from Gitea and Redmine. The WorkflowEventBinding CRDs
+# are loaded from /workflow/argo/bindings/ via the entrypoint ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argo-bindings
+  namespace: ${SHOGGOTH_NAMESPACE}
+data:
+  # placeholder — the `apply-workflows` init container in the
+  # argo-workflow-controller Deployment (see lines above) runs
+  # `kubectl apply -f /workflow/argo/templates -f /workflow/argo/bindings`
+  # on every pod start, after `wait-bootstrap` confirms the required
+  # ExternalSecrets are Ready. The host directory backing /workflow/argo
+  # is /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/argo, which
+  # `make sync` populates from shoggoth/workflow/argo/.
+  README: |
+    WorkflowEventBinding CRDs are applied at controller startup by the
+    `apply-workflows` init container in the same Deployment. The
+    init container runs:
+      kubectl apply -n ${SHOGGOTH_NAMESPACE} \
+        -f /workflow/argo/templates \
+        -f /workflow/argo/bindings \
+        --prune -l app.kubernetes.io/part-of=shoggoth-argo
+    No separate Job / bringup pod exists — the init container IS the
+    apply path. The host directory is
+    /var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/argo
+    (synced by `make sync` from shoggoth/workflow/argo/).

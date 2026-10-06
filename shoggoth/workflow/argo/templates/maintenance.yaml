@@ -1,0 +1,288 @@
+---
+# maintenance — equivalent to kestra's main_shoggoth_maintenance.yml.
+# Single-flight via synchronization mutex (was concurrency:limit:1/behavior:CANCEL).
+# Each step runs sequentially; the DAG ordering matches the original linear flow.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: maintenance
+  namespace: shoggoth
+  labels:
+    app.kubernetes.io/part-of: shoggoth-argo
+spec:
+  entrypoint: run
+  serviceAccountName: shoggoth-maintenance-secret-writer
+  activeDeadlineSeconds: 1800
+  synchronization:
+    mutexes:
+      - name: maintenance-mutex
+  # Required by the submit-time validator (workflow/validate/validate.go):
+  # templates referencing {{workflow.parameters.SHOGGOTH_*}} must resolve
+  # to a declared parameter here. Values are fetched from the
+  # shoggoth-workflow-config ConfigMap at admission time (see
+  # shoggoth/k3s/argo-workflows.yaml). All four are referenced in the
+  # inline step templates below (shoggoth-tools-step, argo-webhook-step,
+  # redmine-webhook-step, redmine-argo-webhook-step, secret-bootstrap-step).
+  arguments:
+    parameters:
+    - name: SHOGGOTH_DOMAIN
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_DOMAIN
+    - name: SHOGGOTH_NAMESPACE
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_NAMESPACE
+    - name: SHOGGOTH_GITHUB_ORG
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_GITHUB_ORG
+    - name: SHOGGOTH_INSTANCE_DIR
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_INSTANCE_DIR
+  templates:
+  - name: run
+    dag:
+      tasks:
+      - name: setup-argo-webhooks
+        template: argo-webhook-step
+      - name: setup-redmine-webhooks
+        template: redmine-webhook-step
+        depends: "setup-argo-webhooks"
+      - name: setup-redmine-argo-webhook
+        template: redmine-argo-webhook-step
+        depends: "setup-redmine-webhooks"
+      - name: gitea-ldap-sync
+        template: shoggoth-tools-step
+        depends: "setup-redmine-argo-webhook"
+        arguments:
+          parameters:
+          - {name: action, value: gitea-ldap-sync}
+      - name: slave-access
+        template: shoggoth-tools-step
+        depends: "gitea-ldap-sync"
+        arguments:
+          parameters:
+          - {name: action, value: slave-access}
+      - name: slave-token
+        template: secret-bootstrap-step
+        depends: "slave-access"
+        arguments:
+          parameters:
+          - {name: action, value: slave-token}
+      - name: runner-token
+        template: secret-bootstrap-step
+        depends: "slave-token"
+        arguments:
+          parameters:
+          - {name: action, value: runner-token}
+      - name: ssh-key
+        template: shoggoth-tools-step
+        depends: "runner-token"
+        arguments:
+          parameters:
+          - {name: action, value: ssh-key}
+      - name: redmine-ldap-sync
+        template: shoggoth-tools-step
+        depends: "ssh-key"
+        arguments:
+          parameters:
+          - {name: action, value: redmine-ldap-sync}
+
+  - name: shoggoth-tools-step
+    inputs:
+      parameters:
+      - name: action
+    container:
+      image: asherikov/shoggoth_tools:alpine
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      args:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose {{inputs.parameters.action}} 2>&1
+      env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://otelcol:4318"
+      - name: GITEA_SERVER_URL
+        value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: GITEA_ADMIN_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: gitea-server-token
+            key: token
+      - name: REDMINE_SERVER
+        value: "http://redmine.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: SHOGGOTH_VAULT_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: openbao-unseal-key
+            key: root-token
+      - name: OPENBAO_ADDR
+        value: "http://openbao:80"
+      volumeMounts:
+      - name: workflow-scripts
+        mountPath: /shoggoth/workflow/scripts
+        readOnly: true
+    volumes:
+    - name: workflow-scripts
+      hostPath:
+        path: /var/lib/rancher/k3s/storage/{{workflow.parameters.SHOGGOTH_INSTANCE_DIR}}/workflow-scripts
+        type: DirectoryOrCreate
+    retryStrategy:
+      limit: 0
+
+  - name: argo-webhook-step
+    container:
+      image: asherikov/shoggoth_tools:alpine
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      args:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose argo-webhooks 2>&1
+      env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://otelcol:4318"
+      - name: GITEA_SERVER_URL
+        value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: GITEA_ADMIN_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: gitea-server-token
+            key: token
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      volumeMounts:
+      - name: workflow-scripts
+        mountPath: /shoggoth/workflow/scripts
+        readOnly: true
+    volumes:
+    - name: workflow-scripts
+      hostPath:
+        path: /var/lib/rancher/k3s/storage/{{workflow.parameters.SHOGGOTH_INSTANCE_DIR}}/workflow-scripts
+        type: DirectoryOrCreate
+    retryStrategy:
+      limit: 0
+
+  - name: redmine-webhook-step
+    container:
+      image: asherikov/shoggoth_tools:alpine
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      args:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose redmine-webhooks 2>&1
+      env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://otelcol:4318"
+      - name: GITEA_SERVER_URL
+        value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: GITEA_ADMIN_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: gitea-server-token
+            key: token
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      volumeMounts:
+      - name: workflow-scripts
+        mountPath: /shoggoth/workflow/scripts
+        readOnly: true
+    volumes:
+    - name: workflow-scripts
+      hostPath:
+        path: /var/lib/rancher/k3s/storage/{{workflow.parameters.SHOGGOTH_INSTANCE_DIR}}/workflow-scripts
+        type: DirectoryOrCreate
+    retryStrategy:
+      limit: 0
+
+  - name: redmine-argo-webhook-step
+    container:
+      image: asherikov/shoggoth_tools:alpine
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      args:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose redmine-argo-webhooks 2>&1
+      env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://otelcol:4318"
+      - name: REDMINE_SERVER
+        value: "http://redmine.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: SHOGGOTH_VAULT_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: openbao-unseal-key
+            key: root-token
+      - name: OPENBAO_ADDR
+        value: "http://openbao:80"
+      volumeMounts:
+      - name: workflow-scripts
+        mountPath: /shoggoth/workflow/scripts
+        readOnly: true
+    volumes:
+    - name: workflow-scripts
+      hostPath:
+        path: /var/lib/rancher/k3s/storage/{{workflow.parameters.SHOGGOTH_INSTANCE_DIR}}/workflow-scripts
+        type: DirectoryOrCreate
+    retryStrategy:
+      limit: 0
+
+  - name: secret-bootstrap-step
+    inputs:
+      parameters:
+      - name: action
+    container:
+      image: asherikov/shoggoth_tools:alpine
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      args:
+      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose {{inputs.parameters.action}} 2>&1
+      env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://otelcol:4318"
+      - name: GITEA_SERVER_URL
+        value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: GITEA_ADMIN_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: gitea-server-token
+            key: token
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: SHOGGOTH_NAMESPACE
+        value: "{{workflow.parameters.SHOGGOTH_NAMESPACE}}"
+      - name: SHOGGOTH_GITHUB_ORG
+        value: "{{workflow.parameters.SHOGGOTH_GITHUB_ORG}}"
+      - name: SHOGGOTH_VAULT_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: openbao-unseal-key
+            key: root-token
+      - name: OPENBAO_ADDR
+        value: "http://openbao:80"
+      volumeMounts:
+      - name: workflow-scripts
+        mountPath: /shoggoth/workflow/scripts
+        readOnly: true
+    volumes:
+    - name: workflow-scripts
+      hostPath:
+        path: /var/lib/rancher/k3s/storage/{{workflow.parameters.SHOGGOTH_INSTANCE_DIR}}/workflow-scripts
+        type: DirectoryOrCreate
+    retryStrategy:
+      limit: 0

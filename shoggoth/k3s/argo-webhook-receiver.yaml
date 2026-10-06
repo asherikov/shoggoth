@@ -1,0 +1,103 @@
+# argo-webhook-receiver — minimal SA + RBAC for delivering gitea/redmine
+# webhook events to argo-server via web-internal. The gitea/redmine webhook
+# URLs in shoggoth/workflow/scripts/shoggoth_maintenance.py now point at
+# api.${SHOGGOTH_DOMAIN}/argo/api/v1/events/{ns}/{discriminator}, which
+# web-internal proxies to argo with this SA's bearer token injected (mirrors
+# the existing api.{SHOGGOTH_DOMAIN} → git/redmine/cdash pattern in
+# shoggoth/k3s/web-internal.yaml:107-148).
+#
+# Why a separate Role (not argo-workflow-executor):
+#   The argo-workflow-executor Role (argo-workflows.yaml:25-67) is missing
+#   workfloweventbindings — it was sized for workflow pod executors, which
+#   never need to read bindings. The v4 event controller does:
+#     server/event/event_server.go:76
+#       WorkflowEventBindings(ns).List(...)        → needs get/list/watch
+#     server/event/dispatch/operation.go:103-115
+#       WorkflowTemplates(ns).Get(...)             → needs get
+#       Workflows(ns).Create(...)                  → needs create
+#   Binding this SA to argo-workflow-executor (or to argo-workflow-controller
+#   ClusterRole) would either over-grant workfloweventbindings to executors
+#   that don't need it, or inherit cluster-wide pods/exec which the controller
+#   needs but the webhook receiver must NOT have. A separate Role keeps
+#   privileges exactly to what the webhook path needs.
+#
+# No cluster-scope bindings are used in shoggoth/workflow/argo/bindings/*
+# (workflowTemplateRef.clusterScope defaults to false), so
+# clusterworkflowtemplates is intentionally omitted. If a future binding
+# adds clusterScope: true, extend this Role with:
+#   - apiGroups: [argoproj.io]
+#     resources: [clusterworkflowtemplates]
+#     verbs: [get]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-webhook-receiver
+  namespace: ${SHOGGOTH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shoggoth
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-webhook-receiver
+  namespace: ${SHOGGOTH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shoggoth
+rules:
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workfloweventbindings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflowtemplates
+  verbs:
+  - get
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflows
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-webhook-receiver
+  namespace: ${SHOGGOTH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shoggoth
+subjects:
+- kind: ServiceAccount
+  name: argo-webhook-receiver
+  namespace: ${SHOGGOTH_NAMESPACE}
+roleRef:
+  kind: Role
+  name: argo-webhook-receiver
+  apiGroup: rbac.authorization.k8s.io
+---
+# Long-lived bearer token consumed by web-internal (shoggoth/k3s/
+# web-internal.yaml). K8s populates .data.token automatically when the
+# Secret has type kubernetes.io/service-account-token and an annotation
+# naming the SA — no external secret store / OpenBao needed, and the token
+# is bound to the argo-webhook-receiver SA so its RBAC above applies.
+#
+# web-internal's wait-bootstrap (web-internal.yaml) waits for the Secret
+# to have a non-empty .data.token before rendering angie.conf, so the
+# ARGO_WEBHOOK_TOKEN substitution is always populated at startup.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argo-webhook-receiver-token
+  namespace: ${SHOGGOTH_NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: shoggoth
+  annotations:
+    kubernetes.io/service-account.name: argo-webhook-receiver
+type: kubernetes.io/service-account-token

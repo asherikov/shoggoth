@@ -52,8 +52,10 @@ subjects:
   namespace: ${SHOGGOTH_NAMESPACE}
 ---
 # The /cache persistent storage is shared across all CI consumers
-# (gitea-runner job pods, slave-term, and Kestra workflows via slave-dind's
-# DinD). See shoggoth/k3s/shared-cache.yaml for the single PVC definition.
+# (gitea-runner job pods and slave-term; the Kestra migration removed
+# the Kestra Docker task runner path that previously consumed this PVC
+# via slave-dind's DinD). See shoggoth/k3s/shared-cache.yaml for the
+# single PVC definition.
 ---
 apiVersion: v1
 kind: Service
@@ -212,6 +214,35 @@ spec:
         terminationMessagePolicy: FallbackToLogsOnError
         securityContext:
           runAsUser: 1000
+        # `restartPolicy: Always` makes git-cred a native sidecar
+        # (long-running, restart on failure, started before any
+        # non-sidecar container that depends on its outputs). K8s 1.28+
+        # also exposes a `startOrder` field on Container that would
+        # gate `term` on git-cred's readinessProbe; we intentionally do
+        # not set it because shoggoth's running k3s build (v1.34.3+k3s3)
+        # does not expose `startOrder` in its apiserver OpenAPI v2 —
+        # `kubectl apply` rejects it with "field not declared in schema",
+        # and even if accepted, the kubelet would not honour it. The
+        # `term` entrypoint waits inline for the sidecar's ready flag
+        # instead (see `command:` below). The readinessProbe is purely
+        # diagnostic (kubectl describe pod, Events). failureThreshold 60
+        # is 2× the 30 s sidecar bootstrap budget to cover a freshly-
+        # started gitea-ssh pod. The probe checks the consumer-facing
+        # ready flag the sidecar touch()es after ssh-agent + credential-
+        # cache are both alive (with a 3 s grace — see
+        # shoggoth/k3s/git-cred-bootstrap.yaml "Ready flag").
+        restartPolicy: Always
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - test -f /shoggoth/git-cred/ready
+          initialDelaySeconds: 0
+          periodSeconds: 1
+          timeoutSeconds: 1
+          successThreshold: 1
+          failureThreshold: 60
       - name: term
         image: registry.${SHOGGOTH_DOMAIN}/slave:noble
         imagePullPolicy: IfNotPresent
@@ -244,6 +275,34 @@ spec:
         - /bin/sh
         - -c
         - |
+          # Wait for the git-cred sidecar to populate /shoggoth/git-cred
+          # before launching ttyd. The kubelet starts this container in
+          # parallel with git-cred (no `startOrder` gate — the running
+          # k3s build, v1.34.3+k3s3, does not expose the field in its
+          # apiserver OpenAPI v2 and `kubectl apply` rejects it anyway),
+          # so this inline poll is the actual gate. Budget 60 s matches
+          # the sidecar's readinessProbe failureThreshold. We wait on
+          # /shoggoth/git-cred/ready — the single flag the sidecar
+          # touch()es after ssh-agent and git-credential-cache--daemon
+          # are both alive (with a 3 s grace — see
+          # shoggoth/k3s/git-cred-bootstrap.yaml "Ready flag"). Polling
+          # one file instead of three sockets (known_hosts,
+          # ssh_auth_sock, git_credential_sock) matches what workflow
+          # main containers do via _wait_for_git_cred in
+          # shoggoth_maintenance.py.
+          ready_flag="/shoggoth/git-cred/ready"
+          i=0
+          while [ "$i" -lt 60 ]; do
+            if [ -f "$ready_flag" ]; then
+              break
+            fi
+            i=$((i + 1))
+            sleep 1
+          done
+          if ! [ -f "$ready_flag" ]; then
+            echo "term: git-cred not ready after ${i}s — proceeding anyway (git/ssh will fail until sidecar catches up); check 'kubectl logs <pod> -c git-cred'" >&2
+          fi
+
           # User exit is expected behavior, not a fault. ttyd --once exits
           # when the browser WebSocket closes; tmux's session also ends.
           # Force exit 0 so kubelet restarts the container without

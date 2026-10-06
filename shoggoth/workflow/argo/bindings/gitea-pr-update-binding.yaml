@@ -1,0 +1,43 @@
+---
+# gitea-pr-update — webhook entry from Gitea's pull_request_review /
+# pull_request_review_request / pull_request_comment events. Equivalent to
+# kestra's main_shoggoth_gitea-pr-update.yml.
+#
+# Webhook endpoint (set up by shoggoth_maintenance.py argo-webhooks):
+#   POST http://api.{domain}/argo/api/v1/events/shoggoth/gitea-pr-update
+#
+# v4 syntax notes (vs v3.7.0):
+#   - spec.event.selector is now an expr-lang boolean expression evaluated
+#     against {namespace, discriminator, payload, metadata} in
+#     server/event/dispatch/operation.go. v3 treated it as a literal
+#     discriminator match — bare "gitea-pr-update" now parses as the
+#     expression "gitea - pr - update" and fails with "unknown name gitea".
+#     Use `discriminator == "<name>"` to match.
+#   - parameters[].value (literal) has been replaced by parameters[].valueFrom.event
+#     (also an expr-lang expression). Bare strings inside the expression must be
+#     quoted (`"shoggoth_workflow.py"`), and Go-template `{{...}}` wrapping
+#     (v3) is gone — the entire expression is the value of that field.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowEventBinding
+metadata:
+  name: gitea-pr-update
+  namespace: shoggoth
+  labels:
+    app.kubernetes.io/part-of: shoggoth-argo
+spec:
+  event:
+    selector: 'discriminator == "gitea-pr-update"'
+  submit:
+    workflowTemplateRef:
+      name: coding-agent-dispatcher
+    arguments:
+      parameters:
+      - name: script
+        valueFrom:
+          event: '"shoggoth_workflow.py"'
+      - name: task_id
+        valueFrom:
+          event: '"pr-update"'
+      - name: payload
+        valueFrom:
+          event: 'payload'

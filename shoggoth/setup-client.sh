@@ -211,7 +211,7 @@ install_ca_certificate() {
 }
 
 update_hosts() {
-    services="kestra dns apt-cache registry litellm git build-cache git-pages redmine python-cache grafana otelcol api slave-term"
+    services="argo dns apt-cache registry litellm git build-cache git-pages redmine python-cache grafana otelcol api slave-term"
     hosts_entries="${HOST_IP} ${DOMAIN}
 "
 
@@ -274,9 +274,6 @@ PIP_TRUSTED_HOST=python-cache.${DOMAIN}
 
 # Shoggoth
 SHOGGOTH_DOMAIN=${DOMAIN}
-
-# Kestra
-KESTRA_HOST=kestra.${DOMAIN}
 EOF
     chmod 600 "${ENV_FILE}"
 

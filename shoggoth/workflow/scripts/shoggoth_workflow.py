@@ -185,6 +185,61 @@ def die(msg):
     sys.exit(1)
 
 
+# The git-cred-bootstrap sidecar (shoggoth/k3s/git-cred-bootstrap.yaml)
+# populates /shoggoth/git-cred in parallel with this script: the kubelet
+# starts both containers at the same time because shoggoth's running k3s
+# build (v1.34.3+k3s3) does not expose K8s 1.28+ `startOrder` in its
+# apiserver OpenAPI v2 (and we removed it from the manifests because
+# `kubectl apply` rejected it with "field not declared in schema"). The
+# sidecar eventually runs ssh-keyscan + ssh-agent + git-credential-cache
+# --daemon as uid 1000 and writes known_hosts, ssh_auth_sock, and
+# git_credential_sock into /shoggoth/git-cred. Until those three outputs
+# appear, any `git clone` / `git push` we run will fail (ssh-add
+# refuses to talk to a missing agent socket; git credential-cache
+# refuses to talk to a missing cache socket; ssh-keyscan produces an
+# empty known_hosts and StrictHostKeyChecking then rejects the host).
+# Wait on the sidecar's single readiness flag — not on per-file
+# existence. Mirrors shoggoth_maintenance.py:_wait_for_git_cred so
+# both scripts gate on the same signal: shoggoth/k3s/git-cred-
+# bootstrap.yaml touches /shoggoth/git-cred/ready 3 s after both
+# ssh-agent has loaded an identity and the credential-cache daemon
+# has accepted its first `store`. Per-file polling was racy —
+# ssh-keyscan creates known_hosts with the > redirect BEFORE writing
+# key data, so an empty known_hosts is a real file that passes
+# os.stat — and the AF_UNIX sockets exist before their
+# listeners are bound.
+GIT_CRED_READY_PATH = "/shoggoth/git-cred/ready"
+GIT_CRED_READY_TIMEOUT = 30
+GIT_CRED_POLL_INTERVAL = 0.5
+
+
+def _wait_for_git_cred(path):
+    deadline = time.time() + GIT_CRED_READY_TIMEOUT
+    while time.time() < deadline:
+        try:
+            os.stat(path)
+            return True
+        except (FileNotFoundError, PermissionError):
+            time.sleep(GIT_CRED_POLL_INTERVAL)
+    return False
+
+
+def _wait_for_git_cred_ready():
+    """Wait on the sidecar's single readiness flag. On timeout, fail
+    with a diagnostic so a run without shell access to the pod can
+    self-diagnose."""
+    log(f"waiting for git-cred sidecar to touch {GIT_CRED_READY_PATH}")
+    if not _wait_for_git_cred(GIT_CRED_READY_PATH):
+        die(
+            f"git-cred sidecar did not touch {GIT_CRED_READY_PATH} within "
+            f"{GIT_CRED_READY_TIMEOUT}s "
+            "(check 'kubectl logs <pod> -c git-cred' for the FATAL line; "
+            "verify the pod has an initContainer named init-git-cred-perms "
+            "and a sidecar named git-cred)"
+        )
+    log("git-cred ready")
+
+
 WSHANDLER_BIN = "/ccws/ccws/tools/bin/wshandler"
 
 
@@ -389,11 +444,30 @@ class Gitea:
         return self._payload.get("pull_request", {}).get("head", {}).get("ref", "")
 
     def has_review(self):
-        return "review" in self._payload
+        # Gitea's PullRequestPayload struct serialises the `Review *ReviewPayload`
+        # field WITHOUT `omitempty` (modules/structs/hook.go in gitea/gitea),
+        # so pull_request_review_request events (action=review_requested /
+        # review_request_removed) arrive here as `"review": null` — the key is
+        # present but the value is None. `dict.get("review")` returns None in
+        # that case (the default-{} only fires when the key is *absent*); a
+        # truthiness check is the predicate the rest of this class already
+        # relies on via `_payload.get("review") or {}`. Without this fix,
+        # is_review_by_slave_user() crashes with
+        # AttributeError: 'NoneType' object has no attribute 'get' before
+        # the action=="review_requested" branch (the one actually meant
+        # for review-request events) can run.
+        return bool(self._payload.get("review"))
 
     def is_review_by_slave_user(self):
         slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
-        review = self._payload.get("review", {})
+        # `or {}` (not `.get("review", {})`): on pull_request_review_request
+        # events Gitea serialises the `Review *ReviewPayload` field WITHOUT
+        # `omitempty`, so `"review": null` arrives — the key is present but
+        # the value is None. `.get(key, {})` only falls back when the key
+        # is *absent*; the `or {}` coercion handles both. Without it this
+        # method raises AttributeError on the very payloads the predicate
+        # is meant to safely return False for.
+        review = self._payload.get("review") or {}
         if review.get("user", {}).get("login") == slave_user:
             return True
         sender = self._payload.get("sender", {})
@@ -2231,8 +2305,8 @@ class PrUpdateCommand(CommandBase):
                 body_first_line = c_body.split("\n")[0].strip()
                 commit_subject = body_first_line[:72]
                 comment_link = f"{pr_url}#issuecomment-{comment_id}" if comment_id is not None else pr_url
-                run_url = os.environ.get("SHOGGOTH_KESTRA_RUN_URL", "")
-                run_url_line = f"\nKestra run: {run_url}" if run_url else ""
+                run_url = os.environ.get("SHOGGOTH_ARGO_RUN_URL", "")
+                run_url_line = f"\nArgo run: {run_url}" if run_url else ""
                 if summary_lines:
                     commit_body = summary[-1000:]
                     if len(summary) > 1000:
@@ -2275,9 +2349,9 @@ class PrUpdateCommand(CommandBase):
             log(f"pr-comment: redmine_task_id={redmine_task_id} changes_produced={changes_produced}")
             if redmine_task_id:
                 note = f"Review comments on {pr_url} have been addressed."
-                run_url = os.environ.get("SHOGGOTH_KESTRA_RUN_URL", "")
+                run_url = os.environ.get("SHOGGOTH_ARGO_RUN_URL", "")
                 if run_url:
-                    note += f" Kestra run: {run_url}."
+                    note += f" Argo run: {run_url}."
                 redmine_note = note
         finally:
             self._push_pending_commits()
@@ -2300,8 +2374,8 @@ class PrUpdateCommand(CommandBase):
         log(f"pr-comment: handling timeout, resolved so far={len(resolved_comments)}")
         self.agent.stop_session()
         resolved_count = len(resolved_comments)
-        run_url = os.environ.get("SHOGGOTH_KESTRA_RUN_URL", "")
-        run_url_suffix = f" Kestra run: {run_url}." if run_url else ""
+        run_url = os.environ.get("SHOGGOTH_ARGO_RUN_URL", "")
+        run_url_suffix = f" Argo run: {run_url}." if run_url else ""
         self._push_pending_commits()
         timeout_msg = (
             f"Agent timed out after {AGENT_TIMEOUT // 60} minutes. "
@@ -2329,6 +2403,11 @@ def main():
 
     global VERBOSE
     VERBOSE = args.verbose
+
+    # The git-cred sidecar runs in parallel with this script; gate every
+    # git operation (clone, push, commit, fetch) on the sidecar producing
+    # its three outputs. See _wait_for_git_cred_ready for details.
+    _wait_for_git_cred_ready()
 
     if args.command == "task":
         if not args.task_id or not args.task_id.isdigit():

@@ -21,6 +21,29 @@
 #   known_hosts              ssh-keyscan output for git.${SHOGGOTH_DOMAIN}
 #   ssh_auth_sock            ssh-agent UNIX socket (SSH_AUTH_SOCK)
 #   git_credential_sock      git credential-cache--daemon socket
+#   ready                    flag file consumers poll on (single signal that
+#                             the two daemons above are alive and populated;
+#                             see "ready flag" below)
+#
+# Ready flag
+# ----------
+# After ssh-agent, git-credential-cache--daemon, and the credential-cache
+# `store` (HTTPS token) are all set up, the script sleeps 3 s and then
+# `touch`es /shoggoth/git-cred/ready. Consumers (the `term` container in
+# slave-term.yaml, every workflow's `main` container via the
+# workflowDefaults podSpecPatch, and the sidecar's own readinessProbe)
+# wait on this single file rather than each individually polling the three
+# pre-flag outputs. The 3 s grace covers ssh-agent's "socket exists but
+# `ssh-add -l` returns no identities yet" window and credential-cache's
+# "socket exists but the daemon hasn't accepted yet" window — both
+# happen immediately on background-start, but a parallel consumer that
+# checks the sockets a millisecond later races against the bind/accept
+# and reports "git_credential_sock doesn't exist" / "Could not open a
+# connection to your authentication agent.". 3 s is comfortably past
+# that window in practice; the 60 s budgets in the consumers (term's
+# inline wait, the readinessProbe failureThreshold, _wait_for_git_cred
+# in shoggoth_maintenance.py) cover cold-start cases like a freshly-
+# spawned gitea-ssh pod where ssh-keyscan has to retry.
 #
 # The script ends with `exec sleep infinity` so the sidecar container stays
 # up for the lifetime of the pod — ssh-agent and git-credential-cache--daemon
@@ -79,11 +102,36 @@ data:
 
     mkdir -p /shoggoth/git-cred
     chmod 0700 /shoggoth/git-cred
+    # Mirror stderr to a file in the shared emptyDir so the main
+    # container's preflight dump (which Argo captures into the
+    # workflow log) can include the sidecar's diagnostic output.
+    # Argo's log archival captures only the main container's
+    # stdout/stderr; sidecar logs are otherwise only accessible via
+    # `kubectl logs <pod> -c git-cred`, which isn't part of the
+    # workflow log. The redirect is set up BEFORE any work that
+    # could fatal() (ssh-add, ssh-agent identity check, etc.) so the
+    # FATAL line is captured — `exec 2> >(...)` replaces fd 2 with
+    # a pipe to a tee that appends to the file AND keeps writing to
+    # the original stderr (which kubelet still captures into
+    # `kubectl logs`). `exec > >(tee … >&2)` would loop (tee's
+    # stdout back into the new pipe); the `2> >(...) >&2` form
+    # avoids it because the tee's stderr is inherited from the
+    # subshell at fork time, before the parent's fd 2 is replaced.
+    # `touch` first so the main container's `open()` on the file
+    # doesn't race against the tee's lazy creation.
+    touch /shoggoth/git-cred/bootstrap.log
+    exec 2> >(tee -a /shoggoth/git-cred/bootstrap.log >&2)
     # Clean any stale AF_UNIX socket left by a previous container restart in
     # the same pod. emptyDir survives container restarts; the ssh-agent /
     # credential-cache process that owned the socket does not, so without
     # this ssh-agent fails to bind with EADDRINUSE on the next start.
     rm -f "${SSH_AUTH_SOCK}" "${GIT_CRED_SOCK}"
+    # Clean the ready flag the previous start touched. Symmetric with the
+    # socket cleanup above: emptyDir persists across restarts, so a stale
+    # ready flag would mislead consumers (workflow main / term containers,
+    # the readinessProbe at argo-workflows.yaml:925) into believing the
+    # new ssh-agent / credential-cache are up before they actually bind.
+    rm -f /shoggoth/git-cred/ready
 
     if [ -z "${SHOGGOTH_DOMAIN:-}" ]; then
         fatal "SHOGGOTH_DOMAIN env var is empty (pod $(hostname -s 2>/dev/null || echo unknown))"
@@ -158,10 +206,20 @@ data:
     fi
     rm -f /tmp/git-cred-bootstrap-key "${SSH_ADD_ERR_FILE}"
 
-    IDENTITY_COUNT=$(ssh-add -l | wc -l | tr -d ' \n')
-    if [ "${IDENTITY_COUNT}" -lt 1 ]; then
+    # `ssh-add -l` with no identities outputs exactly one line —
+    # `The agent has no identities.` — and `wc -l` on that string
+    # returns 1. So `IDENTITY_COUNT=$(... | wc -l) -lt 1` was always
+    # false even when the agent had zero identities, and the bootstrap
+    # script proceeded to `exec sleep infinity` with an empty agent.
+    # Use `ssh-add -l`'s own return code instead: 0 when there is at
+    # least one identity, 1 when the agent has none (the "Could not
+    # open a connection to your authentication agent." case is also
+    # rc=255 / different message, but the script exits earlier in
+    # that path because SSH_AUTH_SOCK points to a dead socket).
+    if ! ssh-add -l > /dev/null 2>&1; then
         fatal "ssh-agent has no identities after ssh-add (agent says: $(ssh-add -l 2>&1 | head -c 400))"
     fi
+    IDENTITY_COUNT=$(ssh-add -l | grep -cE '^[0-9a-f]+ ' || true)
     echo "git-cred-bootstrap: ssh-agent has ${IDENTITY_COUNT} identity(ies)" >&2
 
     echo "git-cred-bootstrap: starting git credential-cache daemon..." >&2
@@ -180,4 +238,15 @@ data:
     fi
 
     echo "git-cred-bootstrap: complete; keeping ssh-agent and git-credential-cache alive" >&2
+
+    # Create the consumer-facing ready flag. The 3 s sleep + touch happens
+    # AFTER ssh-agent is fully initialised (with identities) and AFTER the
+    # credential-cache daemon has accepted at least one `store` request —
+    # so when the flag appears, both daemons are observable from a
+    # parallel container. See the file header comment for why consumers
+    # wait on this single file rather than polling individual sockets.
+    sleep 3
+    touch /shoggoth/git-cred/ready
+    echo "git-cred-bootstrap: ready flag created at /shoggoth/git-cred/ready" >&2
+
     exec sleep infinity

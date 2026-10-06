@@ -1,8 +1,9 @@
 ---
----
 # The /cache persistent storage is shared across all CI consumers
-# (gitea-runner job pods, slave-term, and Kestra workflows via slave-dind's
-# DinD). See shoggoth/k3s/shared-cache.yaml for the single PVC definition.
+# (gitea-runner job pods and slave-term; the Kestra migration removed
+# the Kestra Docker task runner path that previously consumed this PVC
+# via slave-dind's DinD). See shoggoth/k3s/shared-cache.yaml for the
+# single PVC definition.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -284,13 +285,15 @@ metadata:
   name: slave-dind
   namespace: ${SHOGGOTH_NAMESPACE}
 ---
-# Required by Kestra's Docker task runner when the maintenance flow's
-# slave_token / runner_token tasks run inside a container spawned on the
-# slave-dind Docker daemon (networkMode: host + bind-mount of the daemon's
-# SA-token path /var/run/secrets/kubernetes.io/serviceaccount). The spawned
-# container's kubectl resolves credentials from the bind-mounted token,
-# which is slave-dind's; without this Role, `k8s_upsert_secret` would 403
-# on create/update/patch of the maintenance Secrets.
+# This Role/RB is retained for historical reasons — the Kestra
+# maintenance flow used to run kubectl in a DinD-spawned container
+# that inherited slave-dind's SA token via the docker socket bind.
+# After the Kestra → Argo migration, the maintenance workflow runs
+# natively with `serviceAccountName: shoggoth-maintenance-secret-writer`
+# (see shoggoth/workflow/argo/templates/maintenance.yaml), which holds
+# the equivalent verb grants via shoggoth/k3s/maintenance-secret-writer.yaml.
+# This Role/RB is not currently exercised by any live path; remove it
+# only after confirming no consumer still runs kubectl as slave-dind.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

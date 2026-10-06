@@ -1,0 +1,40 @@
+---
+# redmine-task-processor — webhook entry from Redmine's issue.updated /
+# issue.created events. Equivalent to kestra's
+# main_shoggoth_redmine-task-processor.yml.
+#
+# Webhook endpoint (set up by shoggoth_maintenance.py redmine-argo-webhooks):
+#   POST http://api.{domain}/argo/api/v1/events/shoggoth/redmine-task-processor
+#
+# Same v4 syntax change as gitea-pr-update-binding.yaml: selector is now an
+# expr-lang boolean evaluated against {discriminator, payload, ...}, and
+# parameters use valueFrom.event instead of a literal value field. The v3
+# `{{.payload.data.issue.id | squote}}` (Go-template + sprig) becomes a plain
+# expr-lang string concatenation — expr-lang auto-stringifies integers when
+# concatenated with a string, and the equivalent of `| squote` is the
+# surrounding literal `'` characters.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowEventBinding
+metadata:
+  name: redmine-task-processor
+  namespace: shoggoth
+  labels:
+    app.kubernetes.io/part-of: shoggoth-argo
+spec:
+  event:
+    selector: 'discriminator == "redmine-task-processor"'
+  submit:
+    workflowTemplateRef:
+      name: coding-agent-dispatcher
+    arguments:
+      parameters:
+      - name: script
+        valueFrom:
+          event: '"shoggoth_workflow.py"'
+      - name: task_id
+        valueFrom:
+          event: |-
+            "task '" + string(payload.data.issue.id) + "'"
+      - name: payload
+        valueFrom:
+          event: 'payload'

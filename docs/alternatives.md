@@ -560,13 +560,7 @@ records on start/stop.
 
 ## Workflow/orchestration engine
 
-- **[Kestra](https://kestra.io/docs)** (selected)
-  - <https://github.com/kestra-io/kestra>
-  - + rich plugin ecosystem, webhook triggers, file-based flow loading, OTel
-  - + Docker task runner with host socket access (networkMode: host)
-  - - k8s task runner requires Enterprise edition (plugin-ee-kubernetes)
-  - - Docker task runner needs DinD socket (security concern, requires host volume mount)
-- [Argo Workflows](https://github.com/argoproj/argo-workflows) (Apache-2.0, Go)
+- **[Argo Workflows](https://github.com/argoproj/argo-workflows)** (selected)
   - + native k8s pods for task execution (no DinD dependency)
   - + eliminated need for DinD socket (security benefit)
   - + simpler architecture for k8s-native workloads
@@ -580,6 +574,12 @@ records on start/stop.
   - - no built-in webhook signature verification (needs proxy for Gitea's X-Gitea-Signature)
   - - no event deduplication (at-least-once delivery)
   - - webhook event queue default: 16 events, 4 workers (configurable)
+- [Kestra](https://kestra.io/docs) (superseded by Argo Workflows)
+  - <https://github.com/kestra-io/kestra>
+  - + rich plugin ecosystem, webhook triggers, file-based flow loading, OTel
+  - + Docker task runner with host socket access (networkMode: host)
+  - - k8s task runner requires Enterprise edition (plugin-ee-kubernetes)
+  - - Docker task runner needs DinD socket (security concern, requires host volume mount)
 - <https://github.com/dagucloud/dagu/>
   - no webhook trigger support in free version
 - <https://github.com/StackStorm/st2>
@@ -792,7 +792,7 @@ app-aware dumps for Gitea/Redmine, and at least one encrypted off-host copy.
 
 - **[Restic](https://github.com/restic/restic)** (recommended)
   - + client-side encrypted, deduplicated, S3-compatible (B2, Wasabi, Storj, S3, MinIO, Hetzner Storage Box)
-  - + single static binary; fits the existing `slave:noble` Kestra task runner pattern
+  - + single static binary; fits the existing `slave:noble` Argo task runner pattern
   - + automatic pruning/retention; bucket credentials stored in OpenBao
   - + natively orchestratable as new tasks in `main_shoggoth_maintenance.yml`
   - - no GUI; CLI + Restic REST server only
@@ -861,8 +861,9 @@ shoggoth's services already produce a rich event stream (Kestra executions,
 Gitea PR/CI webhooks, Redmine issues, OpenBao unseal events, basic-memory
 write events), but humans currently have no aggregated view — failures
 only land in OTel/Loki traces. The Kestra flow skill's `## Example prompts`
-list (embedded in `shoggoth/k3s/web-internal.yaml` as the
-`kestra-flow-skill.md` ConfigMap data key, around line 669) contains a
+list (originally embedded in `shoggoth/k3s/web-internal.yaml` as the
+`kestra-flow-skill.md` ConfigMap data key, now removed since the migration
+to Argo Workflows) contains a
 string used as an LLM-prompt example —
 `"Add a Slack notification task to this existing flow when any task fails"` —
 that effectively describes the same notification gap, but no `# TODO`
@@ -877,7 +878,7 @@ selected per the team's threading/search needs.
 
 - **[Apprise](https://github.com/caronc/apprise)** (MIT, recommended)
   - + Python + CLI; 100+ targets (Zulip, Slack, Discord, Mattermost, Teams, XMPP, email, SMS, push, webhooks)
-  - + one CLI call (`apprise -t SUBJECT -b BODY --tag shoggoth`) fits the existing `slave:noble` Kestra runner
+  - + one CLI call (`apprise -t SUBJECT -b BODY --tag shoggoth`) fits the existing `slave:noble` Argo runner
   - + destinations declared in `apprise.yml`, stored in OpenBao; chat-platform choice is *not* baked into workflow code
   - - no GUI; CLI only
 - <https://ntfy.sh/> (Apache-2.0)
@@ -891,7 +892,7 @@ selected per the team's threading/search needs.
 
 - **[Zulip](https://zulip.com)** (Apache-2.0, recommended)
   - + Apache-2.0, Docker deploy (`zulip/docker-zulip`), admin console; mature bot API and incoming webhooks
-  - + **stream × topic** two-axis model is purpose-built for CI notifications: one stream per source service (`#kestra`, `#gitea-pr`, `#gitea-ci`, `#redmine`, `#openbao`, `#basic-memory`, `#backup`), one topic per incident
+  - + **stream × topic** two-axis model is purpose-built for CI notifications: one stream per source service (`#argo`, `#gitea-pr`, `#gitea-ci`, `#redmine`, `#openbao`, `#basic-memory`, `#backup`), one topic per incident
   - + strong search across projects; mobile + desktop clients; full message history
   - - integrations catalog covers GitHub/GitLab/Jenkins/Sentry/etc. but **no first-party Gitea integration** — wiring goes through Apprise + generic webhooks
 - <https://mattermost.com/> (MIT server, proprietary mobile SDKs)
@@ -949,12 +950,12 @@ selected per the team's threading/search needs.
 
 The intended posture (no chat platform deployed today):
 
-1. **Apprise** as the fan-out router inside each Kestra task runner (`slave:noble`); tag config in OpenBao as `shoggoth/apprise/tags.yml`
-2. **Zulip** as the first destination — one stream per source service, one topic per incident; this addresses the notification gap noted above (no in-tree TODO exists at `web-internal.yaml:669` — only an LLM-prompt example string in the `kestra-flow-skill.md` ConfigMap data key).
-3. **`shoggoth_maintenance.py` extension** — new step `setup_notification_streams` (alongside `setup_kestra_webhooks`) to provision the stream set on first bringup
+1. **Apprise** as the fan-out router inside each Argo task runner (`slave:noble`); tag config in OpenBao as `shoggoth/apprise/tags.yml`
+2. **Zulip** as the first destination — one stream per source service, one topic per incident; this addresses the notification gap noted above (no in-tree TODO exists at `web-internal.yaml:669` — only an LLM-prompt example string that was once in the deleted `kestra-flow-skill.md` ConfigMap data key).
+3. **`shoggoth_maintenance.py` extension** — new step `setup_notification_streams` (alongside `setup_argo_webhooks`) to provision the stream set on first bringup
 4. **`main_shoggoth_maintenance.yml` extension** — a final task running `apprise --tag shoggoth ...` after each maintenance step; same runner, same OTel env block, no edits to existing tasks
-5. **`onFailure` notification tasks** on `gitea-pr-update`, `gitea-ci-failure`, `redmine-task-processor` — flows where the `kestra-flow-skill.md` example prompt expects a Slack-style task
-6. Apprise tag config in OpenBao (`shoggoth/apprise/tags.yml`) keeps the chat-platform choice swappable: switching to Mattermost or XMPP later is a one-config change, not a refactor of Kestra flows
+5. **`onFailure` notification tasks** on `gitea-pr-update`, `gitea-ci-failure`, `redmine-task-processor` — flows where the deleted kestra-flow-skill example prompt expected a Slack-style task
+6. Apprise tag config in OpenBao (`shoggoth/apprise/tags.yml`) keeps the chat-platform choice swappable: switching to Mattermost or XMPP later is a one-config change, not a refactor of Argo Workflows
 
 Open items:
 - pick Zulip vs Mattermost vs XMPP+Prosody based on team preference; Apprise stays as the bus regardless

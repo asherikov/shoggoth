@@ -1,6 +1,17 @@
 export KUBECONFIG?=private/kubeconfig
 K3S_MANIFESTS?=shoggoth/k3s
 K3S_ALL_MANIFESTS := $(shell find ${K3S_MANIFESTS} -name '*.yaml' | sort)
+# Argo Workflows CRDs are sourced from the submodule pinned to the same
+# v4.1.4 tag as the deployed workflow-controller / argo-server images
+# (quay.io/argoproj/{workflow-controller,argocli}:v4.1.4 in
+# shoggoth/k3s/argo-workflows.yaml). The submodule contents are rsync'd
+# to the host by `make sync` (which copies the entire shoggoth/ tree),
+# so the files exist locally and on the host. Server-side apply is
+# required because some files (workflows.yaml, workflowtemplates.yaml,
+# cronworkflows.yaml, clusterworkflowtemplates.yaml) exceed the 262144
+# byte annotation cap. Files contain no ${...} placeholders so envsubst
+# is a no-op on them.
+K3S_ARGO_CRD_FILES := $(shell find shoggoth/argo-workflows/manifests/base/crds/full -maxdepth 1 -name 'argoproj.io_*.yaml' | sort)
 K3S_TMP_DIR?=.tmp
 K3S_TUNNEL_PID?=${K3S_TMP_DIR}/k3s-tunnel.pid
 
@@ -9,7 +20,7 @@ K3S_API_PORT?=6443
 K3S_TUNNEL_PORT?=6443
 
 K3S_APP_LABELS := $(shell grep -h 'app:' ${K3S_ALL_MANIFESTS} | grep -v 'k8s-app' | sed 's/.*app: *//' | sort -u)
-K3S_HOST_PATHS := redmine-plugins:redmine/plugins workflow-scripts:workflow/scripts kestra-flows:workflow/kestra/flows private:private
+K3S_HOST_PATHS := redmine-plugins:redmine/plugins workflow-scripts:workflow/scripts kestra-flows:workflow/kestra/flows argo:workflow/argo private:private
 
 
 # installation
@@ -228,8 +239,8 @@ up: tunnel_up
 		LDAP_BASE_DN="${LDAP_BASE_DN}"; \
 	ENV_VARS='$${SHOGGOTH_DOMAIN}$${SHOGGOTH_GITHUB_ORG}$${SHOGGOTH_NAMESPACE}$${SHOGGOTH_INSTANCE_DIR}$${SHOGGOTH_DNS_IP}$${SHOGGOTH_WEB_EXT_PORT}$${SHOGGOTH_WG_PORT}$${SHOGGOTH_REGISTRY_PORT}$${SHOGGOTH_WG_UI_PORT}$${SHOGGOTH_AI_DEFAULT_MODEL}$${SHOGGOTH_AI_DEFAULT_API}$${SHOGGOTH_AI_DEFAULT_TOKEN_FILE}$${SHOGGOTH_GITEA_SERVER_TOKEN_FILE}$${LDAP_BASE_DN}'; \
 	echo "=== Pass 1: applying CRDs (server-side, >262144-byte annotation cap) ==="; \
-	CRD_FILES="$$(for f in ${K3S_ALL_MANIFESTS}; do grep -l '^kind: CustomResourceDefinition$$' "$$f" 2>/dev/null; done)"; \
-	if [ -z "$$CRD_FILES" ]; then echo "FAIL: no CRD files found in shoggoth/k3s/"; exit 1; fi; \
+	CRD_FILES="$$(for f in ${K3S_ALL_MANIFESTS} ${K3S_ARGO_CRD_FILES}; do grep -l '^kind: CustomResourceDefinition$$' "$$f" 2>/dev/null; done)"; \
+	if [ -z "$$CRD_FILES" ]; then echo "FAIL: no CRD files found in shoggoth/k3s/ or argo submodule"; exit 1; fi; \
 	for f in $$CRD_FILES; do envsubst "$${ENV_VARS}" < "$$f"; printf "\n---\n"; done | kubectl apply --server-side=true --force-conflicts -f - || { echo "FAIL: CRD apply failed"; exit 1; }; \
 	echo "Waiting for CRDs to become Established..."; \
 	CRD_NAMES="$$(grep -h '^  name: ' $$CRD_FILES 2>/dev/null | sed 's/^  name: //' | sort -u)"; \
@@ -244,7 +255,7 @@ up: tunnel_up
 	echo "=== Pass 2: applying remaining manifests (init containers handle stale-state cleanup and VWC registration) ==="; \
 	for f in ${K3S_ALL_MANIFESTS}; do \
 		case "$$f" in \
-			shoggoth/k3s/external-secrets-crds.yaml) ;; \
+			shoggoth/k3s/external-secrets-crds.yaml|shoggoth/argo-workflows/manifests/base/crds/full/*) ;; \
 			*) envsubst "$${ENV_VARS}" < $$f; printf "\n---\n" ;; \
 		esac; \
 	done | kubectl apply --server-side=true --force-conflicts -f - || { echo "FAIL: apply failed"; exit 1; }

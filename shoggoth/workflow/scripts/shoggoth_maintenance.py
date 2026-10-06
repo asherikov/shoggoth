@@ -820,15 +820,26 @@ class Github:
             params={"page": page, "per_page": limit, "type": "public"}), limit=100)
 
 
-class SetupKestraWebhooks:
+class SetupArgoWebhooks:
+    """Configure Gitea org webhooks to deliver events to Argo Workflows.
+
+    Replaces the Kestra-based equivalent that pointed at
+    /api/v1/main/executions/webhook/. Argo's events endpoint is
+    /api/v1/events/{namespace}/{discriminator} and accepts an arbitrary
+    JSON body (no path-suffix key). The discriminator must match the
+    WorkflowEventBinding selector (gitea-pr-update / gitea-ci-failure).
+    """
+
     def __init__(self, gitea):
         self.gitea = gitea
-        self.kestra_host = os.environ.get("KESTRA_HOST")
-        if not self.kestra_host:
-            domain = self.gitea.domain
-            if not domain:
-                die("KESTRA_HOST or SHOGGOTH_DOMAIN is required")
-            self.kestra_host = f"kestra.{domain}"
+        # Webhook URLs always go through the web-internal gateway at
+        # api.{domain}/argo/ — the gateway injects the
+        # argo-webhook-receiver SA token before proxying to argo:80,
+        # so the v4 webhook interceptor (which has no gitea parser)
+        # is short-circuited by the Authorization header and
+        # argo-server's gatekeeper does bearer validation against k8s.
+        # See shoggoth/k3s/web-internal.yaml for the gateway contract.
+        self.namespace = os.environ.get("SHOGGOTH_NAMESPACE", "shoggoth")
         self.errors = 0
 
     def execute(self, projects=None):
@@ -844,10 +855,26 @@ class SetupKestraWebhooks:
             return
 
         webhooks = [
-            (f"http://{self.kestra_host}/api/v1/main/executions/webhook/shoggoth/gitea-pr-update/key",
+            # gitea-ci-failure is intentionally NOT registered: the
+            # deleted Kestra flow `main_shoggoth_gitea-ci-failure.yml`
+            # carried `disabled: true`, and the WorkflowEventBinding
+            # kind has no equivalent kill switch (active by default
+            # once registered). To re-enable CI-failure dispatch in
+            # the future, add the WorkflowEventBinding under
+            # shoggoth/workflow/argo/bindings/ and re-introduce the
+            # entry below — with the maintainer understanding that
+            # every workflow_run: failure event will spawn a
+            # coding-agent-dispatcher pod.
+            # Webhook URL points at api.<DOMAIN>/argo/, not argo.<DOMAIN>:
+            # web-internal (shoggoth/k3s/web-internal.yaml) injects the
+            # argo-webhook-receiver SA token before proxying to argo:80,
+            # so the v4 webhook interceptor (which has no gitea parser and
+            # would 403 raw gitea payloads — webhookParsers at
+            # server/auth/webhook/interceptor.go:25-30) is short-circuited
+            # by the Authorization header and argo-server's gatekeeper does
+            # bearer validation against k8s instead.
+            (f"http://api.{self.gitea.domain}/argo/api/v1/events/{self.namespace}/gitea-pr-update",
              ["pull_request_review", "pull_request_review_request", "pull_request_comment"]),
-            (f"http://{self.kestra_host}/api/v1/main/executions/webhook/shoggoth/gitea-ci-failure/key",
-             ["workflow_run"]),
         ]
 
         for project in projects:
@@ -866,7 +893,7 @@ class SetupKestraWebhooks:
                     self.errors += 1
 
         if self.errors:
-            die(f"kestra-webhooks completed with {self.errors} error(s)")
+            die(f"argo-webhooks completed with {self.errors} error(s)")
 
 
 class SetupRedmineWebhooks:
@@ -922,12 +949,25 @@ class SetupRedmineWebhooks:
             die(f"redmine-webhooks completed with {self.errors} error(s)")
 
 
-class SetupRedmineKestraWebhooks:
-    WEBHOOK_URL = "http://kestra/api/v1/main/executions/webhook/shoggoth/redmine-task-processor/key"
+class SetupRedmineArgoWebhooks:
     EVENTS = ["issue.created", "issue.updated"]
 
     def __init__(self, redmine):
         self.redmine = redmine
+        self.namespace = os.environ.get("SHOGGOTH_NAMESPACE", "shoggoth")
+        domain = os.environ.get("SHOGGOTH_DOMAIN", "")
+        if not domain:
+            die("SHOGGOTH_DOMAIN is required for argo-webhook URL")
+        # Same pattern as SetupArgoWebhooks above: deliver through
+        # api.<DOMAIN>/argo/ so web-internal injects the argo-webhook-receiver
+        # bearer token (shoggoth/k3s/web-internal.yaml + argo-webhook-receiver.yaml)
+        # before forwarding to argo:80. Going directly (http://argo:80/...)
+        # would trip the v4 interceptor's gitea/redmine signature matcher
+        # absence (webhookParsers at interceptor.go:25-30 has no entry for
+        # either) and 403 the request.
+        self.WEBHOOK_URL = (
+            f"http://api.{domain}/argo/api/v1/events/{self.namespace}/redmine-task-processor"
+        )
         self.errors = 0
 
     def execute(self):
@@ -961,8 +1001,8 @@ class SetupRedmineKestraWebhooks:
             self.errors += 1
 
         if self.errors:
-            die(f"redmine-kestra-webhooks completed with {self.errors} error(s)")
-        print("redmine-kestra-webhooks: webhooks configured successfully")
+            die(f"redmine-argo-webhooks completed with {self.errors} error(s)")
+        print("redmine-argo-webhooks: webhooks configured successfully")
 
 
 class GithubMirrorSync:
@@ -1429,92 +1469,39 @@ class SshKey:
         return removed > 0
 
 
-class VerifyApi:
-    def __init__(self):
-        self.errors = 0
-
-    def _check_redmine(self):
-        openbao = OpenBao() if not os.environ.get("REDMINE_API_TOKEN") else None
-        redmine = Redmine(openbao)
-        print(f"Redmine API URL: {redmine.api_url}")
-        masked = redmine.token[:4] + "..." + redmine.token[-4:] if len(redmine.token) > 8 else "***"
-        print(f"Redmine token: {masked} (len={len(redmine.token)})")
-
-        print("\n--- Redmine GET / (connectivity) ---")
-        status = http_status(redmine.api_url + "/")
-        if status == 200:
-            print(f"OK (HTTP {status})")
-        else:
-            print(f"FAIL: HTTP {status}")
-            self.errors += 1
-
-        print("\n--- Redmine GET /my/account.json (token auth check) ---")
-        account = redmine.get("my/account.json")
-        if account is None:
-            print("FAIL: /my/account.json — token may be invalid or expired")
-            self.errors += 1
-        else:
-            user = account.get("user", {})
-            print(f"OK: authenticated as '{user.get('login', '?')}' (id={user.get('id', '?')})")
-
-        print("\n--- Redmine GET /projects.json ---")
-        projects = redmine.list_projects()
-        if projects is None:
-            print("FAIL: /projects.json")
-            self.errors += 1
-        else:
-            print(f"OK: {len(projects)} project(s)")
-
-        print("\n--- Redmine GET /webhooks (session auth) ---")
-        webhooks = redmine.list_webhooks()
-        if webhooks is None:
-            print("FAIL: /webhooks — webhooks may not be enabled in Settings > Integrations or session auth failed")
-            self.errors += 1
-        else:
-            print(f"OK: {len(webhooks)} webhook(s) found")
-            for hook in webhooks:
-                print(f"  id={hook.get('id')}")
-
-    def _check_gitea(self):
-        gitea = Gitea()
-        print(f"\nGitea API URL: {gitea.api_url}")
-        masked = gitea.token[:4] + "..." + gitea.token[-4:] if len(gitea.token) > 8 else "***"
-        print(f"Gitea token: {masked} (len={len(gitea.token)})")
-
-        print("\n--- Gitea GET /api/v1/version ---")
-        version = gitea.get("version")
-        if version is None:
-            print("FAIL: /api/v1/version returned no data")
-            self.errors += 1
-        else:
-            print(f"OK: Gitea version {version.get('version', '?')}")
-
-    def execute(self, services=None):
-        if not services or "redmine" in services:
-            self._check_redmine()
-        if not services or "gitea" in services:
-            self._check_gitea()
-
-        if self.errors:
-            die(f"verify-api completed with {self.errors} error(s)")
-        print("\nverify-api: all checks passed")
-
-
-class SlaveVerify:
-    SCRATCH_REPO = "slave-verify-scratch"
-    SSH_BRANCH = "slave-verify-ssh"
+class SlaveTest:
+    SCRATCH_REPO = "slave-test-scratch"
+    SSH_BRANCH = "slave-test-ssh"
 
     def __init__(self):
         self.errors = 0
         self._openbao = None
         self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        # `gitea_url` is the HTTP API base. The slave-test template wires
+        # this to the web-internal API gateway (api.${DOMAIN}/gitea),
+        # which replaces our Authorization header with the real slave
+        # token before forwarding to Gitea (see web-internal.yaml,
+        # `proxy_set_header Authorization "Bearer ${GITEA_SLAVE_TOKEN}"`).
+        # The script therefore doesn't need to acquire the slave token
+        # for HTTP API calls.
         self.gitea_url = (os.environ.get("GITEA_SERVER_URL") or "").rstrip("/")
+        # `git_url` is the direct HTTPS URL used by `git clone` /
+        # `git push` / `git ls-remote`. Separate from gitea_url because
+        # git-cred-bootstrap populates the credential cache for
+        # `host=git.${DOMAIN}` (see shoggoth/k3s/git-cred-bootstrap.yaml),
+        # so a clone through the gateway at `host=api.${DOMAIN}` would
+        # have no matching credential and git would fail. Falls back to
+        # `gitea_url` if the template doesn't set GITEA_GIT_URL (legacy
+        # setups that put the gateway URL in GITEA_SERVER_URL and never
+        # clone over HTTPS in this script).
+        self.git_url = (os.environ.get("GITEA_GIT_URL")
+                        or self.gitea_url).rstrip("/")
         self.ssh_host = os.environ.get("GITEA_SSH_HOST", "git")
         self.ssh_port = os.environ.get("GITEA_SSH_PORT", "22")
         self.checks = {
             "gitea-api": self._check_gitea_api,
             "redmine-api": self._check_redmine_api,
-            "git-https": self._check_git_https,
+            "git-http": self._check_git_http,
             "git-ssh": self._check_git_ssh,
             "embeddings": self._check_embeddings,
             "mcp": self._check_mcp,
@@ -1533,9 +1520,32 @@ class SlaveVerify:
         self.errors += 1
 
     def _slave_token(self):
+        """Return the Gitea slave token for HTTP API calls.
+
+        Prefers the `GITEA_ADMIN_TOKEN` env var (workflow templates
+        source this from the `gitea-slave-token` K8s Secret — the same
+        Secret the git-cred sidecar reads, so the token is already on
+        the pod; no OpenBao round-trip needed). Also accepts
+        `GITEA_SLAVE_TOKEN` as an alias (matches the env var name the
+        git-cred-bootstrap sidecar uses internally and what
+        shoggoth_workflow.py reads). Falls back to OpenBao only when
+        neither env var is set, and logs a WARNING so the missing
+        workflow-template secretRef is visible.
+        """
+        token = (os.environ.get("GITEA_ADMIN_TOKEN")
+                 or os.environ.get("GITEA_SLAVE_TOKEN"))
+        if token:
+            log(f"_slave_token: using env var "
+                f"({'GITEA_ADMIN_TOKEN' if os.environ.get('GITEA_ADMIN_TOKEN') else 'GITEA_SLAVE_TOKEN'}), "
+                f"len={len(token)}")
+            return token
+        log("WARNING: GITEA_ADMIN_TOKEN and GITEA_SLAVE_TOKEN env vars both "
+            "unset; falling back to OpenBao gitea/slave-token. The workflow "
+            "template's secretRef wiring is missing for this run.")
         token = self.openbao.get_value("gitea/slave-token")
         if not token:
-            die("gitea/slave-token is missing in OpenBao (run 'slave-token' maintenance first)")
+            die("gitea/slave-token is missing in OpenBao (run 'slave-token' "
+                "maintenance first) and no env var was set either")
         return token
 
     def _slave_headers(self, token):
@@ -1589,6 +1599,148 @@ class SlaveVerify:
         print(f"scratch repo '{repo_full}' created")
         return True
 
+    # The git-cred sidecar (injected via workflowDefaults.podSpecPatch)
+    # populates /shoggoth/git-cred in parallel with the main container's
+    # startup, so the first git operation in the check can outrun
+    # ssh-keyscan + ssh-agent + ssh-add + git-credential-cache--daemon.
+    # Poll the sidecar's outputs for up to ~30s before failing — most
+    # failures here are races, not actual wiring bugs. The probe message
+    # then surfaces ENOENT vs PermissionError distinctly so we can tell
+    # "sidecar crashed before this output" apart from "init container /
+    # runAsUser wiring missing on the Argo podSpecPatch" (the latter
+    # leaves /shoggoth/git-cred drwx------ owned by root, which the main
+    # ccws container can't traverse).
+    #
+    # Both git-http and git-ssh wait on the SINGLE flag
+    # /shoggoth/git-cred/ready that the sidecar touch()es after both
+    # daemons are alive (with a 3 s grace — see
+    # shoggoth/k3s/git-cred-bootstrap.yaml "Ready flag"). Polling one
+    # file instead of three sockets (known_hosts, ssh_auth_sock,
+    # git_credential_sock) means the helper below stays generic — pass
+    # it any path that appears on disk when the sidecar is ready. The
+    # per-socket post-checks (reading known_hosts, `ssh-add -l`) still
+    # run after the wait to surface wiring bugs that pass the flag
+    # check but break individual operations.
+    #
+    # The podSpecPatch also sets `restartPolicy: Always` and a readinessProbe
+    # on git-cred (see shoggoth/k3s/argo-workflows.yaml). `restartPolicy:
+    # Always` is what makes git-cred a native sidecar (long-running, started
+    # before any non-sidecar container). The readinessProbe is purely
+    # diagnostic — `kubectl describe pod` and Events surface git-cred
+    # failures — and the per-check waits below are the actual gate. We do
+    # not set K8s 1.28+ `startOrder` because shoggoth's running k3s build
+    # (v1.34.3+k3s3) does not expose it in its apiserver OpenAPI v2 and
+    # `kubectl apply` would reject it with "field not declared in schema".
+    GIT_CRED_READY_PATH = "/shoggoth/git-cred/ready"
+    GIT_CRED_READY_TIMEOUT = 30
+    GIT_CRED_POLL_INTERVAL = 0.5
+
+    def _wait_for_git_cred(self, path):
+        deadline = time.time() + self.GIT_CRED_READY_TIMEOUT
+        while time.time() < deadline:
+            try:
+                os.stat(path)
+                return True
+            except (FileNotFoundError, PermissionError):
+                time.sleep(self.GIT_CRED_POLL_INTERVAL)
+        return False
+
+    def _git_cred_probe_message(self, path):
+        """Run a single stat() on `path` and turn the OSError into a
+        diagnostic that distinguishes the three failure modes."""
+        try:
+            os.stat(path)
+            return f"{path} exists but _wait_for_git_cred returned False " \
+                f"(timed out after {self.GIT_CRED_READY_TIMEOUT}s)"
+        except FileNotFoundError:
+            return (f"{path} does not exist after waiting "
+                    f"{self.GIT_CRED_READY_TIMEOUT}s "
+                    f"(git-cred sidecar didn't produce this output — "
+                    f"check 'kubectl logs <pod> -c git-cred' for the FATAL line; "
+                    f"also confirm the pod has an initContainer named "
+                    f"init-git-cred-perms and a sidecar named git-cred)")
+        except PermissionError as e:
+            return (f"{path} is not accessible from the main container: {e} "
+                    f"(git-cred sidecar ran but /shoggoth/git-cred is "
+                    f"drwx------ and the main ccws container can't traverse "
+                    f"it; the Argo podSpecPatch is missing init-git-cred-perms "
+                    f"+ securityContext.runAsUser: 1000 on the sidecar — "
+                    f"see shoggoth/k3s/argo-workflows.yaml)")
+        except OSError as e:
+            return f"{path}: {e}"
+
+    # Verbose preflight dump — prints everything we'd otherwise need
+    # `kubectl exec` to see. Each git-* check calls this once at start so
+    # the workflow log itself tells us what state /shoggoth/git-cred is
+    # in from the main container's perspective (uid, ownership, perms,
+    # socket kinds, env var values, credential-cache probe result). Lets a
+    # failing run self-diagnose without needing shell access to the pod.
+    def _preflight_git_cred(self, label):
+        log(f"=== preflight[{label}]: effective UID = {os.getuid()}")
+        log(f"=== preflight[{label}]: SSH_AUTH_SOCK = "
+            f"{os.environ.get('SSH_AUTH_SOCK')!r}")
+        log(f"=== preflight[{label}]: GITEA_SLAVE_TOKEN present = "
+            f"{bool(os.environ.get('GITEA_SLAVE_TOKEN'))} "
+            f"(len={len(os.environ.get('GITEA_SLAVE_TOKEN') or '')})")
+
+        who = run(["whoami"], check=False)
+        log(f"=== preflight[{label}]: whoami rc={who.returncode} "
+            f"stdout={who.stdout.strip()!r} "
+            f"stderr={who.stderr.strip()[:200]!r}")
+        ident = run(["id"], check=False)
+        log(f"=== preflight[{label}]: id rc={ident.returncode} "
+            f"stdout={ident.stdout.strip()!r}")
+
+        ssh_sock = os.environ.get("SSH_AUTH_SOCK")
+
+        # Probe ssh-agent identity (mirrors what ssh-add would do)
+        if ssh_sock and os.path.exists(ssh_sock):
+            identities = run(["ssh-add", "-l"],
+                             env={**os.environ, "SSH_AUTH_SOCK": ssh_sock},
+                             check=False)
+            log(f"=== preflight[{label}]: ssh-add -l rc={identities.returncode} "
+                f"stdout={identities.stdout.strip()[:200]!r} "
+                f"stderr={identities.stderr.strip()[:200]!r}")
+
+        # Dump the git-cred sidecar's bootstrap log. The bootstrap
+        # script mirrors its stderr to
+        # `/shoggoth/git-cred/bootstrap.log` (a file in the emptyDir
+        # shared between the sidecar and this main container), so a
+        # FATAL line from ssh-add / SSH_ID_RSA validation / ssh-agent
+        # identity check / credential-cache etc. surfaces here even
+        # though Argo's workflow log only archives stdout+stderr from
+        # the MAIN container. Without this dump, the symptom of a
+        # sidecar failure is just "ssh-add -l says no identities" /
+        # "git_credential_sock doesn't exist" with no clue WHY —
+        # the operator has to `kubectl logs <pod> -c git-cred` to
+        # see the FATAL line, and that log isn't part of the
+        # workflow output (which is what gets grep'd/jq'd by the
+        # maintenance scripts). ENOENT is the common case (sidecar
+        # hasn't started writing yet — preflight runs immediately
+        # on workflow step start); PermissionError would mean the
+        # init-git-cred-perms chown 1000:1000 didn't apply. Cap the
+        # dump at the last 200 lines so a sidecar that's been
+        # looping on a crash for the full 30s wait budget doesn't
+        # spam the workflow log with N copies of the same FATAL.
+        bootstrap_log_path = "/shoggoth/git-cred/bootstrap.log"
+        try:
+            with open(bootstrap_log_path) as f:
+                log_lines = f.read().splitlines()
+            log(f"=== preflight[{label}]: {bootstrap_log_path} "
+                f"({len(log_lines)} lines, last 200):")
+            for line in log_lines[-200:]:
+                log(f"=== preflight[{label}]:   {line}")
+        except FileNotFoundError:
+            log(f"=== preflight[{label}]: {bootstrap_log_path}: ENOENT "
+                f"(sidecar hasn't written anything yet — bootstrap.sh "
+                f"may not have started, or fatal'd before the redirect "
+                f"line in mkdir/chmod)")
+        except PermissionError as e:
+            log(f"=== preflight[{label}]: {bootstrap_log_path}: EACCES {e} "
+                f"(init-git-cred-perms chown 1000:1000 didn't apply)")
+        except OSError as e:
+            log(f"=== preflight[{label}]: {bootstrap_log_path}: OSError {e}")
+
     def _check_gitea_api(self):
         if not self.gitea_url:
             die("GITEA_SERVER_URL is required")
@@ -1620,65 +1772,293 @@ class SlaveVerify:
         else:
             print(f"OK: {len(projects)} project(s) visible")
 
-    def _check_git_https(self):
-        token = self._slave_token()
+    # Snapshot of /shoggoth/git-cred — called immediately after each
+    # git-* check's wait loop completes, so the listing reflects the
+    # populated state, not a half-ready sidecar. Same shape from
+    # _check_git_http and _check_git_ssh so the two checks' logs are
+    # directly comparable. whoami + ls -lan are always run and always
+    # print *something* — an empty dir shows `total 0` instead of
+    # silently hiding the failure mode. Each line of multi-line
+    # stdout goes on its own log row (no \n-escapes). Allow-listed
+    # env propagation check (no raw env dump — see the allow_list
+    # block below). Let a failing run self-diagnose propagation of
+    # SSH_AUTH_SOCK / GITEA_* / SHOGGOTH_* without `kubectl exec` and
+    # without leaking secret env values to the workflow log.
+    def _log_git_cred_listing(self, label):
+        log(f"[{label}]: whoami + ls of /shoggoth/git-cred + env (allow-list)")
+        who = run(["whoami"], check=False)
+        log(f"[{label}]: whoami rc={who.returncode} "
+            f"stdout={who.stdout.strip()!r} "
+            f"stderr={who.stderr.strip()[:200]!r}")
+        ls = run(["ls", "-lan", "/shoggoth/git-cred"], check=False)
+        log(f"[{label}]: ls -lan /shoggoth/git-cred rc={ls.returncode} "
+            f"stderr={ls.stderr.strip()[:200]!r}")
+        # Per-line stdout: splitlines() gives each ls entry its own log
+        # row. An empty directory shows as a single blank row — that's
+        # the diagnostic signal we want when the sidecar hasn't
+        # populated /shoggoth/git-cred yet.
+        for line in ls.stdout.splitlines():
+            log(f"[{label}]:   {line}")
+
+        # Diagnostic env dump — allow-list only. NEVER dump the raw
+        # env output: SHOGGOTH_VAULT_TOKEN is bound to the OpenBao
+        # root token (full vault access — gitea/slave-token, ssh/slave-
+        # private-key, every */admin path), and the workflow log is
+        # the durable record on a failing run. The list below is the
+        # contract the comment at the function header promised; if a
+        # new diagnostic needs to land here, add it explicitly and
+        # consider whether its value is secret.
+        allow_list = [
+            "SSH_AUTH_SOCK",
+            "GITEA_SERVER_URL", "GITEA_GIT_URL", "GITEA_INSTANCE_SSH_HOST",
+            "REDMINE_SERVER",
+            "SHOGGOTH_DOMAIN", "SHOGGOTH_NAMESPACE", "SHOGGOTH_GITHUB_ORG",
+            "OPENBAO_ADDR",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "ARGO_WEBHOOK_TOKEN",
+        ]
+        log(f"[{label}]: env (allow-list, {len(allow_list)} vars)")
+        for name in allow_list:
+            value = os.environ.get(name, "")
+            # Presence + length, never the value. The presence/empty
+            # distinction is the only signal that matters for a
+            # propagation check; printing the value would defeat the
+            # whole allow-list. Match the GITEA_SLAVE_TOKEN pattern at
+            # the preflight above (line 1758-1760).
+            log(f"[{label}]: {name}={'<set>' if value else '<unset>'} "
+                f"(len={len(value)})")
+
+    def _dump_gitconfig(self, label):
+        # Dump the slave image's baked-in /etc/gitconfig. git-http
+        # relies on this for `credential.helper = cache --socket=...`
+        # (without it the cache helper has no socket to talk to, so
+        # git falls back to prompting and the clone fails); git-ssh
+        # relies on it for any global [user] / [core] settings.
+        # Missing file is logged but non-fatal — a non-zero rc +
+        # `cat: ...: No such file or directory` shows up clearly in
+        # the workflow log without aborting the check, since SSH-only
+        # operations don't strictly need /etc/gitconfig and the user
+        # can decide whether the absence is a bug or expected.
+        gitconfig = "/etc/gitconfig"
+        log(f"[{label}]: cat {gitconfig} (system git config)")
+        cat = run(["cat", gitconfig], check=False)
+        log(f"[{label}]: cat {gitconfig} rc={cat.returncode} "
+            f"stderr={cat.stderr.strip()[:200]!r}")
+        for line in cat.stdout.splitlines():
+            log(f"[{label}]:   {line}")
+
+    def _check_git_http(self):
+        # Validate the git-cred sidecar's credential cache daemon
+        # (/shoggoth/git-cred/git_credential_sock). The slave image's
+        # `git config --system credential.helper 'cache --socket=...'`
+        # makes git use this socket for HTTP auth, so this check exercises
+        # the same path the coding-agent-dispatcher workflow relies on for
+        # git operations that go over HTTP.
+        # Distinguish ENOENT (sidecar never produced the file) from
+        # PermissionError (sidecar ran but main container cannot traverse
+        # /shoggoth/git-cred because the init container / runAsUser wiring
+        # in the Argo podSpecPatch is missing).
+        log("[git-http]: preflight dump of /shoggoth/git-cred")
+        self._preflight_git_cred("git-http")
+
+        ready_flag = self.GIT_CRED_READY_PATH
+        log(f"[git-http]: waiting up to {self.GIT_CRED_READY_TIMEOUT}s for "
+            f"git-cred ready flag at {ready_flag}")
+        if not self._wait_for_git_cred(ready_flag):
+            log(f"[git-http]: timed out, probing errno")
+            self._fail(self._git_cred_probe_message(ready_flag))
+            return
+        log(f"[git-http]: git-cred ready flag present; daemons observable")
+        self._log_git_cred_listing("git-http")
+
+        # HTTP API auth comes from the web-internal gateway (see
+        # self.gitea_url comment in SlaveTest.__init__): the gateway
+        # replaces whatever Authorization header we send with the real
+        # slave token before forwarding. So we don't need to acquire
+        # the slave token here — pass a dummy "gateway" string for
+        # _ensure_scratch_repo (which uses it to build the
+        # Authorization header), and the gateway replaces it on the
+        # way to Gitea. This is the user-visible win: git-http no
+        # longer depends on either the GITEA_ADMIN_TOKEN env var or
+        # the OpenBao gitea/slave-token round-trip.
+        log(f"[git-http]: HTTP API via gateway {self.gitea_url} "
+            f"(auth injected by gateway); git via direct URL "
+            f"{self.git_url} with image-baked credential helper")
+        token = "gateway"
+
+        log(f"[git-http]: ensuring scratch repo {self.slave_user}/{self.SCRATCH_REPO}")
         if not self._ensure_scratch_repo(token):
+            log(f"[git-http]: scratch repo not available, aborting")
             return
-        clone_url = f"{self.gitea_url}/{self.slave_user}/{self.SCRATCH_REPO}.git"
-        workdir = tempfile.mkdtemp(prefix="slave-verify-https-")
+        log(f"[git-http]: scratch repo ready")
+
+        # Clone from the direct git URL (not the gateway) so the
+        # image-baked credential helper finds a cache entry: the
+        # sidecar populates the cache for `host=git.${DOMAIN}`, and a
+        # clone through the gateway at `host=api.${DOMAIN}` would have
+        # no matching credential.
+        clone_url = f"{self.git_url}/{self.slave_user}/{self.SCRATCH_REPO}.git"
+        workdir = tempfile.mkdtemp(prefix="slave-test-http-")
         repo_dir = os.path.join(workdir, "repo")
-        env = self._git_env({"http.extraheader": f"Authorization: token {token}"})
-        if self._git(["clone", clone_url, repo_dir], env).returncode != 0:
+        env = self._git_env()
+        self._dump_gitconfig("git-http")
+        log(f"[git-http]: git clone {clone_url} → {repo_dir} "
+            f"(credential helper cache --socket hits "
+            f"/shoggoth/git-cred/git_credential_sock)")
+        clone = self._git(["clone", clone_url, repo_dir], env)
+        log(f"[git-http]: clone rc={clone.returncode}")
+        if clone.returncode != 0:
+            log(f"[git-http]: clone failed; stderr={clone.stderr.strip()[:500]!r}")
             return
+        log(f"[git-http]: clone OK")
+
         branch = "main"
         for args in (["checkout", "-B", branch],
-                     ["commit", "--allow-empty", "-m", "slave-verify git-https"],
+                     ["commit", "--allow-empty", "-m", "slave-test git-http"],
                      ["push", "origin", branch]):
-            if self._git(["-C", repo_dir] + args, env).returncode != 0:
+            log(f"[git-http]: git -C {repo_dir} {' '.join(args)}")
+            r = self._git(["-C", repo_dir] + args, env)
+            log(f"[git-http]: rc={r.returncode} "
+                f"stderr={r.stderr.strip()[:300]!r}")
+            if r.returncode != 0:
                 return
+
+        log(f"[git-http]: git ls-remote {clone_url} refs/heads/{branch}")
         result = run(["git", "ls-remote", clone_url, f"refs/heads/{branch}"], env=env, check=False)
+        log(f"[git-http]: ls-remote rc={result.returncode} "
+            f"stdout={result.stdout.strip()[:200]!r} "
+            f"stderr={result.stderr.strip()[:200]!r}")
         if result.returncode != 0 or not result.stdout.strip():
             self._fail(f"git ls-remote over https: pushed branch '{branch}' not found")
             return
-        print(f"OK: clone + commit + push + ls-remote over https ({branch} -> {result.stdout.split()[0][:12]})")
+
+        print(f"OK: clone + commit + push + ls-remote over https via credential cache "
+              f"({branch} -> {result.stdout.split()[0][:12]})")
+        log("[git-http]: ALL STEPS PASSED")
 
     def _check_git_ssh(self):
-        key = self.openbao.get_value("ssh/slave-private-key")
-        if not key:
-            self._fail("ssh/slave-private-key is missing in OpenBao (run 'ssh-key' maintenance first)")
+        # Validate the git-cred sidecar's ssh-agent socket and known_hosts
+        # file. The slave image's /etc/ssh/ssh_config.d/shoggoth.conf points
+        # UserKnownHostsFile=/shoggoth/git-cred/known_hosts and SSH_AUTH_SOCK
+        # is set in its ENV block, so this check exercises the same SSH path
+        # as coding-agent-dispatcher clones.
+        log("[git-ssh]: preflight dump of /shoggoth/git-cred")
+        self._preflight_git_cred("git-ssh")
+
+        sock_path = os.environ.get("SSH_AUTH_SOCK")
+        log(f"[git-ssh]: SSH_AUTH_SOCK env var = {sock_path!r}")
+        if not sock_path:
+            self._fail("SSH_AUTH_SOCK is not set (git-cred sidecar not running?)")
             return
+        ready_flag = self.GIT_CRED_READY_PATH
+        log(f"[git-ssh]: waiting up to {self.GIT_CRED_READY_TIMEOUT}s for "
+            f"git-cred ready flag at {ready_flag}")
+        if not self._wait_for_git_cred(ready_flag):
+            log(f"[git-ssh]: timed out, probing errno")
+            self._fail(self._git_cred_probe_message(ready_flag))
+            return
+        log(f"[git-ssh]: git-cred ready flag present; daemons observable")
+        self._log_git_cred_listing("git-ssh")
+
+        known_hosts = "/shoggoth/git-cred/known_hosts"
+        log(f"[git-ssh]: reading known_hosts {known_hosts}")
+        try:
+            with open(known_hosts) as f:
+                kh_lines = [l for l in f.read().splitlines() if l.strip()]
+        except OSError as e:
+            log(f"[git-ssh]: cannot read {known_hosts}: {e}")
+            self._fail(f"cannot read {known_hosts}: {e} "
+                       f"(git-cred sidecar running as wrong uid?)")
+            return
+        log(f"[git-ssh]: known_hosts has {len(kh_lines)} entries "
+            f"(first line prefix: {kh_lines[0][:80] if kh_lines else '<empty>'!r})")
+        if not kh_lines:
+            self._fail(f"{known_hosts} is empty "
+                       f"(git-cred sidecar's ssh-keyscan failed)")
+            return
+
+        log(f"[git-ssh]: ssh-add -l (verify agent has identities)")
+        ssh_add = run(["ssh-add", "-l"],
+                      env={**os.environ, "SSH_AUTH_SOCK": sock_path},
+                      check=False)
+        log(f"[git-ssh]: ssh-add rc={ssh_add.returncode} "
+            f"stdout={ssh_add.stdout.strip()[:200]!r} "
+            f"stderr={ssh_add.stderr.strip()[:200]!r}")
+        if (ssh_add.returncode != 0
+                or "no identities" in ssh_add.stdout.lower()
+                or not ssh_add.stdout.strip()):
+            # Probe the agent socket for staleness — the AF_UNIX socket
+            # file persists in emptyDir across container restarts, so a
+            # dead ssh-agent from a previous bootstrap run can leave a
+            # socket behind that ssh-add -l talks to (with no listener
+            # attached). Without the stat() we can't tell "agent alive
+            # but empty" from "socket is a tombstone".
+            socket_info = "missing"
+            try:
+                st = os.stat(sock_path)
+                socket_info = (f"size={st.st_size} mtime={int(st.st_mtime)} "
+                               f"uid={st.st_uid} gid={st.st_gid}")
+            except OSError as e:
+                socket_info = f"stat failed: {e}"
+            self._fail(
+                f"ssh-agent has no identities. "
+                f"ssh-add -l rc={ssh_add.returncode} "
+                f"stdout={ssh_add.stdout.strip()[:200]!r} "
+                f"stderr={ssh_add.stderr.strip()[:200]!r}. "
+                f"socket={sock_path} ({socket_info}). "
+                f"Inspect the git-cred sidecar logs with "
+                f"`kubectl logs <pod> -c git-cred` — the bootstrap "
+                f"script writes one `git-cred-bootstrap: FATAL: ...` "
+                f"line naming the failing step "
+                f"(SSH_ID_RSA empty → Secret 'ssh-slave-private-key' "
+                f"key 'ssh-id-rsa' missing; ssh-add failed → key "
+                f"permissions / agent refused; ssh-agent has no "
+                f"identities after ssh-add → identity count check "
+                f"hit zero — see git-cred-bootstrap.yaml)."
+            )
+            return
+        print(f"git-cred: ssh-agent has identities, "
+              f"known_hosts has {len(kh_lines)} entries")
+
+        log(f"[git-ssh]: acquiring slave token for HTTP API (env var or "
+            f"OpenBao fallback — see _slave_token log above)")
         token = self._slave_token()
+        log(f"[git-ssh]: ensuring scratch repo {self.slave_user}/{self.SCRATCH_REPO}")
         if not self._ensure_scratch_repo(token):
+            log(f"[git-ssh]: scratch repo not available, aborting")
             return
-        workdir = tempfile.mkdtemp(prefix="slave-verify-ssh-")
-        key_file = os.path.join(workdir, "slave_key")
-        with open(key_file, "w") as f:
-            f.write(key if key.endswith("\n") else key + "\n")
-        os.chmod(key_file, 0o600)
-        known_hosts = os.path.join(workdir, "known_hosts")
-        scan = run(["ssh-keyscan", "-p", self.ssh_port, self.ssh_host], check=False)
-        if scan.returncode != 0 or not scan.stdout.strip():
-            self._fail(f"ssh-keyscan {self.ssh_host}:{self.ssh_port}: {scan.stderr.strip()[:200]}")
-            return
-        with open(known_hosts, "w") as f:
-            f.write(scan.stdout)
+        log(f"[git-ssh]: scratch repo ready")
+
+        workdir = tempfile.mkdtemp(prefix="slave-test-ssh-")
+        repo_dir = os.path.join(workdir, "repo")
         clone_url = f"ssh://git@{self.ssh_host}:{self.ssh_port}/{self.slave_user}/{self.SCRATCH_REPO}.git"
         env = self._git_env()
-        env["GIT_SSH_COMMAND"] = (f"ssh -i {key_file} -o IdentitiesOnly=yes "
-                                  f"-o UserKnownHostsFile={known_hosts} -o StrictHostKeyChecking=yes")
-        repo_dir = os.path.join(workdir, "repo")
-        if self._git(["clone", clone_url, repo_dir], env).returncode != 0:
+        self._dump_gitconfig("git-ssh")
+        log(f"[git-ssh]: git clone {clone_url} → {repo_dir} "
+            f"(will use image-baked ssh_config and SSH_AUTH_SOCK)")
+        clone = self._git(["clone", clone_url, repo_dir], env)
+        log(f"[git-ssh]: clone rc={clone.returncode} "
+            f"stderr={clone.stderr.strip()[:500]!r}")
+        if clone.returncode != 0:
             return
+        log(f"[git-ssh]: clone OK")
         for args in (["checkout", "-B", self.SSH_BRANCH],
-                     ["commit", "--allow-empty", "-m", "slave-verify git-ssh"],
+                     ["commit", "--allow-empty", "-m", "slave-test git-ssh"],
                      ["push", "--force", "origin", self.SSH_BRANCH]):
-            if self._git(["-C", repo_dir] + args, env).returncode != 0:
+            log(f"[git-ssh]: git -C {repo_dir} {' '.join(args)}")
+            r = self._git(["-C", repo_dir] + args, env)
+            log(f"[git-ssh]: rc={r.returncode} stderr={r.stderr.strip()[:300]!r}")
+            if r.returncode != 0:
                 return
         result = run(["git", "ls-remote", clone_url, f"refs/heads/{self.SSH_BRANCH}"], env=env, check=False)
+        log(f"[git-ssh]: ls-remote rc={result.returncode} "
+            f"stdout={result.stdout.strip()[:200]!r}")
         if result.returncode != 0 or not result.stdout.strip():
             self._fail(f"git ls-remote over ssh: pushed branch '{self.SSH_BRANCH}' not found")
             return
-        print(f"OK: clone + commit + push + ls-remote over ssh ({self.SSH_BRANCH} -> {result.stdout.split()[0][:12]})")
+        print(f"OK: clone + commit + push + ls-remote over ssh via ssh-agent "
+              f"({self.SSH_BRANCH} -> {result.stdout.split()[0][:12]})")
+        log("[git-ssh]: ALL STEPS PASSED")
 
     def _check_embeddings(self):
         api = os.environ.get("EMBEDDINGS_API", "http://litellm:80/v1").rstrip("/")
@@ -1743,7 +2123,7 @@ class SlaveVerify:
         status, session, body = self._mcp_post(url, {
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-03-26", "capabilities": {},
-                       "clientInfo": {"name": "shoggoth-slave-verify", "version": "1"}}}, headers)
+                       "clientInfo": {"name": "shoggoth-slave-test", "version": "1"}}}, headers)
         if status != 200:
             self._fail(f"MCP {name}: initialize HTTP {status}: {body[:300]}")
             return
@@ -1788,13 +2168,13 @@ class SlaveVerify:
         payload = {
             "resourceSpans": [{
                 "resource": {"attributes": [
-                    {"key": "service.name", "value": {"stringValue": "shoggoth-slave-verify"}}]},
+                    {"key": "service.name", "value": {"stringValue": "shoggoth-slave-test"}}]},
                 "scopeSpans": [{
-                    "scope": {"name": "shoggoth-slave-verify"},
+                    "scope": {"name": "shoggoth-slave-test"},
                     "spans": [{
                         "traceId": trace_id.hex(),
                         "spanId": secrets.token_bytes(8).hex(),
-                        "name": "slave-verify telemetry",
+                        "name": "slave-test telemetry",
                         "kind": 1,
                         "startTimeUnixNano": str(now_ns),
                         "endTimeUnixNano": str(now_ns + 1000000),
@@ -1814,7 +2194,7 @@ class SlaveVerify:
         if "python-cache" not in index_url:
             self._fail("PIP_INDEX_URL is not set or does not point to the python-cache proxy")
             return
-        workdir = tempfile.mkdtemp(prefix="slave-verify-pip-")
+        workdir = tempfile.mkdtemp(prefix="slave-test-pip-")
         result = run(["pip", "download", "--no-deps", "--disable-pip-version-check",
                       "--no-cache-dir", "--quiet", "-d", workdir, "six"], check=False)
         files = sorted(os.listdir(workdir)) if os.path.isdir(workdir) else []
@@ -1831,14 +2211,14 @@ class SlaveVerify:
         selected = services or list(self.checks)
         for name in selected:
             if name not in self.checks:
-                die(f"unknown slave-verify service '{name}' (valid: {', '.join(self.checks)})")
+                die(f"unknown slave-test service '{name}' (valid: {', '.join(self.checks)})")
         for name in selected:
-            print(f"\n=== slave-verify: {name} ===")
+            print(f"\n=== slave-test: {name} ===")
             self.checks[name]()
-        print(f"\nslave-verify: {len(selected) - self.errors}/{len(selected)} check(s) passed")
+        print(f"\nslave-test: {len(selected) - self.errors}/{len(selected)} check(s) passed")
         if self.errors:
-            die(f"slave-verify completed with {self.errors} error(s)")
-        print("slave-verify: all checks passed")
+            die(f"slave-test completed with {self.errors} error(s)")
+        print("slave-test: all checks passed")
 
 
 class SlaveToken:
@@ -2269,10 +2649,10 @@ def main():
         description="Shoggoth Gitea maintenance: webhooks, mirror sync, and slave user access",
     )
     parser.add_argument("command",
-                        choices=["kestra-webhooks", "redmine-webhooks", "redmine-kestra-webhooks",
+                        choices=["argo-webhooks", "redmine-webhooks", "redmine-argo-webhooks",
                                  "github-mirror-sync", "slave-access", "slave-token", "runner-token",
                                  "ssh-key",
-                                 "verify-api", "slave-verify",
+                                 "slave-test",
                                  "gitea-ldap-sync", "redmine-ldap-sync"],
                         help="Command to execute")
     parser.add_argument("args", nargs="*", default=[],
@@ -2285,26 +2665,67 @@ def main():
     global VERBOSE
     VERBOSE = parsed.verbose
 
-    if parsed.command == "kestra-webhooks":
+    if parsed.command == "argo-webhooks":
         gitea = Gitea()
-        cmd = SetupKestraWebhooks(gitea)
+        cmd = SetupArgoWebhooks(gitea)
         cmd.execute(parsed.args or None)
     elif parsed.command == "redmine-webhooks":
         gitea = Gitea()
         cmd = SetupRedmineWebhooks(gitea)
         cmd.execute(parsed.args or None)
-    elif parsed.command == "redmine-kestra-webhooks":
+    elif parsed.command == "redmine-argo-webhooks":
         openbao = OpenBao()
         redmine = Redmine(openbao)
-        cmd = SetupRedmineKestraWebhooks(redmine)
+        cmd = SetupRedmineArgoWebhooks(redmine)
         cmd.execute()
     elif parsed.command == "github-mirror-sync":
-        if not parsed.args:
-            die("github-mirror-sync requires at least one github organization name")
+        # Resolve the list of orgs to mirror. Precedence:
+        #   1. positional CLI args (e.g. `-p github_orgs="orgA orgB"`
+        #      or trailing argv when invoked outside Argo)
+        #   2. SHOGGOTH_GITHUB_ORG env var (wired by the github-mirror-sync
+        #      WorkflowTemplate at admission time from the
+        #      shoggoth-workflow-config ConfigMap)
+        #   3. /shoggoth/workflow-config/SHOGGOTH_GITHUB_ORG file (the
+        #      same ConfigMap mounted as a volume by the template —
+        #      works even when the cluster's WorkflowTemplate is stale
+        #      and missing the env var wiring above, which happens when
+        #      apply-workflows has not been re-run since the template
+        #      file was updated; apply-workflows only runs on
+        #      argo-workflow-controller pod start)
+        # If all three are unavailable, fail with an actionable error
+        # instead of KeyError so the operator knows what to do.
+        orgs = parsed.args
+        if not orgs:
+            default_org = os.environ.get("SHOGGOTH_GITHUB_ORG", "")
+            if not default_org:
+                config_path = "/shoggoth/workflow-config/SHOGGOTH_GITHUB_ORG"
+                try:
+                    with open(config_path) as f:
+                        default_org = f.read().strip()
+                except OSError:
+                    pass
+            if not default_org:
+                die(
+                    "github-mirror-sync requires at least one github organization name.\n"
+                    "  No positional orgs passed, SHOGGOTH_GITHUB_ORG env var is unset,\n"
+                    "  and /shoggoth/workflow-config/SHOGGOTH_GITHUB_ORG is not mounted.\n"
+                    "  Most likely the cluster's WorkflowTemplate is stale — the\n"
+                    "  apply-workflows init container only refreshes it on\n"
+                    "  argo-workflow-controller pod start.\n"
+                    "  Quick fix:\n"
+                    "    make sync\n"
+                    "    kubectl delete pod -n $INSTANCE -l app=argo-workflow-controller\n"
+                    "    argo submit --from workflowtemplate/github-mirror-sync -n $INSTANCE\n"
+                    "  Or pass orgs explicitly to skip the template refresh:\n"
+                    "    argo submit --from workflowtemplate/github-mirror-sync -n $INSTANCE \\\n"
+                    "        -p github_orgs=\"YOUR_ORG\""
+                )
+            print(f"Using SHOGGOTH_GITHUB_ORG={default_org}")
+            orgs = [default_org]
         gitea = Gitea()
         github = Github()
         cmd = GithubMirrorSync(gitea, github)
-        cmd.execute(parsed.args)
+        cmd.execute(orgs)
     elif parsed.command == "slave-access":
         gitea = Gitea()
         cmd = SlaveAccess(gitea)
@@ -2322,11 +2743,8 @@ def main():
         openbao = OpenBao()
         cmd = SshKey(gitea, openbao)
         cmd.execute()
-    elif parsed.command == "verify-api":
-        cmd = VerifyApi()
-        cmd.execute(parsed.args or None)
-    elif parsed.command == "slave-verify":
-        cmd = SlaveVerify()
+    elif parsed.command == "slave-test":
+        cmd = SlaveTest()
         cmd.execute(parsed.args or None)
     elif parsed.command == "gitea-ldap-sync":
         gitea = Gitea()

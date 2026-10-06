@@ -10,3 +10,6 @@
 [submodule "shoggoth/external-secrets"]
 	path = shoggoth/external-secrets
 	url = https://github.com/external-secrets/external-secrets.git
+[submodule "shoggoth/argo-workflows"]
+	path = shoggoth/argo-workflows
+	url = https://github.com/argoproj/argo-workflows.git

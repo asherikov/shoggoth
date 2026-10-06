@@ -1,0 +1,273 @@
+---
+# slave-test — equivalent to kestra's main_shoggoth_slave-verify.yml.
+#
+# Eight allowFailure-style checks (gitea-api, redmine-api, git-http, git-ssh,
+# embeddings, mcp, telemetry, pip-cache) followed by a final "assert all
+# passed" step. Originally seven ran in parallel with only git-ssh waiting
+# on git-http (they share the scratch repo — first writer wins, second's
+# POST may race). Now serialized: spec.parallelism: 1 caps the workflow at
+# one active pod at a time, so all eight checks run back-to-back in
+# scheduler-determined order and the final assert step's exit code is the
+# AND of every check's exit code.
+#
+# We keep the DAG (instead of converting to a Steps template) so the
+# per-task dependency graph — git-ssh depends on git-http, assert-all-
+# passed depends on every check — stays explicit and a single-line change
+# (bump parallelism) re-enables concurrency if the resource budget ever
+# grows. Each check's `depends:` uses task-result notation
+# `(X.Succeeded || X.Failed || X.Errored)` so a failing upstream check does
+# not skip its dependents — matching kestra's allowFailure: true.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: slave-test
+  namespace: shoggoth
+  labels:
+    app.kubernetes.io/part-of: shoggoth-argo
+spec:
+  entrypoint: test
+  parallelism: 1
+  activeDeadlineSeconds: 600
+  synchronization:
+    mutexes:
+      - name: slave-test-mutex
+  # Required by the submit-time validator (workflow/validate/validate.go):
+  # templates referencing {{workflow.parameters.SHOGGOTH_*}} must resolve
+  # to a declared parameter here. Values are fetched from the
+  # shoggoth-workflow-config ConfigMap at admission time (see
+  # shoggoth/k3s/argo-workflows.yaml). Domain and instance-dir are the
+  # only two this template references.
+  arguments:
+    parameters:
+    - name: SHOGGOTH_DOMAIN
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_DOMAIN
+    - name: SHOGGOTH_INSTANCE_DIR
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_INSTANCE_DIR
+  templates:
+  - name: test
+    dag:
+      tasks:
+      - name: gitea-api
+        template: check
+        arguments:
+          parameters:
+          - {name: check_name, value: gitea-api}
+      - name: redmine-api
+        template: check
+        arguments:
+          parameters:
+          - {name: check_name, value: redmine-api}
+      - name: git-http
+        template: check
+        arguments:
+          parameters:
+          - {name: check_name, value: git-http}
+      - name: git-ssh
+        template: check
+        depends: "(git-http.Succeeded || git-http.Failed || git-http.Errored)"
+        arguments:
+          parameters:
+          - {name: check_name, value: git-ssh}
+      - name: embeddings
+        template: check
+        arguments:
+          parameters:
+          - {name: check_name, value: embeddings}
+      - name: mcp-servers
+        template: check
+        arguments:
+          parameters:
+          - {name: check_name, value: mcp}
+      - name: telemetry
+        template: check
+        arguments:
+          parameters:
+          - {name: check_name, value: telemetry}
+      - name: pip-cache
+        template: check
+        arguments:
+          parameters:
+          - {name: check_name, value: pip-cache}
+      - name: assert-all-passed
+        template: assert-all-passed
+        depends: "(gitea-api.Succeeded || gitea-api.Failed || gitea-api.Errored) && (redmine-api.Succeeded || redmine-api.Failed || redmine-api.Errored) && (git-http.Succeeded || git-http.Failed || git-http.Errored) && (git-ssh.Succeeded || git-ssh.Failed || git-ssh.Errored) && (embeddings.Succeeded || embeddings.Failed || embeddings.Errored) && (mcp-servers.Succeeded || mcp-servers.Failed || mcp-servers.Errored) && (telemetry.Succeeded || telemetry.Failed || telemetry.Errored) && (pip-cache.Succeeded || pip-cache.Failed || pip-cache.Errored)"
+        arguments:
+          parameters:
+          - {name: gitea-api-exit, value: "{{tasks.gitea-api.outputs.parameters.exit_code}}"}
+          - {name: redmine-api-exit, value: "{{tasks.redmine-api.outputs.parameters.exit_code}}"}
+          - {name: git-http-exit, value: "{{tasks.git-http.outputs.parameters.exit_code}}"}
+          - {name: git-ssh-exit, value: "{{tasks.git-ssh.outputs.parameters.exit_code}}"}
+          - {name: embeddings_exit, value: "{{tasks.embeddings.outputs.parameters.exit_code}}"}
+          - {name: mcp-servers-exit, value: "{{tasks.mcp-servers.outputs.parameters.exit_code}}"}
+          - {name: telemetry_exit, value: "{{tasks.telemetry.outputs.parameters.exit_code}}"}
+          - {name: pip-cache-exit, value: "{{tasks.pip-cache.outputs.parameters.exit_code}}"}
+
+  - name: check
+    inputs:
+      parameters:
+      - name: check_name
+    # R1-8: a failing check is recorded as Failed but does not skip
+    # dependents (matches Kestra allowFailure: true).
+    #
+    # The seven "dependency-free" parallel checks (gitea-api, redmine-api,
+    # git-http, embeddings, mcp-servers, telemetry, pip-cache) have NO
+    # `continueOn`. This is intentional: Argo's validator forbids combining
+    # `continueOn` and `depends` *anywhere* in the same template. Once any
+    # task in the DAG declares `depends:` (here `git-ssh` and
+    # `assert-all-passed`), `usingDepends` flips true at the template level
+    # and the per-task check `usingDepends && task.ContinueOn != nil`
+    # (workflow/validate/validate.go:1355) rejects every other task with a
+    # `continueOn:` block. The check is template-wide, not per-task-pair.
+    # We drop `continueOn` from the parallel checks and rely on the fact
+    # that they have no direct dependents in the DAG other than
+    # `assert-all-passed`, whose `depends:` uses task-result notation
+    # `(X.Succeeded || X.Failed || X.Errored)` so it runs regardless of
+    # the upstream task's outcome. Net effect is the same as Kestra's
+    # `allowFailure: true`: a failed check does not skip
+    # `assert-all-passed`, which reports the failure via its non-zero
+    # exit at workflow end.
+    #
+    # The two DAG tasks that DO declare `depends:` (`git-ssh` and
+    # `assert-all-passed`) encode "run regardless of upstream outcome"
+    # in `depends:` via task-result notation, e.g.
+    # `(git-http.Succeeded || git-http.Failed || git-http.Errored)`.
+    # R1-6: the check writes its exit code to a file Argo reads as an
+    # outputs.parameters value, since the original bash for-loop
+    # indirection ({{steps.$step.exitCode}}) does not work in Argo.
+    outputs:
+      parameters:
+      - name: exit_code
+        valueFrom:
+          path: /tmp/check-exit-code
+    container:
+      image: registry.{{workflow.parameters.SHOGGOTH_DOMAIN}}/slave:noble
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      args:
+      - |
+        python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-test {{inputs.parameters.check_name}} 2>&1
+        rc=$?
+        printf '%d' "$rc" > /tmp/check-exit-code
+        exit $rc
+      env:
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://otelcol:4318"
+      - name: GITEA_SERVER_URL
+        # Web-internal API gateway proxies /gitea/ to the gitea service
+        # and replaces our Authorization header with the real slave
+        # token before forwarding (see web-internal.yaml:
+        # `proxy_set_header Authorization "Bearer ${GITEA_SLAVE_TOKEN}"`).
+        # The script therefore doesn't need to acquire the slave token
+        # for HTTP API calls — anything we send is overwritten by the
+        # gateway.
+        value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/gitea"
+      - name: GITEA_GIT_URL
+        # Direct HTTP URL for git clone/push. Separate from
+        # GITEA_SERVER_URL because the gateway path doesn't match the
+        # credential-cache entry — git-cred-bootstrap populates the
+        # cache for `protocol=http host=git.${SHOGGOTH_DOMAIN}` (see
+        # shoggoth/k3s/git-cred-bootstrap.yaml), so a clone through
+        # the gateway at `host=api.${SHOGGOTH_DOMAIN}` would have no
+        # matching credential and git would fail.
+        #
+        # Scheme is http (not https) because the in-cluster gitea
+        # Service is HTTP-only on port 80 — there is no TLS
+        # termination on the gitea side. ANGIE/web-internal sits in
+        # front for the public-facing HTTPS terminations; inside the
+        # cluster everything is plain HTTP. `protocol=http` in the
+        # credential cache MUST match the URL scheme git is cloning
+        # with, so changing this to https would break the credential
+        # lookup even if gitea were reachable on 443.
+        value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: GITEA_SSH_HOST
+        value: "git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: REDMINE_SERVER
+        value: "http://redmine.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: SHOGGOTH_VAULT_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: openbao-unseal-key
+            key: root-token
+      - name: OPENBAO_ADDR
+        value: "http://openbao:80"
+      - name: GITEA_ADMIN_TOKEN
+        # Dummy token — the gateway replaces whatever we send with the
+        # real slave token before forwarding. Previously this was the
+        # actual `gitea-server-token` Secret value, which let the script
+        # call Gitea directly bypassing the gateway. With the gateway
+        # in front, the script no longer needs the real token; the
+        # literal "gateway" is enough to satisfy the Gitea() constructor
+        # (which dies on an empty GITEA_ADMIN_TOKEN) and to identify
+        # the request as gateway-routed in workflow logs.
+        value: "gateway"
+      volumeMounts:
+      - name: check-tmp
+        mountPath: /tmp
+      - name: workflow-scripts
+        mountPath: /shoggoth/workflow/scripts
+        readOnly: true
+      - name: git-cred
+        mountPath: /shoggoth/git-cred
+      - name: ci-cache
+        mountPath: /cache
+    volumes:
+    - name: check-tmp
+      emptyDir: {}
+    - name: workflow-scripts
+      hostPath:
+        path: /var/lib/rancher/k3s/storage/{{workflow.parameters.SHOGGOTH_INSTANCE_DIR}}/workflow-scripts
+        type: DirectoryOrCreate
+    - name: git-cred
+      emptyDir: {}
+    - name: ci-cache
+      persistentVolumeClaim:
+        claimName: shoggoth-shared-cache
+
+  - name: assert-all-passed
+    # R1-6: read each check's exit_code via explicit inputs.parameters
+    # (Argo resolves {{tasks.<name>.outputs.parameters.exit_code}}
+    # at submit time once each check has produced its output — the
+    # broken {{steps.$step.exitCode}} indirection is gone).
+    inputs:
+      parameters:
+      - name: gitea-api-exit
+      - name: redmine-api-exit
+      - name: git-http-exit
+      - name: git-ssh-exit
+      - name: embeddings_exit
+      - name: mcp-servers-exit
+      - name: telemetry_exit
+      - name: pip-cache-exit
+    container:
+      image: registry.{{workflow.parameters.SHOGGOTH_DOMAIN}}/slave:noble
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      args:
+      - |
+        failed=0
+        total=0
+        if [ "{{inputs.parameters.gitea-api-exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: gitea-api exited {{inputs.parameters.gitea-api-exit}}"; fi; total=$((total+1))
+        if [ "{{inputs.parameters.redmine-api-exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: redmine-api exited {{inputs.parameters.redmine-api-exit}}"; fi; total=$((total+1))
+        if [ "{{inputs.parameters.git-http-exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: git-http exited {{inputs.parameters.git-http-exit}}"; fi; total=$((total+1))
+        if [ "{{inputs.parameters.git-ssh-exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: git-ssh exited {{inputs.parameters.git-ssh-exit}}"; fi; total=$((total+1))
+        if [ "{{inputs.parameters.embeddings_exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: embeddings exited {{inputs.parameters.embeddings_exit}}"; fi; total=$((total+1))
+        if [ "{{inputs.parameters.mcp-servers-exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: mcp-servers exited {{inputs.parameters.mcp-servers-exit}}"; fi; total=$((total+1))
+        if [ "{{inputs.parameters.telemetry_exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: telemetry exited {{inputs.parameters.telemetry_exit}}"; fi; total=$((total+1))
+        if [ "{{inputs.parameters.pip-cache-exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: pip-cache exited {{inputs.parameters.pip-cache-exit}}"; fi; total=$((total+1))
+        if [ "$failed" -gt 0 ]; then
+          echo "slave-test: $failed/$total check(s) failed, see WARNING tasks above"
+          exit 1
+        fi
+        echo "slave-test: all $total checks passed"

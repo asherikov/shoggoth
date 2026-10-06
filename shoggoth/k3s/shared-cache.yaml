@@ -3,8 +3,8 @@
 #   - gitea-runner job pods (mount at /cache; slave:noble image's
 #     CCWS_CACHE=/cache/ccws/ + PIP_CACHE_DIR=/cache/ccws/pip expect it)
 #   - slave-term interactive web terminal (mount at /cache)
-#   - kestra workflows (mount at /cache on slave-dind so Kestra-spawned
-#     containers that reference /cache via Docker task runner bind-mount it)
+#   - Argo workflow pods (coding-agent-dispatcher, github-mirror-sync,
+#     slave-test) mount /cache from the shoggoth-shared-cache PVC below.
 #
 # Replaces the per-consumer PVCs that this file obsoletes:
 #   - slave-dind-ci-cache (still in slave-dind.yaml's manifest but no longer

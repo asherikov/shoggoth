@@ -1,0 +1,160 @@
+---
+# coding-agent-dispatcher — invoked by every webhook flow (gitea-pr-update,
+# gitea-ci-failure, redmine-task-processor) via WorkflowEventBinding.
+#
+# Equivalent to kestra's main_shoggoth_coding-agent-dispatcher.yml:
+# runs shoggoth_workflow.py inside a native k8s pod (slave_noble). No
+# docker-in-docker; the workflow-controller's k8sapi runner creates the
+# container directly.
+#
+# Args:
+#   script:   script to invoke (always shoggoth_workflow.py for now)
+#   task_id:  task identifier (e.g. "pr-update", "ci-failure", "task 42")
+#   payload:  raw JSON string from the webhook body (defaults to "")
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: coding-agent-dispatcher
+  namespace: shoggoth
+  labels:
+    app.kubernetes.io/part-of: shoggoth-argo
+spec:
+  entrypoint: dispatch
+  arguments:
+    parameters:
+    - name: script
+      value: "shoggoth_workflow.py"
+    - name: task_id
+      value: ""
+    - name: payload
+      value: ""
+    # The four parameters below are required because the submit-time
+    # validator (workflow/validate/validate.go, Workflow()) merges
+    # WorkflowTemplate.spec.arguments.parameters into the new Workflow's
+    # spec.arguments.parameters and rejects any {{workflow.parameters.X}}
+    # reference in a template that doesn't resolve to one of them.
+    # Values are fetched from the shoggoth-workflow-config ConfigMap at
+    # admission time (see shoggoth/k3s/argo-workflows.yaml) — the
+    # ConfigMap holds the actual domain/namespace/org/instance-dir
+    # because `make up`'s envsubst pass renders its `${SHOGGOTH_*}`
+    # placeholders to literal values before applying.
+    - name: SHOGGOTH_DOMAIN
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_DOMAIN
+    - name: SHOGGOTH_GITHUB_ORG
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_GITHUB_ORG
+    - name: SHOGGOTH_INSTANCE_DIR
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_INSTANCE_DIR
+  templates:
+  - name: dispatch
+    inputs:
+      parameters:
+      - name: script
+      - name: task_id
+      - name: payload
+    # Single-flight serialization. The deleted Kestra subflow enforced
+    # concurrency: { limit: 1, behavior: QUEUE } so two webhook
+    # deliveries (e.g. two pull_request_review events for the same PR
+    # in quick succession) could not run the agent at the same time —
+    # both pods would clone the same PR, run `git push origin<branch>`
+    # in parallel, and race on the same ref, with the second push
+    # overwriting the first's commits. The mutex blocks the second
+    # submitter at admission time until the first finishes, the same
+    # observable effect as Kestra's QUEUE. Held alongside the same
+    # activeDeadlineSeconds (4 h cap below) a wedged holder blocks
+    # others for 4 h; the workflowDefaults.ttlStrategy
+    # (secondsAfterCompletion: 86400 in argo-workflows.yaml:864)
+    # bounds the post-completion lifetime if desired. Naming the
+    # mutex `coding-agent-dispatcher-mutex` keeps it distinct from
+    # the per-workflow mutexes on slave-test / github-mirror-sync /
+    # maintenance — those run different scripts that benefit from
+    # running in parallel with the dispatcher.
+    synchronization:
+      mutexes:
+        - name: coding-agent-dispatcher-mutex
+    container:
+      image: registry.{{workflow.parameters.SHOGGOTH_DOMAIN}}/slave:noble
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      # Pass script + task_id through env vars and exec with quoted
+      # parameter expansion. Direct interpolation into bash source lets
+      # `task_id="1; touch /tmp/pwned; #"` (or any other shell
+      # metacharacter in the parameter value) execute arbitrary
+      # commands inside the workflow pod — exec with "${VAR}" passes the
+      # value as a single argv element.
+      args:
+      - |
+        export PATH="/shoggoth/workflow/scripts:${PATH}"
+        exec "${SHOGGOTH_SCRIPT_NAME}" --verbose "${SHOGGOTH_TASK_ID}" 2>&1
+      env:
+      - name: SHOGGOTH_SCRIPT_NAME
+        value: "{{inputs.parameters.script}}"
+      - name: SHOGGOTH_TASK_ID
+        value: "{{inputs.parameters.task_id}}"
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://otelcol:4318"
+      - name: OPENAI_API_KEY
+        value: "litellm"
+      - name: OPENAI_BASE_URL
+        value: "http://litellm.{{workflow.parameters.SHOGGOTH_DOMAIN}}/v1/"
+      - name: OPENAI_MODEL
+        value: "shoggoth-default"
+      - name: BM_MCP_URL
+        value: "http://litellm.{{workflow.parameters.SHOGGOTH_DOMAIN}}/mcp"
+      - name: CCACHE_REMOTE_STORAGE
+        value: "http://build-cache.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: CCACHE_REMOTE_ONLY
+        value: "true"
+      - name: GITEA_SERVER_URL
+        value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/gitea"
+      - name: GITEA_SERVER_TOKEN
+        value: "gateway"
+      - name: GITEA_INSTANCE_SSH_HOST
+        value: "git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: REDMINE_SERVER
+        value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/redmine"
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: SHOGGOTH_GITHUB_ORG
+        value: "{{workflow.parameters.SHOGGOTH_GITHUB_ORG}}"
+      - name: SHOGGOTH_SLAVE_USER
+        value: "slave"
+      - name: SHOGGOTH_REVIEWER_USER
+        value: "slave-reviewer"
+      - name: GITEA_PAYLOAD
+        value: "{{inputs.parameters.payload}}"
+      - name: SHOGGOTH_ARGO_RUN_URL
+        # Dropped ?id={{workflow.creationTimestamp}} — Argo's workflow UI
+        # uses path segments, not a query parameter, and creationTimestamp
+        # is an RFC-3339 timestamp, not a run id. The URL navigates to the
+        # correct run page on its own.
+        value: "http://argo.{{workflow.parameters.SHOGGOTH_DOMAIN}}/workflows/shoggoth/{{workflow.name}}"
+      volumeMounts:
+      - name: workflow-scripts
+        mountPath: /shoggoth/workflow/scripts
+        readOnly: true
+      - name: git-cred
+        mountPath: /shoggoth/git-cred
+      - name: ci-cache
+        mountPath: /cache
+    volumes:
+    - name: workflow-scripts
+      hostPath:
+        path: /var/lib/rancher/k3s/storage/{{workflow.parameters.SHOGGOTH_INSTANCE_DIR}}/workflow-scripts
+        type: DirectoryOrCreate
+    - name: git-cred
+      emptyDir: {}
+    - name: ci-cache
+      persistentVolumeClaim:
+        claimName: shoggoth-shared-cache
+    activeDeadlineSeconds: 14400

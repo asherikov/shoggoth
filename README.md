@@ -104,7 +104,7 @@ configurable domain, set to `s.local` by default.
     - `git-pages.` — Git Pages static site hosting <https://git-pages.org/>.
     - `gitea-runner` — Gitea Actions runner
       <https://docs.gitea.com/next/usage/actions/act-runner>.
-  - `kestra.` — Kestra workflow orchestration <https://kestra.io/>.
+  - `argo.` — Argo Workflows orchestration <https://argo-workflows.readthedocs.io/>.
   - `slave-dind.` – Docker-in-Docker service for CI and workflow executors:
     DinD daemon + ci-cache + git-cred sidecar (ssh-agent + git-credential-cache
     for every CI container).
@@ -459,6 +459,49 @@ Troubleshooting
 
 Known issues
 ============
+
+- Argo Workflows v4.1.4 webhook dispatch produces duplicate `Workflow` CRDs
+  from a single webhook delivery. `argo-server` wraps the per-binding
+  `client.Workflows(...).Create(...)` call in a `waitutil.Backoff` retry
+  loop using `retry.DefaultRetry` (5 steps × 10 ms,
+  `k8s.io/client-go/util/retry`). When the apiserver accepts the Create
+  but the response is lost before argo-server reads it (transient network
+  blip, apiserver load, kube-apiserver connection reaper), the client
+  returns a transient error and Backoff retries — and because the workflow
+  `Name` is freshly randomised per call
+  (`wf.SetName(wf.GetGenerateName() + util.RandSuffix())`), every
+  successful retry produces a fresh `Workflow` CRD. Result: one webhook
+  delivery → two (or occasionally more) workflows, each spawning its own
+  pod.
+
+  v3.7.0 and the previous kestra-based dispatch did not have this issue:
+  neither wrapped the workflow/execution Create in a retry loop, so a
+  transient response-loss could not produce duplicates. v4's retry was
+  introduced as part of broader "make event dispatch more resilient"
+  changes; the resilience comes at the cost of double-creation on flaky
+  networks.
+
+  Patchable upstream by either (a) hashing `{binding-name,
+  payload-sha256, discriminator}` for an idempotent workflow
+  `generateName` so retries produce `AlreadyExists: Conflict` that
+  Backoff treats as success, or (b) lowering the retry budget to
+  `Steps: 1` for the dispatch's Create call (keeping retry on
+  Watch/List operations only). In the meantime, the doubling is
+  accepted. If the noise becomes problematic, a post-creation dedup
+  pass can be added to the maintenance DAG
+  (`shoggoth/workflow/argo/templates/maintenance.yaml`) that finds
+  duplicate workflows by `workflowEventBinding` label and sub-second
+  `creationTimestamp` deltas and deletes all but the oldest — this is
+  not implemented because the duplicates are inert (each is a normal
+  Failed workflow, not a corrupted one).
+
+  Source: `server/event/dispatch/operation.go`, the `Dispatch` and
+  `dispatch` functions. To confirm argo-side (vs. gitea-side) is the
+  source, compare
+  `kubectl get workflows -n shoggoth -l workflows.argoproj.io/workflow-event-binding=gitea-pr-update`
+  against gitea's *Recent Deliveries* count for the argo webhook URL —
+  if the workflow count exceeds the delivery count, the doubling is on
+  the argo side.
 
 - `kubectl` jsonpath extraction broken for several common forms in Alpine's
   `kubectl` 1.32 (the version packaged in `tools` and used by every

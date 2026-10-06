@@ -138,6 +138,28 @@ data:
                 proxy_set_header X-Forwarded-Proto $scheme;
                 proxy_set_header Authorization "Bearer ${CDASH_API_TOKEN}";
             }
+            # argo webhook ingress. Gitea/Redmine POST to
+            #   http://api.${SHOGGOTH_DOMAIN}/argo/api/v1/events/{ns}/{discriminator}
+            # and web-internal injects the argo-webhook-receiver SA token
+            # before forwarding to argo:80 (plain HTTP, --secure=false;
+            # see argo-workflows.yaml). The interceptor at
+            # server/auth/webhook/interceptor.go short-circuits when an
+            # Authorization header is already present, so v4's missing
+            # `gitea` parser and missing argo-workflows-webhook-clients
+            # Secret both become irrelevant — the gatekeeper does bearer
+            # validation against k8s, and the event controller runs with
+            # that SA's RBAC (see shoggoth/k3s/argo-webhook-receiver.yaml).
+            location = /argo {
+                return 301 /argo/;
+            }
+            location /argo/ {
+                proxy_pass http://argo:80/;
+                proxy_set_header Host argo.${SHOGGOTH_DOMAIN};
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Authorization "Bearer ${ARGO_WEBHOOK_TOKEN}";
+            }
         }
         # --- slave-term: served directly via coreDNS rewrite
         # *.{SHOGGOTH_DOMAIN} -> ${SHOGGOTH_NAMESPACE}.svc.cluster.local
@@ -209,7 +231,7 @@ data:
         <ul class="services">
             <li><a href="http://git.${SHOGGOTH_DOMAIN}/">git</a> - Gitea git service</li>
             <li><a href="http://redmine.${SHOGGOTH_DOMAIN}/">redmine</a> - Redmine issue tracker</li>
-            <li><a href="http://kestra.${SHOGGOTH_DOMAIN}/">kestra</a> - Kestra workflow orchestration</li>
+            <li><a href="http://argo.${SHOGGOTH_DOMAIN}/">argo</a> - Argo Workflows (workflow orchestration)</li>
             <li><a href="http://registry.${SHOGGOTH_DOMAIN}/v2/_catalog">registry</a> - Container image registry (zot)</li>
             <li><a href="http://python-cache.${SHOGGOTH_DOMAIN}/">python-cache</a> - PyPI cache proxy</li>
             <li><a href="http://apt-cache.${SHOGGOTH_DOMAIN}/">apt-cache</a> - APT package cache
@@ -482,85 +504,6 @@ data:
         3. `trace_path` needs exact names — use `search_graph(name_pattern=...)` first.
         4. `direction="outbound"` misses cross-service callers — use `direction="both"`.
         5. `search_graph` results default to 50 per page — check `has_more` and use `offset`.
-
-  kestra-flow-skill.md: |
-    ---
-    name: kestra-flow
-    description: Generate, modify, or debug Kestra Flow YAML by fetching the live flow schema and applying the same guardrails used by the Kestra AI Copilot. Use when users ask to create, write, update, or fix a Kestra flow.
-    compatibility: Requires curl and network access to https://api.kestra.io/v1/plugins/schemas/flow. No Kestra instance required.
-    ---
-    # Kestra Flow Skill
-    Use this skill to generate production-ready Kestra Flow YAML grounded in the live schema.
-    ## When to use
-    Use this skill when the request includes:
-    - Generating a new Kestra flow from scratch
-    - Modifying, extending, or debugging an existing flow
-    - Translating a workflow description into valid Kestra YAML
-    ## Required inputs
-    - A description of the desired flow behavior
-    - Namespace (and tenant ID if applicable)
-    - Existing flow YAML if the request is a modification
-    ## Workflow
-    ### Step 1 — Fetch the flow schema
-    Fetch the full schema with `curl` and read it directly — do not pipe it through any interpreter:
-    ```bash
-    curl -s https://api.kestra.io/v1/plugins/schemas/flow
-    ```
-    Read the raw JSON output to validate every type, property name, and structure used in the output. Do not generate anything before the schema is available.
-    ### Step 2 — Collect context
-    Identify from the user message or conversation:
-    - `id` — flow identifier (preserve if provided)
-    - `namespace` — target namespace (preserve if provided)
-    - Existing flow YAML (for modification requests)
-    - Whether this is an **addition / deletion / modification** or a **full rewrite**
-    ### Step 3 — Generate the YAML
-    Apply all generation rules below, then output raw YAML only.
-    ## Generation rules
-    **Schema compliance**
-    - Use only task types and properties explicitly defined in the fetched schema. Never invent or guess types or property names.
-    - Property keys must be unique within each task or block.
-    **Structural preservation**
-    - Always preserve root-level `id` and `namespace` if provided.
-    - For modification requests, touch only the relevant part. Do not restructure or rewrite unrelated sections.
-    - Avoid duplicating existing intent (e.g., replace a log message rather than adding a second one).
-    **Triggers**
-    - Include at least one trigger if execution should start based on an event or schedule.
-    - Do NOT add a `Schedule` trigger unless a regular occurrence is explicitly requested.
-    - Trigger outputs are accessed via `{{ trigger.outputName }}`; only use variables defined in the trigger's declared outputs.
-    **Looping**
-    - Use `ForEach` for repeated actions over a collection.
-    - Use `LoopUntil` for condition-based looping.
-    **Flow outputs**
-    - Only include flow-level `outputs` if the user explicitly requests returning a value from the execution.
-    **State tracking between executions**
-    - For state-change detection, use KV tasks (`io.kestra.plugin.core.kv.Set` / `io.kestra.plugin.core.kv.Get`) to store and compare state across executions.
-    **JDBC plugin**
-    - Always set `fetchType: STORE` when using JDBC tasks.
-    **Date manipulation in Pebble**
-    - Use `dateAdd` and `date` filters for date arithmetic.
-    - Apply `| number` before numeric comparisons.
-    **Credentials and secrets**
-    - Never embed secrets or hardcoded credentials.
-    - Use flow `inputs` of type `SECRET` or Pebble expressions (e.g., `{{ secret('MY_SECRET') }}`).
-    **APIs and connectivity**
-    - Prefer public/unauthenticated APIs unless the user specifies otherwise.
-    - Never assume a local port; use remote URLs.
-    **Quoting**
-    - Prefer double quotes; use single quotes inside double-quoted strings when needed.
-    **Error handling**
-    - If the request cannot be fulfilled using only schema-defined types and properties, output exactly:
-      ```
-      I cannot generate a valid Kestra Flow YAML for this request based on the available schema.
-      ```
-    ## Output format
-    - **Raw YAML only** — no prose, no markdown fences, no explanations outside the YAML.
-    - Use `#` comments at the top of the output for any caveats, assumptions, or warnings.
-    - The output must be ready to paste directly into the Kestra UI or deploy via `kestractl`.
-    ## Example prompts
-    - "Write a Kestra flow that fetches a public API every hour and stores the result in KV store."
-    - "Add a Slack notification task to this existing flow when any task fails."
-    - "Generate a flow in namespace `prod.data` that reads from a Postgres table and writes the result to S3."
-    - "Debug this flow YAML — it has a trigger variable reference that doesn't exist."
 
   memory-defrag-skill.md: |
     ---
@@ -1665,7 +1608,7 @@ spec:
       labels:
         app: web-internal
       annotations:
-        secret.reloader.stakater.com/reload: gitea-slave-token,redmine-slave-token,cdash-api-token
+        secret.reloader.stakater.com/reload: gitea-slave-token,redmine-slave-token,cdash-api-token,argo-webhook-receiver-token
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -1724,11 +1667,29 @@ spec:
                       echo "      or remote secret missing (Orphan policies require a value in the source store)."
                       return 1
                     }
-          for tok in gitea-slave-token redmine-slave-token cdash-api-token; do
+                    wait_for_k8s_secret() {
+                      local name="$1"
+                      echo "wait-bootstrap: waiting for secret/${name} populated in namespace ${NS}..."
+                      for i in $(seq 1 60); do
+                        if kubectl get secret -n "${NS}" "${name}" -o json 2>/dev/null | jq -e '.data.token // "" | length > 0' >/dev/null 2>&1; then
+                          echo "wait-bootstrap: secret/${name} Ready (after $((i*5))s)"
+                          return 0
+                        fi
+                        sleep 5
+                      done
+                      echo "FAIL: secret/${name} has no .data.token after 5m"
+                      echo "      Hint: confirm the ServiceAccount ${name%-token} exists in ${NS};"
+                      echo "      kubernetes.io/service-account-token Secrets are populated by the"
+                      echo "      token-request controller and stay empty until the SA + RoleBinding"
+                      echo "      + Secret itself are all visible to kube-controller-manager."
+                      return 1
+                    }
+          for tok in gitea-slave-token redmine-slave-token cdash-api-token argo-webhook-receiver-token; do
                     case "${tok}" in
                       gitea-slave-token) wait_for_externalsecret gitea-slave-token || exit 1 ;;
                       redmine-slave-token) wait_for_externalsecret redmine-slave-token || exit 1 ;;
                       cdash-api-token) wait_for_externalsecret cdash-api-token || exit 1 ;;
+                      argo-webhook-receiver-token) wait_for_k8s_secret argo-webhook-receiver-token || exit 1 ;;
                     esac
           done
           echo "wait-bootstrap: all K8s Secrets Ready"
@@ -1748,7 +1709,7 @@ spec:
         - bash
         - -c
         args:
-        - "VARS=\"$(printf '${%s}' SHOGGOTH_DOMAIN)\"\nenvsubst \"$VARS\" < /tmpl/angie.conf.tmpl > /rendered/angie.conf\nenvsubst \"$VARS\" < /tmpl-html/index.html > /rendered/index.html\nsed -e \"s|\\${GITEA_SLAVE_TOKEN}|${GITEA_SLAVE_TOKEN}|g\" \\\n    -e \"s|\\${REDMINE_TOKEN}|${REDMINE_TOKEN}|g\" \\\n    -e \"s|\\${CDASH_API_TOKEN}|${CDASH_API_TOKEN}|g\" \\\n    -i /rendered/angie.conf\n"
+        - "VARS=\"$(printf '${%s}' SHOGGOTH_DOMAIN)\"\nenvsubst \"$VARS\" < /tmpl/angie.conf.tmpl > /rendered/angie.conf\nenvsubst \"$VARS\" < /tmpl-html/index.html > /rendered/index.html\nsed -e \"s|\\${GITEA_SLAVE_TOKEN}|${GITEA_SLAVE_TOKEN}|g\" \\\n    -e \"s|\\${REDMINE_TOKEN}|${REDMINE_TOKEN}|g\" \\\n    -e \"s|\\${CDASH_API_TOKEN}|${CDASH_API_TOKEN}|g\" \\\n    -e \"s|\\${ARGO_WEBHOOK_TOKEN}|${ARGO_WEBHOOK_TOKEN}|g\" \\\n    -i /rendered/angie.conf\n"
         env:
         - name: SHOGGOTH_DOMAIN
           value: ${SHOGGOTH_DOMAIN}
@@ -1766,6 +1727,17 @@ spec:
           valueFrom:
             secretKeyRef:
               name: cdash-api-token
+              key: token
+        # Long-lived SA token for argo-webhook-receiver (see
+        # shoggoth/k3s/argo-webhook-receiver.yaml). Injected on every
+        # request to /argo/ in angie.conf so the v4 webhook interceptor
+        # skips signature verification (interceptor.go:49-52 short-circuits
+        # when an Authorization header is already present) and argo-server's
+        # gatekeeper validates the bearer token instead.
+        - name: ARGO_WEBHOOK_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: argo-webhook-receiver-token
               key: token
         resources:
           requests:
@@ -1897,6 +1869,7 @@ rules:
   - gitea-slave-token
   - redmine-slave-token
   - cdash-api-token
+  - argo-webhook-receiver-token
   verbs:
   - get
 - apiGroups:
