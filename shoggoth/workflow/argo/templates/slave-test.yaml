@@ -153,13 +153,15 @@ spec:
       - -lc
       args:
       - |
-        python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose slave-test {{inputs.parameters.check_name}} 2>&1
+        python3 /shoggoth/workflow/scripts/shoggoth.py slave-test "${SHOGGOTH_CHECK_NAME}" 2>&1
         rc=$?
         printf '%d' "$rc" > /tmp/check-exit-code
         exit $rc
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
+      - name: SHOGGOTH_CHECK_NAME
+        value: "{{inputs.parameters.check_name}}"
       - name: GITEA_SERVER_URL
         # Web-internal API gateway proxies /gitea/ to the gitea service
         # and replaces our Authorization header with the real slave

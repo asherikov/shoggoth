@@ -264,7 +264,7 @@ spec:
         # maintenance flow already uses this form and the term user has
         # GITEA_SLAVE_TOKEN set above for Authorization headers. Same logic
         # for REDMINE_SERVER — the Angie proxy path would need a separate
-        # REDMINE_TOKEN env var wired here, and shoggoth_maintenance.py
+        # REDMINE_TOKEN env var wired here, and shoggoth.py
         # already handles the direct form by reading REDMINE_SERVER and
         # SHOGGOTH_DOMAIN separately.
         - name: GITEA_SERVER_URL
@@ -289,7 +289,7 @@ spec:
           # one file instead of three sockets (known_hosts,
           # ssh_auth_sock, git_credential_sock) matches what workflow
           # main containers do via _wait_for_git_cred in
-          # shoggoth_maintenance.py.
+          # shoggoth.py.
           ready_flag="/shoggoth/git-cred/ready"
           i=0
           while [ "$i" -lt 60 ]; do

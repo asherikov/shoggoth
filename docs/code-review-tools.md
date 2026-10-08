@@ -2,7 +2,7 @@
 
 Comparison of the two PR-review pipelines relevant to the shoggoth maintenance
 workflow. Current selection: **qwen-code `--effort low`** invoked via the
-`/review` slash command in `shoggoth/workflow/scripts/shoggoth_workflow.py`.
+`/review` slash command in `shoggoth/workflow/scripts/shoggoth.py`.
 Candidate: **alibaba/[open-code-review](https://github.com/alibaba/open-code-review)**
 (OCR), a standalone Go CLI purpose-built for diff-based review.
 
@@ -353,7 +353,7 @@ split needed.
 OCR ships a GitHub-only comment poster at
 `scripts/github-actions/post-review-comments.js`. shoggoth already has its own
 Gitea poster (`Gitea.post_pr_review_chunked` and inline-comment logic in
-`shoggoth_workflow.py`). The OCR→Gitea adapter is small (~80 lines) — map
+`shoggoth.py`). The OCR→Gitea adapter is small (~80 lines) — map
 `LlmComment{path,start_line,end_line,content,severity,category}` to Gitea's
 existing `POST /repos/{repo}/pulls/{n}/reviews` shape with `comments[]` for
 inline comments.

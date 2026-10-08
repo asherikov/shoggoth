@@ -3,13 +3,16 @@
 # gitea-ci-failure, redmine-task-processor) via WorkflowEventBinding.
 #
 # Equivalent to kestra's main_shoggoth_coding-agent-dispatcher.yml:
-# runs shoggoth_workflow.py inside a native k8s pod (slave_noble). No
+# runs shoggoth.py inside a native k8s pod (slave_noble). No
 # docker-in-docker; the workflow-controller's k8sapi runner creates the
 # container directly.
 #
 # Args:
-#   script:   script to invoke (always shoggoth_workflow.py for now)
-#   task_id:  task identifier (e.g. "pr-update", "ci-failure", "task 42")
+#   script:   script to invoke (always shoggoth.py for now)
+#   command:  argv[1] for shoggoth.py — the subcommand to run. Supplied by
+#             each binding (pr-update, ci-failure, task, ...).
+#   task_id:  optional argv[2] for shoggoth.py — used by `task` (numeric
+#             Redmine issue ID), empty for the rest.
 #   payload:  raw JSON string from the webhook body (defaults to "")
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
@@ -23,7 +26,9 @@ spec:
   arguments:
     parameters:
     - name: script
-      value: "shoggoth_workflow.py"
+      value: "shoggoth.py"
+    - name: command
+      value: "pr-update"
     - name: task_id
       value: ""
     - name: payload
@@ -58,6 +63,7 @@ spec:
     inputs:
       parameters:
       - name: script
+      - name: command
       - name: task_id
       - name: payload
     # Single-flight serialization. The deleted Kestra subflow enforced
@@ -86,19 +92,21 @@ spec:
       command:
       - bash
       - -lc
-      # Pass script + task_id through env vars and exec with quoted
-      # parameter expansion. Direct interpolation into bash source lets
-      # `task_id="1; touch /tmp/pwned; #"` (or any other shell
+      # Pass script + command + task_id through env vars and exec with
+      # quoted parameter expansion. Direct interpolation into bash source
+      # lets `task_id="1; touch /tmp/pwned; #"` (or any other shell
       # metacharacter in the parameter value) execute arbitrary
-      # commands inside the workflow pod — exec with "${VAR}" passes the
-      # value as a single argv element.
+      # commands inside the workflow pod — exec with "${VAR}" passes each
+      # value as a single argv element, so argparse sees them cleanly.
       args:
       - |
         export PATH="/shoggoth/workflow/scripts:${PATH}"
-        exec "${SHOGGOTH_SCRIPT_NAME}" --verbose "${SHOGGOTH_TASK_ID}" 2>&1
+        exec "${SHOGGOTH_SCRIPT_NAME}" "${SHOGGOTH_COMMAND}" "${SHOGGOTH_TASK_ID}" 2>&1
       env:
       - name: SHOGGOTH_SCRIPT_NAME
         value: "{{inputs.parameters.script}}"
+      - name: SHOGGOTH_COMMAND
+        value: "{{inputs.parameters.command}}"
       - name: SHOGGOTH_TASK_ID
         value: "{{inputs.parameters.task_id}}"
       - name: OTEL_EXPORTER_OTLP_ENDPOINT

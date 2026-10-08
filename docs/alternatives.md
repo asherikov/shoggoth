@@ -451,7 +451,7 @@ records on start/stop.
   - + strongest **provenance and determinism** in this category — same query + same time → same bytes
   - + CPU-only API (no GPU), self-hosted on the user's Postgres
   - + REST + Python/TS SDKs; Apache-2.0; Docker Hub `statewavedev/statewave`
-  - + receipt/replay model fits `shoggoth_workflow.py`'s existing `Update basic memory with any new information` post-step as an auditable decision log
+  - + receipt/replay model fits `shoggoth.py`'s existing `Update basic memory with any new information` post-step as an auditable decision log
   - - compile-then-bundle model reshapes the write path the agent uses today
   - - no UI surface advertised; relies on operator-built UI or external MCP clients
   - - separate Postgres+pgvector cluster adds an ops surface shoggoth doesn't have today
@@ -460,7 +460,7 @@ records on start/stop.
   - + by far the most sophisticated governance and contradiction control in this category
   - + native MCP at `/mcp` slots into LiteLLM the same way basic-memory does
   - + Apache-2.0, GHCR images, air-gappable
-  - - fleet-shaped (cited production reference: 300+ agents, 26k+ memories); shoggoth currently has ~1 agent (`shoggoth_workflow.py`) — most fleet features are unused
+  - - fleet-shaped (cited production reference: 300+ agents, 26k+ memories); shoggoth currently has ~1 agent (`shoggoth.py`) — most fleet features are unused
   - - reads more naturally as the source-of-truth for *many* agents than as the persistent notes of one
   - - OSS UI is the MCP/API only; the graph/timeline inspectors live in the Cloud tier
 - <https://docs.cognee.ai/> (Cognee, Apache-2.0)
@@ -952,7 +952,7 @@ The intended posture (no chat platform deployed today):
 
 1. **Apprise** as the fan-out router inside each Argo task runner (`slave:noble`); tag config in OpenBao as `shoggoth/apprise/tags.yml`
 2. **Zulip** as the first destination — one stream per source service, one topic per incident; this addresses the notification gap noted above (no in-tree TODO exists at `web-internal.yaml:669` — only an LLM-prompt example string that was once in the deleted `kestra-flow-skill.md` ConfigMap data key).
-3. **`shoggoth_maintenance.py` extension** — new step `setup_notification_streams` (alongside `setup_argo_webhooks`) to provision the stream set on first bringup
+3. **`shoggoth.py` extension** — new step `setup_notification_streams` (alongside `setup_argo_webhooks`) to provision the stream set on first bringup
 4. **`main_shoggoth_maintenance.yml` extension** — a final task running `apprise --tag shoggoth ...` after each maintenance step; same runner, same OTel env block, no edits to existing tasks
 5. **`onFailure` notification tasks** on `gitea-pr-update`, `gitea-ci-failure`, `redmine-task-processor` — flows where the deleted kestra-flow-skill example prompt expected a Slack-style task
 6. Apprise tag config in OpenBao (`shoggoth/apprise/tags.yml`) keeps the chat-platform choice swappable: switching to Mattermost or XMPP later is a one-config change, not a refactor of Argo Workflows

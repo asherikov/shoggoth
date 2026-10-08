@@ -104,8 +104,14 @@ spec:
       command:
       - bash
       - -lc
+      # Pass action through env var and exec with quoted expansion. Direct
+      # interpolation of {{inputs.parameters.action}} into bash source lets
+      # a value containing shell metacharacters (e.g. `gitea-ldap-sync; ...`)
+      # execute arbitrary commands inside the workflow pod. Mirrors the
+      # coding-agent-dispatcher pattern.
       args:
-      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose {{inputs.parameters.action}} 2>&1
+      - |
+        exec python3 /shoggoth/workflow/scripts/shoggoth.py "${SHOGGOTH_ACTION}" 2>&1
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
@@ -127,6 +133,8 @@ spec:
             key: root-token
       - name: OPENBAO_ADDR
         value: "http://openbao:80"
+      - name: SHOGGOTH_ACTION
+        value: "{{inputs.parameters.action}}"
       volumeMounts:
       - name: workflow-scripts
         mountPath: /shoggoth/workflow/scripts
@@ -147,7 +155,7 @@ spec:
       - bash
       - -lc
       args:
-      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose argo-webhooks 2>&1
+      - python3 /shoggoth/workflow/scripts/shoggoth.py argo-webhooks 2>&1
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
@@ -180,7 +188,7 @@ spec:
       - bash
       - -lc
       args:
-      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose redmine-webhooks 2>&1
+      - python3 /shoggoth/workflow/scripts/shoggoth.py redmine-webhooks 2>&1
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
@@ -213,7 +221,7 @@ spec:
       - bash
       - -lc
       args:
-      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose redmine-argo-webhooks 2>&1
+      - python3 /shoggoth/workflow/scripts/shoggoth.py redmine-argo-webhooks 2>&1
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
@@ -250,8 +258,15 @@ spec:
       command:
       - bash
       - -lc
+      # Pass action through env var and exec with quoted expansion. Direct
+      # interpolation of {{inputs.parameters.action}} into bash source lets
+      # a value containing shell metacharacters (e.g. `slave-token; ...`)
+      # execute arbitrary commands inside the workflow pod under the
+      # shoggoth-maintenance-secret-writer SA. Mirrors the
+      # coding-agent-dispatcher pattern.
       args:
-      - python3 /shoggoth/workflow/scripts/shoggoth_maintenance.py --verbose {{inputs.parameters.action}} 2>&1
+      - |
+        exec python3 /shoggoth/workflow/scripts/shoggoth.py "${SHOGGOTH_ACTION}" 2>&1
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
@@ -275,6 +290,8 @@ spec:
             key: root-token
       - name: OPENBAO_ADDR
         value: "http://openbao:80"
+      - name: SHOGGOTH_ACTION
+        value: "{{inputs.parameters.action}}"
       volumeMounts:
       - name: workflow-scripts
         mountPath: /shoggoth/workflow/scripts

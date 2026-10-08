@@ -610,8 +610,8 @@ data:
         # (not `server_name api`) so Host=`api` fell through to the
         # default_server 404. Defined here — direct service form, matching
         # the pattern `main_shoggoth_maintenance.yml` already uses — so
-        # spawned job containers that import shoggoth_workflow.py /
-        # shoggoth_maintenance.py can build `api_url` without raising
+        # spawned job containers that import shoggoth.py can build
+        # `api_url` without raising
         # KeyError. Auth on direct calls still needs `GITEA_SLAVE_TOKEN`;
         # the runner container doesn't have that env wired today, so
         # workflows that hit gitea API today either succeed without auth

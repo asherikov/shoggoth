@@ -1,6 +1,6 @@
 # argo-webhook-receiver — minimal SA + RBAC for delivering gitea/redmine
 # webhook events to argo-server via web-internal. The gitea/redmine webhook
-# URLs in shoggoth/workflow/scripts/shoggoth_maintenance.py now point at
+# URLs in shoggoth/workflow/scripts/shoggoth.py now point at
 # api.${SHOGGOTH_DOMAIN}/argo/api/v1/events/{ns}/{discriminator}, which
 # web-internal proxies to argo with this SA's bearer token injected (mirrors
 # the existing api.{SHOGGOTH_DOMAIN} → git/redmine/cdash pattern in

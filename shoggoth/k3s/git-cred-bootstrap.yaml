@@ -42,7 +42,7 @@
 # connection to your authentication agent.". 3 s is comfortably past
 # that window in practice; the 60 s budgets in the consumers (term's
 # inline wait, the readinessProbe failureThreshold, _wait_for_git_cred
-# in shoggoth_maintenance.py) cover cold-start cases like a freshly-
+# in shoggoth.py) cover cold-start cases like a freshly-
 # spawned gitea-ssh pod where ssh-keyscan has to retry.
 #
 # The script ends with `exec sleep infinity` so the sidecar container stays

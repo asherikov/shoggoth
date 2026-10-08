@@ -840,7 +840,7 @@ data:
       # expose `startOrder` in its apiserver OpenAPI v2 — `kubectl apply`
       # rejects it with "field not declared in schema", and even if
       # accepted, the kubelet would not honour it. Instead, the per-check
-      # `_wait_for_git_cred` loops in shoggoth_maintenance.py are the
+      # `_wait_for_git_cred` loops in shoggoth.py are the
       # gate. The readinessProbe is purely diagnostic (kubectl describe
       # pod, Events). failureThreshold 60 s is 2× the 30 s sidecar
       # bootstrap budget to absorb ssh-keyscan retries against a
@@ -996,7 +996,7 @@ spec:
         # --secure=true (the default since v3) the listener refuses any
         # plaintext HTTP and resets the connection with a TLS fatal
         # alert. The gitea/redmine webhook URLs registered by
-        # shoggoth_maintenance.py now point at
+        # shoggoth.py now point at
         # api.<DOMAIN>/argo/api/v1/events/{ns}/{discriminator}, which
         # web-internal (shoggoth/k3s/web-internal.yaml) proxies to
         # argo:80 as plaintext HTTP — web-internal injects the

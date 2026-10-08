@@ -3,7 +3,7 @@
 # pull_request_review_request / pull_request_comment events. Equivalent to
 # kestra's main_shoggoth_gitea-pr-update.yml.
 #
-# Webhook endpoint (set up by shoggoth_maintenance.py argo-webhooks):
+# Webhook endpoint (set up by shoggoth.py argo-webhooks):
 #   POST http://api.{domain}/argo/api/v1/events/shoggoth/gitea-pr-update
 #
 # v4 syntax notes (vs v3.7.0):
@@ -15,7 +15,7 @@
 #     Use `discriminator == "<name>"` to match.
 #   - parameters[].value (literal) has been replaced by parameters[].valueFrom.event
 #     (also an expr-lang expression). Bare strings inside the expression must be
-#     quoted (`"shoggoth_workflow.py"`), and Go-template `{{...}}` wrapping
+#     quoted (`"shoggoth.py"`), and Go-template `{{...}}` wrapping
 #     (v3) is gone — the entire expression is the value of that field.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowEventBinding
@@ -34,10 +34,13 @@ spec:
       parameters:
       - name: script
         valueFrom:
-          event: '"shoggoth_workflow.py"'
-      - name: task_id
+          event: '"shoggoth.py"'
+      - name: command
         valueFrom:
           event: '"pr-update"'
+      - name: task_id
+        valueFrom:
+          event: '""'
       - name: payload
         valueFrom:
           event: 'payload'
