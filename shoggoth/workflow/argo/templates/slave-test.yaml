@@ -195,13 +195,20 @@ spec:
         value: "http://redmine.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_DOMAIN
         value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: SHOGGOTH_VAULT_TOKEN
+      - name: REDMINE_TOKEN
+        # Real slave token — there is no Redmine-side equivalent of the
+        # Gitea web-internal gateway that rewrites a dummy auth header,
+        # so the script must reach the Redmine API directly. The
+        # `redmine-slave-token` Secret is materialised by an
+        # ExternalSecret from the `redmine/slave-token` kv value (same
+        # source the maintenance `redmine-argo-webhooks` template uses
+        # via its K8s fallback). Injecting the token here short-circuits
+        # `Redmine.__init__`'s K8s fallback, which would otherwise
+        # require ``kubectl`` in the `slave:noble` image (it isn't).
         valueFrom:
           secretKeyRef:
-            name: openbao-unseal-key
-            key: root-token
-      - name: OPENBAO_ADDR
-        value: "http://openbao:80"
+            name: redmine-slave-token
+            key: token
       - name: GITEA_ADMIN_TOKEN
         # Dummy token — the gateway replaces whatever we send with the
         # real slave token before forwarding. Previously this was the

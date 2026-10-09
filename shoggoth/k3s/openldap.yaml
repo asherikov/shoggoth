@@ -230,18 +230,6 @@ data:
     homeDirectory: /home/slave
     mail: slave@${SHOGGOTH_DOMAIN}
 
-    dn: uid=slave-reviewer,ou=people,${LDAP_BASE_DN}
-    changetype: add
-    objectClass: inetOrgPerson
-    objectClass: posixAccount
-    uid: slave-reviewer
-    cn: Slave Reviewer
-    sn: Shoggoth
-    uidNumber: 10003
-    gidNumber: 10003
-    homeDirectory: /home/slave-reviewer
-    mail: slave-reviewer@${SHOGGOTH_DOMAIN}
-
     dn: cn=admins,ou=groups,${LDAP_BASE_DN}
     changetype: add
     objectClass: groupOfNames
@@ -286,11 +274,6 @@ data:
     changetype: modify
     replace: userPassword
     userPassword: ${SLAVE_HASH}
-
-    dn: uid=slave-reviewer,ou=people,${LDAP_BASE_DN}
-    changetype: modify
-    replace: userPassword
-    userPassword: ${SLAVE_REVIEWER_HASH}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -311,12 +294,10 @@ data:
     export ADMIN_HASH="$(ssha "$(read_pw /run/secrets/openldap_admin_password)")"
     export LDAPAUTH_HASH="$(ssha "$(read_pw /run/secrets/openldap_ldapauth_password)")"
     export SLAVE_HASH="$(ssha "$(read_pw /run/secrets/openldap_slave_password)")"
-    export SLAVE_REVIEWER_HASH="$(ssha "$(read_pw /run/secrets/openldap_slave-reviewer_password)")"
     [ -n "${ADMIN_HASH}" ] || { echo "render-ldif: FATAL: ADMIN_HASH empty" >&2; exit 1; }
     [ -n "${LDAPAUTH_HASH}" ] || { echo "render-ldif: FATAL: LDAPAUTH_HASH empty" >&2; exit 1; }
     [ -n "${SLAVE_HASH}" ] || { echo "render-ldif: FATAL: SLAVE_HASH empty" >&2; exit 1; }
-    [ -n "${SLAVE_REVIEWER_HASH}" ] || { echo "render-ldif: FATAL: SLAVE_REVIEWER_HASH empty" >&2; exit 1; }
-    VARS='${LDAP_BASE_DN}${SHOGGOTH_DOMAIN}${MDB_DN}${ADMIN_HASH}${LDAPAUTH_HASH}${SLAVE_HASH}${SLAVE_REVIEWER_HASH}'
+    VARS='${LDAP_BASE_DN}${SHOGGOTH_DOMAIN}${MDB_DN}${ADMIN_HASH}${LDAPAUTH_HASH}${SLAVE_HASH}'
     for tmpl in config.ldif data.ldif memberof_module.ldif memberof_overlay.ldif passwords.ldif; do
         if [ ! -f "${TEMPLATES_DIR}/${tmpl}" ]; then
             echo "render-ldif: FATAL: missing template ${tmpl}" >&2
@@ -359,7 +340,7 @@ spec:
       labels:
         app: openldap
       annotations:
-        secret.reloader.stakater.com/reload: openldap-admin-password,openldap-config-admin-password,openldap-ldapauth-password,openldap-slave-password,openldap-slave-reviewer-password
+        secret.reloader.stakater.com/reload: openldap-admin-password,openldap-config-admin-password,openldap-ldapauth-password,openldap-slave-password
     spec:
       dnsPolicy: None
       dnsConfig:
@@ -410,10 +391,6 @@ spec:
           mountPath: /run/secrets/openldap_slave_password
           subPath: password
           readOnly: true
-        - name: slave-reviewer-password
-          mountPath: /run/secrets/openldap_slave-reviewer_password
-          subPath: password
-          readOnly: true
         - name: render-script
           mountPath: /tmpl
           readOnly: true
@@ -445,13 +422,12 @@ spec:
                       echo "      or remote secret missing (Orphan policies require a value in the source store)."
                       return 1
                     }
-          for pw in openldap-admin-password openldap-config-admin-password openldap-ldapauth-password openldap-slave-password openldap-slave-reviewer-password; do
+          for pw in openldap-admin-password openldap-config-admin-password openldap-ldapauth-password openldap-slave-password; do
                     case "${pw}" in
                       openldap-admin-password) wait_for_externalsecret openldap-admin-password || exit 1 ;;
                       openldap-config-admin-password) wait_for_externalsecret openldap-config-admin-password || exit 1 ;;
                       openldap-ldapauth-password) wait_for_externalsecret openldap-ldapauth-password || exit 1 ;;
                       openldap-slave-password) wait_for_externalsecret openldap-slave-password || exit 1 ;;
-                      openldap-slave-reviewer-password) wait_for_externalsecret openldap-slave-reviewer-password || exit 1 ;;
                     esac
           done
           echo "wait-bootstrap: all K8s Secrets Ready"
@@ -583,9 +559,6 @@ spec:
       - name: slave-password
         secret:
           secretName: openldap-slave-password
-      - name: slave-reviewer-password
-        secret:
-          secretName: openldap-slave-reviewer-password
       serviceAccountName: openldap
 ---
 apiVersion: v1
@@ -609,7 +582,6 @@ rules:
   - openldap-config-admin-password
   - openldap-ldapauth-password
   - openldap-slave-password
-  - openldap-slave-reviewer-password
   verbs:
   - get
 - apiGroups:
@@ -621,7 +593,6 @@ rules:
   - openldap-config-admin-password
   - openldap-ldapauth-password
   - openldap-slave-password
-  - openldap-slave-reviewer-password
   verbs:
   - get
 ---

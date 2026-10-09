@@ -137,8 +137,6 @@ spec:
         value: "{{workflow.parameters.SHOGGOTH_GITHUB_ORG}}"
       - name: SHOGGOTH_SLAVE_USER
         value: "slave"
-      - name: SHOGGOTH_REVIEWER_USER
-        value: "slave-reviewer"
       - name: GITEA_PAYLOAD
         value: "{{inputs.parameters.payload}}"
       - name: SHOGGOTH_ARGO_RUN_URL

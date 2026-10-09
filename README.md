@@ -220,7 +220,6 @@ Three LDAP accounts exist, each serving a distinct role:
 | `admin` | OpenLDAP administrator (`cn=admin`); used for LDAP management and as Grafana’s local admin login |
 | `ldapauth` | Service bind account — services that authenticate users via LDAP bind as this account |
 | `slave` | CI/automation account — reserved for slave containers and workflows |
-| `slave-reviewer` | Automation account for review workflows — reserved for future reviewer automation |
 
 ### Password management
 

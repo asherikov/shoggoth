@@ -10,6 +10,13 @@ duplication and lets one binary handle both webhook-driven workflows
 (webhooks / mirror-sync / slave-access / tokens / ssh-key / slave-test /
 ldap-sync).
 
+Secret reads come from Kubernetes Secrets via the ``K8s`` class. The
+SecretStore (shoggoth/k3s/secret-store.yaml) keeps the same K8s Secret
+names in sync with OpenBao via ExternalSecrets, so this script no
+longer talks to OpenBao directly — the kv paths in
+``Parameters.k8s_secret_for`` are translated to the canonical Secret
+name + data key at read time.
+
 Usage:
   shoggoth.py [-v] <command> [args...]
 
@@ -35,6 +42,7 @@ Maintenance commands:
 
 import argparse
 import base64
+import binascii
 import io
 import json
 import os
@@ -56,44 +64,350 @@ from urllib.request import Request, urlopen, HTTPCookieProcessor, build_opener
 from urllib.error import URLError, HTTPError
 
 
-HTTP_TIMEOUT = 30
-AGENT_TIMEOUT = 1200
+# ---------------------------------------------------------------------
+# Parameters: single source of truth for every environment variable the
+# script reads. Constructed once at module import (``params`` below) so
+# every consumer observes the same snapshot. Callers reference
+# ``params.gitea_server_url`` instead of ``os.environ["GITEA_SERVER_URL"]``
+# scattered across modules — this is the audit surface for what the
+# script actually depends on, and it removes the temptation to re-read
+# the same env var with different defaults in different call sites.
+#
+# Required (process will die on import if unset): vars that gate the
+# entire script. ``SHOGGOTH_DOMAIN`` is the only such var now —
+# every code path uses it (DN construction, webhook URL building,
+# namespace resolution). ``GITEA_SERVER_URL`` used to be here, but
+# the maintenance steps that consume only Redmine
+# (``redmine-argo-webhooks``, ``redmine-ldap-sync``) omit it entirely
+# and never instantiate a ``Gitea`` client, so making it required
+# would prevent those commands from booting. It's now declared optional
+# and validated lazily inside ``Gitea.__init__``, mirroring the
+# pattern already in use in ``Redmine.__init__``. A missing required
+# var produces the canonical ``die()`` message; logging in ``__init__``
+# would happen after the process has already decided to exit, so we
+# accept the traceback in favour of early failure.
+#
+# Optional (with default): vars consumed in narrow contexts where the
+# absence is meaningful at the call site (e.g. ``PIP_INDEX_URL`` is only
+# checked in the slave-test ``pip-cache`` probe).
+# ---------------------------------------------------------------------
 
-TOOL_PROFILES = {
-    "full": [],
-    "pr-review": [
-        "edit",
-        "write_file",
-        "notebook_edit",
-    ],
-    "pr-comment": [],
-}
 
-QWEN_DENY_PATTERNS = [
-    "Bash(git commit*)",
-    "Bash(git commit)",
-    "Bash(git push*)",
-    "Bash(git push)",
-    "Bash(git tag*)",
-    "Bash(git tag)",
-    "Bash(git -C * commit*)",
-    "Bash(git -C * push*)",
-    "Bash(git -C * tag*)",
-    "Bash(wsh *commit*)",
-    "Bash(wsh *push*)",
-    "Bash(wsh *tag*)",
-    "Bash(wshandler commit*)",
-    "Bash(wshandler push*)",
-    "Bash(wshandler tag*)",
-    "Bash(wshandler tag)",
-]
+class Parameters:
+    GROUPS = {
+        "Gitea": [
+            ("gitea_server_url", "GITEA_SERVER_URL", False, ""),
+            ("gitea_admin_token", "GITEA_ADMIN_TOKEN", False, ""),
+            ("gitea_slave_token", "GITEA_SLAVE_TOKEN", False, ""),
+            ("gitea_payload", "GITEA_PAYLOAD", False, ""),
+            ("gitea_git_url", "GITEA_GIT_URL", False, ""),
+            ("gitea_ssh_host", "GITEA_SSH_HOST", False, "git"),
+            ("gitea_ssh_port", "GITEA_SSH_PORT", False, "22"),
+        ],
+        "Redmine": [
+            ("redmine_server", "REDMINE_SERVER", False, ""),
+            ("redmine_token", "REDMINE_TOKEN", False, ""),
+            ("redmine_webhook_secret", "REDMINE_WEBHOOK_SECRET", False, ""),
+        ],
+        "LDAP": [
+            ("ldap_url", "LDAP_URL", False, "ldap://openldap:389"),
+            # `openldap-slave-password` is the slave user's LDAP bind
+            # password — read by ``Redmine._get_slave_password`` for
+            # cookie-auth flows (used by ``list_webhooks`` /
+            # ``create_webhook`` / ``delete_webhook`` which Redmine
+            # refuses to expose via the API-key endpoint). Templates
+            # wire this via ``secretKeyRef openldap-slave-password``
+            # so the script doesn't need ``kubectl`` inside the pod
+            # (the maintenance SA also lacks ``get`` RBAC on that
+            # Secret — ``maintenance-secret-writer.yaml`` only grants
+            # it on the Gitea/Redmine token Secrets).
+            ("openldap_slave_password", "OPENLDAP_SLAVE_PASSWORD", False, ""),
+            # `openldap-admin-password` is the LDAP bind password for
+            # the Redmine admin account; ``Redmine._admin_login``
+            # reads it for the admin-session flow (user creation,
+            # project membership updates) which again isn't exposed
+            # via the API-key endpoint. Same RBAC story as
+            # ``openldap-slave-password`` — wired via env var.
+            ("openldap_admin_password", "OPENLDAP_ADMIN_PASSWORD", False, ""),
+            # `openldap-ldapauth-password` is the bind credential the
+            # ``redmine-ldap-sync`` dispatcher uses to enumerate users
+            # under ``ou=people`` when reconciling Redmine ↔ LDAP.
+            # The script reads it before constructing ``Redmine`` so
+            # it needs to live here (the ``Redmine`` instance isn't
+            # involved in the LDAP search itself). Same RBAC story.
+            ("openldap_ldapauth_password", "OPENLDAP_LDAPAUTH_PASSWORD", False, ""),
+        ],
+        "Shoggoth": [
+            ("shoggoth_domain", "SHOGGOTH_DOMAIN", True, ""),
+            ("shoggoth_namespace", "SHOGGOTH_NAMESPACE", False, "shoggoth"),
+            ("shoggoth_github_org", "SHOGGOTH_GITHUB_ORG", False, ""),
+            ("shoggoth_github_api_delay", "SHOGGOTH_GITHUB_API_DELAY", False, "2"),
+            ("shoggoth_slave_user", "SHOGGOTH_SLAVE_USER", False, "slave"),
+            ("shoggoth_review_user", "SHOGGOTH_REVIEW_USER", False, "admin"),
+            ("shoggoth_trusted_reviewers", "SHOGGOTH_TRUSTED_REVIEWERS", False, "admin"),
+            ("shoggoth_argo_run_url", "SHOGGOTH_ARGO_RUN_URL", False, ""),
+            ("workspace_src", "WORKSPACE_SRC", False, "/ccws/workspace/src"),
+        ],
+        "Telemetry": [
+            ("otel_endpoint", "OTEL_EXPORTER_OTLP_ENDPOINT", False, ""),
+            ("otel_grpc_port", "OTEL_GRPC_PORT", False, "4317"),
+        ],
+        "Embeddings": [
+            ("embeddings_api", "EMBEDDINGS_API", False, "http://litellm:80/v1"),
+            ("embeddings_api_key", "EMBEDDINGS_API_KEY", False, "localai"),
+            ("embeddings_model", "EMBEDDINGS_MODEL", False, "nomic-embed-text"),
+        ],
+        "MCP": [
+            ("mcp_gitea_url", "MCP_GITEA_URL", False, "http://mcp-gitea:80/mcp"),
+            ("mcp_basic_memory_url", "MCP_BASIC_MEMORY_URL", False, "http://basic-memory:80/mcp"),
+        ],
+        "Pip": [
+            ("pip_index_url", "PIP_INDEX_URL", False, ""),
+        ],
+        "SSH": [
+            ("ssh_auth_sock", "SSH_AUTH_SOCK", False, ""),
+            # `ssh/slave-public-key` is the public key the
+            # ``ssh-key`` maintenance step registers on the slave
+            # Gitea user (so the slave can clone/push over SSH).
+            # Same RBAC story as the LDAP passwords —
+            # ``shoggoth-maintenance-secret-writer`` lacks ``get`` on
+            # the SSH Secrets, so we wire this via env var instead.
+            ("ssh_slave_public_key", "SSH_SLAVE_PUBLIC_KEY", False, ""),
+        ],
+    }
 
-TOOL_PROFILE_BY_SESSION = {
-    "task": "full",
-    "ci-failure": "full",
-    "pr-review": "pr-review",
-    "pr-comment": "pr-comment",
-}
+    def __init__(self):
+        # Mapping of OpenBao kv paths to K8s Secret + key. Centralised
+        # here because both directions (read-from-K8s and write-to-K8s
+        # with the orphan policy used by ESO) need to agree on the
+        # names. SSO synced the kv values into these Secrets via the
+        # ``creationPolicy: Owner`` / ``creationPolicy: Orphan`` rules in
+        # shoggoth/k3s/external-secrets/.
+        self.k8s_secret_for = {
+            "gitea/slave-token": ("gitea-slave-token", "token"),
+            "redmine/slave-token": ("redmine-slave-token", "token"),
+            "openldap/slave-password": ("openldap-slave-password", "password"),
+            "openldap/admin-password": ("openldap-admin-password", "password"),
+            "openldap/ldapauth-password": ("openldap-ldapauth-password", "password"),
+            "ssh/slave-public-key": ("ssh-slave-public-key", "value"),
+        }
+
+        for group, entries in self.GROUPS.items():
+            for attr, env_var, required, default in entries:
+                value = os.environ.get(env_var, "")
+                if required and not value:
+                    die(f"{env_var} is required")
+                setattr(self, attr, value or default)
+
+        # Derived/composite parameters after the per-group loop so the
+        # raw strings above are also available for one-off callers.
+        self.shoggoth_github_api_delay = float(self.shoggoth_github_api_delay)
+
+    def resolve_ldap_dn(self, base):
+        """Return ``ou=people,dc=<shoggoth_domain_components>``.
+
+        LDAP DNs are assembled from SHOGGOTH_DOMAIN by replacing dots
+        with ``,dc=`` separators (``example.org`` -> ``dc=example,dc=org``)
+        and prefixing with the conventional `ou=people`. Pulled out as
+        a helper because ``ldap-sync`` callers previously hand-rolled
+        the same string.
+        """
+        if not self.shoggoth_domain:
+            die("SHOGGOTH_DOMAIN is required for LDAP DN construction")
+        return f"ou=people,dc={self.shoggoth_domain.replace('.', ',dc=')}"
+
+    def api_delay(self):
+        return self.shoggoth_github_api_delay
+
+
+# ---------------------------------------------------------------------
+# K8s: read and write Kubernetes Secrets via ``kubectl``. Centralises
+# the previously-scattered ``kubectl create secret`` plumbing and the
+# OpenBao kv-v2 reads (renamed: read from the K8s Secret that ESO synced
+# the kv value into).
+# ---------------------------------------------------------------------
+
+
+class K8s:
+    """Read/write a Kubernetes Secret via ``kubectl``.
+
+    The SecretStore reads kv values from OpenBao and materialises them
+    in the cluster namespace; this class talks to those Secrets directly
+    instead of round-tripping through OpenBao. The ``upsert_secret``
+    helper predates the class and is folded in here.
+    """
+
+    def __init__(self, namespace=None):
+        self.namespace = namespace or params.shoggoth_namespace
+
+    def read_secret(self, kv_path, key="value"):
+        """Read a K8s Secret and return the decoded value.
+
+        ``kv_path`` is the OpenBao kv path (``gitea/slave-token``,
+        ``openldap/slave-password``); the canonical K8s Secret name +
+        data key live in ``Parameters.k8s_secret_for`` so writers and
+        readers agree without restating the convention at each call
+        site. Returns ``None`` when the Secret is absent or the data
+        key is missing — same contract the legacy ``OpenBao.get_value``
+        had, so callers that fell back to env vars on missing secrets
+        keep the same behaviour.
+        """
+        if kv_path not in params.k8s_secret_for:
+            die(f"K8s.read_secret: unknown kv path {kv_path!r} "
+                f"(add an entry to Parameters.k8s_secret_for)")
+        name, default_key = params.k8s_secret_for[kv_path]
+        key = key or default_key
+        result = run(
+            ["kubectl", "get", "secret", "-n", self.namespace,
+             name, "-o", f"jsonpath={{.data.{key}}}"],
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        try:
+            return base64.b64decode(result.stdout.strip()).decode()
+        except (binascii.Error, UnicodeDecodeError) as e:
+            print(f"WARNING: K8s.read_secret: failed to decode "
+                  f"{self.namespace}/{name}/{key}: {e}", file=sys.stderr)
+            return None
+
+    def upsert_secret(self, name, data):
+        """Create or patch a Kubernetes Secret via kubectl.
+
+        ``data`` is a dict of key -> raw string value; base64 encoding
+        is handled by kubectl. The caller is responsible for RBAC (the
+        shoggoth-maintenance-secret-writer ServiceAccount grants
+        namespaced create/update/patch on the specific Secret names in
+        shoggoth/k3s/maintenance-secret-writer.yaml).
+        """
+        if not name or not self.namespace:
+            print("ERROR: K8s.upsert_secret requires name and namespace",
+                  file=sys.stderr)
+            return False
+        args = ["kubectl", "create", "secret", "generic", name,
+                f"--namespace={self.namespace}",
+                "--type=Opaque",
+                "--output=json",
+                "--dry-run=client"]
+        for key, value in data.items():
+            args.append(f"--from-literal={key}={value}")
+        create = run(args, check=False)
+        if create.returncode != 0:
+            print(f"ERROR: kubectl create secret (dry-run) failed: "
+                  f"{create.stderr.strip()}", file=sys.stderr)
+            return False
+        apply = run(["kubectl", "apply", "-f", "-"], input=create.stdout,
+                    check=False)
+        if apply.returncode != 0:
+            print(f"ERROR: kubectl apply secret failed: "
+                  f"{apply.stderr.strip()}", file=sys.stderr)
+            return False
+        return True
+
+
+# ---------------------------------------------------------------------
+# Ldap: thin wrapper around ``ldap3`` for the openldap user search used
+# by ``redmine-ldap-sync``. The class owns the bind, the connection
+# lifecycle, and the result-shape normalisation; specific filters and
+# attribute lists live with their callers (separation of concerns:
+# reusable connection + per-call arguments).
+# ---------------------------------------------------------------------
+
+
+class Ldap:
+    """LDAP client for the shoggoth openldap server.
+
+    Constructed with the bind credentials; ``search_users`` runs a
+    single ``inetOrgPerson`` lookup and returns the list of dicts the
+    caller wants. ``rediscover-ldap`` style operations that need a
+    second bind are not currently required and live elsewhere.
+    """
+
+    EXCLUDED_LOGINS = ("admin", "ldapauth", "config-admin")
+
+    def __init__(self, url, bind_dn, bind_password, user_base_dn):
+        import ldap3
+        self._ldap3 = ldap3
+        self.url = url
+        self.bind_dn = bind_dn
+        self.bind_password = bind_password
+        self.user_base_dn = user_base_dn
+
+    def _bind(self):
+        server = self._ldap3.Server(self.url, get_info=self._ldap3.NONE)
+        return self._ldap3.Connection(
+            server,
+            user=self.bind_dn,
+            password=self.bind_password,
+            auto_bind=True,
+        )
+
+    def search_users(self, extra_filter=""):
+        """Enumerate ``inetOrgPerson`` entries under the user base DN.
+
+        ``extra_filter`` is concatenated inside the outer AND so callers
+        can narrow by additional attributes without redefining the
+        exclusion list. Returns a list of dicts (``login``,
+        ``firstname``, ``lastname``, ``mail``); entries without a
+        ``uid`` are skipped.
+
+        Set ``mail`` to ``"<uid>@<shoggoth_domain>"`` when LDAP has no
+        mail attribute so downstream Redmine user creation always has
+        an RFC-5322 address to write.
+        """
+        exclusions = "".join(f"(!(uid={login}))" for login in self.EXCLUDED_LOGINS)
+        base_filter = f"(&(objectClass=inetOrgPerson){exclusions}{extra_filter})"
+        conn = self._bind()
+        try:
+            ok = conn.search(
+                search_base=self.user_base_dn,
+                search_filter=base_filter,
+                attributes=["uid", "cn", "sn", "mail"],
+                size_limit=0,
+            )
+            if not ok:
+                print(f"WARNING: LDAP search returned no result "
+                      f"for base={self.user_base_dn}", file=sys.stderr)
+                return []
+            users = []
+            for entry in conn.entries:
+                if "uid" not in entry:
+                    continue
+                uid = str(entry.uid)
+                cn = str(entry.cn) if "cn" in entry else ""
+                sn = str(entry.sn) if "sn" in entry else ""
+                mail = str(entry.mail) if "mail" in entry else ""
+                firstname, lastname = (sn or cn or uid), (sn or cn or uid)
+                if cn and sn:
+                    parts = cn.split(None, 1)
+                    firstname = parts[0]
+                    lastname = sn or (parts[1] if len(parts) > 1 else cn)
+                elif cn:
+                    firstname, lastname = cn, cn
+                users.append({
+                    "login": uid,
+                    "firstname": firstname,
+                    "lastname": lastname,
+                    "mail": mail or f"{uid}@{params.shoggoth_domain or 'localhost'}",
+                })
+            return users
+        finally:
+            try:
+                conn.unbind()
+            except Exception:
+                pass
+
+    def search_filter_for(self, template):
+        """Return a base LDAP filter excluding well-known internal UIDs.
+
+        ``template`` is the caller-specific filter expression (e.g.
+        ``GiteaLdapSync``'s ``(&(uid=%[1]s)(mail=%[1]s))``) that should
+        be AND-composed with the exclusion list. Kept here so the
+        exclusion set lives in one place — ``admin`` / ``ldapauth`` /
+        ``config-admin`` are not real workflow accounts.
+        """
+        exclusions = "".join(f"(!(uid={login}))" for login in self.EXCLUDED_LOGINS)
+        return f"(&(objectClass=inetOrgPerson){exclusions}{template})"
 
 
 def log(msg):
@@ -106,6 +420,14 @@ def log(msg):
 def die(msg):
     print(f"ERROR: {msg}", file=sys.stderr, flush=True)
     sys.exit(1)
+
+
+# Module-level singleton. Constructed eagerly at import time so a
+# missing required env var fails the whole process with the canonical
+# ``die()`` message rather than surfacing mid-workflow when the first
+# consumer hits it. Placed after the utility functions (log/die/run)
+# so the constructor's ``die()`` call resolves at module-init time.
+params = Parameters()
 
 
 def _redact_argv_for_log(cmd):
@@ -165,36 +487,6 @@ def run(cmd, **kwargs):
     if result.stderr:
         log(f"run: stderr: {result.stderr.strip()[:500]}")
     return result
-
-
-def k8s_upsert_secret(name, namespace, data):
-    """Create or patch a Kubernetes Secret via kubectl.
-
-    `data` is a dict of key -> raw string value; base64 encoding is handled
-    by kubectl. The caller is responsible for RBAC (the
-    shoggoth-maintenance-secret-writer ServiceAccount grants namespaced
-    create/update/patch on the specific Secret names in
-    shoggoth/k3s/maintenance-secret-writer.yaml).
-    """
-    if not name or not namespace:
-        print("ERROR: k8s_upsert_secret requires name and namespace", file=sys.stderr)
-        return False
-    args = ["kubectl", "create", "secret", "generic", name,
-            f"--namespace={namespace}",
-            "--type=Opaque",
-            "--output=json",
-            "--dry-run=client"]
-    for key, value in data.items():
-        args.append(f"--from-literal={key}={value}")
-    create = run(args, check=False)
-    if create.returncode != 0:
-        print(f"ERROR: kubectl create secret (dry-run) failed: {create.stderr.strip()}", file=sys.stderr)
-        return False
-    apply = run(["kubectl", "apply", "-f", "-"], input=create.stdout, check=False)
-    if apply.returncode != 0:
-        print(f"ERROR: kubectl apply secret failed: {apply.stderr.strip()}", file=sys.stderr)
-        return False
-    return True
 
 
 class GitCredentials:
@@ -350,6 +642,14 @@ class HttpApiClient:
     HTTP plumbing are inherited from this class.
     """
 
+    # Default ``urlopen`` timeout for every request issued through
+    # this client. Read by the static-method helpers (``http_get``,
+    # ``http_post_json``, ``http_status``) so it must be a class
+    # attribute, not an instance one. Bumped in derived classes
+    # only when an endpoint genuinely needs more headroom (none
+    # currently do).
+    HTTP_TIMEOUT = 30
+
     @staticmethod
     def _http_warn(label, exc, body_chars=500):
         """Emit the canonical WARNING line for an HTTP failure.
@@ -386,7 +686,7 @@ class HttpApiClient:
         log(f"GET {url}")
         req = Request(url, headers=headers or {})
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 data = json.loads(resp.read().decode())
                 log(f"GET {url} -> {resp.status}")
                 return data
@@ -416,7 +716,7 @@ class HttpApiClient:
     def http_post_json(url, payload, headers=None, quiet=False):
         req = HttpApiClient._json_request("POST", url, payload, headers, quiet=quiet)
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 result = json.loads(resp.read().decode())
                 if not quiet:
                     log(f"POST {url} -> {resp.status}")
@@ -428,7 +728,7 @@ class HttpApiClient:
     def http_post_json_with_status(url, payload, headers=None):
         req = HttpApiClient._json_request("POST", url, payload, headers)
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 body = resp.read().decode(errors="replace")[:2000]
                 log(f"POST {url} -> {resp.status}")
                 try:
@@ -446,7 +746,7 @@ class HttpApiClient:
     def http_status(url, headers=None):
         req = Request(url, headers=headers or {}, method="GET")
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 return resp.status
         except HTTPError as e:
             return e.code
@@ -492,7 +792,7 @@ class HttpApiClient:
         url, hdrs = self._resolve(path, headers)
         req = self._json_request(method, url, payload, hdrs)
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 body = resp.read().decode()
                 log(f"{method} {url} -> {resp.status}")
                 if not body:
@@ -515,7 +815,7 @@ class HttpApiClient:
         url, hdrs = self._resolve(path, headers)
         req = self._json_request(method, url, payload, hdrs)
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 resp.read()
                 log(f"{method} {url} -> {resp.status}")
                 return True
@@ -605,11 +905,21 @@ class HttpApiClient:
 
 class Gitea(HttpApiClient):
     def __init__(self):
-        self.api_url = os.environ["GITEA_SERVER_URL"] + "/api/v1"
-        self.token = (os.environ.get("GITEA_ADMIN_TOKEN")
-                      or os.environ.get("GITEA_SLAVE_TOKEN")
+        # Lazy validation: ``Parameters`` doesn't make GITEA_SERVER_URL
+        # required because the Redmine-only maintenance steps
+        # (``redmine-argo-webhooks``, ``redmine-ldap-sync``) deliberately
+        # don't inject it — they never instantiate a ``Gitea`` client.
+        # When the program does construct one, the env var must be set
+        # or every API call would silently target ``/api/v1`` (a
+        # nonsensical URL on the pod's empty API base). Fail loudly
+        # at this natural boundary instead.
+        if not params.gitea_server_url:
+            die("GITEA_SERVER_URL is required for Gitea-using commands")
+        self.api_url = params.gitea_server_url + "/api/v1"
+        self.token = (params.gitea_admin_token
+                      or params.gitea_slave_token
                       or "")
-        self.domain = os.environ.get("SHOGGOTH_DOMAIN", "")
+        self.domain = params.shoggoth_domain
         self._payload = None
 
     def _auth_header(self):
@@ -641,7 +951,7 @@ class Gitea(HttpApiClient):
     # ----- payload (workflow context) --------------------------------
 
     def load_payload(self):
-        self._payload = json.loads(os.environ["GITEA_PAYLOAD"])
+        self._payload = json.loads(params.gitea_payload)
 
     def get_repo_full_name(self):
         return self._payload.get("repository", {}).get("full_name", "")
@@ -674,7 +984,7 @@ class Gitea(HttpApiClient):
         return bool(self._payload.get("review"))
 
     def is_review_by_slave_user(self):
-        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        slave_user = params.shoggoth_slave_user
         # `or {}` (not `.get("review", {})`): on pull_request_review_request
         # events Gitea serialises the `Review *ReviewPayload` field WITHOUT
         # `omitempty`, so `"review": null` arrives — the key is present but
@@ -691,9 +1001,8 @@ class Gitea(HttpApiClient):
         return False
 
     def is_slave_user_reviewer(self):
-        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
-        reviewer_user = os.environ.get("SHOGGOTH_REVIEWER_USER", "slave-reviewer")
-        candidates = {u for u in (slave_user, reviewer_user) if u}
+        slave_user = params.shoggoth_slave_user
+        candidates = {u for u in (slave_user,) if u}
         pr = self._payload.get("pull_request", {})
         requested = pr.get("requested_reviewers", [])
         if any(r.get("login") in candidates for r in requested):
@@ -728,7 +1037,7 @@ class Gitea(HttpApiClient):
         url = f"{self.api_url}/repos/{repo}/actions/runs/{run_id}/logs"
         req = Request(url, headers=self._auth_header())
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 data = resp.read()
         except (URLError, HTTPError, OSError) as e:
             return f"CI logs unavailable: {e}"
@@ -802,7 +1111,7 @@ class Gitea(HttpApiClient):
         return result
 
     def get_unresolved_review_comments(self, repo, pr_number):
-        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        slave_user = params.shoggoth_slave_user
         all_reviews = self._paginate(lambda page, limit: self.get(
             f"repos/{repo}/pulls/{pr_number}/reviews",
             params={"page": page, "limit": limit}))
@@ -820,7 +1129,7 @@ class Gitea(HttpApiClient):
         unresolved = [c for c in all_comments if not c.get("resolver")]
 
         trusted_users = set(
-            os.environ.get("SHOGGOTH_TRUSTED_REVIEWERS", "admin").split(","))
+            params.shoggoth_trusted_reviewers.split(","))
         trusted_users.discard(slave_user)
 
         threads = {}
@@ -877,7 +1186,7 @@ class Gitea(HttpApiClient):
         req = Request(url, headers={**self._auth_header(),
                                      "accept": "application/vnd.gitea.diff"})
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 return resp.read().decode()
         except (HTTPError, URLError, OSError) as e:
             log(f"get_pr_diff_text: failed to fetch {url}: {e}")
@@ -1064,62 +1373,6 @@ class Gitea(HttpApiClient):
 
 
 # ---------------------------------------------------------------------
-# OpenBao: kv-v2 secret store client.
-# ---------------------------------------------------------------------
-
-
-class OpenBao(HttpApiClient):
-    """OpenBao kv-v2 secret store client.
-
-    Inherits the JSON REST plumbing from ``HttpApiClient``; only the
-    auth header (``X-Vault-Token``) and the kv-v2 response shape
-    (``data.data.data.value``) need to be wired here.
-
-    The kv-v2 read endpoint lives at ``{addr}/v1/secret/data/{path}``;
-    we set ``api_url`` to that prefix so the inherited ``get`` /
-    ``post`` / ``put_json`` / ``delete`` build the right URL without
-    each call site restating the ``v1/secret/data`` segment.
-    """
-
-    def __init__(self):
-        self.addr = os.environ.get("OPENBAO_ADDR", "http://openbao:80")
-        self.token = os.environ.get("SHOGGOTH_VAULT_TOKEN")
-        if not self.token:
-            die("SHOGGOTH_VAULT_TOKEN is required")
-        self.api_url = f"{self.addr}/v1/secret/data"
-
-    def _auth_header(self):
-        """OpenBao auth scheme: ``X-Vault-Token: <T>``."""
-        return {"X-Vault-Token": self.token}
-
-    def get_value(self, path):
-        """Read a kv-v2 secret; returns the ``value`` field, or None.
-
-        The base-class ``get`` warns via ``_http_warn`` on every
-        non-2xx HTTPError (including 404 — "secret not found"). The
-        legacy free-function version returned None silently on 404;
-        callers that fell back to env vars on missing secrets now see
-        one ``WARNING`` line. The caller still surfaces its own
-        failure message (``die(...)``) so the workflow output is the
-        same — the WARNING is an extra diagnostic, not a new failure.
-        """
-        data = self.get(path)
-        if data is None:
-            return None
-        return data.get("data", {}).get("data", {}).get("value")
-
-    def put_value(self, path, value):
-        """Write a kv-v2 secret; returns True on success, False on error.
-
-        OpenBao kv-v2 accepts POST (and PUT) for writes; POST is the
-        historic choice in this script. The base ``post`` returns the
-        parsed body on success and None via ``_http_warn`` on error;
-        we coerce to the legacy bool contract.
-        """
-        return self.post(path, {"data": {"value": value}}) is not None
-
-
-# ---------------------------------------------------------------------
 # Redmine: unified API + session-auth client.
 #
 # Workflow context uses token auth (REDMINE_TOKEN / OpenBao fallback)
@@ -1131,22 +1384,20 @@ class OpenBao(HttpApiClient):
 
 
 class Redmine(HttpApiClient):
-    def __init__(self, openbao=None):
-        server = os.environ.get("REDMINE_SERVER", "")
+    def __init__(self, k8s=None):
+        server = params.redmine_server
         if not server:
-            domain = os.environ.get("SHOGGOTH_DOMAIN", "")
-            if not domain:
+            if not params.shoggoth_domain:
                 die("REDMINE_SERVER or SHOGGOTH_DOMAIN is required")
-            server = f"http://redmine.{domain}"
+            server = f"http://redmine.{params.shoggoth_domain}"
         self.api_url = server.rstrip("/")
         log(f"Redmine API URL: {self.api_url}")
-        self.token = os.environ.get("REDMINE_TOKEN")
-        if not self.token and os.environ.get("SHOGGOTH_VAULT_TOKEN"):
-            if openbao is None:
-                openbao = OpenBao()
-            self.token = openbao.get_value("redmine/slave-token")
+        self.token = params.redmine_token
+        if not self.token:
+            k8s = k8s or K8s()
+            self.token = k8s.read_secret("redmine/slave-token", key="token")
             if self.token:
-                log("Using Redmine slave token from OpenBao")
+                log("Using Redmine slave token from K8s Secret")
         if not self.token:
             # When REDMINE_SERVER is the api service (http://api.<DOMAIN>/redmine),
             # the web-internal proxy injects X-Redmine-API-Key automatically, so a
@@ -1158,26 +1409,38 @@ class Redmine(HttpApiClient):
                 log("No Redmine client token configured; relying on api service proxy to inject X-Redmine-API-Key")
             else:
                 die(f"Redmine client token is required to access {self.api_url} "
-                    "(set REDMINE_API_TOKEN or ensure redmine/slave-token is in OpenBao)")
+                    "(set REDMINE_API_TOKEN or ensure redmine-slave-token K8s Secret exists)")
         else:
             masked = self.token[:4] + "..." + self.token[-4:] if len(self.token) > 8 else "***"
             log(f"Redmine token: {masked} (len={len(self.token)})")
         self._session_cookie = None
         self._admin_session_cookie = None
         self._admin_csrf_token = None
-        self._openbao = openbao
+        self._k8s = k8s
         self._projects = None
         self._statuses = None
         self._user_logins = {}
 
     def _get_slave_password(self):
-        if self._openbao is None:
-            self._openbao = OpenBao()
-        password = self._openbao.get_value("openldap/slave-password")
+        # Prefer the env-var path (wired via ``secretKeyRef`` from the
+        # ``openldap-slave-password`` K8s Secret in the workflow
+        # templates). The K8s.read_secret fallback is only useful in
+        # environments where the maintenance SA has ``get`` RBAC on
+        # that Secret — currently only the ``redmine`` SA does (see
+        # ``maintenance-secret-writer.yaml``), so the fallback will
+        # 403 the maintenance pod and never actually succeed there.
+        if params.openldap_slave_password:
+            log("Using Redmine slave password from env var")
+            return params.openldap_slave_password
+        if self._k8s is None:
+            self._k8s = K8s()
+        password = self._k8s.read_secret("openldap/slave-password", key="password")
         if password:
-            log("Using Redmine slave password from OpenBao")
+            log("Using Redmine slave password from K8s Secret")
             return password
-        die("openldap/slave-password OpenBao secret is required for session auth")
+        die("openldap-slave-password is required for session auth "
+            "(set OPENLDAP_SLAVE_PASSWORD or grant the script's SA "
+            "`get` on the openldap-slave-password K8s Secret)")
 
     def _extract_csrf_token(self, html):
         match = re.search(r'name="authenticity_token"\s+value="([^"]+)"', html)
@@ -1200,11 +1463,22 @@ class Redmine(HttpApiClient):
     def _admin_login(self):
         if self._admin_session_cookie is not None:
             return
-        if self._openbao is None:
-            self._openbao = OpenBao()
-        admin_password = self._openbao.get_value("openldap/admin-password")
+        # Same pattern as ``_get_slave_password``: prefer the env-var
+        # path (``OPENLDAP_ADMIN_PASSWORD`` wired via secretKeyRef on
+        # the template) over the K8s fallback, which 403s under the
+        # ``shoggoth-maintenance-secret-writer`` SA.
+        if params.openldap_admin_password:
+            log("Using Redmine admin password from env var")
+            admin_password = params.openldap_admin_password
+        else:
+            if self._k8s is None:
+                self._k8s = K8s()
+            admin_password = self._k8s.read_secret(
+                "openldap/admin-password", key="password")
         if not admin_password:
-            die("openldap/admin-password OpenBao secret is required for redmine admin session auth")
+            die("openldap-admin-password is required for redmine admin "
+                "session auth (set OPENLDAP_ADMIN_PASSWORD or grant the "
+                "script's SA `get` on the openldap-admin-password K8s Secret)")
         self._password_login(
             username="admin",
             password=admin_password,
@@ -1228,7 +1502,7 @@ class Redmine(HttpApiClient):
         opener = build_opener(HTTPCookieProcessor(jar))
         login_url = f"{self.api_url}/login"
         try:
-            with opener.open(Request(login_url), timeout=HTTP_TIMEOUT) as resp:
+            with opener.open(Request(login_url), timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 html = resp.read().decode()
             csrf_token = self._extract_csrf_token(html)
             post_data = urlencode({
@@ -1238,7 +1512,7 @@ class Redmine(HttpApiClient):
             }).encode()
             req = Request(login_url, data=post_data, method="POST",
                           headers={"Content-Type": "application/x-www-form-urlencoded"})
-            with opener.open(req, timeout=HTTP_TIMEOUT) as resp:
+            with opener.open(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 if resp.status not in (200, 302):
                     die(f"Redmine {label} failed: HTTP {resp.status}")
                 post_login_html = resp.read().decode()
@@ -1269,7 +1543,7 @@ class Redmine(HttpApiClient):
         req = Request(url, data=data, headers=headers, method="POST")
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 final_url = resp.geturl() if hasattr(resp, "geturl") else url
                 body = resp.read().decode(errors="replace")
                 log(f"POST {url} -> {resp.status} (final={final_url})")
@@ -1294,7 +1568,7 @@ class Redmine(HttpApiClient):
         log(f"Redmine admin session GET {url}")
         req = Request(url, headers=headers, method="GET")
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 body = resp.read().decode(errors="replace")
                 log(f"GET {url} -> {resp.status}")
                 return body
@@ -1314,7 +1588,7 @@ class Redmine(HttpApiClient):
         log(f"Redmine session GET {url}")
         req = Request(url, headers=self._session_headers())
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 return resp.read().decode()
         except (HTTPError, URLError, OSError) as e:
             return self._http_warn(f"Redmine session GET {url}", e, body_chars=2000)
@@ -1328,7 +1602,7 @@ class Redmine(HttpApiClient):
         req = Request(url, data=data, headers=headers, method="POST")
         req.add_header("Content-Type", "application/x-www-form-urlencoded")
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 return resp.read().decode()
         except (HTTPError, URLError, OSError) as e:
             return self._http_warn(f"Redmine session POST {url}", e, body_chars=2000)
@@ -1529,7 +1803,7 @@ class Github(HttpApiClient):
 
     def __init__(self):
         self.api_url = "https://api.github.com"
-        self.api_delay = float(os.environ.get("SHOGGOTH_GITHUB_API_DELAY", "2"))
+        self.api_delay = params.shoggoth_github_api_delay
 
     def get(self, path, params=None):
         # Override the base ``get`` because GitHub's quota policy
@@ -1548,7 +1822,7 @@ class Github(HttpApiClient):
             log(f"GET {url}")
             req = Request(url, headers={"accept": "application/json"})
             try:
-                with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                     data = json.loads(resp.read().decode())
                     log(f"GET {url} -> {resp.status}")
                     return data
@@ -1692,10 +1966,67 @@ class OtlpLogger:
 
 
 class Agent:
+    # Default per-invocation wall-clock cap for ``prompt()`` / the
+    # ``pr-comment`` per-comment retries. The workflow template's
+    # ``activeDeadlineSeconds`` (4 h on coding-agent-dispatcher) is
+    # the outer safety net; this is the per-prompt ceiling so a
+    # single hung agent doesn't burn the whole pod's budget.
+    AGENT_TIMEOUT = 1200
+
+    # Forbidden bash glob patterns the agent must NEVER invoke — git
+    # commits/pushes/tags, wsh and wshandler wrappers — encoded as
+    # the Qwen Code permission-deny syntax. Pulled out of the module
+    # top level because every consumer is inside this class.
+    QWEN_DENY_PATTERNS = [
+        "Bash(git commit*)",
+        "Bash(git commit)",
+        "Bash(git push*)",
+        "Bash(git push)",
+        "Bash(git tag*)",
+        "Bash(git tag)",
+        "Bash(git -C * commit*)",
+        "Bash(git -C * push*)",
+        "Bash(git -C * tag*)",
+        "Bash(wsh *commit*)",
+        "Bash(wsh *push*)",
+        "Bash(wsh *tag*)",
+        "Bash(wshandler commit*)",
+        "Bash(wshandler push*)",
+        "Bash(wshandler tag*)",
+        "Bash(wshandler tag)",
+    ]
+
+    # Allowed tool sets per session kind. ``full`` is unrestricted;
+    # ``pr-review`` / ``pr-comment`` exclude mutating tools because
+    # those sessions are read-only reviews of work the dispatcher is
+    # evaluating.
+    TOOL_PROFILES = {
+        "full": [],
+        "pr-review": [
+            "edit",
+            "write_file",
+            "notebook_edit",
+        ],
+        "pr-comment": [],
+    }
+
+    # Map Qwen session kind (``start_session(event_type=...)``) to
+    # the corresponding ``TOOL_PROFILES`` key.
+    TOOL_PROFILE_BY_SESSION = {
+        "task": "full",
+        "ci-failure": "full",
+        "pr-review": "pr-review",
+        "pr-comment": "pr-comment",
+    }
+
     # Env-var names whose values must NEVER leak to the qwen subprocess.
     # Mirrors ``qwen_security``: stripping these from the inherited env
-    # before Popen() keeps workflow-injected secrets (OpenBao root token,
-    # Gitea admin token, LDAP admin password) out of the model context.
+    # before Popen() keeps workflow-injected secrets (Gitea admin
+    # token, Redmine API key, OpenLDAP admin password) out of the model
+    # context. SHOGGOTH_VAULT_TOKEN / OPENBAO_ADDR are kept here as a
+    # defensive measure — they are no longer read by this script after
+    # the K8s refactor, but if a workflow template still injects them,
+    # they shouldn't reach the agent either.
     SECRET_ENV_KEYS = frozenset([
         "GITEA_ADMIN_TOKEN",
         "SHOGGOTH_VAULT_TOKEN", "REDMINE_TOKEN",
@@ -1797,19 +2128,19 @@ class Agent:
 
     def __init__(self, shoggoth):
         self.shoggoth = shoggoth
-        self.otlp = OtlpLogger(os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"])
+        self.otlp = OtlpLogger(params.otel_endpoint)
         self.tool_profile = "full"
         self._qwen_restrict_path = None
 
     def start_session(self, event_type):
-        self.tool_profile = TOOL_PROFILE_BY_SESSION.get(event_type, "full")
+        self.tool_profile = Agent.TOOL_PROFILE_BY_SESSION.get(event_type, "full")
         log(f"start_session: event_type={event_type} "
             f"tool_profile={self.tool_profile}")
         self.otlp.start_session(event_type)
 
         self.qwen_env = self._filter_qwen_env()
 
-        deny_rules = QWEN_DENY_PATTERNS
+        deny_rules = Agent.QWEN_DENY_PATTERNS
         if deny_rules:
             settings_path = f"/tmp/qwen-restrict-{self.otlp.session_id}.json"
             try:
@@ -1858,7 +2189,7 @@ class Agent:
         log(f"prompt: cwd={cwd}")
 
         cmd = ["qwen", "--yolo", "--output-format", "stream-json"]
-        for excluded in TOOL_PROFILES.get(self.tool_profile, []):
+        for excluded in Agent.TOOL_PROFILES.get(self.tool_profile, []):
             cmd.extend(["--exclude-tools", excluded])
         if resume:
             cmd.extend(["--resume", self.otlp.session_id])
@@ -1985,8 +2316,8 @@ class Agent:
 class Shoggoth:
     def __init__(self, redmine, gitea, args):
         self.project = None
-        self.domain = os.environ["SHOGGOTH_DOMAIN"]
-        self.github_org = os.environ["SHOGGOTH_GITHUB_ORG"]
+        self.domain = params.shoggoth_domain
+        self.github_org = params.shoggoth_github_org
         self.type = None
         self.working_repo = None
         self.working_branch = None
@@ -2026,7 +2357,7 @@ class Shoggoth:
     def _check_task_actionable(self, task, redmine):
         task_id = task.get("id")
         status_name = (task.get("status") or {}).get("name")
-        slave_user_login = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        slave_user_login = params.shoggoth_slave_user
         assigned_to = task.get("assigned_to") or {}
         assigned_to_id = assigned_to.get("id")
         assigned_to_login = assigned_to.get("login")
@@ -2089,7 +2420,7 @@ class Shoggoth:
         log(f"load_manifest: type={self.type}")
 
     def checkout(self):
-        workspace_dir = os.environ.get("WORKSPACE_SRC", "/ccws/workspace/src")
+        workspace_dir = params.workspace_src
         os.makedirs(workspace_dir, exist_ok=True)
 
         log(f"checkout: type={self.type} branch={self.working_branch} url={self.clone_url} dest={workspace_dir}")
@@ -2509,8 +2840,8 @@ class TaskCommand(CommandBase):
 
     def create_pull_request(self, repo, branch, task_id, title, base="main"):
         self.gitea.ensure_pull_requests_enabled(repo)
-        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
-        review_user = os.environ.get("SHOGGOTH_REVIEW_USER", "admin")
+        slave_user = params.shoggoth_slave_user
+        review_user = params.shoggoth_review_user
         result = self.gitea.post(f"repos/{repo}/pulls", {
             "base": base,
             "head": branch,
@@ -2920,7 +3251,7 @@ class PrUpdateCommand(CommandBase):
 
             t0 = time.time()
             rc = self.agent.prompt_with_retry(review_prompt,
-                                              timeout=AGENT_TIMEOUT,
+                                              timeout=Agent.AGENT_TIMEOUT,
                                               cwd=wt_path,
                                               retry_label="pr-review")
             elapsed = time.time() - t0
@@ -2966,7 +3297,7 @@ class PrUpdateCommand(CommandBase):
                 log("pr-review: no review text captured from agent")
                 otlp._push_line(
                     "pr-review: no review text captured from agent")
-                slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+                slave_user = params.shoggoth_slave_user
                 self.gitea.remove_requested_reviewer(pr_repo, pr_number,
                                                     slave_user)
                 self.agent.stop_session()
@@ -2989,14 +3320,9 @@ class PrUpdateCommand(CommandBase):
             self.shoggoth._remove_review_worktree(wt_path)
             otlp._push_line(f"pr-review: removed worktree {wt_path}")
 
-        slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
-        reviewer_user = os.environ.get("SHOGGOTH_REVIEWER_USER",
-                                        "slave-reviewer")
-        log(f"pr-review: removing requested reviewers "
-            f"{slave_user}, {reviewer_user}")
+        slave_user = params.shoggoth_slave_user
+        log(f"pr-review: removing requested reviewer {slave_user}")
         self.gitea.remove_requested_reviewer(pr_repo, pr_number, slave_user)
-        self.gitea.remove_requested_reviewer(pr_repo, pr_number,
-                                            reviewer_user)
         otlp._push_line(
             f"pr-review: session done elapsed={time.time() - t0:.1f}s "
             f"review_chars={len(review_md)}")
@@ -3073,7 +3399,7 @@ class PrUpdateCommand(CommandBase):
                     f"Do not post comments, reviews, or replies via Gitea MCP tools."
                 )
                 rc = self.agent.prompt_with_retry(prompt, resume=True,
-                                                  timeout=AGENT_TIMEOUT,
+                                                  timeout=Agent.AGENT_TIMEOUT,
                                                   retry_label="pr-comment")
                 if rc == 124:
                     self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
@@ -3085,7 +3411,7 @@ class PrUpdateCommand(CommandBase):
                 body_first_line = c_body.split("\n")[0].strip()
                 commit_subject = body_first_line[:72]
                 comment_link = f"{pr_url}#issuecomment-{comment_id}" if comment_id is not None else pr_url
-                run_url = os.environ.get("SHOGGOTH_ARGO_RUN_URL", "")
+                run_url = params.shoggoth_argo_run_url
                 run_url_line = f"\nArgo run: {run_url}" if run_url else ""
                 if summary_lines:
                     commit_body = summary[-1000:]
@@ -3103,7 +3429,7 @@ class PrUpdateCommand(CommandBase):
             rc = self.agent.prompt_with_retry(
                 f"Finalize all remaining work. Update basic memory with any new information "
                 f"learned about the project {self.shoggoth.project}.",
-                resume=True, timeout=AGENT_TIMEOUT,
+                resume=True, timeout=Agent.AGENT_TIMEOUT,
                 retry_label="pr-comment-finalize")
             if rc == 124:
                 self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
@@ -3113,7 +3439,7 @@ class PrUpdateCommand(CommandBase):
             if task_subject:
                 rc = self.agent.prompt_with_retry(
                     f"Update basic memory with any new information learned about "
-                    f"the task \"{task_subject}\".", resume=True, timeout=AGENT_TIMEOUT,
+                    f"the task \"{task_subject}\".", resume=True, timeout=Agent.AGENT_TIMEOUT,
                     retry_label="pr-comment-finalize-task")
                 if rc == 124:
                     self._handle_timeout(pr_repo, pr_number, pr_url, resolved_comments)
@@ -3129,7 +3455,7 @@ class PrUpdateCommand(CommandBase):
             log(f"pr-comment: redmine_task_id={redmine_task_id} changes_produced={changes_produced}")
             if redmine_task_id:
                 note = f"Review comments on {pr_url} have been addressed."
-                run_url = os.environ.get("SHOGGOTH_ARGO_RUN_URL", "")
+                run_url = params.shoggoth_argo_run_url
                 if run_url:
                     note += f" Argo run: {run_url}."
                 redmine_note = note
@@ -3154,11 +3480,11 @@ class PrUpdateCommand(CommandBase):
         log(f"pr-comment: handling timeout, resolved so far={len(resolved_comments)}")
         self.agent.stop_session()
         resolved_count = len(resolved_comments)
-        run_url = os.environ.get("SHOGGOTH_ARGO_RUN_URL", "")
+        run_url = params.shoggoth_argo_run_url
         run_url_suffix = f" Argo run: {run_url}." if run_url else ""
         self._push_pending_commits()
         timeout_msg = (
-            f"Agent timed out after {AGENT_TIMEOUT // 60} minutes. "
+            f"Agent timed out after {Agent.AGENT_TIMEOUT // 60} minutes. "
             f"Addressed {resolved_count} comment(s) before timeout. "
             f"Committed changes have been pushed."
             f"{run_url_suffix}"
@@ -3223,7 +3549,7 @@ class SetupArgoWebhooks(GiteaCommand):
         # is short-circuited by the Authorization header and
         # argo-server's gatekeeper does bearer validation against k8s.
         # See shoggoth/k3s/web-internal.yaml for the gateway contract.
-        self.namespace = os.environ.get("SHOGGOTH_NAMESPACE", "shoggoth")
+        self.namespace = params.shoggoth_namespace
 
     def execute(self, projects=None):
         projects = self._resolve_orgs(projects)
@@ -3276,14 +3602,14 @@ class SetupArgoWebhooks(GiteaCommand):
 class SetupRedmineWebhooks(GiteaCommand):
     def __init__(self, gitea):
         super().__init__(gitea)
-        redmine_server = os.environ.get("REDMINE_SERVER", "")
+        redmine_server = params.redmine_server
         if not redmine_server:
             domain = self.gitea.domain
             if not domain:
                 die("REDMINE_SERVER or SHOGGOTH_DOMAIN is required")
             redmine_server = f"http://redmine.{domain}"
         self.redmine_host = redmine_server.replace("https://", "").replace("http://", "")
-        self.webhook_secret = os.environ.get("REDMINE_WEBHOOK_SECRET", "")
+        self.webhook_secret = params.redmine_webhook_secret
         self.webhook_url = f"http://{self.redmine_host}/forgejo/webhook"
 
     def execute(self, projects=None):
@@ -3324,8 +3650,8 @@ class SetupRedmineArgoWebhooks:
 
     def __init__(self, redmine):
         self.redmine = redmine
-        self.namespace = os.environ.get("SHOGGOTH_NAMESPACE", "shoggoth")
-        domain = os.environ.get("SHOGGOTH_DOMAIN", "")
+        self.namespace = params.shoggoth_namespace
+        domain = params.shoggoth_domain
         if not domain:
             die("SHOGGOTH_DOMAIN is required for argo-webhook URL")
         # Same pattern as SetupArgoWebhooks above: deliver through
@@ -3670,9 +3996,8 @@ class GithubMirrorSync:
 class SlaveAccess(GiteaCommand):
     def __init__(self, gitea):
         super().__init__(gitea)
-        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
-        self.reviewer_user = os.environ.get("SHOGGOTH_REVIEWER_USER", "slave-reviewer")
-        self.automation_users = [u for u in (self.slave_user, self.reviewer_user) if u]
+        self.slave_user = params.shoggoth_slave_user
+        self.automation_users = [u for u in (self.slave_user,) if u]
 
     def execute(self):
         orgs = self.gitea.list_orgs()
@@ -3728,17 +4053,26 @@ class SlaveAccess(GiteaCommand):
 
 class SshKey(GiteaCommand):
     KEY_TITLE = "shoggoth-slave"
-    OPENBAO_PATH = "ssh/slave-public-key"
+    K8S_KV_PATH = "ssh/slave-public-key"
 
-    def __init__(self, gitea, openbao):
+    def __init__(self, gitea, k8s=None):
         GiteaCommand.__init__(self, gitea)
-        self.openbao = openbao
-        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        self.k8s = k8s or K8s()
+        self.slave_user = params.shoggoth_slave_user
 
     def execute(self):
-        public_key = self.openbao.get_value(self.OPENBAO_PATH)
+        # Prefer the env-var path (``SSH_SLAVE_PUBLIC_KEY`` wired
+        # via ``secretKeyRef ssh-slave-public-key`` on the
+        # template) over the K8s fallback, which 403s under
+        # ``shoggoth-maintenance-secret-writer`` (no RBAC for the
+        # SSH Secrets).
+        public_key = params.ssh_slave_public_key
+        if public_key:
+            log("Using SSH public key from env var")
+        else:
+            public_key = self.k8s.read_secret(self.K8S_KV_PATH, key="value")
         if not public_key:
-            print(f"ERROR: SSH public key not found in OpenBao at '{self.OPENBAO_PATH}'", file=sys.stderr)
+            print(f"ERROR: SSH public key not found (env var SSH_SLAVE_PUBLIC_KEY or K8s Secret '{self.K8S_KV_PATH}')", file=sys.stderr)
             self.errors += 1
             die(f"ssh-key completed with {self.errors} error(s)")
 
@@ -3842,9 +4176,9 @@ class SlaveTest:
 
     def __init__(self):
         self.errors = 0
-        self._openbao = None
+        self._k8s = None
         self.git_cred = GitCredentials()
-        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        self.slave_user = params.shoggoth_slave_user
         # `gitea_url` is the HTTP API base. The slave-test template wires
         # this to the web-internal API gateway (api.${DOMAIN}/gitea),
         # which replaces our Authorization header with the real slave
@@ -3852,7 +4186,7 @@ class SlaveTest:
         # `proxy_set_header Authorization "Bearer ${GITEA_SLAVE_TOKEN}"`).
         # The script therefore doesn't need to acquire the slave token
         # for HTTP API calls.
-        self.gitea_url = (os.environ.get("GITEA_SERVER_URL") or "").rstrip("/")
+        self.gitea_url = (params.gitea_server_url or "").rstrip("/")
         # `git_url` is the direct HTTPS URL used by `git clone` /
         # `git push` / `git ls-remote`. Separate from gitea_url because
         # git-cred-bootstrap populates the credential cache for
@@ -3862,10 +4196,10 @@ class SlaveTest:
         # `gitea_url` if the template doesn't set GITEA_GIT_URL (legacy
         # setups that put the gateway URL in GITEA_SERVER_URL and never
         # clone over HTTPS in this script).
-        self.git_url = (os.environ.get("GITEA_GIT_URL")
+        self.git_url = (params.gitea_git_url
                         or self.gitea_url).rstrip("/")
-        self.ssh_host = os.environ.get("GITEA_SSH_HOST", "git")
-        self.ssh_port = os.environ.get("GITEA_SSH_PORT", "22")
+        self.ssh_host = params.gitea_ssh_host
+        self.ssh_port = params.gitea_ssh_port
         self.checks = {
             "gitea-api": self._check_gitea_api,
             "redmine-api": self._check_redmine_api,
@@ -3878,10 +4212,10 @@ class SlaveTest:
         }
 
     @property
-    def openbao(self):
-        if self._openbao is None:
-            self._openbao = OpenBao()
-        return self._openbao
+    def k8s(self):
+        if self._k8s is None:
+            self._k8s = K8s()
+        return self._k8s
 
     def _fail(self, msg):
         print(f"FAIL: {msg}", file=sys.stderr, flush=True)
@@ -3893,25 +4227,24 @@ class SlaveTest:
         Prefers the `GITEA_ADMIN_TOKEN` env var (workflow templates
         source this from the `gitea-slave-token` K8s Secret — the same
         Secret the git-cred sidecar reads, so the token is already on
-        the pod; no OpenBao round-trip needed). Also accepts
-        `GITEA_SLAVE_TOKEN` as an alias (matches the env var name the
-        git-cred-bootstrap sidecar uses internally). Falls back to
-        OpenBao only when neither env var is set, and logs a WARNING so
-        the missing workflow-template secretRef is visible.
+        the pod). Also accepts `GITEA_SLAVE_TOKEN` as an alias
+        (matches the env var name the git-cred-bootstrap sidecar uses
+        internally). Falls back to reading the K8s Secret directly
+        when neither env var is set, and logs a WARNING so the
+        missing workflow-template secretRef is visible.
         """
-        token = (os.environ.get("GITEA_ADMIN_TOKEN")
-                 or os.environ.get("GITEA_SLAVE_TOKEN"))
+        token = (params.gitea_admin_token or params.gitea_slave_token)
         if token:
             log(f"_slave_token: using env var "
-                f"({'GITEA_ADMIN_TOKEN' if os.environ.get('GITEA_ADMIN_TOKEN') else 'GITEA_SLAVE_TOKEN'}), "
+                f"({'GITEA_ADMIN_TOKEN' if params.gitea_admin_token else 'GITEA_SLAVE_TOKEN'}), "
                 f"len={len(token)}")
             return token
         log("WARNING: GITEA_ADMIN_TOKEN and GITEA_SLAVE_TOKEN env vars both "
-            "unset; falling back to OpenBao gitea/slave-token. The workflow "
+            "unset; falling back to K8s Secret gitea-slave-token. The workflow "
             "template's secretRef wiring is missing for this run.")
-        token = self.openbao.get_value("gitea/slave-token")
+        token = self.k8s.read_secret("gitea/slave-token", key="token")
         if not token:
-            die("gitea/slave-token is missing in OpenBao (run 'slave-token' "
+            die("gitea-slave-token K8s Secret is missing (run 'slave-token' "
                 "maintenance first) and no env var was set either")
         return token
 
@@ -3987,7 +4320,7 @@ class SlaveTest:
             print(f"OK: authenticated as '{login}' (id={user.get('id', '?')})")
 
     def _check_redmine_api(self):
-        redmine = Redmine(self.openbao)
+        redmine = Redmine(self.k8s)
         print(f"Redmine API URL: {redmine.api_url}")
         account = redmine.get("my/account.json")
         if account is None:
@@ -4101,7 +4434,7 @@ class SlaveTest:
         # UserKnownHostsFile=/shoggoth/git-cred/known_hosts and SSH_AUTH_SOCK
         # is set in its ENV block, so this check exercises the same SSH path
         # as coding-agent-dispatcher clones.
-        sock_path = os.environ.get("SSH_AUTH_SOCK")
+        sock_path = params.ssh_auth_sock
         log(f"[git-ssh]: SSH_AUTH_SOCK env var = {sock_path!r}")
         if not sock_path:
             self._fail("SSH_AUTH_SOCK is not set (git-cred sidecar not running?)")
@@ -4204,9 +4537,9 @@ class SlaveTest:
         log("[git-ssh]: ALL STEPS PASSED")
 
     def _check_embeddings(self):
-        api = os.environ.get("EMBEDDINGS_API", "http://litellm:80/v1").rstrip("/")
-        model = os.environ.get("EMBEDDINGS_MODEL", "nomic-embed-text")
-        api_key = os.environ.get("EMBEDDINGS_API_KEY", "localai")
+        api = params.embeddings_api.rstrip("/")
+        model = params.embeddings_model
+        api_key = params.embeddings_api_key
         print(f"Embeddings API: {api} (model={model})")
         resp = HttpApiClient.http_post_json(f"{api}/embeddings",
                               {"model": model, "input": "shoggoth slave verify"},
@@ -4230,7 +4563,7 @@ class SlaveTest:
             hdrs["Mcp-Session-Id"] = session_id
         req = Request(url, data=json.dumps(payload).encode(), headers=hdrs, method="POST")
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 return resp.status, resp.headers.get("Mcp-Session-Id"), resp.read().decode(errors="replace")
         except HTTPError as e:
             body = e.read().decode(errors="replace")[:2000]
@@ -4290,18 +4623,18 @@ class SlaveTest:
     def _check_mcp(self):
         token = self._slave_token()
         self._check_mcp_server("mcp-gitea",
-                               os.environ.get("MCP_GITEA_URL", "http://mcp-gitea:80/mcp"), token)
+                               params.mcp_gitea_url, token)
         self._check_mcp_server("basic-memory",
-                               os.environ.get("MCP_BASIC_MEMORY_URL", "http://basic-memory:80/mcp"))
+                               params.mcp_basic_memory_url)
 
     def _check_telemetry(self):
-        endpoint = (os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or "http://otelcol:4318").rstrip("/")
+        endpoint = (params.otel_endpoint or "http://otelcol:4318").rstrip("/")
         print(f"OTLP endpoint: {endpoint}")
         host = urlsplit(endpoint).hostname or "otelcol"
-        grpc_port = int(os.environ.get("OTEL_GRPC_PORT", "4317"))
+        grpc_port = int(params.otel_grpc_port)
         print(f"\n--- OTLP gRPC connect {host}:{grpc_port} ---")
         try:
-            with socket.create_connection((host, grpc_port), timeout=HTTP_TIMEOUT):
+            with socket.create_connection((host, grpc_port), timeout=HttpApiClient.HTTP_TIMEOUT):
                 print(f"OK: {host}:{grpc_port} accepts connections")
         except OSError as e:
             self._fail(f"cannot connect to OTLP gRPC {host}:{grpc_port}: {e}")
@@ -4332,7 +4665,7 @@ class SlaveTest:
         print(f"OK: trace exported (traceId={trace_id.hex()})")
 
     def _check_pip_cache(self):
-        index_url = (os.environ.get("PIP_INDEX_URL") or "").rstrip("/")
+        index_url = (params.pip_index_url or "").rstrip("/")
         print(f"Pip index URL: {index_url or '(unset)'}")
         if "python-cache" not in index_url:
             self._fail("PIP_INDEX_URL is not set or does not point to the python-cache proxy")
@@ -4368,12 +4701,11 @@ class SlaveToken(GiteaCommand):
     TOKEN_NAME = "shoggoth-slave"
     TOKEN_SCOPES = ["write:repository", "write:issue", "read:user"]
     K8S_SECRET_NAME = "gitea-slave-token"
-    OPENBAO_PATH = "gitea/slave-token"
 
     def __init__(self, gitea):
         GiteaCommand.__init__(self, gitea)
-        self.namespace = os.environ.get("SHOGGOTH_NAMESPACE", "")
-        self.slave_user = os.environ.get("SHOGGOTH_SLAVE_USER", "slave")
+        self.namespace = params.shoggoth_namespace
+        self.slave_user = params.shoggoth_slave_user
 
     def _is_token_expired(self, token):
         expires_at = token.get("expires_at", "")
@@ -4398,14 +4730,14 @@ class SlaveToken(GiteaCommand):
         return sorted(token.get("scopes") or []) != sorted(self.TOKEN_SCOPES)
 
     def _stored_token_is_usable(self):
-        stored = OpenBao().get_value(self.OPENBAO_PATH)
+        stored = K8s().read_secret("gitea/slave-token", key="token")
         if not stored:
             return True
         status = HttpApiClient.http_status(f"{self.gitea.api_url}/api/v1/user",
                              headers={"Authorization": f"token {stored}"})
         if status == 200:
             return True
-        print(f"Token stored in OpenBao is not usable: GET /api/v1/user -> HTTP {status}")
+        print(f"Token stored in K8s Secret is not usable: GET /api/v1/user -> HTTP {status}")
         return False
 
     def execute(self):
@@ -4429,13 +4761,14 @@ class SlaveToken(GiteaCommand):
         # "access token name has been used already" when an old token
         # with the same name is still present. We have to delete the
         # existing token first; only then can we create the new one.
-        # This means there is an unavoidable window where the consumer
-        # paths (OpenBao+K8s) still hold the old value while the old
-        # token is gone — consumers reading OpenBao/K8s during that
-        # window will get 401 from Gitea until the writes below complete.
-        # Re-running this command after a mid-rotation failure is the
-        # recovery: by then the old token is gone, so the create path
-        # succeeds and the writes overwrite the stale consumer values.
+        # This means there is an unavoidable window where consumers
+        # (the K8s Secret, the git-cred sidecar, the web-internal
+        # gateway proxy_set_header) still hold the old value while the
+        # old token is gone — those consumers will see 401 from Gitea
+        # until the write below completes. Re-running this command
+        # after a mid-rotation failure is the recovery: by then the
+        # old token is gone, so the create path succeeds and the write
+        # overwrites the stale consumer value.
         if existing_tok_id is not None:
             print(f"Deleting existing token '{self.TOKEN_NAME}' (id={existing_tok_id})")
             if not self.gitea.delete_user_token(self.slave_user, existing_tok_id):
@@ -4455,14 +4788,6 @@ class SlaveToken(GiteaCommand):
         new_tok_id = result["id"]
         token_value = result["sha1"]
 
-        print(f"Storing token in OpenBao '{self.OPENBAO_PATH}'")
-        openbao_ok = OpenBao().put_value(self.OPENBAO_PATH, token_value)
-        if not openbao_ok:
-            print(f"ERROR: Failed to write OpenBao '{self.OPENBAO_PATH}'", file=sys.stderr)
-            self.errors += 1
-            self._rollback_new_token(new_tok_id)
-            die(f"slave-token completed with {self.errors} error(s)")
-
         if not self.namespace:
             print("ERROR: SHOGGOTH_NAMESPACE is required for K8s Secret write", file=sys.stderr)
             self.errors += 1
@@ -4470,17 +4795,11 @@ class SlaveToken(GiteaCommand):
             die(f"slave-token completed with {self.errors} error(s)")
 
         print(f"Storing token in K8s Secret '{self.K8S_SECRET_NAME}' in namespace '{self.namespace}'")
-        k8s_ok = k8s_upsert_secret(self.K8S_SECRET_NAME, self.namespace, {"token": token_value})
+        k8s_ok = K8s(self.namespace).upsert_secret(self.K8S_SECRET_NAME, {"token": token_value})
         if not k8s_ok:
             print(f"ERROR: Failed to write K8s Secret '{self.K8S_SECRET_NAME}'", file=sys.stderr)
             self.errors += 1
             self._rollback_new_token(new_tok_id)
-            die(f"slave-token completed with {self.errors} error(s)")
-
-        if not (openbao_ok and k8s_ok):
-            # Defensive — _rollback_new_token() above should have die()d
-            # if either write failed, but be explicit about a non-zero exit
-            # if execution somehow reaches here with errors.
             die(f"slave-token completed with {self.errors} error(s)")
 
         print(f"slave-token: token rotated and stored successfully")
@@ -4488,16 +4807,16 @@ class SlaveToken(GiteaCommand):
     def _rollback_new_token(self, new_tok_id):
         """Best-effort delete of the just-created token.
 
-        Called when an OpenBao or K8s write fails AFTER the create step,
-        so consumers don't accumulate orphan tokens with no usable
-        OpenBao/K8s value. We can't undo the delete-old-then-create step
-        (the old sha1 is gone from Gitea by the time we reach this
-        branch), but we CAN keep the Gitea state clean so the next run
-        starts from a known "no token with this name" baseline.
+        Called when the K8s write fails AFTER the create step, so
+        consumers don't accumulate orphan tokens with no usable K8s
+        value. We can't undo the delete-old-then-create step (the old
+        sha1 is gone from Gitea by the time we reach this branch),
+        but we CAN keep the Gitea state clean so the next run starts
+        from a known "no token with this name" baseline.
         """
         if self.gitea.delete_user_token(self.slave_user, new_tok_id):
-            print(f"Rolled back new token (id={new_tok_id}); OpenBao/K8s callers "
-                  "will see stale values until the next slave-token run succeeds")
+            print(f"Rolled back new token (id={new_tok_id}); K8s Secret "
+                  "will see stale value until the next slave-token run succeeds")
         else:
             print(f"WARNING: rollback failed; orphan token (id={new_tok_id}) "
                   "for TOKEN_NAME remains in Gitea. The next slave-token run "
@@ -4510,8 +4829,8 @@ class RunnerToken(GiteaCommand):
 
     def __init__(self, gitea):
         super().__init__(gitea)
-        self.org = os.environ.get("SHOGGOTH_GITHUB_ORG", "")
-        self.namespace = os.environ.get("SHOGGOTH_NAMESPACE", "")
+        self.org = params.shoggoth_github_org
+        self.namespace = params.shoggoth_namespace
 
     def _fetch_registration_token(self):
         if not self.org:
@@ -4532,15 +4851,12 @@ class RunnerToken(GiteaCommand):
             else:
                 token_value = result["token"]
                 print(f"Storing token in K8s Secret '{self.K8S_SECRET_NAME}' in namespace '{self.namespace}'")
-                if not k8s_upsert_secret(self.K8S_SECRET_NAME, self.namespace, {"token": token_value}):
+                if not K8s(self.namespace).upsert_secret(self.K8S_SECRET_NAME, {"token": token_value}):
                     print(f"ERROR: Failed to write K8s Secret '{self.K8S_SECRET_NAME}'", file=sys.stderr)
                     self.errors += 1
         if self.errors:
             die(f"runner-token completed with {self.errors} error(s)")
         print(f"runner-token: token fetched and stored successfully")
-
-
-LDAP_EXCLUDED_LOGINS = ("admin", "ldapauth", "config-admin")
 
 
 class GiteaLdapSync(GiteaCommand):
@@ -4551,7 +4867,7 @@ class GiteaLdapSync(GiteaCommand):
         return len(users)
 
     def _ldap_source_filter(self):
-        exclusions = "".join(f"(!(uid={login}))" for login in LDAP_EXCLUDED_LOGINS)
+        exclusions = "".join(f"(!(uid={login}))" for login in Ldap.EXCLUDED_LOGINS)
         return (f"(&(objectClass=inetOrgPerson)"
                 f"(|(uid=%[1]s)(mail=%[1]s))"
                 f"{exclusions})")
@@ -4570,10 +4886,10 @@ class GiteaLdapSync(GiteaCommand):
         new_filter = self._ldap_source_filter()
         if source.get("user_filter") == new_filter:
             log(f"gitea-ldap-sync: LDAP source filter already excludes "
-                f"{list(LDAP_EXCLUDED_LOGINS)}")
+                f"{list(Ldap.EXCLUDED_LOGINS)}")
             return
         log(f"gitea-ldap-sync: updating LDAP source filter to exclude "
-            f"{list(LDAP_EXCLUDED_LOGINS)}")
+            f"{list(Ldap.EXCLUDED_LOGINS)}")
         if self.gitea.patch(f"admin/ldap/{source_id}",
                             {"user_filter": new_filter}) is None:
             print("ERROR: gitea-ldap-sync: failed to update LDAP source filter",
@@ -4589,7 +4905,7 @@ class GiteaLdapSync(GiteaCommand):
                       headers={"Authorization": f"token {self.gitea.token}",
                                "accept": "application/json"})
         try:
-            with urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
                 log(f"POST {url} -> {resp.status}")
                 if resp.status != 204:
                     print(f"WARNING: gitea sync_external_users returned HTTP {resp.status}", file=sys.stderr)
@@ -4616,9 +4932,8 @@ class GiteaLdapSync(GiteaCommand):
 
 class RedmineLdapSync:
     def __init__(self, redmine, ldap_url, ldap_bind_dn, ldap_bind_password, ldap_user_base_dn):
-        import ldap3
-        self._ldap3 = ldap3
         self.redmine = redmine
+        self.ldap = Ldap(ldap_url, ldap_bind_dn, ldap_bind_password, ldap_user_base_dn)
         self.ldap_url = ldap_url
         self.ldap_bind_dn = ldap_bind_dn
         self.ldap_bind_password = ldap_bind_password
@@ -4626,8 +4941,7 @@ class RedmineLdapSync:
         self.errors = 0
 
     def _ldap_search_filter(self):
-        exclusions = "".join(f"(!(uid={login}))" for login in LDAP_EXCLUDED_LOGINS)
-        return f"(&(objectClass=inetOrgPerson){exclusions})"
+        return self.ldap.search_filter_for("")
 
     def _auth_source_id(self):
         body = self.redmine._admin_session_get("auth_sources")
@@ -4647,47 +4961,11 @@ class RedmineLdapSync:
         return None
 
     def _ldap_users(self):
-        server = self._ldap3.Server(self.ldap_url, get_info=self._ldap3.NONE)
-        conn = self._ldap3.Connection(server,
-                                     user=self.ldap_bind_dn,
-                                     password=self.ldap_bind_password,
-                                     auto_bind=True)
         try:
-            search_filter = self._ldap_search_filter()
-            ok = conn.search(search_base=self.ldap_user_base_dn,
-                             search_filter=search_filter,
-                             attributes=["uid", "cn", "sn", "mail"],
-                             size_limit=0)
-            if not ok:
-                print(f"WARNING: LDAP search returned no result for base={self.ldap_user_base_dn}", file=sys.stderr)
-                return []
-            users = []
-            for entry in conn.entries:
-                uid = str(entry.uid) if "uid" in entry else ""
-                if not uid:
-                    continue
-                cn = str(entry.cn) if "cn" in entry else ""
-                sn = str(entry.sn) if "sn" in entry else ""
-                mail = str(entry.mail) if "mail" in entry else ""
-                firstname, lastname = (sn or cn or uid), (sn or cn or uid)
-                if cn and sn:
-                    parts = cn.split(None, 1)
-                    firstname = parts[0]
-                    lastname = sn or (parts[1] if len(parts) > 1 else cn)
-                elif cn:
-                    firstname, lastname = cn, cn
-                users.append({
-                    "login": uid,
-                    "firstname": firstname,
-                    "lastname": lastname,
-                    "mail": mail or f"{uid}@{os.environ.get('SHOGGOTH_DOMAIN', 'localhost')}",
-                })
-            return users
-        finally:
-            try:
-                conn.unbind()
-            except Exception:
-                pass
+            return self.ldap.search_users()
+        except Exception as e:
+            print(f"WARNING: LDAP search failed: {e}", file=sys.stderr)
+            return []
 
     def _developer_role_id(self):
         data = self.redmine.get("roles.json")
@@ -4831,7 +5109,12 @@ class RedmineLdapSync:
 # Unified dispatcher.
 # ---------------------------------------------------------------------
 
-
+# Script's public command-line surface. Lives at module level (rather
+# than inside a class) because it's read by both ``argparse`` (in
+# ``main()``) and the ``_run`` dispatch below — neither of which has
+# any other shared state worth a class instance. The two sets are
+# disjoint so callers can decide which init path to take (workflow
+# commands need the git-cred sidecar; maintenance commands don't).
 WORKFLOW_COMMANDS = {"task", "ci-failure", "pr-update"}
 MAINTENANCE_COMMANDS = {
     "argo-webhooks", "redmine-webhooks", "redmine-argo-webhooks",
@@ -4897,8 +5180,8 @@ def _run(args):
         cmd = SetupRedmineWebhooks(gitea)
         cmd.execute(args.args or None)
     elif args.command == "redmine-argo-webhooks":
-        openbao = OpenBao()
-        redmine = Redmine(openbao)
+        k8s = K8s()
+        redmine = Redmine(k8s)
         cmd = SetupRedmineArgoWebhooks(redmine)
         cmd.execute()
     elif args.command == "github-mirror-sync":
@@ -4907,7 +5190,7 @@ def _run(args):
         # both ``"myOrg"`` and ``"orgA orgB orgC"`` work — the latter
         # for one-shot overrides of the configured org via
         # ``-e SHOGGOTH_GITHUB_ORG=...``.
-        orgs = os.environ.get("SHOGGOTH_GITHUB_ORG", "").split()
+        orgs = params.shoggoth_github_org.split() if params.shoggoth_github_org else []
         if not orgs:
             die(
                 "github-mirror-sync requires SHOGGOTH_GITHUB_ORG to be "
@@ -4932,8 +5215,7 @@ def _run(args):
         cmd.execute()
     elif args.command == "ssh-key":
         gitea = Gitea()
-        openbao = OpenBao()
-        cmd = SshKey(gitea, openbao)
+        cmd = SshKey(gitea)
         cmd.execute()
     elif args.command == "slave-test":
         cmd = SlaveTest()
@@ -4952,21 +5234,29 @@ def _run(args):
         cmd = GiteaLdapSync(gitea)
         cmd.execute()
     elif args.command == "redmine-ldap-sync":
-        openbao = OpenBao()
-        redmine = Redmine(openbao)
-        ldap_bind_password = openbao.get_value("openldap/ldapauth-password")
+        k8s = K8s()
+        redmine = Redmine(k8s)
+        # Prefer ``OPENLDAP_LDAPAUTH_PASSWORD`` (wired via
+        # ``secretKeyRef openldap-ldapauth-password`` on the template)
+        # over the K8s fallback. Same RBAC story as the slave/admin
+        # passwords — ``shoggoth-maintenance-secret-writer`` doesn't
+        # have ``get`` on the LDAP Secrets.
+        if params.openldap_ldapauth_password:
+            log("Using ldapauth password from env var")
+            ldap_bind_password = params.openldap_ldapauth_password
+        else:
+            ldap_bind_password = k8s.read_secret(
+                "openldap/ldapauth-password", key="password")
         if not ldap_bind_password:
-            die("openldap/ldapauth-password OpenBao secret is required for LDAP bind")
-        domain = os.environ.get("SHOGGOTH_DOMAIN", "")
-        if not domain:
+            die("openldap-ldapauth-password is required for LDAP bind "
+                "(set OPENLDAP_LDAPAUTH_PASSWORD or grant the script's "
+                "SA `get` on the openldap-ldapauth-password K8s Secret)")
+        if not params.shoggoth_domain:
             die("SHOGGOTH_DOMAIN is required")
-        ldap_base_dn = "dc=" + domain.replace(".", ",dc=")
-        ldap_url = os.environ.get("LDAP_URL", "ldap://openldap:389")
+        ldap_base_dn = "dc=" + params.shoggoth_domain.replace(".", ",dc=")
+        ldap_url = params.ldap_url
         ldap_bind_dn = f"uid=ldapauth,ou=people,{ldap_base_dn}"
         ldap_user_base_dn = f"ou=people,{ldap_base_dn}"
-        os.environ.setdefault("LDAP_URL", ldap_url)
-        os.environ.setdefault("LDAP_BIND_DN", ldap_bind_dn)
-        os.environ.setdefault("LDAP_USER_BASE_DN", ldap_user_base_dn)
         cmd = RedmineLdapSync(redmine, ldap_url, ldap_bind_dn, ldap_bind_password, ldap_user_base_dn)
         cmd.execute()
 

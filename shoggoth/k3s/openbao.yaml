@@ -273,7 +273,6 @@ data:
         openldap/config-admin-password \
         openldap/ldapauth-password \
         openldap/slave-password \
-        openldap/slave-reviewer-password \
         cdash/app-key \
         ca/passphrase \
         wireguard/admin-password \

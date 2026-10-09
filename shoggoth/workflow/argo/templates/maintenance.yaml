@@ -124,15 +124,20 @@ spec:
             key: token
       - name: REDMINE_SERVER
         value: "http://redmine.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: SHOGGOTH_DOMAIN
-        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: SHOGGOTH_VAULT_TOKEN
+      - name: REDMINE_TOKEN
+        # Wired into the shared ``shoggoth-tools-step`` (used by
+        # ``redmine-ldap-sync`` plus the Gitea-only maintenance
+        # commands) so the Redmine-using dispatcher short-circuits
+        # ``Redmine.__init__``'s K8s fallback. The Gitea-using
+        # consumers ignore the var (just as they ignore
+        # ``GITEA_ADMIN_TOKEN`` vs Redmine). Same Secret the dedicated
+        # ``redmine-argo-webhook-step`` reads.
         valueFrom:
           secretKeyRef:
-            name: openbao-unseal-key
-            key: root-token
-      - name: OPENBAO_ADDR
-        value: "http://openbao:80"
+            name: redmine-slave-token
+            key: token
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_ACTION
         value: "{{inputs.parameters.action}}"
       volumeMounts:
@@ -227,15 +232,13 @@ spec:
         value: "http://otelcol:4318"
       - name: REDMINE_SERVER
         value: "http://redmine.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: SHOGGOTH_DOMAIN
-        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: SHOGGOTH_VAULT_TOKEN
+      - name: REDMINE_TOKEN
         valueFrom:
           secretKeyRef:
-            name: openbao-unseal-key
-            key: root-token
-      - name: OPENBAO_ADDR
-        value: "http://openbao:80"
+            name: redmine-slave-token
+            key: token
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       volumeMounts:
       - name: workflow-scripts
         mountPath: /shoggoth/workflow/scripts
@@ -283,13 +286,6 @@ spec:
         value: "{{workflow.parameters.SHOGGOTH_NAMESPACE}}"
       - name: SHOGGOTH_GITHUB_ORG
         value: "{{workflow.parameters.SHOGGOTH_GITHUB_ORG}}"
-      - name: SHOGGOTH_VAULT_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: openbao-unseal-key
-            key: root-token
-      - name: OPENBAO_ADDR
-        value: "http://openbao:80"
       - name: SHOGGOTH_ACTION
         value: "{{inputs.parameters.action}}"
       volumeMounts:

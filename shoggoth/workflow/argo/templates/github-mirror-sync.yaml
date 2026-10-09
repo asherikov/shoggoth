@@ -44,7 +44,7 @@ spec:
   templates:
   - name: sync
     container:
-      image: registry.{{workflow.parameters.SHOGGOTH_DOMAIN}}/slave:noble
+      image: asherikov/shoggoth_tools:alpine
       imagePullPolicy: IfNotPresent
       command:
       - bash
@@ -72,18 +72,9 @@ spec:
       - name: workflow-scripts
         mountPath: /shoggoth/workflow/scripts
         readOnly: true
-      - name: git-cred
-        mountPath: /shoggoth/git-cred
-      - name: ci-cache
-        mountPath: /cache
     volumes:
     - name: workflow-scripts
       hostPath:
         path: /var/lib/rancher/k3s/storage/{{workflow.parameters.SHOGGOTH_INSTANCE_DIR}}/workflow-scripts
         type: DirectoryOrCreate
-    - name: git-cred
-      emptyDir: {}
-    - name: ci-cache
-      persistentVolumeClaim:
-        claimName: shoggoth-shared-cache
     activeDeadlineSeconds: 1800
