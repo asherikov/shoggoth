@@ -154,6 +154,37 @@ data:
         log "OpenBao KV ${path} PUT (HTTP ${code})"
     }
 
+    # Tag an OpenBao kv-v2 secret with ``custom_metadata.managed-by:
+    # external-secrets`` so the external-secrets Vault client
+    # (providers/v1/vault/client_push.go in external-secrets) accepts
+    # subsequent PushSecret writes to it. The client reads the
+    # ``custom_metadata`` field of ``/v1/secret/metadata/<path>``
+    # before every push and refuses to write a remote secret that
+    # doesn't carry this marker — the marker is also self-asserted
+    # by the client's first successful push, but the bootstrap
+    # creates the secret via ``bao_put_value`` (data endpoint only)
+    # and would otherwise leave the marker missing forever, leaving
+    # PushSecret writes stuck on ``secret not managed by
+    # external-secrets``. Idempotent: re-running just re-POSTs the
+    # same metadata, which kv-v2 treats as an update.
+    bao_put_metadata() {
+        local path="$1"
+        local payload
+        payload=$(jq -c -n '{custom_metadata:{"managed-by":"external-secrets"}}')
+        local code curl_err
+        code=$(curl -sS --max-time 10 -o /tmp/bao-put-meta.json -w '%{http_code}' \
+            -X POST \
+            -H "X-Vault-Token: ${ROOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${payload}" \
+            "${OPENBAO_ADDR}/v1/secret/metadata/${path}" 2>/tmp/bao-put-meta-err.txt) || code="000"
+        if [ "${code}" != "200" ] && [ "${code}" != "204" ]; then
+            curl_err="$(head -c 200 /tmp/bao-put-meta-err.txt 2>/dev/null | tr '\n' ' ')"
+            die "PUT ${path} metadata HTTP ${code}; body=$(head -c 400 /tmp/bao-put-meta.json 2>/dev/null); curlerr=${curl_err}"
+        fi
+        log "OpenBao KV ${path} metadata PUT (HTTP ${code})"
+    }
+
     # === Phase A: idempotent init + unseal ===
     phase "Phase A: waiting for OpenBao at ${OPENBAO_ADDR}"
     until code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null) \
@@ -280,7 +311,8 @@ data:
         ssh/slave-private-key \
         ssh/slave-public-key \
         gitea/runner-token \
-        gitea/slave-token
+        gitea/slave-token \
+        redmine/slave-token
     do
         if bao_get_value "$path" >/dev/null 2>&1; then
             SKIPPED=$((SKIPPED + 1))
@@ -324,6 +356,31 @@ data:
     # Clean up any SSH keypair remnants before exiting the loop.
     rm -f /tmp/kk /tmp/kk.pub 2>/dev/null || true
     log "Phase B: done (seeded=${SEEDED}, skipped=${SKIPPED}, user-overridden=${OVERRIDDEN})"
+
+    # Tag the PushSecret-targeted kv paths with the
+    # ``managed-by: external-secrets`` metadata marker that the
+    # external-secrets Vault client (client_push.go) requires
+    # before it will accept any push. Done as a post-seed step
+    # (not inside the loop) so the marker is also applied to
+    # pre-existing secrets that the loop skipped via the
+    # ``continue`` early-exit, and to secrets owned by other pods
+    # (e.g. ``redmine/slave-token`` is created by the redmine
+    # pod's ``slave_token_init.rb`` — but the redmine init writes
+    # only the data endpoint, NOT the metadata marker, so without
+    # this step the FIRST PushSecret push on that path fails with
+    # ``secret not managed by external-secrets`` and never
+    # self-asserts the marker: the metadata check runs BEFORE
+    # the data write, and the self-assert only fires AFTER a
+    # successful write. The bootstrap must set the marker; the
+    # redmine pod overwriting the data value later is fine, the
+    # metadata is preserved. The marker write is idempotent
+    # (kv-v2 ``POST /v1/secret/metadata`` overwrites the field),
+    # so re-running this phase is safe.
+    for path in gitea/slave-token gitea/runner-token redmine/slave-token; do
+        if bao_get_value "$path" >/dev/null 2>&1; then
+            bao_put_metadata "$path"
+        fi
+    done
 
     # === Phase B.5: Configure OpenBao LDAP auth (idempotent) ===
     phase "Phase B.5: configuring OpenBao LDAP auth"
@@ -442,13 +499,38 @@ data:
     # root token), any K8s actor with secrets/update or pushsecrets/create in
     # the namespace can pivot to OpenBao writes at any path. Fix: dedicated
     # write-scoped policy covering exactly the path(s) PushSecret needs.
+    #
+    # OpenBao kv-v2 reads the metadata path before the data path on writes:
+    # the controller does ``GET /v1/secret/metadata/<path>`` to check current
+    # state, then ``POST /v1/secret/data/<path>`` to push the new value. The
+    # metadata path is a separate ACL surface; without an explicit grant, the
+    # first request 403s and the controller records
+    # ``set secret failed: could not write remote ref token to target
+    # secretstore shoggoth-openbao-write: cannot read secret data from Vault:
+    # Error making API request`` (URL=GET .../v1/secret/metadata/<path>,
+    # Code=403, "permission denied"). The read policy (``shoggoth-eso-read``)
+    # doesn't need metadata access because ExternalSecret's flow only reads
+    # ``secret/data/<path>``.
+    #
+    # After the data write succeeds, the client also writes the metadata to
+    # self-assert the ``managed-by: external-secrets`` marker on first push
+    # (see ``providers/v1/vault/client_push.go``: ``c.logical.WriteWithContext
+    # (ctx, metaPath, label)``). The metadata path therefore needs both
+    # ``read`` (for the pre-push check) AND ``create,update`` (for the
+    # post-data write). Without ``create,update`` the post-data write 403s
+    # and the controller records
+    # ``set secret failed: ... Error making API request. URL: PUT
+    # http://openbao:80/v1/secret/metadata/<path> Code: 403. permission
+    # denied`` even though the data write succeeded — the controller
+    # considers the whole push failed because the metadata write is part
+    # of the same call sequence.
     phase "Phase B.5: provisioning shoggoth-eso-write policy + token"
     ESO_WRITE_POLICY_BODY=/tmp/bao-eso-write-acl.json
     if ! code=$(curl -sS --max-time 10 -o "${ESO_WRITE_POLICY_BODY}" -w '%{http_code}' \
         -X POST "${OPENBAO_ADDR}/v1/sys/policies/acl/shoggoth-eso-write" \
         -H "X-Vault-Token: ${ROOT_TOKEN}" \
         -H "Content-Type: application/json" \
-        -d '{"policy":"path \"secret/data/gitea/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/data/gitea/runner-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/data/redmine/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }"}' 2>/tmp/bao-eso-write-acl-err.txt); then
+        -d '{"policy":"path \"secret/data/gitea/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/data/gitea/runner-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/data/redmine/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/metadata/gitea/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/metadata/gitea/runner-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/metadata/redmine/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }"}' 2>/tmp/bao-eso-write-acl-err.txt); then
         die "POST /v1/sys/policies/acl/shoggoth-eso-write: curl failed (rc=${code}); err=$(cat /tmp/bao-eso-write-acl-err.txt)"
     fi
     if [ "${code}" != "200" ] && [ "${code}" != "204" ]; then

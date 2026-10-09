@@ -59,11 +59,6 @@ spec:
         value: "http://otelcol:4318"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: GITEA_ADMIN_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: gitea-slave-token
-            key: token
       - name: SHOGGOTH_DOMAIN
         value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_GITHUB_ORG

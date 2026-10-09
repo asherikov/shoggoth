@@ -9,6 +9,14 @@ spec:
     name: shoggoth-openbao
     kind: SecretStore
   target:
+    # See gitea-slave-token.yaml for the rationale: the
+    # redmine pod's ``slave_token_init.rb`` POST caller is the
+    # authority on this Secret's value, the PushSecret pushes
+    # it to OpenBao, and the ExternalSecret must not overwrite
+    # the fresh write. ``creationPolicy: Orphan`` +
+    # ``refreshInterval: 0s`` is the combo that prevents the
+    # overwrite (see gitea-slave-token.yaml for the
+    # controller-side reason).
     name: redmine-slave-token
     creationPolicy: Orphan
   data:
@@ -16,4 +24,4 @@ spec:
       remoteRef:
         key: redmine/slave-token
         property: value
-  refreshInterval: 5m
+  refreshInterval: 0s

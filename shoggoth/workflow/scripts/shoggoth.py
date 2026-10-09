@@ -14,7 +14,7 @@ Secret reads come from Kubernetes Secrets via the ``K8s`` class. The
 SecretStore (shoggoth/k3s/secret-store.yaml) keeps the same K8s Secret
 names in sync with OpenBao via ExternalSecrets, so this script no
 longer talks to OpenBao directly — the kv paths in
-``Parameters.k8s_secret_for`` are translated to the canonical Secret
+``SecretStore.K8S_PATHS`` are translated to the canonical Secret
 name + data key at read time.
 
 Usage:
@@ -97,8 +97,6 @@ class Parameters:
     GROUPS = {
         "Gitea": [
             ("gitea_server_url", "GITEA_SERVER_URL", False, ""),
-            ("gitea_admin_token", "GITEA_ADMIN_TOKEN", False, ""),
-            ("gitea_slave_token", "GITEA_SLAVE_TOKEN", False, ""),
             ("gitea_payload", "GITEA_PAYLOAD", False, ""),
             ("gitea_git_url", "GITEA_GIT_URL", False, ""),
             ("gitea_ssh_host", "GITEA_SSH_HOST", False, "git"),
@@ -106,36 +104,9 @@ class Parameters:
         ],
         "Redmine": [
             ("redmine_server", "REDMINE_SERVER", False, ""),
-            ("redmine_token", "REDMINE_TOKEN", False, ""),
-            ("redmine_webhook_secret", "REDMINE_WEBHOOK_SECRET", False, ""),
         ],
         "LDAP": [
             ("ldap_url", "LDAP_URL", False, "ldap://openldap:389"),
-            # `openldap-slave-password` is the slave user's LDAP bind
-            # password — read by ``Redmine._get_slave_password`` for
-            # cookie-auth flows (used by ``list_webhooks`` /
-            # ``create_webhook`` / ``delete_webhook`` which Redmine
-            # refuses to expose via the API-key endpoint). Templates
-            # wire this via ``secretKeyRef openldap-slave-password``
-            # so the script doesn't need ``kubectl`` inside the pod
-            # (the maintenance SA also lacks ``get`` RBAC on that
-            # Secret — ``maintenance-secret-writer.yaml`` only grants
-            # it on the Gitea/Redmine token Secrets).
-            ("openldap_slave_password", "OPENLDAP_SLAVE_PASSWORD", False, ""),
-            # `openldap-admin-password` is the LDAP bind password for
-            # the Redmine admin account; ``Redmine._admin_login``
-            # reads it for the admin-session flow (user creation,
-            # project membership updates) which again isn't exposed
-            # via the API-key endpoint. Same RBAC story as
-            # ``openldap-slave-password`` — wired via env var.
-            ("openldap_admin_password", "OPENLDAP_ADMIN_PASSWORD", False, ""),
-            # `openldap-ldapauth-password` is the bind credential the
-            # ``redmine-ldap-sync`` dispatcher uses to enumerate users
-            # under ``ou=people`` when reconciling Redmine ↔ LDAP.
-            # The script reads it before constructing ``Redmine`` so
-            # it needs to live here (the ``Redmine`` instance isn't
-            # involved in the LDAP search itself). Same RBAC story.
-            ("openldap_ldapauth_password", "OPENLDAP_LDAPAUTH_PASSWORD", False, ""),
         ],
         "Shoggoth": [
             ("shoggoth_domain", "SHOGGOTH_DOMAIN", True, ""),
@@ -158,40 +129,24 @@ class Parameters:
             ("embeddings_model", "EMBEDDINGS_MODEL", False, "nomic-embed-text"),
         ],
         "MCP": [
-            ("mcp_gitea_url", "MCP_GITEA_URL", False, "http://mcp-gitea:80/mcp"),
-            ("mcp_basic_memory_url", "MCP_BASIC_MEMORY_URL", False, "http://basic-memory:80/mcp"),
+            # The litellm MCP proxy is the only MCP ingress the
+            # slave-test verifies (see ``_check_mcp``). The direct
+            # ``mcp-gitea`` and ``basic-memory`` backends are not
+            # exercised here — they're reachable only through the
+            # proxy, and the proxy is the surface the agents call.
+            # URL matches the ``BM_MCP_URL`` baked into the slave
+            # image (``shoggoth/dockerfiles/slave``).
+            ("mcp_litellm_url", "MCP_LITELLM_URL", False, "http://litellm/mcp"),
         ],
         "Pip": [
             ("pip_index_url", "PIP_INDEX_URL", False, ""),
         ],
         "SSH": [
             ("ssh_auth_sock", "SSH_AUTH_SOCK", False, ""),
-            # `ssh/slave-public-key` is the public key the
-            # ``ssh-key`` maintenance step registers on the slave
-            # Gitea user (so the slave can clone/push over SSH).
-            # Same RBAC story as the LDAP passwords —
-            # ``shoggoth-maintenance-secret-writer`` lacks ``get`` on
-            # the SSH Secrets, so we wire this via env var instead.
-            ("ssh_slave_public_key", "SSH_SLAVE_PUBLIC_KEY", False, ""),
         ],
     }
 
     def __init__(self):
-        # Mapping of OpenBao kv paths to K8s Secret + key. Centralised
-        # here because both directions (read-from-K8s and write-to-K8s
-        # with the orphan policy used by ESO) need to agree on the
-        # names. SSO synced the kv values into these Secrets via the
-        # ``creationPolicy: Owner`` / ``creationPolicy: Orphan`` rules in
-        # shoggoth/k3s/external-secrets/.
-        self.k8s_secret_for = {
-            "gitea/slave-token": ("gitea-slave-token", "token"),
-            "redmine/slave-token": ("redmine-slave-token", "token"),
-            "openldap/slave-password": ("openldap-slave-password", "password"),
-            "openldap/admin-password": ("openldap-admin-password", "password"),
-            "openldap/ldapauth-password": ("openldap-ldapauth-password", "password"),
-            "ssh/slave-public-key": ("ssh-slave-public-key", "value"),
-        }
-
         for group, entries in self.GROUPS.items():
             for attr, env_var, required, default in entries:
                 value = os.environ.get(env_var, "")
@@ -221,6 +176,66 @@ class Parameters:
 
 
 # ---------------------------------------------------------------------
+# Secrets: tokens and passwords the script needs to do work. Acquired
+# exclusively from K8s via ``K8s.read_secret`` — the env-var fallback
+# path is intentionally absent. Acquisition path by execution context:
+#
+#   * Jobs in the ``slave:noble`` image (the ``slave-test`` workflow)
+#     do not need secrets: the Gitea/Redmine HTTP API calls route
+#     through the web-internal api-proxy which injects auth headers
+#     server-side. The script's HTTP client accepts an empty token
+#     when the URL host starts with ``api.``.
+#
+#   * Jobs in the ``shoggoth_tools:alpine`` image (maintenance
+#     workflows, ``github-mirror-sync``) have ``kubectl`` plus the
+#     RBAC Roles in ``shoggoth/k3s/maintenance-secret-writer.yaml`` /
+#     ``argo-workflows.yaml`` and read directly from K8s.
+#
+# No template wires secret env vars any more; if a workflow template
+# starts wiring one, the right fix is to widen the RBAC instead of
+# adding an env-var passthrough here.
+# ---------------------------------------------------------------------
+
+
+class SecretStore:
+    # Map of OpenBao-style kv path -> (K8s Secret name, data key).
+    # Centralised so writers (K8s.upsert_secret) and readers
+    # (K8s.read_secret, SecretStore.read) agree on the names. SSO
+    # synced the kv values into these Secrets via the
+    # ``creationPolicy: Owner`` / ``creationPolicy: Orphan`` rules in
+    # shoggoth/k3s/external-secrets/.
+    K8S_PATHS = {
+        "gitea/server-token": ("gitea-server-token", "token"),
+        "gitea/slave-token": ("gitea-slave-token", "token"),
+        "redmine/slave-token": ("redmine-slave-token", "token"),
+        "openldap/slave-password": ("openldap-slave-password", "password"),
+        "openldap/admin-password": ("openldap-admin-password", "password"),
+        "openldap/ldapauth-password": ("openldap-ldapauth-password", "password"),
+        "ssh/slave-public-key": ("ssh-slave-public-key", "value"),
+    }
+
+    def read(self, kv_path, key="value", k8s=None):
+        """Read a secret from K8s.
+
+        ``kv_path`` is the OpenBao-style path; the canonical K8s
+        Secret name + data key live in ``K8S_PATHS``. ``key``
+        overrides the data key from ``K8S_PATHS`` when a Secret has
+        more than one entry (the default of ``"value"`` is rarely
+        correct — most call sites pass ``key="token"`` or
+        ``key="password"``).
+
+        Returns the decoded value, or ``None`` when the Secret is
+        absent, the data key is missing, or ``kubectl`` is
+        unavailable. Callers that need a value to proceed should
+        ``die()`` on ``None``; callers that route through the
+        web-internal api-proxy can accept ``None`` and let the
+        proxy inject the auth header.
+        """
+        k8s = k8s or K8s()
+        return k8s.read_secret(kv_path, key=key)
+
+
+# ---------------------------------------------------------------------
 # K8s: read and write Kubernetes Secrets via ``kubectl``. Centralises
 # the previously-scattered ``kubectl create secret`` plumbing and the
 # OpenBao kv-v2 reads (renamed: read from the K8s Secret that ESO synced
@@ -245,17 +260,17 @@ class K8s:
 
         ``kv_path`` is the OpenBao kv path (``gitea/slave-token``,
         ``openldap/slave-password``); the canonical K8s Secret name +
-        data key live in ``Parameters.k8s_secret_for`` so writers and
-        readers agree without restating the convention at each call
-        site. Returns ``None`` when the Secret is absent or the data
-        key is missing — same contract the legacy ``OpenBao.get_value``
-        had, so callers that fell back to env vars on missing secrets
-        keep the same behaviour.
+        data key live in ``SecretStore.K8S_PATHS`` so writers and readers
+        agree without restating the convention at each call site.
+        Returns ``None`` when the Secret is absent, the data key is
+        missing, or ``kubectl`` is unavailable (e.g. the ``slave:noble``
+        image used by ``slave-test``). Same contract the legacy
+        ``OpenBao.get_value`` had.
         """
-        if kv_path not in params.k8s_secret_for:
+        if kv_path not in secrets_store.K8S_PATHS:
             die(f"K8s.read_secret: unknown kv path {kv_path!r} "
-                f"(add an entry to Parameters.k8s_secret_for)")
-        name, default_key = params.k8s_secret_for[kv_path]
+                f"(add an entry to SecretStore.K8S_PATHS)")
+        name, default_key = secrets_store.K8S_PATHS[kv_path]
         key = key or default_key
         result = run(
             ["kubectl", "get", "secret", "-n", self.namespace,
@@ -271,33 +286,41 @@ class K8s:
                   f"{self.namespace}/{name}/{key}: {e}", file=sys.stderr)
             return None
 
-    def upsert_secret(self, name, data):
+    def upsert_secret(self, name, data, labels=None):
         """Create or patch a Kubernetes Secret via kubectl.
 
         ``data`` is a dict of key -> raw string value; base64 encoding
-        is handled by kubectl. The caller is responsible for RBAC (the
+        is done here (the apply path takes a full Secret manifest, not
+        a ``--from-literal`` round-trip).
+
+        ``labels`` is an optional dict of metadata labels to set on
+        the Secret. ``kubectl apply`` is a strategic merge, so
+        pre-existing labels are preserved.
+
+        The caller is responsible for RBAC (the
         shoggoth-maintenance-secret-writer ServiceAccount grants
-        namespaced create/update/patch on the specific Secret names in
-        shoggoth/k3s/maintenance-secret-writer.yaml).
+        namespaced create/update/patch on the specific Secret
+        names in shoggoth/k3s/maintenance-secret-writer.yaml).
         """
         if not name or not self.namespace:
             print("ERROR: K8s.upsert_secret requires name and namespace",
                   file=sys.stderr)
             return False
-        args = ["kubectl", "create", "secret", "generic", name,
-                f"--namespace={self.namespace}",
-                "--type=Opaque",
-                "--output=json",
-                "--dry-run=client"]
-        for key, value in data.items():
-            args.append(f"--from-literal={key}={value}")
-        create = run(args, check=False)
-        if create.returncode != 0:
-            print(f"ERROR: kubectl create secret (dry-run) failed: "
-                  f"{create.stderr.strip()}", file=sys.stderr)
-            return False
-        apply = run(["kubectl", "apply", "-f", "-"], input=create.stdout,
-                    check=False)
+        manifest = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": name,
+                "namespace": self.namespace,
+            },
+            "type": "Opaque",
+            "data": {k: base64.b64encode(v.encode()).decode()
+                     for k, v in data.items()},
+        }
+        if labels:
+            manifest["metadata"]["labels"] = labels
+        apply = run(["kubectl", "apply", "-f", "-"],
+                    input=json.dumps(manifest), check=False)
         if apply.returncode != 0:
             print(f"ERROR: kubectl apply secret failed: "
                   f"{apply.stderr.strip()}", file=sys.stderr)
@@ -428,6 +451,7 @@ def die(msg):
 # consumer hits it. Placed after the utility functions (log/die/run)
 # so the constructor's ``die()`` call resolves at module-init time.
 params = Parameters()
+secrets_store = SecretStore()
 
 
 def _redact_argv_for_log(cmd):
@@ -471,6 +495,18 @@ def run(cmd, **kwargs):
     log(f"run: {' '.join(_redact_argv_for_log(cmd))}")
     try:
         result = subprocess.run(cmd, **kwargs)
+    except FileNotFoundError as e:
+        # The first element of ``cmd`` (the executable) is missing
+        # from PATH. Returning a synthetic non-zero CompletedProcess
+        # lets callers treat this the same as a normal failure —
+        # e.g. ``K8s.read_secret`` returns ``None`` when kubectl
+        # isn't installed (the ``slave:noble`` image used by
+        # ``slave-test`` doesn't ship kubectl and falls through to
+        # the web-internal api-proxy for auth).
+        log(f"run: executable not found: {cmd[0] if cmd else '?'} ({e})")
+        return subprocess.CompletedProcess(cmd, returncode=127,
+                                             stdout="",
+                                             stderr=f"{cmd[0] if cmd else '?'}: not found")
     except subprocess.TimeoutExpired as e:
         log(f"run: TIMEOUT after {e.timeout}s: {' '.join(_redact_argv_for_log(cmd))}")
         stderr = e.stderr
@@ -753,6 +789,32 @@ class HttpApiClient:
         except (URLError, OSError):
             return 0
 
+    @staticmethod
+    def http_get_with_status(url, headers=None):
+        """GET ``url`` and return ``(status_code, parsed_json_or_None)``.
+
+        Returns ``(0, None)`` on network error, ``(status, None)``
+        for non-JSON bodies, ``(status, body_dict)`` for JSON bodies.
+        The body is best-effort — callers that only need the status
+        code should use ``http_status`` instead. This is the
+        counterpart used by the token-validation checks (e.g.
+        ``SlaveToken._api_rejects_token``) where the operator
+        wants to know *who* the stored token authenticates as,
+        not just that the call succeeded.
+        """
+        req = Request(url, headers=headers or {}, method="GET")
+        try:
+            with urlopen(req, timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
+                raw = resp.read().decode(errors="replace")
+                try:
+                    return resp.status, json.loads(raw)
+                except json.JSONDecodeError:
+                    return resp.status, None
+        except HTTPError as e:
+            return e.code, None
+        except (URLError, OSError):
+            return 0, None
+
     def _auth_header(self):
         return {}
 
@@ -891,9 +953,11 @@ class HttpApiClient:
 # ---------------------------------------------------------------------
 # Gitea: unified API client.
 #
-# Workflow context (webhook payloads): GITEA_SLAVE_TOKEN preferred;
-# token is optional (anonymous GETs still work for public repos).
-# Maintenance context (cron jobs): GITEA_ADMIN_TOKEN required.
+# Tokens are read from K8s via ``secrets_store.read`` (kv paths
+# ``gitea/server-token`` and ``gitea/slave-token``). The script
+# tolerates an empty token when the API URL host starts with
+# ``api.`` — the web-internal proxy injects the Authorization
+# header in that case.
 #
 # Token resolution: admin token first (full access), then slave token,
 # then empty. The token list (``self._paginate``, `_basic_headers`) endpoints
@@ -916,9 +980,25 @@ class Gitea(HttpApiClient):
         if not params.gitea_server_url:
             die("GITEA_SERVER_URL is required for Gitea-using commands")
         self.api_url = params.gitea_server_url + "/api/v1"
-        self.token = (params.gitea_admin_token
-                      or params.gitea_slave_token
+        # Read the Gitea token from K8s. The ``server`` token carries
+        # the site-admin scopes the maintenance scripts need
+        # (``gitea-ldap-sync``, ``slave-access``, ``ssh-key`` etc.);
+        # the ``slave`` token is the fallback for contexts that don't
+        # need admin scope (``github-mirror-sync``). When the script
+        # runs against the web-internal api-proxy (``api.${DOMAIN}``)
+        # the proxy replaces whatever Authorization header we send
+        # with the real slave token, so an empty token is acceptable
+        # in that case — see the lenience block below.
+        self.token = (secrets_store.read("gitea/server-token", key="token")
+                      or secrets_store.read("gitea/slave-token", key="token")
                       or "")
+        if not self.token:
+            hostname = urlparse(self.api_url).hostname or ""
+            if hostname.startswith("api."):
+                log("No Gitea client token configured; relying on api service proxy to inject Authorization")
+            else:
+                die("Neither gitea-server-token nor gitea-slave-token is readable "
+                    "from K8s; grant the script's SA `get` on those Secrets")
         self.domain = params.shoggoth_domain
         self._payload = None
 
@@ -1392,12 +1472,12 @@ class Redmine(HttpApiClient):
             server = f"http://redmine.{params.shoggoth_domain}"
         self.api_url = server.rstrip("/")
         log(f"Redmine API URL: {self.api_url}")
-        self.token = params.redmine_token
-        if not self.token:
-            k8s = k8s or K8s()
-            self.token = k8s.read_secret("redmine/slave-token", key="token")
-            if self.token:
-                log("Using Redmine slave token from K8s Secret")
+        # Read the Redmine slave token from K8s. The maintenance SA
+        # inherits ``get`` on ``redmine-slave-token`` via the
+        # ``shoggoth-redmine-slave-token-read`` Role. The slave-test
+        # workflow uses the web-internal api-proxy URL
+        # (``api.${DOMAIN}/redmine``) and accepts an empty token.
+        self.token = secrets_store.read("redmine/slave-token", key="token")
         if not self.token:
             # When REDMINE_SERVER is the api service (http://api.<DOMAIN>/redmine),
             # the web-internal proxy injects X-Redmine-API-Key automatically, so a
@@ -1409,7 +1489,8 @@ class Redmine(HttpApiClient):
                 log("No Redmine client token configured; relying on api service proxy to inject X-Redmine-API-Key")
             else:
                 die(f"Redmine client token is required to access {self.api_url} "
-                    "(set REDMINE_API_TOKEN or ensure redmine-slave-token K8s Secret exists)")
+                    "(grant the script's SA `get` on the "
+                    "redmine-slave-token K8s Secret)")
         else:
             masked = self.token[:4] + "..." + self.token[-4:] if len(self.token) > 8 else "***"
             log(f"Redmine token: {masked} (len={len(self.token)})")
@@ -1422,25 +1503,20 @@ class Redmine(HttpApiClient):
         self._user_logins = {}
 
     def _get_slave_password(self):
-        # Prefer the env-var path (wired via ``secretKeyRef`` from the
-        # ``openldap-slave-password`` K8s Secret in the workflow
-        # templates). The K8s.read_secret fallback is only useful in
-        # environments where the maintenance SA has ``get`` RBAC on
-        # that Secret — currently only the ``redmine`` SA does (see
-        # ``maintenance-secret-writer.yaml``), so the fallback will
-        # 403 the maintenance pod and never actually succeed there.
-        if params.openldap_slave_password:
-            log("Using Redmine slave password from env var")
-            return params.openldap_slave_password
-        if self._k8s is None:
-            self._k8s = K8s()
-        password = self._k8s.read_secret("openldap/slave-password", key="password")
+        # Read the LDAP slave user's bind password from K8s. The
+        # maintenance SA's
+        # ``shoggoth-maintenance-secret-writer-ldap-ssh-read`` Role
+        # grants ``get`` on the four LDAP/SSH Secrets (see
+        # ``shoggoth/k3s/maintenance-secret-writer.yaml``).
+        k8s = self._k8s or K8s()
+        password = secrets_store.read("openldap/slave-password", key="password",
+                                     k8s=k8s)
         if password:
             log("Using Redmine slave password from K8s Secret")
             return password
         die("openldap-slave-password is required for session auth "
-            "(set OPENLDAP_SLAVE_PASSWORD or grant the script's SA "
-            "`get` on the openldap-slave-password K8s Secret)")
+            "(grant the script's SA `get` on the "
+            "openldap-slave-password K8s Secret)")
 
     def _extract_csrf_token(self, html):
         match = re.search(r'name="authenticity_token"\s+value="([^"]+)"', html)
@@ -1463,22 +1539,15 @@ class Redmine(HttpApiClient):
     def _admin_login(self):
         if self._admin_session_cookie is not None:
             return
-        # Same pattern as ``_get_slave_password``: prefer the env-var
-        # path (``OPENLDAP_ADMIN_PASSWORD`` wired via secretKeyRef on
-        # the template) over the K8s fallback, which 403s under the
-        # ``shoggoth-maintenance-secret-writer`` SA.
-        if params.openldap_admin_password:
-            log("Using Redmine admin password from env var")
-            admin_password = params.openldap_admin_password
-        else:
-            if self._k8s is None:
-                self._k8s = K8s()
-            admin_password = self._k8s.read_secret(
-                "openldap/admin-password", key="password")
+        # Read the LDAP admin user's bind password from K8s — same
+        # pattern as ``_get_slave_password``.
+        k8s = self._k8s or K8s()
+        admin_password = secrets_store.read("openldap/admin-password", key="password",
+                                            k8s=k8s)
         if not admin_password:
             die("openldap-admin-password is required for redmine admin "
-                "session auth (set OPENLDAP_ADMIN_PASSWORD or grant the "
-                "script's SA `get` on the openldap-admin-password K8s Secret)")
+                "session auth (grant the script's SA `get` on the "
+                "openldap-admin-password K8s Secret)")
         self._password_login(
             username="admin",
             password=admin_password,
@@ -2021,17 +2090,17 @@ class Agent:
 
     # Env-var names whose values must NEVER leak to the qwen subprocess.
     # Mirrors ``qwen_security``: stripping these from the inherited env
-    # before Popen() keeps workflow-injected secrets (Gitea admin
-    # token, Redmine API key, OpenLDAP admin password) out of the model
-    # context. SHOGGOTH_VAULT_TOKEN / OPENBAO_ADDR are kept here as a
+    # before Popen() keeps workflow-injected secrets (OpenBao address,
+    # default AI token) out of the model context. The Gitea / Redmine /
+    # LDAP / SSH tokens are no longer injected by workflow templates
+    # (the script reads them from K8s directly), so they don't need
+    # filtering here. SHOGGOTH_VAULT_TOKEN / OPENBAO_ADDR are kept as a
     # defensive measure — they are no longer read by this script after
     # the K8s refactor, but if a workflow template still injects them,
     # they shouldn't reach the agent either.
     SECRET_ENV_KEYS = frozenset([
-        "GITEA_ADMIN_TOKEN",
-        "SHOGGOTH_VAULT_TOKEN", "REDMINE_TOKEN",
-        "OPENBAO_ADDR", "SHOGGOTH_AI_DEFAULT_TOKEN",
-        "REDMINE_WEBHOOK_SECRET",
+        "SHOGGOTH_VAULT_TOKEN", "OPENBAO_ADDR",
+        "SHOGGOTH_AI_DEFAULT_TOKEN",
     ])
 
     ANTI_LEAK_DIRECTIVE = (
@@ -3609,7 +3678,17 @@ class SetupRedmineWebhooks(GiteaCommand):
                 die("REDMINE_SERVER or SHOGGOTH_DOMAIN is required")
             redmine_server = f"http://redmine.{domain}"
         self.redmine_host = redmine_server.replace("https://", "").replace("http://", "")
-        self.webhook_secret = params.redmine_webhook_secret
+        # Webhook signing is intentionally disabled: the
+        # ``redmine_forgejo_webhook`` plugin reads its
+        # ``Setting.plugin_redmine_forgejo_webhook['secret_token']``
+        # from the Redmine plugin settings (DB), not an env var or
+        # K8s Secret. There is no shared-secret source for the script
+        # to mirror here, so the Gitea org hook is created with
+        # ``secret=None`` and Redmine accepts unsigned webhooks. If
+        # shared-secret signing is needed in the future, add a K8s
+        # Secret and ``SecretStore.K8S_PATHS`` entry, then read it
+        # here via ``K8s.read_secret``.
+        self.webhook_secret = None
         self.webhook_url = f"http://{self.redmine_host}/forgejo/webhook"
 
     def execute(self, projects=None):
@@ -4061,18 +4140,14 @@ class SshKey(GiteaCommand):
         self.slave_user = params.shoggoth_slave_user
 
     def execute(self):
-        # Prefer the env-var path (``SSH_SLAVE_PUBLIC_KEY`` wired
-        # via ``secretKeyRef ssh-slave-public-key`` on the
-        # template) over the K8s fallback, which 403s under
-        # ``shoggoth-maintenance-secret-writer`` (no RBAC for the
-        # SSH Secrets).
-        public_key = params.ssh_slave_public_key
-        if public_key:
-            log("Using SSH public key from env var")
-        else:
-            public_key = self.k8s.read_secret(self.K8S_KV_PATH, key="value")
+        # Read the slave's public SSH key from K8s. The maintenance
+        # SA's ``shoggoth-maintenance-secret-writer-ldap-ssh-read``
+        # Role grants ``get`` on this Secret.
+        public_key = secrets_store.read(self.K8S_KV_PATH, key="value", k8s=self.k8s)
         if not public_key:
-            print(f"ERROR: SSH public key not found (env var SSH_SLAVE_PUBLIC_KEY or K8s Secret '{self.K8S_KV_PATH}')", file=sys.stderr)
+            print(f"ERROR: SSH public key not found in K8s Secret '{self.K8S_KV_PATH}' "
+                  "(grant the script's SA `get` on ssh-slave-public-key)",
+                  file=sys.stderr)
             self.errors += 1
             die(f"ssh-key completed with {self.errors} error(s)")
 
@@ -4221,33 +4296,6 @@ class SlaveTest:
         print(f"FAIL: {msg}", file=sys.stderr, flush=True)
         self.errors += 1
 
-    def _slave_token(self):
-        """Return the Gitea slave token for HTTP API calls.
-
-        Prefers the `GITEA_ADMIN_TOKEN` env var (workflow templates
-        source this from the `gitea-slave-token` K8s Secret — the same
-        Secret the git-cred sidecar reads, so the token is already on
-        the pod). Also accepts `GITEA_SLAVE_TOKEN` as an alias
-        (matches the env var name the git-cred-bootstrap sidecar uses
-        internally). Falls back to reading the K8s Secret directly
-        when neither env var is set, and logs a WARNING so the
-        missing workflow-template secretRef is visible.
-        """
-        token = (params.gitea_admin_token or params.gitea_slave_token)
-        if token:
-            log(f"_slave_token: using env var "
-                f"({'GITEA_ADMIN_TOKEN' if params.gitea_admin_token else 'GITEA_SLAVE_TOKEN'}), "
-                f"len={len(token)}")
-            return token
-        log("WARNING: GITEA_ADMIN_TOKEN and GITEA_SLAVE_TOKEN env vars both "
-            "unset; falling back to K8s Secret gitea-slave-token. The workflow "
-            "template's secretRef wiring is missing for this run.")
-        token = self.k8s.read_secret("gitea/slave-token", key="token")
-        if not token:
-            die("gitea-slave-token K8s Secret is missing (run 'slave-token' "
-                "maintenance first) and no env var was set either")
-        return token
-
     def _slave_headers(self, token):
         return {"Authorization": f"token {token}"}
 
@@ -4306,12 +4354,21 @@ class SlaveTest:
     def _check_gitea_api(self):
         if not self.gitea_url:
             die("GITEA_SERVER_URL is required")
-        token = self._slave_token()
+        # The ``GITEA_SERVER_URL`` env var points at the web-internal
+        # api-proxy (``http://api.${DOMAIN}/gitea``); the proxy
+        # replaces whatever Authorization header we send with the real
+        # slave token before forwarding, so the literal ``"gateway"``
+        # string is enough to satisfy the Gitea client's auth-header
+        # builder — the same pattern ``_check_git_http`` uses for the
+        # scratch-repo HTTP API. No ``_slave_token()`` call (which
+        # would die in the ``slave:noble`` container with no kubectl
+        # and no env-var wired).
+        token = "gateway"
         headers = self._slave_headers(token)
         print(f"Gitea API URL: {self.gitea_url}")
         user = HttpApiClient.http_get(f"{self.gitea_url}/api/v1/user", headers=headers)
         if user is None:
-            self._fail("GET /api/v1/user with slave token")
+            self._fail("GET /api/v1/user via web-internal api-proxy")
             return
         login = user.get("login", "?")
         if login != self.slave_user:
@@ -4320,11 +4377,16 @@ class SlaveTest:
             print(f"OK: authenticated as '{login}' (id={user.get('id', '?')})")
 
     def _check_redmine_api(self):
+        # The ``REDMINE_SERVER`` env var points at the web-internal
+        # api-proxy (``http://api.${DOMAIN}/redmine``); the proxy
+        # injects ``X-Redmine-API-Key`` so ``Redmine.__init__`` may
+        # end up with an empty token. The HTTP call still
+        # authenticates as the slave user.
         redmine = Redmine(self.k8s)
         print(f"Redmine API URL: {redmine.api_url}")
         account = redmine.get("my/account.json")
         if account is None:
-            self._fail("GET /my/account.json with redmine/slave-token")
+            self._fail("GET /my/account.json via web-internal api-proxy")
             return
         user = account.get("user", {})
         print(f"OK: authenticated as '{user.get('login', '?')}' (id={user.get('id', '?')})")
@@ -4501,9 +4563,13 @@ class SlaveTest:
         print(f"git-cred: ssh-agent has identities, "
               f"known_hosts has {len(kh_lines)} entries")
 
-        log(f"[git-ssh]: acquiring slave token for HTTP API (env var or "
-            f"OpenBao fallback — see _slave_token log above)")
-        token = self._slave_token()
+        # The HTTP API scratch-repo creation goes through the
+        # web-internal api-proxy (same as ``_check_gitea_api``); the
+        # proxy replaces whatever Authorization header we send. Same
+        # ``"gateway"`` literal as ``_check_git_http``.
+        log(f"[git-ssh]: HTTP API via gateway {self.gitea_url} "
+            f"(auth injected by gateway)")
+        token = "gateway"
         log(f"[git-ssh]: ensuring scratch repo {self.slave_user}/{self.SCRATCH_REPO}")
         if not self._ensure_scratch_repo(token):
             log(f"[git-ssh]: scratch repo not available, aborting")
@@ -4621,11 +4687,14 @@ class SlaveTest:
         print(f"OK: {len(tools)} tool(s): {', '.join(t.get('name', '?') for t in tools[:10])}")
 
     def _check_mcp(self):
-        token = self._slave_token()
-        self._check_mcp_server("mcp-gitea",
-                               params.mcp_gitea_url, token)
-        self._check_mcp_server("basic-memory",
-                               params.mcp_basic_memory_url)
+        # Only the litellm MCP proxy is checked: it's the single
+        # ingress for the in-cluster MCP traffic (gitea / basic-memory
+        # / etc. all flow through it), so its reachability is the
+        # meaningful signal. The direct ``mcp-gitea`` and
+        # ``basic-memory`` URLs are intentionally not exercised here
+        # — those backends may be reachable only through the proxy
+        # and the proxy is the surface the agents actually call.
+        self._check_mcp_server("litellm", params.mcp_litellm_url)
 
     def _check_telemetry(self):
         endpoint = (params.otel_endpoint or "http://otelcol:4318").rstrip("/")
@@ -4729,31 +4798,86 @@ class SlaveToken(GiteaCommand):
     def _has_outdated_scopes(self, token):
         return sorted(token.get("scopes") or []) != sorted(self.TOKEN_SCOPES)
 
-    def _stored_token_is_usable(self):
+    def _api_rejects_token(self):
+        """Hit the Gitea API with ``token`` and return True if
+        Gitea rejects it.
+
+        Two failure modes drive a rotation:
+          1. The K8s Secret ``gitea-slave-token`` has no value
+             (the ExternalSecret was never materialised, the
+             previous write failed, or the PushSecret to OpenBao
+             hasn't converged yet). An empty stored value is
+             treated as "rejected" — there is no point skipping
+             rotation when the consumers have nothing to work
+             with.
+          2. ``GET /api/v1/user`` with the stored value returns a
+             non-2xx status. Gitea returns 401 when the token is
+             missing, revoked, or the user has been deleted; 403
+             when the scopes don't cover the endpoint. Both are
+             "Gitea says the stored value is bad" and trigger
+             rotation.
+
+        Returns True (rotate) when the API rejects the token or
+        the K8s Secret is empty; False (keep) when the API
+        authenticates the request with HTTP 200. The Gitea user
+        identity returned by the endpoint is logged so the
+        operator can confirm the stored value is binding to the
+        right user, not just any 200.
+        """
         stored = K8s().read_secret("gitea/slave-token", key="token")
         if not stored:
+            print(f"API check: K8s Secret '{self.K8S_SECRET_NAME}' is empty "
+                  f"(no token value) → will rotate")
             return True
-        status = HttpApiClient.http_status(f"{self.gitea.api_url}/api/v1/user",
-                             headers={"Authorization": f"token {stored}"})
+        masked = (stored[:4] + "..." + stored[-4:]
+                  if len(stored) > 8 else "***")
+        # ``self.gitea.api_url`` is the constructor's
+        # ``params.gitea_server_url + "/api/v1"`` — the
+        # ``/api/v1`` prefix is already there. Appending another
+        # ``/api/v1/user`` produced the malformed
+        # ``/api/v1/api/v1/user`` URL that Gitea answered with
+        # 404, which the script then misread as "token
+        # rejected" and triggered an unnecessary rotation.
+        url = f"{self.gitea.api_url}/user"
+        print(f"API check: GET {url} with Authorization: token {masked}")
+        status, body = HttpApiClient.http_get_with_status(
+            url, headers={"Authorization": f"token {stored}"})
         if status == 200:
-            return True
-        print(f"Token stored in K8s Secret is not usable: GET /api/v1/user -> HTTP {status}")
-        return False
+            login = (body or {}).get("login", "?")
+            print(f"API check: HTTP 200 (authenticated as '{login}') — "
+                  f"stored token is good")
+            return False
+        print(f"API check: HTTP {status} — stored token is REJECTED by Gitea "
+              f"→ will rotate")
+        return True
 
     def execute(self):
         existing_tok = self._find_existing_token()
         existing_tok_id = (existing_tok.get("id") if existing_tok else None)
         if existing_tok is not None:
+            # Run the API check first — it's the most reliable
+            # signal: it answers the actual question "can the
+            # stored token talk to Gitea?" instead of inferring
+            # it from metadata that may be stale or wrong.
+            # ``_is_token_expired`` and ``_has_outdated_scopes``
+            # are kept as belt-and-suspenders for the metadata
+            # cases the API might still accept (e.g. the scopes
+            # could be wrong but the user is still alive — the
+            # API check passes, the scope check catches it).
+            api_rejects = self._api_rejects_token()
             expired = self._is_token_expired(existing_tok)
             outdated = self._has_outdated_scopes(existing_tok)
-            unusable = not self._stored_token_is_usable()
-            if expired or outdated or unusable:
-                reason = ("expired" if expired
-                          else "with outdated scopes" if outdated
-                          else "with unusable stored value")
-                print(f"Will rotate token '{self.TOKEN_NAME}' ({reason}, id={existing_tok_id})")
+            if api_rejects or expired or outdated:
+                reasons = []
+                if api_rejects: reasons.append("Gitea rejected the stored token")
+                if expired:     reasons.append("expired")
+                if outdated:    reasons.append("scopes drifted")
+                reason = "; ".join(reasons)
+                print(f"Will rotate token '{self.TOKEN_NAME}' "
+                      f"({reason}, id={existing_tok_id})")
             else:
-                print(f"Token '{self.TOKEN_NAME}' is still valid, skipping creation")
+                print(f"Token '{self.TOKEN_NAME}' is still valid, "
+                      "skipping creation")
                 return
 
         # Gitea has no atomic "swap token" API — the access-token name
@@ -4857,6 +4981,188 @@ class RunnerToken(GiteaCommand):
         if self.errors:
             die(f"runner-token completed with {self.errors} error(s)")
         print(f"runner-token: token fetched and stored successfully")
+
+
+class PushSecretCheck:
+    """Surface PushSecret controller errors as workflow failures.
+
+    After ``slave-token`` / ``runner-token`` write a new value to
+    the ``gitea-slave-token`` / ``gitea-runner-token`` K8s Secret,
+    the external-secrets PushSecret controller picks up the change
+    (within seconds; the 5-minute ``refreshInterval`` is the
+    fallback, not the only path) and pushes the new value to OpenBao
+    via the ``shoggoth-openbao-write`` SecretStore. When that
+    SecretStore's write token — the K8s Secret
+    ``shoggoth-openbao-eso-write-token`` — is invalid (revoked,
+    expired, or scoped wrong) the controller records
+    ``status.conditions[].status=False`` with reason like
+    ``VaultError`` and message
+    ``"cannot read secret data from Vault: Error making API
+    request..."``.
+
+    The maintenance workflow that wrote the K8s Secret still
+    succeeds, because the write is to the K8s Secret, not to
+    OpenBao. Argo doesn't watch the PushSecret's events, so the
+    failure stays invisible until a downstream consumer
+    (git-cred sidecar, web-internal proxy) starts 401-ing on the
+    stale OpenBao value. This class makes the failure visible:
+    it queries each known PushSecret's ``status.conditions`` and
+    ``die()``s the workflow when any condition is not ``Ready``.
+
+    RBAC: the maintenance SA needs ``get`` on ``pushsecrets`` in
+    the namespace — see the
+    ``shoggoth-maintenance-secret-writer-pushsecrets-read`` Role
+    in ``shoggoth/k3s/maintenance-secret-writer.yaml``.
+    """
+
+    # PushSecrets whose OpenBao round-trip the maintenance workflow
+    # should verify. Centralised so adding a new PushSecret to
+    # ``shoggoth/k3s/external-secrets/`` is a one-line change here.
+    # ``redmine-slave-token`` is included even though the redmine
+    # pod's ``slave_token_init.rb`` POST caller — not the
+    # maintenance workflow — is what writes its K8s Secret: the
+    # three PushSecrets share a SecretStore and a write token, so a
+    # single root-cause failure surfaces in all three and a single
+    # check covers all three.
+    PUSH_SECRETS = (
+        "gitea-slave-token",
+        "gitea-runner-token",
+        "redmine-slave-token",
+    )
+
+    # Small delay before querying so the controller has time to
+    # evaluate the freshly-written K8s Secret. Default 0 — the
+    # controller reacts to Secret change events within seconds
+    # (the 5-minute ``refreshInterval`` is the fallback), and the
+    # upstream maintenance steps (gitea-ldap-sync, slave-access,
+    # slave-token, runner-token, ssh-key, redmine-ldap-sync) take
+    # much longer than that, so by the time the check runs the
+    # conditions are already settled. Override via
+    # ``SHOGGOTH_PUSHSECRET_CHECK_WAIT`` for fast-failing tests.
+    DEFAULT_WAIT_SECONDS = 0
+
+    def __init__(self):
+        self.errors = 0
+        self.namespace = params.shoggoth_namespace
+        self.wait_seconds = int(os.environ.get(
+            "SHOGGOTH_PUSHSECRET_CHECK_WAIT",
+            self.DEFAULT_WAIT_SECONDS))
+
+    def _query(self, name):
+        """Return the parsed status.conditions for one PushSecret.
+
+        ``None`` on success (caller can read ``self.errors``), or
+        an error string on failure (already counted via
+        ``self.errors``). Distinguishes the three error shapes:
+
+          1. ``kubectl`` itself failed (RC != 0): the SA is missing
+             ``get pushsecrets`` or the PushSecret doesn't exist.
+          2. ``kubectl`` returned unparseable JSON: a controller
+             bug or a CRD version mismatch.
+          3. ``status.conditions`` is empty: the controller
+             hasn't evaluated this PushSecret yet (genuine race
+             only — the 5m refreshInterval bounds it).
+        """
+        result = run(
+            ["kubectl", "get", "pushsecret", name,
+             "-n", self.namespace, "-o", "json"],
+            check=False,
+        )
+        if result.returncode != 0:
+            self.errors += 1
+            stderr = (result.stderr or "").strip().splitlines()
+            tail = stderr[-1] if stderr else ""
+            return (f"kubectl get pushsecret {name} -n {self.namespace} "
+                    f"failed (rc={result.returncode}): {tail[:200]}")
+        try:
+            doc = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            self.errors += 1
+            return f"failed to parse PushSecret {name} JSON: {e}"
+        status = doc.get("status") or {}
+        conditions = status.get("conditions") or []
+        if not conditions:
+            self.errors += 1
+            return ("no status.conditions yet (the controller hasn't "
+                    f"evaluated pushsecret/{name}; refreshInterval may "
+                    "have been raised or the controller is wedged)")
+        # external-secrets uses 'Ready' as the canonical overall
+        # condition and 'Synced' for the per-sync status. Accept
+        # either as authoritative — 'Ready' is what the controller
+        # sets False with reason='VaultError' on a write failure;
+        # 'Synced' mirrors it on a per-ref basis. A non-True value
+        # on either surfaces a root-cause the operator must
+        # address.
+        for cond in conditions:
+            ctype = cond.get("type", "")
+            cstatus = cond.get("status", "")
+            if ctype in ("Ready", "Synced") and cstatus != "True":
+                self.errors += 1
+                reason = cond.get("reason", "") or ""
+                message = cond.get("message", "") or ""
+                return (f"{ctype}={cstatus} reason={reason!r} "
+                        f"message={message!r}")
+        return None
+
+    def execute(self):
+        if not self.namespace:
+            die("SHOGGOTH_NAMESPACE is required for pushsecret-check")
+        if self.wait_seconds > 0:
+            print(f"pushsecret-check: waiting {self.wait_seconds}s for "
+                  "the PushSecret controller to evaluate the freshly "
+                  "written K8s Secrets...")
+            time.sleep(self.wait_seconds)
+        for name in self.PUSH_SECRETS:
+            err = self._query(name)
+            if err:
+                print(f"ERROR: pushsecret/{name} in namespace "
+                      f"'{self.namespace}': {err}", file=sys.stderr)
+            else:
+                print(f"pushsecret-check: pushsecret/{name} is Ready")
+        if self.errors:
+            print("ERROR: pushsecret-check found errored PushSecret(s). "
+                  "The maintenance workflow wrote the K8s Secret, but the "
+                  "PushSecret controller failed to propagate the new value "
+                  "to OpenBao. Three common causes, in order of likelihood: "
+                  "(1) the write token at shoggoth-openbao-eso-write-token "
+                  "is invalid (revoked, expired, or scoped wrong) — "
+                  "recovery is to delete that K8s Secret and re-run openbao "
+                  "init; (2) the shoggoth-eso-write policy is missing "
+                  "``secret/metadata/<path>`` access — the Vault client "
+                  "needs ``read`` for the pre-push ``managed-by`` check "
+                  "AND ``create``+``update`` for the post-data metadata "
+                  "write that self-asserts the marker on first push; "
+                  "without the post-data grant the controller records "
+                  "``set secret failed: ... PUT /v1/secret/metadata/<path> "
+                  "Code: 403 permission denied`` even though the data "
+                  "write itself succeeded — recovery is to re-run openbao "
+                  "init (the policy is idempotent and re-applied "
+                  "unconditionally; the token stays valid); (3) the OpenBao "
+                  "secret at the PushSecret's ``remoteRef.remoteKey`` "
+                  "exists (it was created by the openbao init bootstrap) "
+                  "but does NOT carry "
+                  "``custom_metadata.managed-by: external-secrets`` — the "
+                  "external-secrets Vault client (see "
+                  "``providers/v1/vault/client_push.go``) refuses to push "
+                  "to any remote secret that isn't tagged as managed by ESO, "
+                  "and the bootstrap's ``bao_put_value`` writes the data "
+                  "endpoint only (kv-v2 keeps the data and metadata "
+                  "endpoints separate) — recovery is to ``POST`` the "
+                  "missing marker once per affected path: "
+                  "``curl -X POST -H 'X-Vault-Token: <root>' -H "
+                  "'Content-Type: application/json' -d "
+                  "'{\"custom_metadata\":{\"managed-by\":\"external-secrets\"}}' "
+                  "http://openbao:80/v1/secret/metadata/<path>`` (then "
+                  "force the PushSecret to re-evaluate via "
+                  "``kubectl annotate pushsecret <name> "
+                  "force-sync=$(date +%s) --overwrite``). See "
+                  "shoggoth/k3s/openbao.yaml Phase B.5 for procedures (1) "
+                  "and (2); for a fresh cluster the bootstrap needs the "
+                  "``bao_put_metadata`` helper added (the script can't fix "
+                  "existing kv data).",
+                  file=sys.stderr)
+            die(f"pushsecret-check completed with {self.errors} error(s)")
+        print("pushsecret-check: all PushSecrets are Ready")
 
 
 class GiteaLdapSync(GiteaCommand):
@@ -5122,6 +5428,7 @@ MAINTENANCE_COMMANDS = {
     "ssh-key",
     "slave-test",
     "gitea-ldap-sync", "redmine-ldap-sync",
+    "pushsecret-check",
 }
 
 
@@ -5217,6 +5524,17 @@ def _run(args):
         gitea = Gitea()
         cmd = SshKey(gitea)
         cmd.execute()
+    elif args.command == "pushsecret-check":
+        # Verifies that the external-secrets PushSecret controller
+        # successfully propagated the K8s Secret value (written by
+        # the upstream ``slave-token`` / ``runner-token`` steps) to
+        # OpenBao via the ``shoggoth-openbao-write`` SecretStore.
+        # Surfaces "cannot read secret data from Vault" and similar
+        # write-token failures as a workflow ``die()`` so the cron
+        # is marked failed instead of silently leaving a stale kv
+        # value that downstream consumers (git-cred sidecar,
+        # web-internal proxy) only discover via 401s.
+        PushSecretCheck().execute()
     elif args.command == "slave-test":
         cmd = SlaveTest()
         # Slave-test dispatchers pass the check name as the single
@@ -5236,21 +5554,14 @@ def _run(args):
     elif args.command == "redmine-ldap-sync":
         k8s = K8s()
         redmine = Redmine(k8s)
-        # Prefer ``OPENLDAP_LDAPAUTH_PASSWORD`` (wired via
-        # ``secretKeyRef openldap-ldapauth-password`` on the template)
-        # over the K8s fallback. Same RBAC story as the slave/admin
-        # passwords — ``shoggoth-maintenance-secret-writer`` doesn't
-        # have ``get`` on the LDAP Secrets.
-        if params.openldap_ldapauth_password:
-            log("Using ldapauth password from env var")
-            ldap_bind_password = params.openldap_ldapauth_password
-        else:
-            ldap_bind_password = k8s.read_secret(
-                "openldap/ldapauth-password", key="password")
+        # Read the ``ldapauth`` user's bind password from K8s — same
+        # RBAC story as the slave/admin passwords.
+        ldap_bind_password = secrets_store.read("openldap/ldapauth-password",
+                                                key="password", k8s=k8s)
         if not ldap_bind_password:
             die("openldap-ldapauth-password is required for LDAP bind "
-                "(set OPENLDAP_LDAPAUTH_PASSWORD or grant the script's "
-                "SA `get` on the openldap-ldapauth-password K8s Secret)")
+                "(grant the script's SA `get` on the "
+                "openldap-ldapauth-password K8s Secret)")
         if not params.shoggoth_domain:
             die("SHOGGOTH_DOMAIN is required")
         ldap_base_dn = "dc=" + params.shoggoth_domain.replace(".", ",dc=")

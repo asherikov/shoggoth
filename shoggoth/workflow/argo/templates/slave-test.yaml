@@ -192,33 +192,16 @@ spec:
       - name: GITEA_SSH_HOST
         value: "git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: REDMINE_SERVER
-        value: "http://redmine.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+        # Web-internal API proxy path: web-internal.yaml sets
+        # `proxy_set_header X-Redmine-API-Key "${REDMINE_TOKEN}"` for
+        # any request under /redmine/, so the script never has to
+        # supply a token (and doesn't need kubectl to fetch one from
+        # K8s). Mirrors the GITEA_SERVER_URL pattern above; the
+        # ``Redmine.__init__`` constructor detects the ``api.`` host
+        # and logs the no-token path instead of dying.
+        value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/redmine"
       - name: SHOGGOTH_DOMAIN
         value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: REDMINE_TOKEN
-        # Real slave token — there is no Redmine-side equivalent of the
-        # Gitea web-internal gateway that rewrites a dummy auth header,
-        # so the script must reach the Redmine API directly. The
-        # `redmine-slave-token` Secret is materialised by an
-        # ExternalSecret from the `redmine/slave-token` kv value (same
-        # source the maintenance `redmine-argo-webhooks` template uses
-        # via its K8s fallback). Injecting the token here short-circuits
-        # `Redmine.__init__`'s K8s fallback, which would otherwise
-        # require ``kubectl`` in the `slave:noble` image (it isn't).
-        valueFrom:
-          secretKeyRef:
-            name: redmine-slave-token
-            key: token
-      - name: GITEA_ADMIN_TOKEN
-        # Dummy token — the gateway replaces whatever we send with the
-        # real slave token before forwarding. Previously this was the
-        # actual `gitea-server-token` Secret value, which let the script
-        # call Gitea directly bypassing the gateway. With the gateway
-        # in front, the script no longer needs the real token; the
-        # literal "gateway" is enough to satisfy the Gitea() constructor
-        # (which dies on an empty GITEA_ADMIN_TOKEN) and to identify
-        # the request as gateway-routed in workflow logs.
-        value: "gateway"
       volumeMounts:
       - name: check-tmp
         mountPath: /tmp

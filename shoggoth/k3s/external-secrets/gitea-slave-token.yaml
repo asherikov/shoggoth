@@ -9,6 +9,26 @@ spec:
     name: shoggoth-openbao
     kind: SecretStore
   target:
+    # The PushSecret at gitea-slave-token-push.yaml reads this
+    # K8s Secret and pushes it back to OpenBao. The script
+    # (``slave-token``) is the authority on the Secret's value;
+    # the ExternalSecret must NOT overwrite the script's fresh
+    # write with stale OpenBao data, or the PushSecret would
+    # see no change in K8s and skip the push (the OpenBao value
+    # would then stay stale). ``creationPolicy: Orphan`` makes
+    # the controller treat the K8s Secret as "always valid"
+    # (``isSecretValid`` short-circuits to ``true`` in
+    # pkg/controllers/externalsecret/externalsecret_controller.go)
+    # and ``refreshInterval: 0s`` makes ``shouldRefresh`` return
+    # false after the first successful sync (the
+    # ``SyncedResourceVersion != ""`` short-circuit at line 1273).
+    # Together they cause the early-return at line 372 to fire
+    # on every reconcile after the first, leaving the script's
+    # fresh K8s write intact. The PushSecret's
+    # ``custom_metadata.managed-by: external-secrets`` check is
+    # OpenBao-side and unrelated to this ``creationPolicy``; it's
+    # handled by the ``bao_put_metadata`` call in
+    # shoggoth/k3s/openbao.yaml Phase B.
     name: gitea-slave-token
     creationPolicy: Orphan
   data:
@@ -16,4 +36,4 @@ spec:
       remoteRef:
         key: gitea/slave-token
         property: value
-  refreshInterval: 5m
+  refreshInterval: 0s

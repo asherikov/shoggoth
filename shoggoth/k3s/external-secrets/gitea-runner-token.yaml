@@ -9,6 +9,14 @@ spec:
     name: shoggoth-openbao
     kind: SecretStore
   target:
+    # See gitea-slave-token.yaml for the rationale: the script
+    # (``runner-token``) is the authority on this Secret's
+    # value, the PushSecret pushes it to OpenBao, and the
+    # ExternalSecret must not overwrite the script's fresh
+    # write. ``creationPolicy: Orphan`` + ``refreshInterval:
+    # 0s`` is the combo that prevents the overwrite
+    # (see gitea-slave-token.yaml for the controller-side
+    # reason).
     name: gitea-runner-token
     creationPolicy: Orphan
   data:
@@ -16,4 +24,4 @@ spec:
       remoteRef:
         key: gitea/runner-token
         property: value
-  refreshInterval: 5m
+  refreshInterval: 0s

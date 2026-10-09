@@ -1,7 +1,18 @@
 ---
 # maintenance — equivalent to kestra's main_shoggoth_maintenance.yml.
 # Single-flight via synchronization mutex (was concurrency:limit:1/behavior:CANCEL).
-# Each step runs sequentially; the DAG ordering matches the original linear flow.
+# DAG ordering preserves only the real cross-step dependencies; steps with
+# disjoint state run in parallel. The five levels are:
+#   L0  setup-argo-webhooks               ┐ setup-redmine-argo-webhook (Redmine,
+#                                          ┘   independent of Gitea webhook state)
+#   L1  setup-redmine-webhooks (after L0)  ┐ gitea-ldap-sync             ┐ redmine-ldap-sync
+#   L2  slave-access                      ┐ ssh-key   (both after gitea-ldap-sync;
+#                                          ┘   ssh-key doesn't need slave-access)
+#   L3  slave-token                       ┐ runner-token
+#   L4  pushsecret-check (after both L3 token writers — it verifies writes)
+# The Gitea-webhook sequence stays serial because setup-argo-webhooks
+# DELETES every existing org hook and re-adds the argo one; running
+# setup-redmine-webhooks in parallel would race against that delete.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -51,24 +62,33 @@ spec:
       tasks:
       - name: setup-argo-webhooks
         template: argo-webhook-step
+      - name: setup-redmine-argo-webhook
+        template: redmine-argo-webhook-step
       - name: setup-redmine-webhooks
         template: redmine-webhook-step
         depends: "setup-argo-webhooks"
-      - name: setup-redmine-argo-webhook
-        template: redmine-argo-webhook-step
-        depends: "setup-redmine-webhooks"
       - name: gitea-ldap-sync
         template: shoggoth-tools-step
-        depends: "setup-redmine-argo-webhook"
         arguments:
           parameters:
           - {name: action, value: gitea-ldap-sync}
+      - name: redmine-ldap-sync
+        template: shoggoth-tools-step
+        arguments:
+          parameters:
+          - {name: action, value: redmine-ldap-sync}
       - name: slave-access
         template: shoggoth-tools-step
         depends: "gitea-ldap-sync"
         arguments:
           parameters:
           - {name: action, value: slave-access}
+      - name: ssh-key
+        template: shoggoth-tools-step
+        depends: "gitea-ldap-sync"
+        arguments:
+          parameters:
+          - {name: action, value: ssh-key}
       - name: slave-token
         template: secret-bootstrap-step
         depends: "slave-access"
@@ -77,22 +97,16 @@ spec:
           - {name: action, value: slave-token}
       - name: runner-token
         template: secret-bootstrap-step
-        depends: "slave-token"
+        depends: "slave-access"
         arguments:
           parameters:
           - {name: action, value: runner-token}
-      - name: ssh-key
+      - name: pushsecret-check
         template: shoggoth-tools-step
-        depends: "runner-token"
+        depends: "slave-token && runner-token"
         arguments:
           parameters:
-          - {name: action, value: ssh-key}
-      - name: redmine-ldap-sync
-        template: shoggoth-tools-step
-        depends: "ssh-key"
-        arguments:
-          parameters:
-          - {name: action, value: redmine-ldap-sync}
+          - {name: action, value: pushsecret-check}
 
   - name: shoggoth-tools-step
     inputs:
@@ -117,25 +131,8 @@ spec:
         value: "http://otelcol:4318"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: GITEA_ADMIN_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: gitea-server-token
-            key: token
       - name: REDMINE_SERVER
         value: "http://redmine.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: REDMINE_TOKEN
-        # Wired into the shared ``shoggoth-tools-step`` (used by
-        # ``redmine-ldap-sync`` plus the Gitea-only maintenance
-        # commands) so the Redmine-using dispatcher short-circuits
-        # ``Redmine.__init__``'s K8s fallback. The Gitea-using
-        # consumers ignore the var (just as they ignore
-        # ``GITEA_ADMIN_TOKEN`` vs Redmine). Same Secret the dedicated
-        # ``redmine-argo-webhook-step`` reads.
-        valueFrom:
-          secretKeyRef:
-            name: redmine-slave-token
-            key: token
       - name: SHOGGOTH_DOMAIN
         value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_ACTION
@@ -166,11 +163,6 @@ spec:
         value: "http://otelcol:4318"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: GITEA_ADMIN_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: gitea-server-token
-            key: token
       - name: SHOGGOTH_DOMAIN
         value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       volumeMounts:
@@ -199,11 +191,6 @@ spec:
         value: "http://otelcol:4318"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: GITEA_ADMIN_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: gitea-server-token
-            key: token
       - name: SHOGGOTH_DOMAIN
         value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       volumeMounts:
@@ -232,11 +219,6 @@ spec:
         value: "http://otelcol:4318"
       - name: REDMINE_SERVER
         value: "http://redmine.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: REDMINE_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: redmine-slave-token
-            key: token
       - name: SHOGGOTH_DOMAIN
         value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       volumeMounts:
@@ -275,11 +257,6 @@ spec:
         value: "http://otelcol:4318"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: GITEA_ADMIN_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: gitea-server-token
-            key: token
       - name: SHOGGOTH_DOMAIN
         value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_NAMESPACE
