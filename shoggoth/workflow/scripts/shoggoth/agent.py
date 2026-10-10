@@ -1,0 +1,374 @@
+"""Module split out of shoggoth.py; see package __init__."""
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
+from .otlp import OtlpLogger
+from .util import die, log, run
+from .state import params
+
+class Agent:
+    # Default per-invocation wall-clock cap for ``prompt()`` / the
+    # ``pr-comment`` per-comment retries. The workflow template's
+    # ``activeDeadlineSeconds`` (4 h on coding-agent-dispatcher) is
+    # the outer safety net; this is the per-prompt ceiling so a
+    # single hung agent doesn't burn the whole pod's budget.
+    AGENT_TIMEOUT = 1200
+
+    # Forbidden bash glob patterns the agent must NEVER invoke — git
+    # commits/pushes/tags, wsh and wshandler wrappers — encoded as
+    # the Qwen Code permission-deny syntax. Pulled out of the module
+    # top level because every consumer is inside this class.
+    QWEN_DENY_PATTERNS = [
+        "Bash(git commit*)",
+        "Bash(git commit)",
+        "Bash(git push*)",
+        "Bash(git push)",
+        "Bash(git tag*)",
+        "Bash(git tag)",
+        "Bash(git -C * commit*)",
+        "Bash(git -C * push*)",
+        "Bash(git -C * tag*)",
+        "Bash(wsh *commit*)",
+        "Bash(wsh *push*)",
+        "Bash(wsh *tag*)",
+        "Bash(wshandler commit*)",
+        "Bash(wshandler push*)",
+        "Bash(wshandler tag*)",
+        "Bash(wshandler tag)",
+    ]
+
+    # Allowed tool sets per session kind. ``full`` is unrestricted;
+    # ``pr-review`` / ``pr-comment`` exclude mutating tools because
+    # those sessions are read-only reviews of work the dispatcher is
+    # evaluating.
+    TOOL_PROFILES = {
+        "full": [],
+        "pr-review": [
+            "edit",
+            "write_file",
+            "notebook_edit",
+        ],
+        "pr-comment": [],
+    }
+
+    # Map Qwen session kind (``start_session(event_type=...)``) to
+    # the corresponding ``TOOL_PROFILES`` key.
+    TOOL_PROFILE_BY_SESSION = {
+        "task": "full",
+        "ci-failure": "full",
+        "pr-review": "pr-review",
+        "pr-comment": "pr-comment",
+    }
+
+    # Env-var names whose values must NEVER leak to the qwen subprocess.
+    # Mirrors ``qwen_security``: stripping these from the inherited env
+    # before Popen() keeps workflow-injected secrets (OpenBao address,
+    # default AI token) out of the model context. The Gitea / Redmine /
+    # LDAP / SSH tokens are no longer injected by workflow templates
+    # (the script reads them from K8s directly), so they don't need
+    # filtering here. SHOGGOTH_VAULT_TOKEN / OPENBAO_ADDR are kept as a
+    # defensive measure — they are no longer read by this script after
+    # the K8s refactor, but if a workflow template still injects them,
+    # they shouldn't reach the agent either.
+    SECRET_ENV_KEYS = frozenset([
+        "SHOGGOTH_VAULT_TOKEN", "OPENBAO_ADDR",
+        "SHOGGOTH_AI_DEFAULT_TOKEN",
+    ])
+
+    ANTI_LEAK_DIRECTIVE = (
+        "Do not emit thinking markup (e.g., <thinking>, <thought>, or any "
+        "XML/HTML tags that resemble reasoning traces). Output only the final "
+        "answer.\n\n"
+    )
+
+    @staticmethod
+    def _filter_qwen_env():
+        return {k: v for k, v in os.environ.items()
+                if k not in Agent.SECRET_ENV_KEYS}
+
+    @staticmethod
+    def _extract_review_json(text):
+        """Find and parse a JSON review object from agent assistant text.
+
+        Looks for the first ```json ... ``` fenced block (or a bare JSON
+        object ending at the END_OF_REVIEW marker), validates it has the
+        expected shape, and returns the parsed dict. Returns None if
+        nothing usable is found.
+        """
+        return Agent._extract_agent_json(text, "END_OF_REVIEW",
+                                          ("verdict", "findings", "summary"))
+
+    @staticmethod
+    def _extract_agent_json(text, end_marker, required_keys=()):
+        """Generic JSON extractor from agent assistant text.
+
+        The ``_extract_review_json`` shape check is too narrow for the
+        slash-command prompts (squash wants ``subject``/``body``,
+        rebase wants ``resolutions``); the JSON-locating logic is
+        identical, so this helper does the locating once and lets the
+        caller supply an end-marker name and the keys that make a
+        payload "useful". ``required_keys`` is a tuple; the parsed
+        dict passes if at least one of the keys is present, matching
+        the lenient "any of these keys indicates a real review"
+        contract ``_extract_review_json`` historically enforced.
+        """
+        if not text:
+            return None
+        m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+        candidate = None
+        if m:
+            candidate = m.group(1)
+        else:
+            end = text.find(end_marker)
+            if end != -1:
+                head = text[:end]
+            else:
+                head = text
+            decoder = json.JSONDecoder()
+            for i, ch in enumerate(head):
+                if ch != "{":
+                    continue
+                try:
+                    obj, consumed = decoder.raw_decode(head, i)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    candidate = head[i:i + consumed]
+                    break
+            else:
+                return None
+        if not candidate:
+            return None
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        if required_keys and not any(key in data for key in required_keys):
+            return None
+        return data
+
+    @staticmethod
+    def _format_review_json(review_data, pr_title, pr_url):
+        """Render a qwen review run --json result as a Markdown review body
+        suitable for posting as a single Gitea PR review.
+        """
+        if not isinstance(review_data, dict):
+            return ""
+        findings = review_data.get("findings") or []
+        verdict = review_data.get("verdict") or ""
+        summary = (review_data.get("summary")
+                   or review_data.get("summary_md")
+                   or review_data.get("body") or "")
+        parts = [f"## Code review: {pr_title}", f"PR: {pr_url}", ""]
+        if verdict:
+            parts.append(f"**Verdict:** {verdict}")
+            parts.append("")
+        if summary and not findings:
+            parts.append(summary.strip())
+            parts.append("")
+        if findings:
+            parts.append("### Findings")
+            parts.append("")
+            for f in findings:
+                sev = (f.get("severity") or "info").upper()
+                path = f.get("path") or "?"
+                line = f.get("line") or f.get("start_line")
+                loc = f"{path}:{line}" if line else path
+                parts.append(f"- **[{sev}]** `{loc}`")
+                body = (f.get("body") or f.get("message") or "").strip()
+                if body:
+                    for bl in body.splitlines():
+                        parts.append(f"  {bl}")
+                parts.append("")
+        elif not summary:
+            parts.append("_No issues found._")
+        return "\n".join(parts)
+
+    def __init__(self, shoggoth):
+        self.shoggoth = shoggoth
+        self.otlp = OtlpLogger(params.otel_endpoint)
+        self.tool_profile = "full"
+        self._qwen_restrict_path = None
+
+    def start_session(self, event_type):
+        self.tool_profile = Agent.TOOL_PROFILE_BY_SESSION.get(event_type, "full")
+        log(f"start_session: event_type={event_type} "
+            f"tool_profile={self.tool_profile}")
+        self.otlp.start_session(event_type)
+
+        self.qwen_env = self._filter_qwen_env()
+
+        deny_rules = Agent.QWEN_DENY_PATTERNS
+        if deny_rules:
+            settings_path = f"/tmp/qwen-restrict-{self.otlp.session_id}.json"
+            try:
+                with open(settings_path, "w") as f:
+                    json.dump({"permissions": {"deny": deny_rules}}, f)
+                self.qwen_env["QWEN_CODE_SYSTEM_SETTINGS_PATH"] = settings_path
+                self._qwen_restrict_path = settings_path
+                log(f"start_session: wrote qwen restrictions to {settings_path} "
+                    f"({len(deny_rules)} deny rules)")
+            except OSError as e:
+                print(f"WARNING: failed to write qwen restriction file "
+                      f"{settings_path}: {e}", file=sys.stderr)
+        else:
+            self._qwen_restrict_path = None
+
+        plugin_url = f"http://{self.shoggoth.domain}/plugin.tar.gz"
+        plugin_archive = run(["curl", "-sfS", "--max-time", "30", "-o", "/tmp/plugin.tar.gz", plugin_url],
+                             check=False, capture_output=True, text=True, timeout=60)
+        if plugin_archive.returncode != 0:
+            die(f"failed to download plugin from {plugin_url}: {plugin_archive.stderr.strip()}")
+
+        plugin_install = run(["qwen", "extensions", "install", "/tmp/plugin.tar.gz",
+                              "--scope", "user", "--consent"],
+                             check=False, capture_output=True, text=True, timeout=60)
+        if plugin_install.returncode != 0:
+            err = (plugin_install.stderr or plugin_install.stdout or "").strip()
+            die(f"failed to install plugin from {plugin_url}: {err}")
+
+        index_path = self.shoggoth.repo_dir
+        index_result = run(
+            ["codebase-memory-mcp", "cli", "index_repository",
+             json.dumps({"repo_path": index_path})],
+            check=False, capture_output=True, text=True, timeout=120,
+        )
+        if index_result.returncode != 0:
+            print(f"WARNING: codebase-memory-mcp indexing failed: "
+                  f"{index_result.stderr.strip()}", file=sys.stderr)
+
+    def prompt(self, text, resume=False, timeout=None, cwd=None):
+        if cwd is None:
+            if self.shoggoth.type == "ccws":
+                cwd = "/ccws"
+            else:
+                cwd = self.shoggoth.repo_dir
+        os.chdir(cwd)
+        log(f"prompt: cwd={cwd}")
+
+        cmd = ["qwen", "--yolo", "--output-format", "stream-json"]
+        for excluded in Agent.TOOL_PROFILES.get(self.tool_profile, []):
+            cmd.extend(["--exclude-tools", excluded])
+        if resume:
+            cmd.extend(["--resume", self.otlp.session_id])
+        else:
+            cmd.extend(["--session-id", self.otlp.session_id])
+        cmd.extend(["--prompt", Agent.ANTI_LEAK_DIRECTIVE + text])
+
+        log(f"prompt: resume={resume} session={self.otlp.session_id} "
+            f"timeout={timeout} tool_profile={self.tool_profile}")
+        log(f"prompt: cmd={' '.join(cmd[:6])}... (prompt length={len(text)})")
+        log(f"prompt: text:\n{Agent.ANTI_LEAK_DIRECTIVE}{text}")
+        log("prompt: starting qwen subprocess")
+
+        def _pump(stream, label):
+            try:
+                for line in iter(stream.readline, b""):
+                    decoded = line.decode(errors="replace")
+                    if label == "stdout":
+                        sys.stdout.write(decoded)
+                        sys.stdout.flush()
+                        stripped = decoded.rstrip("\n")
+                        self.otlp._push_line(stripped)
+                        self.otlp._capture_stream_json(stripped)
+                    else:
+                        sys.stderr.write(decoded)
+                        sys.stderr.flush()
+            except Exception as e:
+                print(f"WARNING: stream pump {label} crashed: {e}", file=sys.stderr)
+            finally:
+                stream.close()
+
+        self.otlp.reset()
+        qwen = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=self.qwen_env,
+        )
+        stdout_thread = threading.Thread(
+            target=_pump, args=(qwen.stdout, "stdout"), daemon=True)
+        stderr_thread = threading.Thread(
+            target=_pump, args=(qwen.stderr, "stderr"), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        timed_out = False
+        try:
+            qwen.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log(f"prompt: TIMEOUT after {timeout}s, killing qwen")
+            qwen.kill()
+            timed_out = True
+            qwen.wait()
+        stdout_thread.join(timeout=10)
+        stderr_thread.join(timeout=10)
+        if timed_out:
+            log("prompt: qwen killed due to timeout")
+            return 124
+        log(f"prompt: qwen exited with code {qwen.returncode}")
+        if self.otlp.last_error:
+            log(f"prompt: agent reported an error: {str(self.otlp.last_error)[:200]}")
+            return 125
+        return qwen.returncode
+
+    def prompt_with_retry(self, text, resume=False, timeout=None, cwd=None,
+                          max_retries=3, retry_label=None):
+        """Wrap prompt() with retry on leaked-thinking-tag errors.
+
+        The bundled qwen-code parser throws
+        InvalidStreamError("Model response leaked thinking tags.",
+        "PROTOCOL_TAG_LEAK") when the model emits content that resembles an
+        unclosed thinking tag. After the bundled protocolTagLeakMaxRetries=2
+        the error surfaces as
+        [API Error: Model response leaked thinking tags.] in the stream-json
+        result event; qwen then exits non-zero and OtlpLogger.last_error is
+        set. This wrapper catches that, rotates to a fresh qwen session-id
+        so the model has no carryover from the failed run (LLM output is
+        non-deterministic — subsequent attempts usually succeed), and retries.
+        """
+        label = retry_label or "prompt"
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                delay = 2 * attempt
+                self.otlp._push_line(
+                    f"{label}: leaked-thinking-tag error "
+                    f"attempt={attempt}/{max_retries} "
+                    f"delay={delay}s; rotating session and retrying")
+                time.sleep(delay)
+                self.otlp.reset()
+                self.otlp.session_id = str(uuid.uuid4())
+                resume = False
+            rc = self.prompt(text, resume=resume, timeout=timeout, cwd=cwd)
+            if rc == 0:
+                return rc
+            err = str(self.otlp.last_error or "")
+            if "leaked thinking tags" not in err:
+                return rc
+            if attempt >= max_retries:
+                break
+        self.otlp._push_line(
+            f"{label}: gave up after {max_retries + 1} attempts "
+            f"last_error={(str(self.otlp.last_error or ''))[:200]!r}")
+        return rc
+
+
+    def stop_session(self):
+        log("stop_session")
+        self.otlp.stop_session()
+        if self._qwen_restrict_path:
+            try:
+                os.unlink(self._qwen_restrict_path)
+                log(f"stop_session: removed qwen restrictions file "
+                    f"{self._qwen_restrict_path}")
+            except OSError as e:
+                print(f"WARNING: failed to remove qwen restriction file "
+                      f"{self._qwen_restrict_path}: {e}", file=sys.stderr)
+            self._qwen_restrict_path = None
