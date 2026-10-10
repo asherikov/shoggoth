@@ -115,7 +115,7 @@ class Parameters:
             ("shoggoth_github_api_delay", "SHOGGOTH_GITHUB_API_DELAY", False, "2"),
             ("shoggoth_slave_user", "SHOGGOTH_SLAVE_USER", False, "slave"),
             ("shoggoth_review_user", "SHOGGOTH_REVIEW_USER", False, "admin"),
-            ("shoggoth_trusted_reviewers", "SHOGGOTH_TRUSTED_REVIEWERS", False, "admin"),
+            ("shoggoth_trusted_users", "SHOGGOTH_TRUSTED_USERS", False, "admin"),
             ("shoggoth_argo_run_url", "SHOGGOTH_ARGO_RUN_URL", False, ""),
             ("workspace_src", "WORKSPACE_SRC", False, "/ccws/workspace/src"),
         ],
@@ -433,11 +433,11 @@ class Ldap:
         return f"(&(objectClass=inetOrgPerson){exclusions}{template})"
 
 
-def log(msg):
+def log(msg, file=sys.stderr):
     """Print ``msg`` with one ``[shoggoth]`` prefix per line.
     """
     for line in msg.splitlines() or [""]:
-        print(f"[shoggoth] {line}", file=sys.stderr, flush=True)
+        print(f"[shoggoth] {line}", file=file, flush=True)
 
 
 def die(msg):
@@ -523,6 +523,375 @@ def run(cmd, **kwargs):
     if result.stderr:
         log(f"run: stderr: {result.stderr.strip()[:500]}")
     return result
+
+
+class Git:
+    """Thin wrapper around ``git`` CLI invocations used by the
+    workflow script.
+
+    The script used to spawn ``git`` via ``run([...])`` at every
+    call site (55 of them at the time of writing). That format
+    repeatedly re-states the same three facts — which ``git``,
+    which ``-C <dir>``, which subcommand — and there is no single
+    place to add a global guard (e.g. ``GIT_TERMINAL_PROMPT=0`` for
+    CI, ``--no-pager`` for log hygiene, future per-invocation
+    metrics). This wrapper centralises the ``git`` argv and lets
+    each call site speak in domain terms (``add_all``, ``commit``,
+    ``push_force_with_lease``) instead of ``run(["git", "-C",
+    self.repo_dir, "commit", "-m", msg], check=False)``.
+
+    Scope and contract:
+
+    * Constructor takes an optional ``repo_dir``. When ``None``
+      (e.g. for ``clone`` / ``ls-remote``), the wrapper does not
+      emit ``-C`` and the caller is expected to pass the working
+      directory via the underlying ``run`` (or to be running from
+      the right cwd already).
+    * Methods return a ``subprocess.CompletedProcess``-like object
+      from ``run()``, so callers keep reading ``.stdout``,
+      ``.stderr``, ``.returncode`` (and ``check=False`` overrides
+      keep working unchanged).
+    * ``check=None`` (the default) means "use ``run()``'s default"
+      (raises on non-zero rc); passing ``check=False`` preserves
+      the original callsite's error-handling.
+    * ``env=`` (where the caller really does need it — only the
+      rebase path wants ``GIT_EDITOR=true``) is forwarded to
+      ``run()``; ``-c <key>=<value>`` git-level config is folded
+      into the relevant convenience methods (``clone``,
+      ``push_with_credential_helper``) rather than added as a
+      generic knob.
+    """
+
+    def __init__(self, repo_dir=None):
+        self.repo_dir = repo_dir
+
+    # ----- internal argv builder ------------------------------------
+
+    def _argv(self, *args):
+        if self.repo_dir is None:
+            return ["git", *args]
+        return ["git", "-C", self.repo_dir, *args]
+
+    def _invoke(self, *args, env=None, check=None):
+        kwargs = {}
+        if env is not None:
+            kwargs["env"] = env
+        if check is not None:
+            kwargs["check"] = check
+        return run(self._argv(*args), **kwargs)
+
+    # ----- generic escape hatch -------------------------------------
+
+    def raw(self, *args, env=None, check=None):
+        """Run an arbitrary ``git`` subcommand.
+
+        Used by the few callsites whose argv shape does not recur
+        elsewhere (e.g. ``for-each-ref``, ``tag --list``). New
+        callers should prefer the named methods below; this
+        escape hatch is here so the wrapper does not block adding
+        one-off invocations during the cutover.
+        """
+        return self._invoke(*args, env=env, check=check)
+
+    # ----- remote / clone / fetch -----------------------------------
+
+    def clone(self, url, dest, depth="1", branch=None,
+              credential_helper=None, check=None):
+        """``git clone [--depth 1] [--branch <b>] [--credential.helper=…]
+        <url> <dest>``.
+
+        ``credential_helper`` is the shoggoth-sidecar helper string
+        (e.g. ``"!qwen-redis-cred-helper.sh"``). It is rendered as
+        ``-c credential.helper=<helper>`` so the URL never has to
+        be embedded in the credential helper's stdin — that
+        pattern is what the ``github-mirror-sync`` flow uses for
+        sub-repo pushes.
+        """
+        argv = ["git"]
+        if credential_helper:
+            argv += ["-c", f"credential.helper={credential_helper}"]
+        argv += ["clone", "--depth", str(depth)]
+        if branch:
+            argv += ["--branch", branch]
+        argv += [url, dest]
+        kwargs = {}
+        if check is not None:
+            kwargs["check"] = check
+        return run(argv, **kwargs)
+
+    def fetch(self, remote="origin", ref=None, local_ref=None,
+              unshallow=False, tags=False, check=None):
+        """``git fetch <remote> [<ref>[:<local_ref>]] [--unshallow]
+        [--tags]``.
+
+        ``shallow=False`` (the default) plus ``ref=None`` reproduces
+        the existing ``git fetch origin`` invocations (used by
+        ``_unshallow`` — note that path passes ``--unshallow`` and
+        ``--tags`` flags explicitly).
+        """
+        argv = ["fetch"]
+        if unshallow:
+            argv.append("--unshallow")
+        if tags:
+            argv.append("--tags")
+        argv.append(remote)
+        if ref and local_ref is not None:
+            argv.append(f"{ref}:{local_ref}")
+        elif ref:
+            argv.append(ref)
+        return self._invoke(*argv, check=check)
+
+    def fetch_url_refspecs(self, url, refspec, depth=None, tags=False,
+                            credential_helper=None, quiet=False, check=None):
+        """``git fetch [--quiet] [--tags] [--depth <n>] [--credential.
+        helper=…] <url> <refspec>``.
+
+        Used by the ``github-mirror-sync`` flow (``GithubMirrorSync.
+        _sync_existing_repo``) to mirror an upstream branch into a
+        local clone — the URL is not the local ``origin`` (which
+        may not exist yet), so this gets its own helper rather than
+        overloading ``fetch``. ``self.repo_dir`` still routes the
+        fetch into the local clone's ``.git``.
+        """
+        if credential_helper:
+            argv = self._argv("-c", f"credential.helper={credential_helper}",
+                                "fetch")
+        else:
+            argv = self._argv("fetch")
+        if quiet:
+            argv.append("--quiet")
+        if tags:
+            argv.append("--tags")
+        if depth is not None:
+            argv += ["--depth", str(depth)]
+        argv += [url, refspec]
+        return run(argv, check=check)
+
+    # ----- working-tree mutations ----------------------------------
+
+    def status_porcelain(self, check=None):
+        return self._invoke("status", "--porcelain", check=check)
+
+    def diff(self, *args, check=None):
+        """``git diff <args>`` — caller passes spec and any flags.
+
+        Use ``diff_cached`` (or pass ``--cached`` yourself) for
+        staged diffs; ``diff_name_only`` is the dedicated helper
+        for ``--diff-filter=U`` lookups in the rebase loop.
+        """
+        return self._invoke("diff", *args, check=check)
+
+    def diff_cached_name_only(self, check=None):
+        """``git diff --cached --name-only``.
+
+        Used by ``_commit_only`` (standalone + ccws) and the
+        squash handler to detect staged changes after a soft
+        reset. Trimming the argv into a dedicated method means
+        a future change to the staging query (e.g. ``-z`` for NUL
+        safety) lands in one place.
+        """
+        return self._invoke("diff", "--cached", "--name-only", check=check)
+
+    def diff_name_only_filter(self, filter_flag, check=None):
+        """``git diff --name-only --diff-filter=<flag>``.
+
+        ``filter_flag`` is one of ``U`` (unmerged), ``A``
+        (added), ``M`` (modified), etc. Used by the rebase loop
+        to enumerate files with conflict markers still present.
+        """
+        return self._invoke("diff", "--name-only",
+                             "--diff-filter", filter_flag, check=check)
+
+    def add_all(self, check=None):
+        return self._invoke("add", "-A", check=check)
+
+    def add(self, *paths, check=None):
+        return self._invoke("add", *paths, check=check)
+
+    def reset_soft(self, target, check=None):
+        return self._invoke("reset", "--soft", target, check=check)
+
+    def commit(self, message, check=None):
+        """``git commit -m <message>``.
+
+        ``message`` is passed as a single argv element to avoid
+        shell-quoting pitfalls; git handles multi-line commit
+        messages natively so ``-m `` with a literal newline is
+        fine and we do not need ``-F <tmpfile>``.
+        """
+        return self._invoke("commit", "-m", message, check=check)
+
+    def checkout_new_b(self, branch, check=None):
+        """``git checkout -B <branch>`` — force-create/reset a branch."""
+        return self._invoke("checkout", "-B", branch, check=check)
+
+    # ----- refs ----------------------------------------------------
+
+    def rev_parse(self, ref, check=None):
+        """``git rev-parse <ref>`` — resolve a ref (no ``--verify``)."""
+        return self._invoke("rev-parse", ref, check=check)
+
+    def rev_parse_verify(self, ref, check=None):
+        """``git rev-parse --verify <ref>`` — fail loudly on missing.
+        """
+        return self._invoke("rev-parse", "--verify", ref, check=check)
+
+    def rev_parse_verify_quiet(self, ref, check=None):
+        """``git rev-parse --verify -q <ref>`` — quiet variant (rc only).
+        """
+        return self._invoke("rev-parse", "--verify", "-q", ref, check=check)
+
+    def rev_parse_git_path(self, marker, check=None):
+        """``git rev-parse --git-path <marker>`` — print the path
+        of a marker under the git dir (``rebase-merge`` /
+        ``rebase-apply``). Used by ``_rebase_in_progress``.
+        """
+        return self._invoke("rev-parse", "--git-path", marker, check=check)
+
+    def branch(self, name, ref, force=False, check=None):
+        """``git branch [-f] <name> <ref>`` — create or reset a branch.
+        """
+        argv = ["branch"]
+        if force:
+            argv.append("-f")
+        argv += [name, ref]
+        return self._invoke(*argv, check=check)
+
+    # ----- worktrees ------------------------------------------------
+
+    def worktree_add(self, wt_path, ref, detach=False, check=None):
+        """``git worktree add [--detach] <wt_path> <ref>``.
+
+        ``detach=True`` is the path ``_apply_pr_to_worktree`` uses
+        so the worktree does not auto-checkout a fresh branch on
+        top of the PR's base SHA.
+        """
+        argv = ["worktree", "add"]
+        if detach:
+            argv.append("--detach")
+        argv += [wt_path, ref]
+        return self._invoke(*argv, check=check)
+
+    def worktree_remove(self, wt_path, force=False, check=None):
+        argv = ["worktree", "remove"]
+        if force:
+            argv.append("--force")
+        argv.append(wt_path)
+        return self._invoke(*argv, check=check)
+
+    def worktree_prune(self, check=None):
+        return self._invoke("worktree", "prune", check=check)
+
+    # ----- apply (patch via stdin) ----------------------------------
+
+    def apply_stdin(self, patch_text, three_way=False,
+                     whitespace_fix=True, recount=False, check=None):
+        """``git apply [--whitespace=fix] [--recount] [--3way] -``.
+
+        The patch is passed via stdin (``-``) rather than as a
+        argv path because the workflow script computes the patch
+        text in-memory (it may have been re-routed from the Gitea
+        ``.diff`` fallback or rewritten by ``_rewrite_patch_paths``
+        for ccws sub-repos). ``whitespace_fix`` defaults to True
+        to match the existing flow's
+        ``--whitespace=fix`` arg.
+        """
+        argv = ["apply"]
+        if whitespace_fix:
+            argv.append("--whitespace=fix")
+        if recount:
+            argv.append("--recount")
+        if three_way:
+            argv.append("--3way")
+        argv.append("-")
+        kwargs = {"input": patch_text}
+        if check is not None:
+            kwargs["check"] = check
+        return run(self._argv(*argv), **kwargs)
+
+    # ----- rebase (needs GIT_EDITOR=true) ---------------------------
+
+    def rebase(self, upstream, env=None, check=None):
+        """``git rebase <upstream>`` — caller-supplied ``env`` must
+        contain ``GIT_EDITOR=true`` (or equivalent) to avoid the
+        command hanging on a commit-message prompt.
+        """
+        return self._invoke("rebase", upstream, env=env, check=check)
+
+    def rebase_abort(self, env=None, check=None):
+        return self._invoke("rebase", "--abort", env=env, check=check)
+
+    def rebase_continue(self, env=None, check=None):
+        return self._invoke("rebase", "--continue", env=env, check=check)
+
+    def rebase_skip(self, env=None, check=None):
+        return self._invoke("rebase", "--skip", env=env, check=check)
+
+    # ----- push ----------------------------------------------------
+
+    def push(self, remote, *refs, force_with_lease=False,
+             set_upstream=False, credential_helper=None,
+             dry_run=False, check=None):
+        """``git push [--force-with-lease] [-u] [--dry-run] <remote> <refs…>``
+        (or ``-c credential.helper=… git push …`` when a helper
+        is supplied). ``force_with_lease`` matches the existing
+        flow's refusal-to-overwrite-an-unseen-divergence policy;
+        do not add a raw ``--force`` here — use ``force_with_lease``
+        or reach for ``raw()`` so the choice is visible at the
+        call site.
+
+        ``refs`` is variadic: the standalone/squash/rebase flows
+        pass a single branch (``push("origin", pr_branch,
+        force_with_lease=True)``); the github-mirror-sync flow
+        passes the full list of changed branches (``push("origin",
+        *changed_branches, credential_helper=cred_helper)``).
+        ``--tags`` is not handled here — tag pushes are rare and
+        sufficiently different that they go through ``raw()``.
+
+        ``dry_run`` adds ``--dry-run`` so the push is exercised
+        end-to-end (server talks back, lease check runs) without
+        mutating the remote or the local branch. Used by
+        ``_preflight_push`` to fail fast before ``/squash`` /
+        ``/rebase`` commit to a destructive local state whose
+        push the server would reject anyway.
+        """
+        if credential_helper:
+            argv = self._argv("-c", f"credential.helper={credential_helper}",
+                                "push")
+        else:
+            argv = self._argv("push")
+        if dry_run:
+            argv.append("--dry-run")
+        if force_with_lease:
+            argv.append("--force-with-lease")
+        if set_upstream:
+            argv.append("-u")
+        argv.append(remote)
+        argv.extend(refs)
+        return run(argv, check=check)
+
+    # ----- merge-base ----------------------------------------------
+
+    def merge_base_is_ancestor(self, ancestor, descendant, check=None):
+        """``git merge-base --is-ancestor <a> <b>`` — returns
+        ``.returncode == 0`` iff ``a`` is an ancestor of ``b``.
+        """
+        return self._invoke(
+            "merge-base", "--is-ancestor", ancestor, descendant,
+            check=check)
+
+    # ----- ls-remote (no -C, runs against a URL) -------------------
+
+    def ls_remote(self, url, *refs, env=None, check=None):
+        """``git ls-remote [<env SSH vars>] <url> [<refs>…]``.
+
+        ``ls-remote`` does not take ``-C`` (it operates against a
+        URL, not a local checkout), so this method never uses
+        ``self.repo_dir``. ``env`` carries SSH-side vars
+        (``SSH_AUTH_SOCK``, ``GIT_SSH_COMMAND``) for the ssh
+        clone path.
+        """
+        return self._invoke("ls-remote", url, *refs, env=env, check=check)
 
 
 class GitCredentials:
@@ -936,6 +1305,12 @@ class HttpApiClient:
         subclass's list endpoint (``Gitea.list_orgs``, ``Gitea.list_branches``,
         ``Github.list_repos``, etc.). Static so subclasses can't
         accidentally inherit a hook into ``self``.
+
+        Returns ``[]`` on transport failure (the first ``data is
+        None`` collapses to an empty accumulator) — callers that
+        must distinguish "API succeeded with empty list" from
+        "API failed entirely" cannot use this helper directly; use
+        ``get_list`` instead, which returns ``(items, error)``.
         """
         results = []
         page = 1
@@ -948,6 +1323,53 @@ class HttpApiClient:
                 break
             page += 1
         return results
+
+    def get_list(self, path, params=None, limit=50):
+        """GET a paginated list endpoint and return ``(items, error)``.
+
+        Distinguishes three outcomes the plain ``_paginate`` loop
+        collapses:
+
+        * API transport failure (``HTTPError`` / ``URLError`` /
+          ``OSError`` / ``JSONDecodeError``) → ``(None, error_str)``
+        * API responded but the body is not a list
+          (an HTML error page, a redirect object, etc.) →
+          ``(None, error_str)``
+        * API succeeded with N items (N may be 0) →
+          ``(items, None)``
+
+        Callers branch on ``error is not None``: a transport failure
+        is a hard error (the maintenance script must ``die()`` so the
+        Argo step reports it); an empty list on a list endpoint is
+        just a fact about the org / repo. ``_paginate`` collapses the
+        two to ``[]`` and the old ``if not repos: continue`` paths
+        silently skipped the org — the bug the
+        ``SlaveAccess._add_to_mirrored_repos`` /
+        ``_ensure_force_push_access`` defensive checks were meant
+        to surface. ``list_org`` etc. remain on the class for
+        callers that legitimately do not need to distinguish; new
+        callers use ``get_list``.
+        """
+        page = 1
+        items = []
+        try:
+            while True:
+                p = {"page": page, "limit": limit}
+                if params:
+                    p.update(params)
+                batch = self.get(path, params=p)
+                if batch is None:
+                    return None, f"GET {path} transport failure"
+                if not isinstance(batch, list):
+                    return None, (f"GET {path} returned non-list: "
+                                  f"{type(batch).__name__}")
+                items.extend(batch)
+                if len(batch) < limit:
+                    break
+                page += 1
+        except Exception as e:
+            return None, f"GET {path} raised {type(e).__name__}: {e}"
+        return items, None
 
 
 # ---------------------------------------------------------------------
@@ -1177,6 +1599,27 @@ class Gitea(HttpApiClient):
     def get_repo(self, repo_full):
         return self.get(f"repos/{repo_full}")
 
+    def can_push(self, repo_full):
+        """True if the authenticated user has push permission on
+        ``repo_full``. Reads the Gitea ``permissions`` block in the
+        repo metadata (``GET /repos/{owner}/{repo}``); the field is
+        present when the caller has any access to the repo and
+        names ``pull`` / ``push`` / ``admin`` / ``maintain`` /
+        ``triage`` booleans.
+
+        Returns ``None`` (not False) on lookup failure — the caller
+        distinguishes "Gitea said no" from "we don't know". The
+        ``_preflight_push`` consumer treats ``None`` as
+        fail-closed (it would rather over-refuse than commit to a
+        destructive local op on a permission state it cannot
+        read).
+        """
+        data = self.get_repo(repo_full)
+        if not data:
+            return None
+        perms = data.get("permissions") or {}
+        return bool(perms.get("push"))
+
     def ensure_pull_requests_enabled(self, repo_full):
         data = self.get(f"repos/{repo_full}")
         if data is None:
@@ -1209,7 +1652,7 @@ class Gitea(HttpApiClient):
         unresolved = [c for c in all_comments if not c.get("resolver")]
 
         trusted_users = set(
-            params.shoggoth_trusted_reviewers.split(","))
+            params.shoggoth_trusted_users.split(","))
         trusted_users.discard(slave_user)
 
         threads = {}
@@ -1311,6 +1754,42 @@ class Gitea(HttpApiClient):
                 return None
         return True
 
+    # ----- slash command helpers (workflow) --------------------------
+
+    def request_reviewer(self, repo, pr_number, username):
+        """Request a review from ``username`` on the given PR.
+
+        Mirrors ``remove_requested_reviewer`` (which uses DELETE) for
+        the symmetric POST case. Used by ``PrUpdateCommand``'s
+        ``/review`` slash command so the user-driven path and the
+        existing ``pull_request_review_request`` workflow trigger
+        converge on the same Gitea API call.
+        """
+        return self.post(
+            f"repos/{repo}/pulls/{pr_number}/requested_reviewers",
+            {"reviewers": [username]})
+
+    def post_pr_comment(self, repo, pr_number, body):
+        """Post an issue-style comment on a PR.
+
+        Distinct from ``post_pr_review`` (which posts a review with a
+        verdict on the PR's review tab). Issue comments are top-level
+        timeline comments used by the ``/help`` / ``/review`` /
+        ``/squash`` / ``/rebase`` slash-command responses.
+        """
+        return self.post(f"repos/{repo}/issues/{pr_number}/comments",
+                          {"body": body})
+
+    def get_pr_comment_body(self):
+        """Return the body of the comment in the current PR payload.
+
+        Returns an empty string when the payload has no comment field
+        (e.g. a non-comment PR event). Caller is responsible for
+        stripping whitespace.
+        """
+        comment = self._payload.get("comment") or {}
+        return comment.get("body") or ""
+
     # ----- orgs / org-hooks (maintenance) ----------------------------
 
     def list_orgs(self):
@@ -1350,6 +1829,51 @@ class Gitea(HttpApiClient):
         return self._paginate(lambda page, limit: self.get(
             f"repos/{repo_full}/tags", params={"page": page, "limit": limit}))
 
+    # ----- branch protection (maintenance) ---------------------------
+    #
+    # Gitea stores per-branch protection rules in
+    # ``/repos/{owner}/{repo}/branch_protections``. The relevant
+    # fields for the slave's force-push path are ``enable_push``
+    # (whether push is restricted to the whitelist), ``enable_force_push``
+    # (whether force-push is allowed for those who can push),
+    # ``whitelist_users`` (the explicit allow-list of users when
+    # ``enable_push`` is true) and ``whitelist_teams`` (same, for
+    # teams). The list endpoint paginates, the get/patch endpoints
+    # are keyed on the protected branch name and *not* on a numeric
+    # id — the path is ``/branch_protections/{name}`` with ``name``
+    # URL-encoded. PATCH on an existing rule is a partial update;
+    # any field omitted from the body is left unchanged.
+    #
+    # The ``slave-access`` step calls these to ensure the slave can
+    # force-push to any protected branch in any mirrored repo: it
+    # sets ``enable_force_push=true`` (so a ``write`` user can
+    # force-push when ``enable_push`` is false) and appends the
+    # slave to ``whitelist_users`` (so the slave can force-push
+    # when ``enable_push`` is true and the whitelist is the only
+    # path to push at all).
+
+    def list_branch_protections(self, repo_full):
+        return self._paginate(lambda page, limit: self.get(
+            f"repos/{repo_full}/branch_protections",
+            params={"page": page, "limit": limit}))
+
+    def get_branch_protection(self, repo_full, branch_name):
+        return self.get(
+            f"repos/{repo_full}/branch_protections/{branch_name}")
+
+    def update_branch_protection(self, repo_full, branch_name, **fields):
+        """PATCH ``/repos/{owner}/{repo}/branch_protections/{branch}``.
+
+        Accepts any subset of the Gitea protection fields. Pass
+        ``whitelist_users=[...]`` to replace the list (Gitea
+        treats the field as a full set on PATCH, not a diff); the
+        caller is responsible for computing the desired end state
+        and passing the merged list in one call.
+        """
+        return self.patch(
+            f"repos/{repo_full}/branch_protections/{branch_name}",
+            fields)
+
     def is_org_member(self, org, username):
         return self.status(f"orgs/{org}/members/{username}") == 204
 
@@ -1373,6 +1897,72 @@ class Gitea(HttpApiClient):
             if not self.put(f"teams/{team_id}/members/{username}"):
                 ok = False
         return ok
+
+    def find_team_by_name(self, org, name):
+        """Return the team dict for ``org``/``name`` or ``None``.
+
+        Uses ``GET /orgs/{org}/teams/search?q={name}`` and matches on
+        the exact lowercased team name. Gitea's search endpoint
+        returns up to 10 teams whose name, description, or lower_name
+        contain the query; the case-insensitive equality check is
+        the only safe way to avoid a "shoggoth-slave-push" prefix
+        matching "shoggoth-slave-push-archive". Returns ``None``
+        on 404, on a non-200 status, on a transport failure, or when
+        the search returns no team with that exact name — callers
+        treat every ``None`` outcome identically and fall through to
+        the create path. Distinguishing "found a team" from
+        "anything else" is the caller's only contract here.
+        """
+        data = self.get(f"orgs/{org}/teams/search",
+                        params={"q": name, "limit": 10})
+        if not isinstance(data, list):
+            return None
+        want = name.lower()
+        for team in data:
+            if (team.get("name", "").lower() == want
+                    or team.get("lower_name") == want):
+                return team
+        return None
+
+    def create_team(self, org, name, permission="write",
+                    includes_all_repositories=True,
+                    units=None):
+        """Create ``name`` in ``org`` with the given permission and
+        team-repo scope. Returns the new team dict on 201, ``None``
+        on any other outcome (the 422 "team already exists" is the
+        expected outcome on a re-run and the caller must check
+        ``find_team_by_name`` to recover).
+
+        ``includes_all_repositories=True`` (the default) makes the
+        team auto-grant access to every existing and future repo in
+        the org, so the script does not have to add the team to each
+        repo individually. ``NewTeam`` walks the org repos and
+        calls ``addRepositoryToTeam`` (which calls
+        ``RecalculateTeamAccesses``) for each one, so the
+        ``Access`` table is populated for every existing repo at
+        create-time. Future repos picked up by the
+        ``includes_all_repositories`` watch are not visible here,
+        but the in-org mirror-sync adds them to the team's
+        ``team_repo`` rows anyway and triggers a recalc through
+        the same path.
+        """
+        payload = {
+            "name": name,
+            "permission": permission,
+            "includes_all_repositories": includes_all_repositories,
+            "units": units or ["repo.code", "repo.issues",
+                               "repo.pulls", "repo.releases"],
+        }
+        return self.post(f"orgs/{org}/teams", payload)
+
+    def update_team(self, team_id, **fields):
+        """PATCH ``/teams/{id}`` with ``fields`` (permission, units,
+        includes_all_repositories, etc.). Returns the parsed
+        response body on 200, ``None`` on any other outcome. Used
+        to upgrade an existing team to ``includes_all_repositories``
+        if it was created without that flag.
+        """
+        return self.patch(f"teams/{team_id}", fields)
 
     def migrate_repo(self, clone_addr, repo_name, repo_owner, description=""):
         return self.post("repos/migrate", {
@@ -1398,6 +1988,72 @@ class Gitea(HttpApiClient):
     def is_repo_collaborator(self, repo_full, username):
         code = self.status(f"repos/{repo_full}/collaborators/{username}")
         return code == 204
+
+    def delete_repo_collaborator(self, repo_full, username):
+        """``DELETE /repos/{owner}/{repo}/collaborators/{username}``.
+
+        Returns ``True`` on 204 (the user was a collaborator and
+        is now gone) and ``True`` on 404 (the user was not a
+        collaborator — idempotent). ``False`` on any other
+        transport / status error. Used by the maintenance pass
+        to force a ``RecalculateUserAccess`` on the next add
+        when the ``Access`` table is suspected stale (e.g.
+        after a team removal that did not propagate).
+        """
+        # ``_send_status`` returns ``True`` on 2xx and ``None``
+        # (via ``_http_warn``) on HTTPError/URLError/OSError.
+        # Gitea returns 204 on a successful delete and 404 when
+        # the user was not a collaborator; both are acceptable
+        # outcomes for the force-refresh path. We can't tell 204
+        # and 404 apart with the boolean ``_send_status`` returns
+        # (it collapses 2xx to True and 4xx/5xx to None), so a
+        # more nuanced check is not possible without a status-code
+        # variant. The boolean is enough for the caller: the
+        # "force-refresh" semantic only needs the request to
+        # reach Gitea and either delete the collaborator or
+        # confirm absence.
+        return bool(self._send_status(
+            "DELETE", f"repos/{repo_full}/collaborators/{username}"))
+
+    def get_repo_collaborator_permission(self, repo_full, username):
+        """Return ``username``'s effective permission on ``repo_full``.
+
+        Calls ``GET /repos/{owner}/{repo}/collaborators/{collaborator}/permission``
+        which returns the *effective* role — the maximum of the direct
+        collaborator permission and any team-based permission the user
+        inherits through org membership. Gitea documents the role as
+        one of ``read`` / ``write`` / ``admin`` / ``owner``.
+
+        Returns the role string when the user has any access; ``None``
+        when the user is not a collaborator (404) or the lookup failed
+        (HTTP/URL/OS error). Callers that need to distinguish "not a
+        collaborator" from "lookup failed" should fall through to the
+        ``add_repo_collaborator`` path: the PUT endpoint is idempotent
+        and accepts an existing collaborator, so retrying with a write
+        payload upgrades their permission on success and surfaces the
+        underlying transport error on failure.
+        """
+        url, hdrs = self._resolve(
+            f"repos/{repo_full}/collaborators/{username}/permission")
+        try:
+            with urlopen(Request(url, headers=hdrs),
+                         timeout=HttpApiClient.HTTP_TIMEOUT) as resp:
+                body = resp.read().decode()
+                log(f"GET {url} -> {resp.status}")
+                if not body:
+                    return None
+                data = json.loads(body)
+        except HTTPError as e:
+            if e.code == 404:
+                log(f"GET {url} -> 404 (not a collaborator)")
+                return None
+            self._http_warn(f"GET {url}", e)
+            return None
+        except (URLError, OSError, json.JSONDecodeError) as e:
+            self._http_warn(f"GET {url}", e)
+            return None
+        role = data.get("role") if isinstance(data, dict) else None
+        return role if isinstance(role, str) else None
 
     # ----- user tokens / SSH keys / admin (maintenance) --------------
 
@@ -1983,9 +2639,9 @@ class OtlpLogger:
                 f"failed={self._failed_count}); line: {line[:120]!r}")
 
     def start_session(self, event_type):
-        self.session_id = str(uuid.uuid4())
         self.service_name = f"qwen-{event_type}"
         self.reset()
+        self.session_id = str(uuid.uuid4())
         self._pushed_count = 0
         self._failed_count = 0
         self._logged_endpoint = False
@@ -1996,7 +2652,17 @@ class OtlpLogger:
         self.last_result = None
         self.last_error = None
         self.assistant_text = []
-        self.session_id = None
+        # NOTE: do not clear ``session_id`` here. The session id is the
+        # qwen conversation identity and must persist across prompt()
+        # calls within the same session so subsequent prompts that pass
+        # ``resume=True`` can still find the id to pass as ``--resume``.
+        # ``prompt()`` calls ``reset()`` right before launching qwen; if
+        # reset() nuked session_id, the next prompt() in the workflow
+        # (``pr-comment`` chains several ``resume=True`` prompts after
+        # ``start_session``) would build a cmd with ``--resume None`` and
+        # crash the logging join. Callers that want a fresh session
+        # (``start_session``, ``prompt_with_retry`` on leaked-tag retry)
+        # assign ``session_id`` themselves.
 
     def stop_session(self):
         log(f"otlp: stop_session pushed={self._pushed_count} "
@@ -2123,13 +2789,31 @@ class Agent:
         expected shape, and returns the parsed dict. Returns None if
         nothing usable is found.
         """
+        return Agent._extract_agent_json(text, "END_OF_REVIEW",
+                                          ("verdict", "findings", "summary"))
+
+    @staticmethod
+    def _extract_agent_json(text, end_marker, required_keys=()):
+        """Generic JSON extractor from agent assistant text.
+
+        The ``_extract_review_json`` shape check is too narrow for the
+        slash-command prompts (squash wants ``subject``/``body``,
+        rebase wants ``resolutions``); the JSON-locating logic is
+        identical, so this helper does the locating once and lets the
+        caller supply an end-marker name and the keys that make a
+        payload "useful". ``required_keys`` is a tuple; the parsed
+        dict passes if at least one of the keys is present, matching
+        the lenient "any of these keys indicates a real review"
+        contract ``_extract_review_json`` historically enforced.
+        """
         if not text:
             return None
         m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+        candidate = None
         if m:
             candidate = m.group(1)
         else:
-            end = text.find("END_OF_REVIEW")
+            end = text.find(end_marker)
             if end != -1:
                 head = text[:end]
             else:
@@ -2148,13 +2832,15 @@ class Agent:
                         break
             else:
                 return None
+        if not candidate:
+            return None
         try:
             data = json.loads(candidate)
         except json.JSONDecodeError:
             return None
         if not isinstance(data, dict):
             return None
-        if "verdict" not in data and "findings" not in data and "summary" not in data:
+        if required_keys and not any(key in data for key in required_keys):
             return None
         return data
 
@@ -2346,8 +3032,8 @@ class Agent:
                     f"attempt={attempt}/{max_retries} "
                     f"delay={delay}s; rotating session and retrying")
                 time.sleep(delay)
-                self.otlp.session_id = str(uuid.uuid4())
                 self.otlp.reset()
+                self.otlp.session_id = str(uuid.uuid4())
                 resume = False
             rc = self.prompt(text, resume=resume, timeout=timeout, cwd=cwd)
             if rc == 0:
@@ -2494,16 +3180,17 @@ class Shoggoth:
 
         log(f"checkout: type={self.type} branch={self.working_branch} url={self.clone_url} dest={workspace_dir}")
 
+        g = Git()
         if self.working_branch:
-            result = run(["git", "clone", "--depth", "1", "--branch", self.working_branch,
-                          self.clone_url, workspace_dir], check=False)
+            result = g.clone(self.clone_url, workspace_dir, depth="1",
+                              branch=self.working_branch, check=False)
             if result.returncode != 0 and self.type == "ccws":
                 log(f"checkout: branch {self.working_branch} not found, cloning default branch")
-                result = run(["git", "clone", "--depth", "1",
-                              self.clone_url, workspace_dir], check=False)
+                result = g.clone(self.clone_url, workspace_dir, depth="1",
+                                  check=False)
         else:
-            result = run(["git", "clone", "--depth", "1",
-                          self.clone_url, workspace_dir], check=False)
+            result = g.clone(self.clone_url, workspace_dir, depth="1",
+                              check=False)
 
         if result.returncode != 0:
             die(f"git clone failed for {self.clone_url}: {result.stderr}")
@@ -2557,8 +3244,8 @@ class Shoggoth:
         if not os.path.exists(os.path.join(repo_dir, ".git", "shallow")):
             log(f"_unshallow: {repo_dir} already full history")
             return
-        result = run(["git", "-C", repo_dir, "fetch", "origin",
-                      "--unshallow", "--tags"], check=False)
+        result = Git(repo_dir).fetch(remote="origin", unshallow=True,
+                                      tags=True, check=False)
         if result.returncode != 0:
             log(f"_unshallow: warning: {result.stderr.strip()[:200]}")
 
@@ -2573,15 +3260,18 @@ class Shoggoth:
         if not safe or safe.startswith("-") or ".." in safe:
             log(f"_ensure_remote_ref: refusing unsafe ref {ref_name!r}")
             return False
-        result = run(["git", "-C", repo_dir, "fetch", "origin",
-                      f"{ref_name}:refs/remotes/origin/{safe}"], check=False)
+        g = Git(repo_dir)
+        result = g.fetch(remote="origin", ref=ref_name,
+                         local_ref=f"refs/remotes/origin/{safe}",
+                         check=False)
         if result.returncode == 0:
             return True
         if pr_number is not None:
             log(f"_ensure_remote_ref: trying pull/{pr_number}/head as fallback")
-            result = run(["git", "-C", repo_dir, "fetch", "origin",
-                          f"pull/{pr_number}/head:refs/remotes/origin/pr-{pr_number}"],
-                         check=False)
+            result = g.fetch(remote="origin",
+                             ref=f"pull/{pr_number}/head",
+                             local_ref=f"refs/remotes/origin/pr-{pr_number}",
+                             check=False)
             return result.returncode == 0
         return False
 
@@ -2600,9 +3290,9 @@ class Shoggoth:
         if base_ref:
             candidates.append(f"origin/{base_ref}...HEAD")
         candidates.append("HEAD~1...HEAD")
+        g = Git(repo_dir)
         for spec in candidates:
-            result = run(["git", "-C", repo_dir, "diff", spec,
-                          "--binary", "--no-color"], check=False)
+            result = g.diff(spec, "--binary", "--no-color", check=False)
             if result.returncode == 0 and result.stdout.strip():
                 with open(diff_path, "w") as f:
                     f.write(result.stdout)
@@ -2636,11 +3326,10 @@ class Shoggoth:
                 f"as worktree source")
 
         base_sha = None
+        source_git = Git(worktree_source)
         for candidate in ([f"origin/{base_ref}", base_ref]
                           if base_ref else []):
-            resolved = run(["git", "-C", worktree_source, "rev-parse",
-                            "--verify", candidate], check=False,
-                           capture_output=True, text=True)
+            resolved = source_git.rev_parse_verify(candidate, check=False)
             if resolved.returncode == 0 and resolved.stdout.strip():
                 base_sha = resolved.stdout.strip()
                 break
@@ -2650,9 +3339,8 @@ class Shoggoth:
                 f"{base_ref!r} from {worktree_source}")
             return None, ""
 
-        add_wt = run(["git", "-C", worktree_source, "worktree", "add",
-                      "--detach", wt_path, base_sha], check=False,
-                     capture_output=True, text=True)
+        add_wt = source_git.worktree_add(wt_path, base_sha, detach=True,
+                                          check=False)
         if add_wt.returncode != 0:
             log(f"_apply_pr_to_worktree: worktree add failed: "
                 f"{add_wt.stderr.strip()[:200]}")
@@ -2665,9 +3353,8 @@ class Shoggoth:
                       "HEAD~1...HEAD"] if base_ref and head_ref else
                      [f"origin/{base_ref}...HEAD", "HEAD~1...HEAD"]
                      if base_ref else ["HEAD~1...HEAD"]):
-            res = run(["git", "-C", worktree_source, "diff", spec,
-                       "--binary", "--no-color"],
-                      check=False, capture_output=True, text=True)
+            res = source_git.diff(spec, "--binary", "--no-color",
+                                   check=False)
             if res.returncode == 0 and res.stdout.strip():
                 diff_text = res.stdout
                 diff_source = f"git-diff:{spec}"
@@ -2694,25 +3381,21 @@ class Shoggoth:
             diff_text = self._rewrite_patch_paths(
                 diff_text, review_repo_dir)
 
-        apply = run(["git", "-C", wt_path, "apply", "--whitespace=fix",
-                     "--recount", "-"],
-                    check=False, input=diff_text,
-                    capture_output=True, text=True)
+        wt_git = Git(wt_path)
+        apply = wt_git.apply_stdin(diff_text, whitespace_fix=True,
+                                    recount=True, check=False)
         if apply.returncode != 0:
             log(f"_apply_pr_to_worktree: git apply failed "
                 f"(will retry with -3): {apply.stderr.strip()[:300]}")
-            apply3 = run(["git", "-C", wt_path, "apply", "--3way",
-                          "--whitespace=fix", "-"],
-                         check=False, input=diff_text,
-                         capture_output=True, text=True)
+            apply3 = wt_git.apply_stdin(diff_text, three_way=True,
+                                         whitespace_fix=True, check=False)
             if apply3.returncode != 0:
                 log(f"_apply_pr_to_worktree: git apply --3way also "
                     f"failed: {apply3.stderr.strip()[:300]}")
                 self._remove_review_worktree(wt_path)
                 return None, ""
 
-        status = run(["git", "-C", wt_path, "status", "--porcelain"],
-                     check=False, capture_output=True, text=True)
+        status = wt_git.status_porcelain(check=False)
         log(f"_apply_pr_to_worktree: worktree {wt_path} ready; "
             f"diff_source={diff_source}; "
             f"changed_files={len([l for l in status.stdout.splitlines() if l.strip()])}")
@@ -2775,9 +3458,9 @@ class Shoggoth:
                 f"{wt_path}; falling back to force remove")
             shutil.rmtree(wt_path, ignore_errors=True)
             return
-        run(["git", "-C", repo_dir, "worktree", "remove", "--force",
-             wt_path], check=False)
-        run(["git", "-C", repo_dir, "worktree", "prune"], check=False)
+        g = Git(repo_dir)
+        g.worktree_remove(wt_path, force=True, check=False)
+        g.worktree_prune(check=False)
         if os.path.isdir(wt_path):
             shutil.rmtree(wt_path, ignore_errors=True)
 
@@ -2828,7 +3511,7 @@ class CommandBase:
         """
         for repo_name in modified_repos:
             repo_path = os.path.join(repo_dir, repo_name)
-            add = run(["git", "-C", repo_path, "add", "-A"], check=False)
+            add = Git(repo_path).add_all(check=False)
             if add.returncode != 0:
                 die(f"failed to stage changes in {repo_name}: {add.stderr}")
         commit = WsHandler(repo_dir).commit(commit_msg, check=False)
@@ -2836,24 +3519,25 @@ class CommandBase:
             die(f"git commit failed: {commit.stderr}")
 
     def _commit_only_standalone(self, repo_dir, commit_msg):
-        status = run(["git", "-C", repo_dir, "status", "--porcelain"], check=False)
+        g = Git(repo_dir)
+        status = g.status_porcelain(check=False)
         if status.returncode != 0:
             die(f"git status failed in {repo_dir}: {status.stderr}")
         if not status.stdout.strip():
             self._pending_modified_repos = []
             return False
 
-        add = run(["git", "-C", repo_dir, "add", "-A"], check=False)
+        add = g.add_all(check=False)
         if add.returncode != 0:
             die(f"failed to stage changes in {repo_dir}: {add.stderr}")
-        staged = run(["git", "-C", repo_dir, "diff", "--cached", "--name-only"], check=False)
+        staged = g.diff_cached_name_only(check=False)
         if staged.returncode != 0:
             die(f"git diff --cached failed in {repo_dir}: {staged.stderr}")
         if not staged.stdout.strip():
             self._pending_modified_repos = []
             return False
 
-        commit = run(["git", "-C", repo_dir, "commit", "-m", commit_msg], check=False)
+        commit = g.commit(commit_msg, check=False)
         if commit.returncode != 0:
             die(f"git commit failed: {commit.stderr}")
         self._pending_modified_repos = []
@@ -2893,7 +3577,7 @@ class CommandBase:
             if push.returncode != 0:
                 die(f"failed to push branches: {push.stderr}")
         else:
-            push = run(["git", "-C", repo_dir, "push", "origin", pr_branch], check=False)
+            push = Git(repo_dir).push("origin", pr_branch, check=False)
             if push.returncode != 0:
                 die(f"failed to push branch {pr_branch}: {push.stderr}")
 
@@ -2927,19 +3611,20 @@ class TaskCommand(CommandBase):
 
     def commit_push_and_create_mr_standalone(self, branch, task_id, task_subject):
         repo_dir = self.shoggoth.repo_dir
-        status = run(["git", "-C", repo_dir, "status", "--porcelain"])
+        g = Git(repo_dir)
+        status = g.status_porcelain()
         if not status.stdout.strip():
             print("No local changes, skipping commit and push")
             return False, []
 
-        checkout = run(["git", "-C", repo_dir, "checkout", "-B", branch], check=False)
+        checkout = g.checkout_new_b(branch, check=False)
         if checkout.returncode != 0:
             die(f"git checkout -B {branch} failed: {checkout.stderr}")
-        add = run(["git", "-C", repo_dir, "add", "-A"], check=False)
+        add = g.add_all(check=False)
         if add.returncode != 0:
             die(f"failed to stage changes: {add.stderr}")
 
-        staged = run(["git", "-C", repo_dir, "diff", "--cached", "--name-only"], check=False)
+        staged = g.diff_cached_name_only(check=False)
         if staged.returncode != 0:
             die(f"git diff --cached failed: {staged.stderr}")
         if not staged.stdout.strip():
@@ -2947,12 +3632,11 @@ class TaskCommand(CommandBase):
             return False, []
 
         sanitized_subject = self._sanitize_subject(task_subject)
-        commit = run(["git", "-C", repo_dir, "commit",
-                      "-m", f"Task#{task_id}: {sanitized_subject}"], check=False)
+        commit = g.commit(f"Task#{task_id}: {sanitized_subject}", check=False)
         if commit.returncode != 0:
             die(f"git commit failed: {commit.stderr}")
 
-        push = run(["git", "-C", repo_dir, "push", "-u", "origin", branch], check=False)
+        push = g.push("origin", branch, set_upstream=True, check=False)
         if push.returncode != 0:
             die(f"failed to push branch '{branch}': {push.stderr}")
 
@@ -3149,6 +3833,29 @@ class CiFailureCommand(CommandBase):
 
 
 class PrUpdateCommand(CommandBase):
+    # Slash command regex: a comment whose body is exactly
+    # ``/command_name`` — no leading/trailing whitespace, no other
+    # content. The ``\w+`` class excludes slashes / spaces so a
+    # ``/command extra`` comment falls through to the normal
+    # ``_pr_comment`` review-comments flow. ``action == "created"``
+    # is enforced in ``_detect_slash_command`` so edits / deletes
+    # do not re-fire commands (only the original invocation does).
+    SLASH_COMMAND_RE = re.compile(r"^/(\w+)$")
+
+    # Catalog surfaced by ``/help``. Tuples keep the order stable
+    # without making callers depend on Python's dict ordering
+    # guarantee (the file targets Python 3).
+    SUPPORTED_COMMANDS = (
+        ("help", "List available slash commands"),
+        ("review", "Request a code review from the slave user "
+                   "(identical to assigning a review request)"),
+        ("squash", "Squash all commits in this PR into a single "
+                   "commit; the commit message is generated by an "
+                   "agent from the cumulative diff"),
+        ("rebase", "Rebase this PR on top of the target branch; "
+                   "conflicts are resolved by an agent"),
+    )
+
     def __init__(self, shoggoth, gitea, redmine, agent):
         super().__init__(gitea, redmine, agent, shoggoth=shoggoth)
 
@@ -3180,6 +3887,20 @@ class PrUpdateCommand(CommandBase):
                   f"repo={self.shoggoth.working_repo} ===", flush=True)
             self._pr_review(pr_url)
         else:
+            # Slash-command dispatch fires before the generic
+            # review-comments walk so a comment whose body is just
+            # ``/command_name`` is consumed by the command handler
+            # instead of being treated as a (text-only) review
+            # comment that has nothing to address.
+            if action == "created":
+                slash_command = self._detect_slash_command()
+                if slash_command:
+                    print(f"=== PR SLASH COMMAND: pr={pr_url} "
+                          f"repo={self.shoggoth.working_repo} "
+                          f"command=/{slash_command} ===", flush=True)
+                    self._handle_slash_command(slash_command,
+                                               pr_number, pr_url)
+                    return
             print(f"=== PR COMMENT CHECK: pr={pr_url} "
                   f"repo={self.shoggoth.working_repo} ===", flush=True)
             self._pr_comment(self.gitea.get_pr_number(), pr_url)
@@ -3545,6 +4266,831 @@ class PrUpdateCommand(CommandBase):
                     self.redmine.update_issue(redmine_task_id,
                          "--note", redmine_note)
 
+    # ----- slash commands (workflow) ---------------------------------
+
+    def _detect_slash_command(self):
+        """Return the slash-command name (without the leading ``/``)
+        if the current PR comment is a slash command, otherwise
+        ``None``.
+
+        Matches ``SLASH_COMMAND_RE`` against the stripped body of the
+        ``comment`` field in the webhook payload. ``action ==
+        "created"`` is enforced so an ``edited``/``deleted`` comment
+        does not re-fire the command — only the original invocation
+        counts, mirroring how GitHub slash-command bots typically
+        gate on ``action == "created"``.
+
+        The check is deliberately strict (``^/(\\w+)$``, no
+        content besides the command name) per the spec:
+        surrounding whitespace is stripped first (so an accidental
+        newline before ``/help`` is still recognised) but anything
+        after the command — e.g. ``/help please`` — falls through
+        to ``_pr_comment`` as a normal PR comment.
+        """
+        if self.gitea.get_pr_action() != "created":
+            return None
+        body = self.gitea.get_pr_comment_body().strip()
+        m = self.SLASH_COMMAND_RE.match(body)
+        return m.group(1) if m else None
+
+    def _handle_slash_command(self, command, pr_number, pr_url):
+        """Dispatch ``/command`` to its handler.
+
+        Looks up ``_slash_<command>`` on this class; unknown names
+        get a help-style response so a typo never silently no-ops.
+        Handler exceptions are caught, posted as a PR comment, and
+        then the workflow ``die()``s so the failure is visible in
+        the Argo log and the step is marked Failed — a slash
+        command that half-ran (e.g. force-pushed a squashed branch
+        but failed before reporting back) must not return success
+        to the workflow template.
+        """
+        pr_repo = self.shoggoth.working_repo
+        log(f"slash-command: command=/{command} repo={pr_repo} "
+            f"pr={pr_number}")
+
+        # Trust check: only ``shoggoth_trusted_users`` can drive
+        # destructive operations (force-push on /squash, /rebase,
+        # review-request on /review). Implemented here (rather than
+        # in execute()) so any future dispatch path also inherits
+        # the gate without having to remember to add it. The check
+        # is silent on rejection — posting a PR-visible "not
+        # authorized" message would leak the existence of the
+        # command names and give unauthenticated users a probe
+        # channel. The Argo log line is sufficient for the trusted
+        # user auditing what happened.
+        comment = self.gitea._payload.get("comment") or {}
+        author = (comment.get("user") or {}).get("login") or ""
+        trusted_users = set(
+            (params.shoggoth_trusted_users or "").split(","))
+        trusted_users.discard("")
+        if not author or author not in trusted_users:
+            log(f"slash-command: rejecting /{command} from "
+                f"non-trusted user {author!r} (allowed={sorted(trusted_users)})",
+                file=sys.stderr)
+            return
+
+        handler = getattr(self, f"_slash_{command}", None)
+        if handler is None:
+            log(f"slash-command: no handler for /{command}")
+            self._post_slash_response(pr_repo, pr_number,
+                f"Unknown command `/{command}`. "
+                f"Type `/help` for the list of supported commands.")
+            return
+        try:
+            handler(pr_repo, pr_number, pr_url)
+        except Exception as e:
+            log(f"slash-command: command=/{command} failed: {e}",
+                file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                f"Command `/{command}` failed: {e}")
+            # Fail the workflow, not just the command. The PR
+            # comment above gives the user a clean pointer to the
+            # reason; dying surfaces the same reason in the Argo
+            # log (which the workflow template displays prominently
+            # and which Argo uses to mark the step as Failed) and
+            # stops the rest of the dispatch path from running on
+            # a half-completed state. The pre-fix behaviour
+            # (silently continue) hid the very bugs the user is
+            # trying to debug — e.g. the ``session_id = None``
+            # crash in /squash, where the workflow succeeded in
+            # Argo despite the command being a no-op.
+            die(f"slash-command: /{command} failed: {e}")
+
+    def _post_slash_response(self, pr_repo, pr_number, body,
+                              fatal=False, command=None):
+        """Post a slash-command response as an issue-style comment.
+
+        Used by every ``_slash_*`` handler to confirm success or
+        explain failure. A ``None`` return from ``post_pr_comment``
+        is logged but does not raise — the original command may
+        already have made destructive changes (e.g. force-push on
+        ``/squash``) and the workflow should not abort at that
+        point on a comment-post failure alone.
+
+        When ``fatal=True`` the caller is reporting a failure that
+        the workflow must not return success on (a soft failure
+        path: handler caught the error, posted a comment, returned
+        without raising). After posting, this calls ``die()`` so
+        the Argo step is marked Failed and the user sees the same
+        message in the workflow log; ``command`` names the slash
+        command for the die line. The pre-fix behaviour was to
+        return from the handler normally and let the workflow
+        succeed — which masked destructive partial state
+        (e.g. ``/squash`` with a successful ``git reset --soft`` +
+        ``git commit`` but a rejected ``git push``: the local
+        branch is squashed, the remote is not, the next push is a
+        force-push onto a divergence the user did not intend).
+        """
+        result = self.gitea.post_pr_comment(pr_repo, pr_number, body)
+        if result is None:
+            log(f"slash-command: WARNING failed to post response "
+                f"comment to {pr_repo}#{pr_number}",
+                file=sys.stderr)
+        if fatal:
+            label = f"/{command}" if command else "(unknown)"
+            die(f"slash-command: {label} failed: workflow halted after "
+                f"posted failure response")
+        return result
+
+    def _slash_help(self, pr_repo, pr_number, pr_url):
+        """``/help`` — list supported slash commands as a PR comment."""
+        lines = ["**Supported slash commands:**", ""]
+        for cmd, desc in self.SUPPORTED_COMMANDS:
+            lines.append(f"- `/{cmd}` — {desc}")
+        self._post_slash_response(pr_repo, pr_number, "\n".join(lines))
+
+    def _slash_review(self, pr_repo, pr_number, pr_url):
+        """``/review`` — request a review from the slave user.
+
+        Identical to assigning a review request to ``slave_user`` via
+        the Gitea UI: posts to
+        ``/repos/{repo}/pulls/{n}/requested_reviewers`` which fires
+        a ``pull_request_review_request`` webhook. The existing
+        review handler in ``execute()`` picks that up and runs the
+        normal review flow. Posting a response comment is best-effort
+        — the actual review is what the user wanted, not the
+        confirmation.
+        """
+        slave_user = params.shoggoth_slave_user
+        log(f"slash-review: requesting review from {slave_user} "
+            f"on {pr_repo}#{pr_number}")
+        result = self.gitea.request_reviewer(pr_repo, pr_number, slave_user)
+        if result is None:
+            log(f"slash-review: request_reviewer returned None",
+                file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                f"Failed to request review from `{slave_user}`.",
+                fatal=True, command="review")
+            return
+        self._post_slash_response(pr_repo, pr_number,
+            f"Review requested from `{slave_user}`. "
+            f"The review will be posted once it completes.")
+
+    def _slash_squash(self, pr_repo, pr_number, pr_url):
+        """``/squash`` — squash all PR commits into one.
+
+        Two-stage flow: (1) an agent generates a commit message from
+        the cumulative diff (subject + Markdown body), (2) a soft
+        ``git reset`` to the merge-base with the target branch
+        followed by a single ``git commit`` with the generated
+        message. The squashed branch is then force-pushed.
+
+        ccws note: this operates on the manifest repo (the one
+        holding the working branch). Sub-repos keep their per-PR
+        commit history; a full cross-repo squash would require a
+        separate per-sub-repo reset+recommit loop that this handler
+        does not implement. For standalone repos the manifest is
+        the only repo and the squash is exact.
+        """
+        repo_dir = self.shoggoth.repo_dir
+        pr_branch = self.shoggoth.working_branch
+        pr_data = self.gitea.get_pr(pr_repo, pr_number)
+        if not pr_data:
+            log(f"slash-squash: get_pr returned no data",
+                file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                f"Failed to get PR #{pr_number} info.",
+                fatal=True, command="squash")
+            return
+        base_ref = (pr_data.get("base") or {}).get("ref", "")
+        if not base_ref:
+            log(f"slash-squash: no base ref in PR data",
+                file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                "Failed to determine base branch.",
+                fatal=True, command="squash")
+            return
+
+        log(f"slash-squash: base={base_ref} branch={pr_branch} "
+            f"repo={repo_dir}")
+        self.shoggoth._unshallow(repo_dir)
+        self.shoggoth._ensure_remote_ref(repo_dir, base_ref, pr_number)
+        base_sha = self._resolve_remote_ref(repo_dir, f"origin/{base_ref}")
+        if not base_sha:
+            log(f"slash-squash: failed to resolve origin/{base_ref}",
+                file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                f"Failed to resolve base ref `{base_ref}`.",
+                fatal=True, command="squash")
+            return
+
+        diff_text = self._pr_diff_for_prompt(repo_dir, pr_repo,
+                                              pr_number, base_ref)
+        if not diff_text:
+            self._post_slash_response(pr_repo, pr_number,
+                "Failed to compute PR diff for squash.",
+                fatal=True, command="squash")
+            return
+        if len(diff_text) > 80000:
+            diff_text = diff_text[:80000] + "\n... (truncated)"
+
+        commit_msg = self._agent_generate_squash_message(
+            pr_url, pr_repo, pr_number, pr_branch, base_ref,
+            diff_text, repo_dir)
+        if commit_msg is None:
+            return  # _agent_generate_squash_message already posted failure (fatal)
+
+        # Pre-flight: verify the push would succeed before doing any
+        # destructive local work (``git reset --soft`` + ``git
+        # commit``). If the server would reject the push, bail out
+        # with the local branch in its pre-squash state so the user
+        # can fix the permission and retry.
+        if not self._preflight_push(pr_repo, pr_number, pr_branch,
+                                     repo_dir, "squash"):
+            return  # _preflight_push already posted a fatal failure
+
+        g = Git(repo_dir)
+        reset = g.reset_soft(base_sha, check=False)
+        if reset.returncode != 0:
+            log(f"slash-squash: git reset --soft failed: "
+                f"{reset.stderr.strip()[:200]}", file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                f"Failed to soft reset to base: "
+                f"{reset.stderr.strip()[:200]}",
+                fatal=True, command="squash")
+            return
+
+        cached = g.diff_cached_name_only(check=False)
+        if not cached.stdout.strip():
+            log(f"slash-squash: nothing staged after reset "
+                f"(branch already at base)")
+            self._post_slash_response(pr_repo, pr_number,
+                "No changes to squash (branch already at base).")
+            return
+
+        commit = g.commit(commit_msg, check=False)
+        if commit.returncode != 0:
+            log(f"slash-squash: git commit failed: "
+                f"{commit.stderr.strip()[:200]}", file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                f"Failed to commit squashed changes: "
+                f"{commit.stderr.strip()[:200]}",
+                fatal=True, command="squash")
+            return
+
+        push = g.push("origin", pr_branch, force_with_lease=True,
+                       check=False)
+        if push.returncode != 0:
+            stderr = (push.stderr or "").strip()[:500]
+            log(f"slash-squash: git push failed: {stderr}",
+                file=sys.stderr)
+            self._post_slash_response(
+                pr_repo, pr_number,
+                f"Failed to push squashed branch — the local "
+                f"branch is squashed (one commit on top of the "
+                f"base) but the remote is unchanged. Server said:"
+                f"\n\n```\n{stderr}\n```\n\n"
+                f"To finish the squash, push from a machine that "
+                f"has push access to `{pr_branch}`:\n\n"
+                f"```\n"
+                f"git fetch origin\n"
+                f"git checkout {pr_branch}\n"
+                f"git push --force-with-lease origin {pr_branch}\n"
+                f"```\n\n"
+                f"Or grant the shoggoth slave write permission on "
+                f"this repo and retry — the pre-flight check "
+                f"would then catch it before any destructive local "
+                f"op runs.",
+                fatal=True, command="squash")
+            return
+
+        log(f"slash-squash: successfully squashed {pr_branch}")
+        self._post_slash_response(pr_repo, pr_number,
+            f"Branch `{pr_branch}` squashed into a single commit "
+            f"and force-pushed.")
+
+    def _agent_generate_squash_message(self, pr_url, pr_repo, pr_number,
+                                        pr_branch, base_ref, diff_text,
+                                        repo_dir):
+        """Invoke the agent to produce a squash commit message.
+
+        Returns the commit message string (subject + body, separated
+        by a blank line) on success, or ``None`` if the agent
+        failed — in which case a failure response has already been
+        posted via ``_post_slash_response``.
+
+        ``tool_profile`` defaults to ``"full"`` (the agent is free
+        to inspect the workspace for context); ``cwd`` is the repo
+        directory so file references in the prompt resolve to the
+        PR branch's checkout.
+        """
+        self.agent.start_session("pr-squash")
+        try:
+            prompt = (
+                f"Generate a git commit message for squashing all "
+                f"commits in PR {pr_url} (repo `{pr_repo}`, "
+                f"PR #{pr_number}, branch `{pr_branch}`, target "
+                f"`{base_ref}`).\n\n"
+                f"The cumulative diff is:\n\n```diff\n{diff_text}\n```\n\n"
+                f"Output a JSON object in a ```json fenced block, "
+                f"followed by the literal line END_OF_SQUASH on its "
+                f"own line. The JSON shape is:\n"
+                f"```\n"
+                f"{{\n"
+                f'  "subject": "concise subject line (50-72 chars, '
+                f'imperative mood, no trailing period)",\n'
+                f'  "body": "detailed body explaining the change '
+                f'(Markdown allowed)"\n'
+                f"}}\n"
+                f"```\n"
+            )
+            rc = self.agent.prompt_with_retry(
+                prompt, timeout=Agent.AGENT_TIMEOUT,
+                cwd=repo_dir, retry_label="pr-squash")
+            if rc != 0:
+                log(f"slash-squash: agent rc={rc}", file=sys.stderr)
+                self._post_slash_response(pr_repo, pr_number,
+                    f"Failed to generate squash commit message "
+                    f"(agent rc={rc}).",
+                    fatal=True, command="squash")
+                return None
+            response_text = self.agent.otlp.get_review_text()
+            data = self.agent._extract_agent_json(response_text,
+                                                   "END_OF_SQUASH",
+                                                   ("subject", "body"))
+            if not data:
+                log(f"slash-squash: failed to extract JSON from agent "
+                    f"output (length={len(response_text) if response_text else 0})",
+                    file=sys.stderr)
+                self._post_slash_response(pr_repo, pr_number,
+                    "Failed to parse squash commit message from agent.",
+                    fatal=True, command="squash")
+                return None
+            subject = (data.get("subject") or "").strip()
+            body = (data.get("body") or "").strip()
+            if not subject:
+                log(f"slash-squash: agent returned empty subject",
+                    file=sys.stderr)
+                self._post_slash_response(pr_repo, pr_number,
+                    "Agent generated an empty squash commit subject.",
+                    fatal=True, command="squash")
+                return None
+            return f"{subject}\n\n{body}" if body else subject
+        finally:
+            self.agent.stop_session()
+
+    def _slash_rebase(self, pr_repo, pr_number, pr_url):
+        """``/rebase`` — rebase the PR branch on top of the target.
+
+        Two-stage flow: (1) ``git fetch origin <base>`` + ``git
+        rebase origin/<base>`` with ``GIT_EDITOR=true`` so the
+        rebase does not hang waiting for a commit-message editor,
+        (2) on conflict, the agent reads the conflicted files and
+        produces resolved content as JSON; the workflow writes it
+        back, ``git add``s each file, and continues the rebase in a
+        loop until done.
+
+        Conflict resolution is bounded by ``_resolve_rebase_conflicts``
+        (max steps); if the agent fails to resolve cleanly the
+        rebase is aborted and a failure comment posted. The
+        rebased branch is force-pushed on success.
+
+        ccws note: same caveat as ``_slash_squash`` — the manifest
+        is rebased; sub-repo branches are not.
+        """
+        repo_dir = self.shoggoth.repo_dir
+        pr_branch = self.shoggoth.working_branch
+        pr_data = self.gitea.get_pr(pr_repo, pr_number)
+        if not pr_data:
+            log(f"slash-rebase: get_pr returned no data",
+                file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                f"Failed to get PR #{pr_number} info.",
+                fatal=True, command="rebase")
+            return
+        base_ref = (pr_data.get("base") or {}).get("ref", "")
+        if not base_ref:
+            log(f"slash-rebase: no base ref in PR data",
+                file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                "Failed to determine base branch.",
+                fatal=True, command="rebase")
+            return
+
+        log(f"slash-rebase: base={base_ref} branch={pr_branch}")
+        self.shoggoth._unshallow(repo_dir)
+        self.shoggoth._ensure_remote_ref(repo_dir, base_ref, pr_number)
+
+        g = Git(repo_dir)
+        fetch = g.fetch(remote="origin", ref=base_ref, check=False)
+        if fetch.returncode != 0:
+            log(f"slash-rebase: fetch failed: "
+                f"{fetch.stderr.strip()[:200]}", file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                f"Failed to fetch base branch: "
+                f"{fetch.stderr.strip()[:200]}",
+                fatal=True, command="rebase")
+            return
+
+        # GIT_EDITOR=true prevents the rebase / rebase --continue
+        # from hanging on a commit-message prompt. The default
+        # commit message (whatever was on the rebased commit) is
+        # accepted as-is for resolution-loop continues.
+        rebase_env = {**os.environ, "GIT_EDITOR": "true",
+                      "GIT_SEQUENCE_EDITOR": "true"}
+
+        # Pre-flight: verify the push would succeed before doing
+        # the destructive ``git rebase``. A successful rebase
+        # whose push is rejected leaves the local branch in a
+        # state the remote cannot absorb (the user's other
+        # machines cannot force-push the same divergence back).
+        if not self._preflight_push(pr_repo, pr_number, pr_branch,
+                                     repo_dir, "rebase"):
+            return  # _preflight_push already posted a fatal failure
+
+        rebase = g.rebase(f"origin/{base_ref}", env=rebase_env,
+                          check=False)
+        if rebase.returncode == 0:
+            self._push_force(pr_repo, pr_number, pr_branch, repo_dir,
+                              f"Branch `{pr_branch}` rebased onto "
+                              f"`{base_ref}` and force-pushed.",
+                              command="rebase")
+            return
+
+        log(f"slash-rebase: rebase encountered conflicts, invoking "
+            f"agent")
+        resolved = self._resolve_rebase_conflicts(
+            repo_dir, pr_repo, pr_number, pr_url, base_ref, rebase_env)
+        if not resolved:
+            g.rebase_abort(env=rebase_env, check=False)
+            log(f"slash-rebase: conflict resolution failed; aborted",
+                file=sys.stderr)
+            self._post_slash_response(pr_repo, pr_number,
+                "Could not automatically resolve rebase conflicts. "
+                "Manual intervention required.",
+                fatal=True, command="rebase")
+            return
+
+        self._push_force(pr_repo, pr_number, pr_branch, repo_dir,
+                          f"Branch `{pr_branch}` rebased onto "
+                          f"`{base_ref}` (conflicts resolved by agent) "
+                          f"and force-pushed.",
+                          command="rebase")
+
+    def _push_force(self, pr_repo, pr_number, pr_branch, repo_dir,
+                     success_msg, command="rebase"):
+        """Force-push ``pr_branch`` from ``repo_dir``; post
+        ``success_msg`` on success or an error comment on failure.
+
+        ``--force-with-lease`` (not ``--force``) refuses the push
+        when the upstream branch has moved since the last fetch —
+        matching the existing ``_commit_only``+``_push_pending_commits``
+        philosophy of safe force-pushes for the workflow script.
+        """
+        push = Git(repo_dir).push("origin", pr_branch,
+                                   force_with_lease=True, check=False)
+        if push.returncode != 0:
+            stderr = (push.stderr or "").strip()[:500]
+            log(f"slash-{command}: push failed: {stderr}",
+                file=sys.stderr)
+            self._post_slash_response(
+                pr_repo, pr_number,
+                f"Failed to push rebased branch — the local "
+                f"branch is rebased (in front of the target) but "
+                f"the remote is unchanged. Server said:\n\n"
+                f"```\n{stderr}\n```\n\n"
+                f"To finish the rebase, push from a machine that "
+                f"has push access to `{pr_branch}`:\n\n"
+                f"```\n"
+                f"git fetch origin\n"
+                f"git checkout {pr_branch}\n"
+                f"git push --force-with-lease origin {pr_branch}\n"
+                f"```\n\n"
+                f"Or grant the shoggoth slave write permission on "
+                f"this repo and retry — the pre-flight check "
+                f"would then catch it before any destructive local "
+                f"op runs.",
+                fatal=True, command=command)
+            return False
+        log(f"slash-{command}: force-push of {pr_branch} OK")
+        self._post_slash_response(pr_repo, pr_number, success_msg)
+        return True
+
+    def _preflight_push(self, pr_repo, pr_number, pr_branch, repo_dir,
+                        command):
+        """Verify the push would succeed before any destructive local
+        op. Two layered checks:
+
+        1. ``Gitea.can_push`` — a Gitea-API call to read the
+           authenticated user's ``permissions.push`` on the repo.
+           The most reliable signal for the "User permission
+           denied for writing" case (a server-side ACL the
+           receiving end runs on every push before any hook
+           fires). Returns ``False`` on a clean "no" and
+           ``None`` on a lookup failure — the second is treated
+           as fail-closed.
+
+        2. ``git push --dry-run --force-with-lease`` against the
+           actual remote. Catches network errors, missing remote
+           refs, and any ACL/branch-protection check the server
+           runs on dry-runs.
+
+        On either failure, posts a fatal slash response and dies.
+        The caller MUST NOT have run ``git reset --soft``,
+        ``git commit`` or ``git rebase`` at this point — a
+        destructive local state on a branch whose push the server
+        rejects is what we are guarding against: the local branch
+        diverges from the remote in a way no other machine can
+        resolve without manual intervention. Failing here keeps
+        the local branch in its pre-destructive state so the user
+        can fix the permission/branch-protection and retry.
+
+        The actual ``git push`` at the end of the handler is
+        still the authoritative check — pre-receive hooks do not
+        fire on dry-runs (verified empirically), and a hook
+        verdict that depends on server state not visible to the
+        client will only surface there. The preflight is a
+        fast-fail, not a guarantee.
+        """
+        # Check 1: Gitea API permission (most reliable for the
+        # ACL case the user reported).
+        can_push = self.gitea.can_push(pr_repo)
+        if can_push is False:
+            log(f"slash-{command}: preflight denied by Gitea API "
+                f"(no push permission on {pr_repo})", file=sys.stderr)
+            self._post_slash_response(
+                pr_repo, pr_number,
+                f"Push preflight failed — Gitea reports the "
+                f"authenticated user does not have write permission "
+                f"on `{pr_repo}`. Refusing to run destructive local "
+                f"ops (``git reset --soft`` / ``git commit`` / "
+                f"``git rebase``) on a branch that cannot be "
+                f"pushed. Grant push access (or have someone with "
+                f"push access run the command) and retry. The "
+                f"local branch has not been modified.",
+                fatal=True, command=command)
+            return False
+        if can_push is None:
+            log(f"slash-{command}: preflight could not read "
+                f"permissions from Gitea API; failing closed",
+                file=sys.stderr)
+            self._post_slash_response(
+                pr_repo, pr_number,
+                f"Push preflight failed — could not read the "
+                f"authenticated user's permissions on `{pr_repo}` "
+                f"from the Gitea API. Refusing to run destructive "
+                f"local ops on a branch whose push state is "
+                f"unknown. Retry once the API is reachable.",
+                fatal=True, command=command)
+            return False
+
+        # Check 2: dry-run push (catches network / ref / branch-
+        # protection cases the API check misses).
+        g = Git(repo_dir)
+        dry_run = g.push("origin", pr_branch, force_with_lease=True,
+                          dry_run=True, check=False)
+        if dry_run.returncode != 0:
+            stderr = (dry_run.stderr or "").strip()[:500]
+            log(f"slash-{command}: preflight push rejected: {stderr}",
+                file=sys.stderr)
+            self._post_slash_response(
+                pr_repo, pr_number,
+                f"Push preflight failed — the dry-run push was "
+                f"rejected (the actual ``git push`` would be "
+                f"rejected the same way, leaving the local branch "
+                f"in a state the remote could not absorb). Server "
+                f"said:\n\n"
+                f"```\n{stderr}\n```\n\n"
+                f"Fix the branch protection, pre-receive hook, or "
+                f"transport issue and retry. The local branch has "
+                f"not been modified.",
+                fatal=True, command=command)
+            return False
+        log(f"slash-{command}: preflight OK (Gitea push perm + "
+            f"dry-run push)")
+        return True
+
+    def _resolve_rebase_conflicts(self, repo_dir, pr_repo, pr_number,
+                                   pr_url, base_ref, rebase_env):
+        """Iteratively resolve rebase conflicts using the agent.
+
+        Loop body: check whether the rebase is still active, then
+        either ``git rebase --continue`` (when no unmerged files
+        remain) or hand the unmerged files to the agent for
+        resolution. Each loop iteration starts a fresh agent
+        session so a single failed prompt cannot poison the rest
+        of the resolution; the cost is the plugin-download /
+        codebase-index overhead on each iteration, accepted in
+        exchange for fault isolation.
+
+        Returns ``True`` when the rebase completes (the agent has
+        resolved every conflict), ``False`` on any unrecoverable
+        failure (the caller aborts the rebase and posts an error
+        comment).
+        """
+        g = Git(repo_dir)
+        max_steps = 20
+        for step in range(max_steps):
+            in_progress = self._rebase_in_progress(repo_dir)
+            if not in_progress:
+                log(f"slash-rebase: rebase complete after {step} step(s)")
+                return True
+
+            unmerged = g.diff_name_only_filter("U", check=False)
+            conflicted = [f for f in unmerged.stdout.strip().splitlines()
+                          if f]
+
+            if not conflicted:
+                cont = g.rebase_continue(env=rebase_env, check=False)
+                if cont.returncode == 0:
+                    continue
+                stderr = (cont.stderr or "").lower()
+                if "no changes" in stderr:
+                    skip = g.rebase_skip(env=rebase_env, check=False)
+                    if skip.returncode != 0:
+                        log(f"slash-rebase: rebase --skip failed: "
+                            f"{(skip.stderr or '').strip()[:200]}",
+                            file=sys.stderr)
+                        return False
+                    continue
+                log(f"slash-rebase: rebase --continue failed: "
+                    f"{(cont.stderr or '').strip()[:200]}",
+                    file=sys.stderr)
+                return False
+
+            ok = self._resolve_file_conflicts_with_agent(
+                repo_dir, conflicted, pr_url, repo_dir)
+            if not ok:
+                return False
+
+        log(f"slash-rebase: hit max steps ({max_steps}), giving up",
+            file=sys.stderr)
+        return False
+
+    @staticmethod
+    def _rebase_in_progress(repo_dir):
+        """Return True if ``repo_dir`` is in the middle of a rebase.
+
+        Both ``git-rebase`` (``rebase-merge/``) and ``git-rebase
+        --interactive``/``--apply`` (``rebase-apply/``) leave a
+        marker under the git dir; checking both keeps the helper
+        robust against the rebase backend ``git`` chose.
+
+        ``git rev-parse --git-path <marker>`` is a path *resolver* —
+        it always succeeds and prints the resolved path string
+        regardless of whether the marker actually exists on disk —
+        so we also ``os.path.exists`` the resolved path before
+        claiming a rebase is in progress.
+        """
+        g = Git(repo_dir)
+        for marker in ("rebase-merge", "rebase-apply"):
+            probe = g.rev_parse_git_path(marker, check=False)
+            if (probe.returncode == 0
+                    and probe.stdout.strip()
+                    and os.path.exists(probe.stdout.strip())):
+                return True
+        return False
+
+    def _resolve_file_conflicts_with_agent(self, repo_dir, conflicted,
+                                            pr_url, agent_cwd):
+        """Use the agent to resolve one batch of conflicted files.
+
+        Reads each conflicted file (with conflict markers intact),
+        hands the contents to the agent as a JSON payload, and
+        asks for ``{"resolutions": [{"path": ..., "content": ...}]}``.
+        Resolved contents are written back and ``git add``ed; a
+        failure (missing path in the agent's response, read/write
+        error, agent rc != 0) returns False so the rebase can be
+        aborted cleanly.
+
+        One agent session per batch: cheaper ``start_session`` cost
+        is acceptable in exchange for the per-batch fault
+        isolation the ``_resolve_rebase_conflicts`` loop relies on.
+        """
+        file_contents = {}
+        for filepath in conflicted:
+            full_path = os.path.join(repo_dir, filepath)
+            try:
+                with open(full_path) as f:
+                    file_contents[filepath] = f.read()
+            except OSError as e:
+                log(f"slash-rebase: cannot read conflicted file "
+                    f"{filepath}: {e}", file=sys.stderr)
+                return False
+
+        try:
+            files_payload = json.dumps(file_contents, indent=2)
+        except (TypeError, ValueError) as e:
+            log(f"slash-rebase: cannot serialise file contents: {e}",
+                file=sys.stderr)
+            return False
+        if len(files_payload) > 150000:
+            log(f"slash-rebase: conflicted files payload too large "
+                f"({len(files_payload)} chars), truncating", file=sys.stderr)
+            files_payload = files_payload[:150000] + "\n... (truncated)"
+
+        self.agent.start_session("pr-rebase")
+        try:
+            prompt = (
+                f"Resolve git rebase conflicts in PR {pr_url}.\n\n"
+                f"The following files have unresolved conflicts "
+                f"(<<<<<<<, =======, >>>>>>> markers):\n\n"
+                + "\n".join(f"- `{p}`" for p in conflicted) +
+                "\n\nFor each file, understand the changes from both "
+                f"branches and produce a clean version with all "
+                f"conflict markers removed. Do not add new features or "
+                f"refactor; only resolve the conflicts.\n\n"
+                f"File contents (JSON-encoded, paths are relative to "
+                f"the repo root):\n\n"
+                f"```json\n{files_payload}\n```\n\n"
+                f"Output a JSON object in a ```json fenced block, "
+                f"followed by the literal line END_OF_REBASE on its "
+                f"own line. The JSON shape is:\n"
+                f"```\n"
+                f"{{\n"
+                f'  "resolutions": [\n'
+                f"    {{\n"
+                f'      "path": "relative/path/to/file",\n'
+                f'      "content": "resolved file content as a string"\n'
+                f"    }}\n"
+                f"  ]\n"
+                f"}}\n"
+                f"```\n"
+            )
+            rc = self.agent.prompt_with_retry(
+                prompt, timeout=Agent.AGENT_TIMEOUT,
+                cwd=agent_cwd, retry_label="pr-rebase")
+            if rc != 0:
+                log(f"slash-rebase: agent rc={rc}", file=sys.stderr)
+                return False
+            response_text = self.agent.otlp.get_review_text()
+            data = self.agent._extract_agent_json(response_text,
+                                                   "END_OF_REBASE",
+                                                   ("resolutions",))
+            if not data or "resolutions" not in data:
+                log(f"slash-rebase: failed to extract resolutions JSON",
+                    file=sys.stderr)
+                return False
+            resolutions = data.get("resolutions") or []
+        finally:
+            self.agent.stop_session()
+
+        by_path = {r.get("path"): r.get("content")
+                   for r in resolutions
+                   if isinstance(r, dict) and r.get("path") is not None}
+        ok = True
+        for filepath in conflicted:
+            resolved_content = by_path.get(filepath)
+            if resolved_content is None:
+                log(f"slash-rebase: agent did not provide resolution "
+                    f"for {filepath}", file=sys.stderr)
+                ok = False
+                continue
+            full_path = os.path.join(repo_dir, filepath)
+            try:
+                with open(full_path, "w") as f:
+                    f.write(resolved_content)
+            except OSError as e:
+                log(f"slash-rebase: cannot write resolved file "
+                    f"{filepath}: {e}", file=sys.stderr)
+                ok = False
+                continue
+            add = Git(repo_dir).add(filepath, check=False)
+            if add.returncode != 0:
+                log(f"slash-rebase: git add {filepath} failed: "
+                    f"{add.stderr.strip()[:200]}", file=sys.stderr)
+                ok = False
+        return ok
+
+    @staticmethod
+    def _resolve_remote_ref(repo_dir, ref):
+        """Resolve ``ref`` (e.g. ``origin/main``) to its SHA. ``None``
+        on failure.
+
+        Used by ``_slash_squash`` to turn the PR's base branch into
+        the SHA for ``git reset --soft <base_sha>``. ``rev-parse
+        --verify`` fails loudly on missing refs, so a non-zero
+        rc is the right "not found" signal.
+        """
+        rev = Git(repo_dir).rev_parse_verify(ref, check=False)
+        if rev.returncode == 0 and rev.stdout.strip():
+            return rev.stdout.strip()
+        return None
+
+    def _pr_diff_for_prompt(self, repo_dir, pr_repo, pr_number, base_ref):
+        """Return the cumulative PR diff as text, or ``None`` on failure.
+
+        Reuses the existing ``_write_pr_diff`` + Gitea ``.diff``
+        fallback chain from the review path so the slash-command
+        flows do not reinvent diff-fetching logic. The diff is the
+        full ``base...head`` patch; callers trim it for prompt size
+        if needed.
+        """
+        diff_path = (f"/tmp/shoggoth-squash-{pr_number}-"
+                     f"{uuid.uuid4().hex[:8]}.diff")
+        wrote = self.shoggoth._write_pr_diff(repo_dir, base_ref,
+                                              None, diff_path)
+        diff_text = ""
+        if wrote and os.path.exists(diff_path):
+            with open(diff_path) as f:
+                diff_text = f.read()
+        if not diff_text:
+            gitea_diff = self.gitea.get_pr_diff_text(pr_repo, pr_number)
+            if gitea_diff:
+                diff_text = gitea_diff
+        return diff_text or None
+
     def _handle_timeout(self, pr_repo, pr_number, pr_url, resolved_comments):
         log(f"pr-comment: handling timeout, resolved so far={len(resolved_comments)}")
         self.agent.stop_session()
@@ -3889,8 +5435,8 @@ class GithubMirrorSync:
         REST calls, which exhausted the GitHub API quota for orgs with more
         than ~30 repos (2 unauthenticated calls per repo, 60/hour limit).
         """
-        ls_remote = run(["git", "ls-remote",
-                         f"https://github.com/{github_org}/{repo_name}.git"], check=False)
+        ls_remote = Git().ls_remote(
+            f"https://github.com/{github_org}/{repo_name}.git", check=False)
         if ls_remote.returncode != 0:
             return None
         branches, tags = {}, {}
@@ -3957,16 +5503,21 @@ class GithubMirrorSync:
 
         cred_helper = f"store --file={cred_file}"
 
-        clone = run(["git", "-c", f"credential.helper={cred_helper}",
-                     "clone", "--quiet", "--bare", clone_url, clone_dir], check=False)
+        # --bare is not surfaced as a named ``clone`` flag because
+        # no other call site wants a bare clone; reuse the helper
+        # shape via ``raw``.
+        clone = Git().raw("-c", f"credential.helper={cred_helper}",
+                          "clone", "--quiet", "--bare",
+                          clone_url, clone_dir, check=False)
         if clone.returncode != 0:
             self._record_failure(gitea_repo, "failed to clone from Gitea")
             os.unlink(cred_file)
             return "failed"
 
-        fetch = run(["git", "-C", clone_dir, "fetch", "--quiet", "--tags",
-                     f"https://github.com/{github_org}/{repo_name}.git",
-                     "+refs/heads/*:refs/remotes/github/*"], check=False)
+        fetch = Git(clone_dir).fetch_url_refspecs(
+            f"https://github.com/{github_org}/{repo_name}.git",
+            "+refs/heads/*:refs/remotes/github/*",
+            tags=True, quiet=True, check=False)
         if fetch.returncode != 0:
             self._record_failure(gitea_repo, "failed to fetch from GitHub")
             os.unlink(cred_file)
@@ -3974,43 +5525,43 @@ class GithubMirrorSync:
 
         changed_branches = []
         repo_had_conflicts = False
-        refs = run(["git", "-C", clone_dir, "for-each-ref",
-                    "--format=%(refname)", "refs/remotes/github/"], check=False)
+        clone_git = Git(clone_dir)
+        refs = clone_git.raw("for-each-ref", "--format=%(refname)",
+                              "refs/remotes/github/", check=False)
         for ref in refs.stdout.strip().splitlines() if refs.stdout else []:
             branch_name = ref.replace("refs/remotes/github/", "")
             if branch_name == "HEAD":
                 continue
 
-            remote_sha = run(["git", "-C", clone_dir, "rev-parse", ref],
-                              check=False).stdout.strip()
+            remote_sha = clone_git.rev_parse(ref, check=False).stdout.strip()
 
-            local_check = run(["git", "-C", clone_dir, "rev-parse", "--verify", "-q",
-                               f"refs/heads/{branch_name}"], check=False)
+            local_check = clone_git.rev_parse_verify_quiet(
+                f"refs/heads/{branch_name}", check=False)
             if local_check.returncode == 0:
                 local_sha = local_check.stdout.strip()
                 if local_sha == remote_sha:
                     print(f"  Branch '{branch_name}' already up to date")
                     continue
-                ancestor = run(["git", "-C", clone_dir, "merge-base", "--is-ancestor",
-                                f"refs/heads/{branch_name}", ref], check=False)
+                ancestor = clone_git.merge_base_is_ancestor(
+                    f"refs/heads/{branch_name}", ref, check=False)
                 if ancestor.returncode == 0:
                     print(f"  Branch '{branch_name}': fast-forwarding")
-                    run(["git", "-C", clone_dir, "branch", "-f", branch_name, ref],
-                        check=False)
+                    clone_git.branch(branch_name, ref, force=True,
+                                      check=False)
                     changed_branches.append(branch_name)
                 else:
                     print(f"  WARNING: Branch '{branch_name}' has diverged from GitHub, skipping (manual reconciliation needed)")
                     repo_had_conflicts = True
             else:
-                run(["git", "-C", clone_dir, "branch", branch_name, ref], check=False)
+                clone_git.branch(branch_name, ref, check=False)
                 changed_branches.append(branch_name)
 
         status = "ok"
         if changed_branches:
             print(f"  Pushing {len(changed_branches)} changed branch(es) to Gitea")
-            push = run(["git", "-C", clone_dir, "-c", f"credential.helper={cred_helper}",
-                        "push", "--quiet", "origin"] +
-                        changed_branches, check=False)
+            push = Git(clone_dir).push("origin", *changed_branches,
+                                        credential_helper=cred_helper,
+                                        check=False)
             if push.returncode != 0:
                 self._record_failure(gitea_repo, "failed to push branches to Gitea")
                 status = "failed"
@@ -4018,10 +5569,12 @@ class GithubMirrorSync:
             print(f"  No changed branches to push")
 
         if status != "failed":
-            tags = run(["git", "-C", clone_dir, "tag", "--list"], check=False)
+            tags = Git(clone_dir).raw("tag", "--list", check=False)
             if tags.stdout.strip():
-                tag_push = run(["git", "-C", clone_dir, "-c", f"credential.helper={cred_helper}",
-                               "push", "--quiet", "--tags", "origin"], check=False)
+                tag_push = Git().raw("-c",
+                                      f"credential.helper={cred_helper}",
+                                      "-C", clone_dir, "push", "--quiet",
+                                      "--tags", "origin", check=False)
                 if tag_push.returncode != 0:
                     self._record_failure(gitea_repo, "failed to push tags to Gitea")
                     status = "failed"
@@ -4073,6 +5626,31 @@ class GithubMirrorSync:
 
 
 class SlaveAccess(GiteaCommand):
+    # Branches the slave is NEVER allowed to push (regular or force)
+    # to. These are the production branches — protecting them against
+    # force-push is the whole point of branch protection, and the
+    # maintenance script must not silently undo that protection. All
+    # other protected branches are patched: ``enable_force_push`` is
+    # flipped to true and the slave is appended to ``whitelist_users``
+    # whenever ``enable_push`` is true.
+    ALWAYS_EXCLUDE = frozenset({"main", "master"})
+
+    # Team created in every org to grant the slave ``write`` access to
+    # every existing and future repo in the org. The team is created
+    # with ``includes_all_repositories=True`` and ``permission=write``,
+    # so the script does not have to enumerate repos to add the team
+    # to each one — the team auto-grants access at org scope. The
+    # direct write-collaborator grant set up by
+    # ``_add_to_mirrored_repos`` is layered on top, partly as
+    # belt-and-braces (the team membership also requires the user to
+    # actually be in the org, which ``AddTeamMember`` does NOT refresh
+    # against the ``Access`` table) and partly to make the slave's
+    # access show up correctly in the per-repo collaborators view.
+    PUSH_TEAM_NAME = "shoggoth-slave-push"
+    PUSH_TEAM_PERMISSION = "write"
+    PUSH_TEAM_UNITS = ("repo.code", "repo.issues",
+                        "repo.pulls", "repo.releases")
+
     def __init__(self, gitea):
         super().__init__(gitea)
         self.slave_user = params.shoggoth_slave_user
@@ -4081,10 +5659,128 @@ class SlaveAccess(GiteaCommand):
     def execute(self):
         orgs = self.gitea.list_orgs()
         for user in self.automation_users:
+            self._ensure_push_team(orgs, user)
             self._add_to_orgs(orgs, user)
             self._add_to_mirrored_repos(orgs, user)
+            self._ensure_force_push_access(orgs, user)
         if self.errors:
             die(f"slave-access completed with {self.errors} error(s)")
+
+    def _ensure_push_team(self, orgs, user):
+        """Create ``PUSH_TEAM_NAME`` in each org and add ``user`` to
+        it. Idempotent: existing teams are reused, existing
+        memberships are no-ops.
+
+        Why this exists: the slave was previously a member of the
+        org's ``Owners`` team, which Gitea grants implicit
+        ``AccessModeOwner`` on every repo in the org. The user
+        was removed from ``Owners`` (clean-up of the prior
+        impersonation-by-Owners setup) and is now a direct
+        write-collaborator on each repo. The receive-pack
+        permission check (``routers/private/hook_pre_receive.go``
+        → ``Permission.CanWrite(unit.TypeCode)``) reads the
+        ``Access`` table cache, and that table was left stale
+        after the team removal (``RecalculateUserAccess`` runs
+        on team add / direct-collaborator add / update, but
+        ``AddTeamMember`` is NOT one of those triggers — Gitea
+        1.27.3's ``services/org/team.go::AddTeamMember`` only
+        inserts a ``TeamUser`` row and does not touch the
+        ``Access`` table for the team's repos). A dedicated
+        push team gives the slave a persistent team-based
+        access path that survives the direct-collaborator being
+        removed by a future operator action.
+
+        Gitea's behaviour for the create path matters here:
+        ``NewTeam`` with ``includes_all_repositories=True`` walks
+        every org repo and calls ``addRepositoryToTeam`` per repo
+        (which in turn calls ``RecalculateTeamAccesses``), so
+        the ``Access`` table is populated for every existing
+        repo at create-time — but only for users who are
+        ALREADY team members at that point. The slave is added
+        to the team right after, so the recalc sees an empty
+        team. The script therefore does not rely on the
+        create-time recalc; the direct-collaborator path in
+        ``_add_to_mirrored_repos`` is what populates the
+        ``Access`` table for the slave on each existing repo,
+        and this team's role is the durable access path for
+        future runs.
+        """
+        if not orgs:
+            print("No organizations found (push-team pass)")
+            return
+
+        for org in orgs:
+            org_name = org.get("username")
+            if not org_name:
+                continue
+            team = self.gitea.find_team_by_name(
+                org_name, self.PUSH_TEAM_NAME)
+            if team is None:
+                print(f"Creating push team '{self.PUSH_TEAM_NAME}' "
+                      f"in org '{org_name}' "
+                      f"(permission={self.PUSH_TEAM_PERMISSION}, "
+                      f"includes_all_repositories=true)")
+                created = self.gitea.create_team(
+                    org_name, self.PUSH_TEAM_NAME,
+                    permission=self.PUSH_TEAM_PERMISSION,
+                    includes_all_repositories=True,
+                    units=list(self.PUSH_TEAM_UNITS))
+                if created is None:
+                    # 422 here means a concurrent run (or a manual
+                    # create) got there first — re-fetch.
+                    team = self.gitea.find_team_by_name(
+                        org_name, self.PUSH_TEAM_NAME)
+                    if team is None:
+                        print(f"ERROR: failed to create or find push "
+                              f"team '{self.PUSH_TEAM_NAME}' in org "
+                              f"'{org_name}'", file=sys.stderr)
+                        self.errors += 1
+                        continue
+                else:
+                    team = created
+            else:
+                # If the team exists but is missing
+                # ``includes_all_repositories`` (e.g. it was created
+                # by an earlier version of this script before that
+                # flag was added), patch the team to set it. The
+                # patch does NOT re-run ``addRepositoryToTeam`` for
+                # the existing repos (see ``UpdateTeam`` in
+                # ``services/org/team.go``), so this is a no-op for
+                # the ``Access`` table — the
+                # ``_add_to_mirrored_repos`` direct-collaborator
+                # pass is what populates that.
+                if not team.get("includes_all_repositories"):
+                    team_id = team.get("id")
+                    if team_id is not None:
+                        print(f"Upgrading push team "
+                              f"'{self.PUSH_TEAM_NAME}' in org "
+                              f"'{org_name}' to "
+                              f"includes_all_repositories=true")
+                        if self.gitea.update_team(
+                                team_id,
+                                includes_all_repositories=True) is None:
+                            print(f"ERROR: failed to upgrade push "
+                                  f"team '{self.PUSH_TEAM_NAME}' "
+                                  f"in org '{org_name}'",
+                                  file=sys.stderr)
+                            self.errors += 1
+                            continue
+
+            team_id = team.get("id") if isinstance(team, dict) else None
+            if team_id is None:
+                print(f"ERROR: push team '{self.PUSH_TEAM_NAME}' in "
+                      f"org '{org_name}' has no id", file=sys.stderr)
+                self.errors += 1
+                continue
+            print(f"Adding '{user}' to push team "
+                  f"'{self.PUSH_TEAM_NAME}' (id={team_id}) in org "
+                  f"'{org_name}'")
+            if not self.gitea.put(
+                    f"teams/{team_id}/members/{user}"):
+                print(f"ERROR: failed to add '{user}' to push team "
+                      f"'{self.PUSH_TEAM_NAME}' in org '{org_name}'",
+                      file=sys.stderr)
+                self.errors += 1
 
     def _add_to_orgs(self, orgs, user):
         if not orgs:
@@ -4112,7 +5808,13 @@ class SlaveAccess(GiteaCommand):
             org_name = org.get("username")
             if not org_name:
                 continue
-            repos = self.gitea.list_org_repos(org_name)
+            repos, repos_err = self.gitea.get_list(f"orgs/{org_name}/repos")
+            if repos_err is not None:
+                print(f"ERROR: could not list repos for org "
+                      f"'{org_name}': {repos_err}",
+                      file=sys.stderr)
+                self.errors += 1
+                continue
             if not repos:
                 continue
 
@@ -4122,12 +5824,234 @@ class SlaveAccess(GiteaCommand):
                 if not full_name:
                     continue
 
-                if not self.gitea.is_repo_collaborator(full_name, user):
-                    print(f"Adding '{user}' as collaborator to repo '{full_name}'")
-                    if not self.gitea.add_repo_collaborator(full_name, user, "write"):
+                # Check the *effective* permission (max of direct
+                # collaborator + team-based via org membership). The
+                # previous logic only checked whether the user was a
+                # collaborator at all, which meant a user added with
+                # ``read`` by a team — or with ``read`` from a prior
+                # run of an older maintenance script — was never
+                # escalated to ``write``. ``/squash`` and ``/rebase``
+                # force-push and need at least ``write``; ``read`` is
+                # the symptom the user reported as "User permission
+                # denied for writing" on the force-push.
+                role = self.gitea.get_repo_collaborator_permission(
+                    full_name, user)
+                if role in ("write", "admin", "owner"):
+                    # Force-refresh the ``Access`` table cache. The
+                    # ``get_repo_collaborator_permission`` result is
+                    # computed live (reads ``Collaboration`` +
+                    # ``TeamUser`` + ``Access`` per request), but
+                    # the receive-pack permission check
+                    # (``routers/private/hook_pre_receive.go`` →
+                    # ``Permission.CanWrite(unit.TypeCode)``)
+                    # reads the ``Access`` table cache directly
+                    # and short-circuits on stale state. If the
+                    # user was previously in the org's ``Owners``
+                    # team (or any team whose removal cleared the
+                    # ``Access`` row via
+                    # ``RecalculateUserAccess`` → ``accessMode <
+                    # minMode`` → DELETE without re-INSERT) and is
+                    # now only a direct write-collaborator, the
+                    # ``Access`` table for the user on the repo can
+                    # be empty even though the direct collaborator
+                    # row is present. ``AddOrUpdateCollaborator``
+                    # early-returns when the requested mode equals
+                    # the current ``Collaboration.Mode`` and does
+                    # NOT call ``RecalculateUserAccess``, so a
+                    # no-op PUT leaves the stale ``Access`` table
+                    # in place. Forcing the mode through ``read``
+                    # → ``write`` always changes the mode (the
+                    # first PUT goes from ``write`` to ``read``;
+                    # the second from ``read`` to ``write``), so
+                    # both PUTs reach ``RecalculateUserAccess`` and
+                    # the ``Access`` row is rewritten with the
+                    # correct mode. The intermediate ``read``
+                    # state is brief (a single network round-trip
+                    # apart from the second PUT) and the user has
+                    # only direct access to this repo — no other
+                    # workflow path pushes during the maintenance
+                    # step — so the brief downgrade is not
+                    # observable. Cheaper than a ``delete + add``
+                    # dance (``RecalculateAccesses`` recomputes for
+                    # every user on the repo) and avoids a window
+                    # where the user has no access at all.
+                    print(f"  '{user}' already has {role!r} on "
+                          f"'{full_name}'; force-refreshing "
+                          f"the Access table cache via read+write")
+                    if not self.gitea.add_repo_collaborator(
+                            full_name, user, "read"):
+                        print(f"ERROR: failed force-refresh step 1 "
+                              f"(downgrade to read) for '{user}' on "
+                              f"'{full_name}'", file=sys.stderr)
                         self.errors += 1
+                        continue
+                    if not self.gitea.add_repo_collaborator(
+                            full_name, user, "write"):
+                        print(f"ERROR: failed force-refresh step 2 "
+                              f"(upgrade to write) for '{user}' on "
+                              f"'{full_name}'", file=sys.stderr)
+                        self.errors += 1
+                        continue
+                    print(f"  '{user}' Access table refreshed to "
+                          f"'write' on '{full_name}'")
+                    continue
+                if role is None:
+                    # ``None`` covers both "not a collaborator" (404)
+                    # and "lookup failed" — the PUT endpoint is
+                    # idempotent and accepts an existing
+                    # collaborator, so retrying with a write payload
+                    # upgrades the permission on the success path
+                    # and surfaces the underlying transport error on
+                    # the failure path. Treating the two cases the
+                    # same here is the right call: we'd want to
+                    # write the permission either way.
+                    action = "Adding"
                 else:
-                    print(f"  '{user}' already has access to '{full_name}'")
+                    # ``role`` is one of ``read`` (or a future
+                    # Gitea value) — escalate.
+                    action = f"Upgrading '{user}' on '{full_name}' " \
+                             f"from {role!r} to 'write'"
+                if not self.gitea.add_repo_collaborator(
+                        full_name, user, "write"):
+                    print(f"ERROR: failed to set write permission for "
+                          f"'{user}' on '{full_name}'",
+                          file=sys.stderr)
+                    self.errors += 1
+                    continue
+                if action == "Adding":
+                    print(f"{action} '{user}' as write collaborator "
+                          f"to repo '{full_name}'")
+                else:
+                    print(action)
+
+    def _ensure_force_push_access(self, orgs, user):
+        """Patch branch protection on every protected branch in every
+        mirrored repo so the slave can push (regular and force).
+
+        ``_add_to_mirrored_repos`` covers the *collaborator* half of
+        the permission story — it guarantees ``role >= write`` on
+        each repo. The other half is *branch protection*: Gitea's
+        receive-pack returns ``User permission denied for writing``
+        when one of:
+
+        * ``enable_push`` is true and the user is not in
+          ``whitelist_users`` / ``whitelist_teams`` (push is
+          restricted to the allow-list) — even a ``write``
+          collaborator is rejected, and this applies to REGULAR
+          pushes (the ``pr-comment`` flow's `git push` of a
+          per-comment commit) as well as force-pushes;
+        * ``enable_force_push`` is false and the push is a
+          non-fast-forward (force-push is denied to everyone,
+          regardless of write).
+
+        This method walks every branch-protection rule on every
+        mirrored repo and applies the minimum patch:
+
+        * Append ``user`` to ``whitelist_users`` whenever
+          ``enable_push`` is true and the user is not already
+          listed (regular push).
+        * Set ``enable_force_push=true`` whenever it is not
+          already (force-push).
+
+        The only branches excluded from this are ``main`` and
+        ``master`` (``ALWAYS_EXCLUDE``) — branch protection on the
+        production branches is the whole point of the protection
+        feature, and silently undoing it from the maintenance
+        script would defeat that. Anything else, including
+        previously out-of-scope patterns like
+        ``wshandler/release-policies``, is patched.
+
+        The list is computed by the caller and passed in full to
+        ``update_branch_protection`` — Gitea's PATCH treats
+        ``whitelist_users`` as a complete set, not a diff.
+
+        A read failure on a single rule records an error and
+        continues; the next maintenance run will retry it. A read
+        failure on the whole repo's rule list is logged and
+        skipped — the read failures are visible in the workflow
+        log and recoverable by re-running.
+        """
+        if not orgs:
+            print("No organizations found (branch protection pass)")
+            return
+
+        for org in orgs:
+            org_name = org.get("username")
+            if not org_name:
+                continue
+            repos, repos_err = self.gitea.get_list(f"orgs/{org_name}/repos")
+            if repos_err is not None:
+                print(f"ERROR: could not list repos for org "
+                      f"'{org_name}': {repos_err}",
+                      file=sys.stderr)
+                self.errors += 1
+                continue
+            if not repos:
+                continue
+
+            for repo in repos:
+                full_name = repo.get("full_name")
+                if not full_name:
+                    continue
+
+                protections, protections_err = self.gitea.get_list(
+                    f"repos/{full_name}/branch_protections")
+                if protections_err is not None:
+                    print(f"ERROR: could not list branch protections "
+                          f"on '{full_name}': {protections_err} (skipping)",
+                          file=sys.stderr)
+                    self.errors += 1
+                    continue
+                if not protections:
+                    continue
+
+                for prot in protections:
+                    branch = (prot.get("branch_name")
+                              or prot.get("name"))
+                    if not branch:
+                        print(f"ERROR: branch protection on "
+                              f"'{full_name}' has no branch_name; "
+                              f"skipping",
+                              file=sys.stderr)
+                        self.errors += 1
+                        continue
+
+                    if branch in self.ALWAYS_EXCLUDE:
+                        print(f"  Skipping protected branch "
+                              f"'{full_name}:{branch}' "
+                              f"(production branch, ALWAYS_EXCLUDE)")
+                        continue
+
+                    enable_push = bool(prot.get("enable_push"))
+                    enable_force_push = bool(
+                        prot.get("enable_force_push"))
+                    whitelist = list(prot.get("whitelist_users") or [])
+
+                    patch = {}
+                    if enable_push and user not in whitelist:
+                        patch["whitelist_users"] = whitelist + [user]
+                    if not enable_force_push:
+                        patch["enable_force_push"] = True
+                    if not patch:
+                        print(f"  '{user}' already has push access to "
+                              f"protected branch '{full_name}:{branch}'")
+                        continue
+
+                    desc = []
+                    if "whitelist_users" in patch:
+                        desc.append(f"whitelist_users +'{user}'")
+                    if "enable_force_push" in patch:
+                        desc.append("enable_force_push: false -> true")
+                    print(f"Patching branch protection on "
+                          f"'{full_name}:{branch}' "
+                          f"({'; '.join(desc)})")
+                    updated = self.gitea.update_branch_protection(
+                        full_name, branch, **patch)
+                    if updated is None:
+                        print(f"ERROR: failed to update branch "
+                              f"protection on '{full_name}:{branch}'",
+                              file=sys.stderr)
+                        self.errors += 1
 
 
 class SshKey(GiteaCommand):
@@ -4481,7 +6405,8 @@ class SlaveTest:
             if r.returncode != 0:
                 return
 
-        result = run(["git", "ls-remote", clone_url, f"refs/heads/{branch}"], env=env, check=False)
+        result = Git().ls_remote(clone_url, f"refs/heads/{branch}",
+                                  env=env, check=False)
         if result.returncode != 0 or not result.stdout.strip():
             self._fail(f"git ls-remote over https: pushed branch '{branch}' not found")
             return
@@ -4594,7 +6519,8 @@ class SlaveTest:
             r = self._git(["-C", repo_dir] + args, env)
             if r.returncode != 0:
                 return
-        result = run(["git", "ls-remote", clone_url, f"refs/heads/{self.SSH_BRANCH}"], env=env, check=False)
+        result = Git().ls_remote(clone_url, f"refs/heads/{self.SSH_BRANCH}",
+                                  env=env, check=False)
         if result.returncode != 0 or not result.stdout.strip():
             self._fail(f"git ls-remote over ssh: pushed branch '{self.SSH_BRANCH}' not found")
             return
@@ -5172,38 +7098,7 @@ class GiteaLdapSync(GiteaCommand):
             return None
         return len(users)
 
-    def _ldap_source_filter(self):
-        exclusions = "".join(f"(!(uid={login}))" for login in Ldap.EXCLUDED_LOGINS)
-        return (f"(&(objectClass=inetOrgPerson)"
-                f"(|(uid=%[1]s)(mail=%[1]s))"
-                f"{exclusions})")
-
-    def _update_ldap_source_filter(self):
-        data = self.gitea.get("admin/ldap")
-        if not isinstance(data, list):
-            print("WARNING: gitea-ldap-sync: could not list LDAP sources",
-                  file=sys.stderr)
-            return
-        source = next((s for s in data if s.get("name") == "openldap"), None)
-        if source is None:
-            log("gitea-ldap-sync: openldap source not found, skipping filter update")
-            return
-        source_id = source.get("id")
-        new_filter = self._ldap_source_filter()
-        if source.get("user_filter") == new_filter:
-            log(f"gitea-ldap-sync: LDAP source filter already excludes "
-                f"{list(Ldap.EXCLUDED_LOGINS)}")
-            return
-        log(f"gitea-ldap-sync: updating LDAP source filter to exclude "
-            f"{list(Ldap.EXCLUDED_LOGINS)}")
-        if self.gitea.patch(f"admin/ldap/{source_id}",
-                            {"user_filter": new_filter}) is None:
-            print("ERROR: gitea-ldap-sync: failed to update LDAP source filter",
-                  file=sys.stderr)
-            self.errors += 1
-
     def execute(self):
-        self._update_ldap_source_filter()
         before = self._user_count()
         log(f"gitea-ldap-sync: user count before sync_external_users: {before}")
         url = f"{self.gitea.api_url}/admin/cron/sync_external_users"
@@ -5267,11 +7162,16 @@ class RedmineLdapSync:
         return None
 
     def _ldap_users(self):
-        try:
-            return self.ldap.search_users()
-        except Exception as e:
-            print(f"WARNING: LDAP search failed: {e}", file=sys.stderr)
-            return []
+        """Enumerate the LDAP ``inetOrgPerson`` users to mirror into Redmine.
+
+        Lets any exception propagate to ``execute()``'s outer
+        ``try/except`` block (which calls ``die(...)``) so the step
+        fails fast on LDAP outage / bind failure / malformed
+        response rather than silently returning an empty user list.
+        A legitimately empty LDAP still returns ``[]`` cleanly with
+        no exception.
+        """
+        return self.ldap.search_users()
 
     def _developer_role_id(self):
         data = self.redmine.get("roles.json")

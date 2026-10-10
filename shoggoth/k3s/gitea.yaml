@@ -34,6 +34,19 @@ data:
     fi
     EXISTING="$(su-exec git gitea admin auth list 2>/dev/null \
         | awk -v name="openldap" '$2 == name {print $1; exit}')"
+    # The user_filter must exclude the three infrastructure accounts
+    # (``admin``, ``ldapauth``, ``config-admin``) — the workflow
+    # script's ``Ldap.EXCLUDED_LOGINS`` tuple. Gitea 1.x does not
+    # expose the LDAP source list/patch endpoints over its v1 API
+    # (verified against ``routers/api/v1/api.go`` v1.21/v1.22/v1.27),
+    # so this static filter is the authoritative source: it is
+    # applied at first install (``add-ldap``) and re-applied on
+    # every gitea pod start (``update-ldap``). The workflow's
+    # ``gitea-ldap-sync`` step does not maintain this filter (it
+    # only triggers ``sync_external_users``); to re-apply after
+    # editing ``Ldap.EXCLUDED_LOGINS`` the operator must
+    # ``kubectl rollout restart deployment/gitea -n shoggoth``.
+    USER_FILTER="(&(objectClass=inetOrgPerson)(!(uid=admin))(!(uid=ldapauth))(!(uid=config-admin))(|(uid=%[1]s)(mail=%[1]s)))"
     if [ -z "${EXISTING}" ]; then
         su-exec git gitea admin auth add-ldap \
             -name openldap \
@@ -43,7 +56,7 @@ data:
             -bind-dn "${LDAP_BIND_DN}" \
             -bind-password "${LDAP_BIND_PASSWORD}" \
             -user-search-base "ou=people,${LDAP_BASE_DN}" \
-            -user-filter "(&(objectClass=inetOrgPerson)(|(uid=%[1]s)(mail=%[1]s)))" \
+            -user-filter "${USER_FILTER}" \
             -admin-filter "(memberOf=cn=admins,ou=groups,${LDAP_BASE_DN})" \
             -username-attribute uid \
             -firstname-attribute cn \
@@ -59,7 +72,7 @@ data:
             -bind-dn "${LDAP_BIND_DN}" \
             -bind-password "${LDAP_BIND_PASSWORD}" \
             -user-search-base "ou=people,${LDAP_BASE_DN}" \
-            -user-filter "(&(objectClass=inetOrgPerson)(|(uid=%[1]s)(mail=%[1]s)))" \
+            -user-filter "${USER_FILTER}" \
             -admin-filter "(memberOf=cn=admins,ou=groups,${LDAP_BASE_DN})" \
             -username-attribute uid \
             -firstname-attribute cn \
