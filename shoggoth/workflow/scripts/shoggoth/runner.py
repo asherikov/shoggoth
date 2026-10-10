@@ -124,15 +124,13 @@ class Shoggoth:
 
         g = Git()
         if self.working_branch:
-            result = g.clone(self.clone_url, workspace_dir, depth="1",
+            result = g.clone(self.clone_url, workspace_dir,
                               branch=self.working_branch, check=False)
             if result.returncode != 0 and self.type == "ccws":
                 log(f"checkout: branch {self.working_branch} not found, cloning default branch")
-                result = g.clone(self.clone_url, workspace_dir, depth="1",
-                                  check=False)
+                result = g.clone(self.clone_url, workspace_dir, check=False)
         else:
-            result = g.clone(self.clone_url, workspace_dir, depth="1",
-                              check=False)
+            result = g.clone(self.clone_url, workspace_dir, check=False)
 
         if result.returncode != 0:
             die(f"git clone failed for {self.clone_url}: {result.stderr}")

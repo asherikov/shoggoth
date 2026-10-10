@@ -74,10 +74,16 @@ class Git:
 
     # ----- remote / clone / fetch -----------------------------------
 
-    def clone(self, url, dest, depth="1", branch=None,
+    def clone(self, url, dest, depth=None, branch=None,
               credential_helper=None, check=None):
-        """``git clone [--depth 1] [--branch <b>] [--credential.helper=…]
+        """``git clone [--depth <n>] [--branch <b>] [--credential.helper=…]
         <url> <dest>``.
+
+        ``depth`` defaults to ``None`` (full history) so that
+        downstream operations like ``git rebase``, ``git log``
+        walks, and ``git describe`` work without first having to
+        ``--unshallow``. Pass an explicit integer (e.g. ``1``) for
+        the cases that explicitly want a truncated clone.
 
         ``credential_helper`` is the shoggoth-sidecar helper string
         (e.g. ``"!qwen-redis-cred-helper.sh"``). It is rendered as
@@ -89,7 +95,9 @@ class Git:
         argv = ["git"]
         if credential_helper:
             argv += ["-c", f"credential.helper={credential_helper}"]
-        argv += ["clone", "--depth", str(depth)]
+        argv += ["clone"]
+        if depth is not None:
+            argv += ["--depth", str(depth)]
         if branch:
             argv += ["--branch", branch]
         argv += [url, dest]

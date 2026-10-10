@@ -770,8 +770,10 @@ class PrUpdateCommand(CommandBase):
                 f"{{\n"
                 f'  "subject": "concise subject line (50-72 chars, '
                 f'imperative mood, no trailing period)",\n'
-                f'  "body": "detailed body explaining the change '
-                f'(Markdown allowed)"\n'
+                f'  "body": "summary of the change in under 10 '
+                f'lines (Markdown allowed; wrap at 72 chars; no '
+                f'bullet padding, no preambles, no "this commit" '
+                f'phrasing)"\n'
                 f"}}\n"
                 f"```\n"
             )
