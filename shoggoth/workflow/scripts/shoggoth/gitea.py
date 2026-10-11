@@ -313,11 +313,311 @@ class Gitea(HttpApiClient):
 
         return result
 
+    def get_pr_review_thread(self, repo, pr_number, path, line):
+        """Fetch a SINGLE review-comment thread on a PR,
+        identified by its ``(path, line)`` anchor. Returns
+        a thread dict with the combined body of all
+        participants, or ``None`` if no such thread
+        exists (or all its comments are resolved).
+
+        Used by the ``/do`` slash command, which is
+        reply-only: the triggering ``/do`` comment must
+        be a reply to a specific review comment (so the
+        thread anchor is recoverable by id-lookup
+        against the per-review comments endpoint — see
+        ``find_review_comment_by_id``, since the webhook
+        payload itself only carries the reply's ``id``;
+        the dispatcher feeds those recovered
+        ``path``/``position`` values into this function
+        as the anchor). The workflow then asks Gitea
+        for JUST that thread and feeds its body to the
+        agent — no other comments on the PR are visible
+        to the agent. This is the load-bearing change
+        for the "``/do`` should never apply to all
+        comments in the MR" requirement: a function that
+        returns the full PR comment list (even if
+        filtered client-side afterwards) makes it
+        easy for the agent to be re-introduced to
+        the rest of the comments via MCP reads; a
+        function that returns ONE thread, by
+        contract, cannot leak the rest.
+
+        The Gitea REST API does not expose a
+        "list review comments filtered by
+        ``(path, line)``" endpoint — the closest
+        endpoints are
+        ``GET /repos/{owner}/{repo}/pulls/{index}/reviews``
+        (list reviews) and
+        ``GET /repos/{owner}/{repo}/pulls/{index}/reviews/{id}/comments``
+        (list comments in a review). We therefore
+        enumerate all reviews, fetch each review's
+        comments, and filter to the requested
+        ``(path, line)`` pair. The returned thread
+        combines every matching comment (root +
+        replies, across all reviews — a user can
+        reply to their own review comment via a
+        follow-up review, which is a separate
+        Gitea review with its own comment).
+
+        Returned thread dict shape (matches
+        ``get_unresolved_review_comments`` so the
+        downstream ``/do`` handler can use either
+        source interchangeably):
+
+          - ``id``: the id of the FIRST comment in
+            the thread (used by ``resolve_comment``
+            to mark the thread resolved)
+          - ``review_id``: the review id of the
+            first comment
+          - ``path``: the path (always equal to the
+            ``path`` arg)
+          - ``line``: the line (always equal to the
+            ``line`` arg)
+          - ``body``: combined body, format
+            ``[login1]: body1\\n\\n[login2]: body2\\n…``,
+            sorted by comment id ascending
+
+        Returns ``None`` if the PR has no review
+        comments at the requested ``(path, line)``
+        pair, or all such comments are resolved.
+        """
+        all_reviews = self._paginate(lambda page, limit: self.get(
+            f"repos/{repo}/pulls/{pr_number}/reviews",
+            params={"page": page, "limit": limit}))
+
+        thread_comments = []
+        for review in all_reviews:
+            review_id = review.get("id")
+            if review_id is None:
+                continue
+            comments = self._paginate(lambda page, limit: self.get(
+                f"repos/{repo}/pulls/{pr_number}/reviews/{review_id}/comments",
+                params={"page": page, "limit": limit}))
+            for c in comments:
+                if c.get("resolver"):
+                    continue
+                if c.get("path") != path:
+                    continue
+                if c.get("position") != line:
+                    continue
+                thread_comments.append(c)
+
+        if not thread_comments:
+            return None
+
+        thread_comments.sort(key=lambda c: c.get("id", 0))
+        combined_body = "\n\n".join(
+            f"[{c.get('user', {}).get('login', 'unknown')}]: {c.get('body', '')}"
+            for c in thread_comments)
+        root_comment = thread_comments[0]
+        return {
+            "id": root_comment.get("id"),
+            "review_id": root_comment.get("review_id"),
+            "path": path,
+            "line": line,
+            "body": combined_body,
+        }
+
+    def find_review_comment_by_id(self, repo, pr_number, comment_id):
+        """Return the ``PullReviewComment`` dict for the given
+        database id, or ``None`` if no review comment with that
+        id exists on the PR.
+
+        Used by the ``/do`` slash command's dispatcher to
+        recover the inline anchor ``(path, position,
+        pull_request_review_id)`` for the comment that triggered
+        the webhook. The webhook's
+        ``IssueCommentPayload.Comment`` struct
+        (``modules/structs/issue_comment.go:11``) carries only
+        the ``id`` — ``path``/``position`` are not serialised —
+        because the reply path
+        (``routers/api/v1/repo/pull_review.go:266`` →
+        ``CreateCodeComment`` → ``notify_service.CreateIssueComment``
+        → ``convert.ToAPIComment``) goes through the
+        stripped-down ``*api.Comment`` converter
+        (``services/convert/issue_comment.go:18``) instead of
+        the ``*api.PullReviewComment`` converter used by the
+        ``/reviews/{id}/comments`` REST endpoint
+        (``services/convert/pull_review.go:103``, which DOES
+        carry ``Path``/``LineNum``). The dispatcher therefore
+        has to recover the anchor via id lookup, not from the
+        payload directly.
+
+        Gitea does not expose a "review comment by id"
+        endpoint — the only list-comment route is
+        ``GET /repos/{o}/{r}/pulls/{n}/reviews/{id}/comments``,
+        which requires the review id in the path. This method
+        enumerates reviews and per-review comments looking for
+        a match, paying the same N+1 cost as
+        ``get_pr_review_thread`` (the follow-up thread fetch
+        after this lookup also enumerates). Single-shot match
+        by ``comment.id`` is the cheapest reliable signal; the
+        alternative — relying on a heuristic like "newest code
+        comment in this PR" — would race against pending agent
+        runs from a parallel trigger.
+
+        Returns ``None`` when:
+          - ``comment_id`` is falsy (no id on the webhook, e.g.
+            a deleted-comment payload, or a non-PR-comment
+            event that shares the dispatch path),
+          - the PR has no reviews (so the enumeration is empty),
+          - the id does not appear in any review's comment list
+            — typical for a top-level PR comment whose
+            ``Type == CommentTypeComment`` and which therefore
+            is never returned by ``/reviews/{id}/comments``.
+        The caller treats all three cases as "no inline anchor
+        recoverable, drop the trigger silently" — matching the
+        existing top-level-comment rejection policy.
+        """
+        if not comment_id:
+            return None
+        all_reviews = self._paginate(lambda page, limit: self.get(
+            f"repos/{repo}/pulls/{pr_number}/reviews",
+            params={"page": page, "limit": limit}))
+        for review in all_reviews:
+            review_id = review.get("id")
+            if review_id is None:
+                continue
+            comments = self._paginate(lambda page, limit: self.get(
+                f"repos/{repo}/pulls/{pr_number}/reviews/{review_id}/comments",
+                params={"page": page, "limit": limit}))
+            for c in comments:
+                if c.get("id") == comment_id:
+                    return c
+        return None
+
     def resolve_comment(self, repo, comment_id):
         self.post(f"repos/{repo}/pulls/comments/{comment_id}/resolve", {})
 
     def get_pr(self, repo, pr_number):
         return self.get(f"repos/{repo}/pulls/{pr_number}")
+
+    def list_pr_reviews(self, repo, pr_number):
+        """Fetch every review on the PR, including pending
+        drafts.
+
+        Hits ``GET /repos/{repo}/pulls/{n}/reviews``
+        (handler ``ListPullReviews`` at
+        ``routers/api/v1/repo/pull_review.go:27``,
+        paginated by the same ``_paginate`` pattern used
+        by the other list endpoints in this class — the
+        route returns the full list in one page on Gitea,
+        but paging future-proofs the call against a
+        higher review count).
+
+        Each list item carries at least:
+          - ``id`` (int64)
+          - ``user`` with ``login``
+          - ``state`` — one of the ``ReviewStateType``
+            constants defined in
+            ``modules/structs/pull_review.go``: ``PENDING``
+            (a draft the user hasn't submitted; does NOT
+            count as "review submitted"), ``COMMENT``,
+            ``APPROVED``, ``REQUEST_CHANGES``,
+            ``REQUEST_REVIEW`` (a re-request; Gitea uses
+            this state for a reviewer who's been
+            re-requested after their previous submission,
+            so it does NOT indicate a fresh review is
+            available — see the dispatch in
+            ``commands/pr_update.py:execute``)
+          - ``commit_id`` (the head SHA the review was
+            posted against; only present for submitted
+            reviews — pending drafts omit it)
+          - ``submitted_at``
+
+        The dispatcher uses this list to gate
+        ``_pr_review`` on the slave user's review
+        status: "review requested" (in
+        ``requested_reviewers``) does NOT trigger a
+        re-review when the slave already has a
+        ``COMMENT`` / ``APPROVED`` /
+        ``REQUEST_CHANGES`` review on the current head
+        SHA. ``REQUEST_REVIEW`` and ``PENDING`` are
+        explicitly treated as not-submitted so a
+        pending draft or a previously-dismissed re-
+        request leaves the door open for a fresh review.
+
+        Returns ``[]`` on transport failure (the
+        caller treats that as "no submitted review" —
+        safe because the dispatch already gates on
+        ``_pr_review``'s own state check after this
+        check passes; we err on the side of running
+        again rather than skipping a real first
+        request).
+        """
+        reviews = self._paginate(lambda page, limit: self.get(
+            f"repos/{repo}/pulls/{pr_number}/reviews",
+            params={"page": page, "limit": limit}))
+        return reviews if reviews is not None else []
+
+    # States that count as "review submitted" per the
+    # ``ReviewStateType`` enum in Gitea's
+    # ``modules/structs/pull_review.go``. ``PENDING`` and
+    # ``REQUEST_REVIEW`` are intentionally excluded:
+    #   - ``PENDING`` is a draft the user hasn't published.
+    #   - ``REQUEST_REVIEW`` is the placeholder row Gitea
+    #     creates when a reviewer is requested; a
+    #     re-request can also yield a fresh ``REQUEST_REVIEW``
+    #     row even after a previous submission, so trusting
+    #     it would incorrectly skip a re-review of a new
+    #     head.
+    _SUBMITTED_REVIEW_STATES = frozenset(
+        {"COMMENT", "APPROVED", "REQUEST_CHANGES"})
+
+    def slave_has_submitted_review_on_head(self, slave_user, head_sha):
+        """Return ``True`` iff ``slave_user`` has at least
+        one submitted review on the PR's current head
+        SHA.
+
+        "Submitted" is the union of the three states that
+        Gitea's ``ReviewStateType`` enum marks as final
+        reviewer output (``COMMENT`` / ``APPROVED`` /
+        ``REQUEST_CHANGES``). The check is additionally
+        scoped to ``commit_id == head_sha`` so that a
+        previously-submitted review against an older head
+        does NOT count as covering the current head — a
+        push between the submission and the re-request
+        drops the old review out of scope, even though
+        the row still sits in the table.
+
+        Used by ``PrUpdateCommand.execute`` to gate the
+        ``_pr_review`` dispatch: a re-request webhook
+        (``action == "review_requested"``) fires every
+        time a reviewer is added to ``requested_reviewers``,
+        including re-requests after the slave already
+        submitted. Without this check the slave would
+        re-review the same head on every push of a
+        "request changes" button; with it, the slave
+        only re-reviews when the head has actually moved
+        past the previously-submitted commit, which is
+        the F2 requirement.
+
+        Returns ``False`` when:
+          - ``list_pr_reviews`` returned ``[]`` (e.g.
+            the API call failed — the caller treats that
+            as "no submitted review" and runs the review
+            once, which is the safe default for a first
+            request),
+          - the slave has no rows at all on this PR,
+          - every slave row is a ``PENDING`` /
+            ``REQUEST_REVIEW`` placeholder,
+          - every submitted row targets a different head
+            SHA.
+        """
+        if not slave_user or not head_sha:
+            return False
+        pr = self._payload.get("pull_request", {}) or {}
+        repo = pr.get("base", {}).get("repo", {}).get("full_name", "")
+        pr_number = pr.get("number")
+        if not repo or not pr_number:
+            return False
+        reviews = self.list_pr_reviews(repo, pr_number) or []
+        for r in reviews:
+            if (r.get("state") in self._SUBMITTED_REVIEW_STATES
+                    and r.get("commit_id") == head_sha
+                    and (r.get("user") or {}).get("login") == slave_user):
+                return True
+        return False
 
     def get_pr_files(self, repo, pr_number):
         return self._paginate(lambda page, limit: self.get(
@@ -344,10 +644,64 @@ class Gitea(HttpApiClient):
             "event": event,
         })
 
-    def remove_requested_reviewer(self, repo, pr_number, username):
-        return self.delete(
-            f"repos/{repo}/pulls/{pr_number}/requested_reviewers",
-            {"reviewers": [username]})
+    def post_pr_review_with_inline(self, repo, pr_number, body, event,
+                                    comments, commit_id):
+        """Post a single review carrying the summary body plus a list
+        of inline comments anchored to diff positions.
+
+        ``comments`` is a list of dicts, each ``{path, body,
+        new_position}`` (Gitea also accepts ``old_position`` or
+        ``position``; the format helper here only emits
+        ``new_position`` because the agent's ``line`` is the new-
+        file line number). ``commit_id`` is the head SHA the
+        comments anchor against; without it Gitea 422s on the
+        first inline comment.
+
+        Returns the parsed JSON response on success, or
+        ``None`` on any HTTP / network failure (handled by
+        ``http_post_json``). Gitea rejects the whole review
+        when any inline comment references a non-existent
+        ``(path, position)``, so a failure here means every
+        inline comment in the batch was rejected — the caller
+        falls back to ``post_pr_review_chunked`` (body only)
+        and the inline comments are lost. A per-comment
+        retry loop is a future improvement; today the helper
+        is a pass-through.
+        """
+        payload = {
+            "body": body,
+            "event": event,
+            "commit_id": commit_id,
+            "comments": comments,
+        }
+        return self.post(f"repos/{repo}/pulls/{pr_number}/reviews",
+                          payload)
+
+    def get_pr_review_comments(self, repo, pr_number, review_id):
+        """Fetch all inline comments for a review.
+
+        Calls ``GET /repos/{repo}/pulls/{n}/reviews/{id}/comments``
+        (route registered in
+        ``routers/api/v1/repo/pull_review.go:158``, handler
+        ``GetPullReviewComments``). Returns a list of
+        comment dicts, each with at least ``id``, ``path``,
+        ``position`` (= the file line number, mapped from
+        ``LineNum`` in the response — see the
+        ``PullReviewComment`` struct), and ``html_url``
+        (format: ``{issue_url}#issuecomment-{id}``).
+
+        Used by the review follow-up to build a clickable
+        index of inline comments posted in a review — the
+        review body has "see inline comment" placeholders
+        (the review API doesn't expose per-comment URLs
+        in the POST response, and Gitea doesn't support
+        editing a posted review body), so the follow-up
+        comment provides the actual links.
+
+        Returns ``None`` on HTTP / network failure.
+        """
+        return self.get(
+            f"repos/{repo}/pulls/{pr_number}/reviews/{review_id}/comments")
 
     def post_pr_review_chunked(self, repo, pr_number, body, event="COMMENT",
                                chunk_size=60000):
@@ -382,11 +736,14 @@ class Gitea(HttpApiClient):
     def request_reviewer(self, repo, pr_number, username):
         """Request a review from ``username`` on the given PR.
 
-        Mirrors ``remove_requested_reviewer`` (which uses DELETE) for
-        the symmetric POST case. Used by ``PrUpdateCommand``'s
-        ``/review`` slash command so the user-driven path and the
-        existing ``pull_request_review_request`` workflow trigger
-        converge on the same Gitea API call.
+        Used by ``PrUpdateCommand``'s ``/review`` slash command
+        so the user-driven path and the existing
+        ``pull_request_review_request`` workflow trigger
+        converge on the same Gitea API call. The dispatch
+        path no longer uses a symmetric DELETE to clear the
+        request — re-requests are now handled by gating
+        ``_pr_review`` on the slave's existing review state
+        (see ``slave_has_submitted_review_on_head``).
         """
         return self.post(
             f"repos/{repo}/pulls/{pr_number}/requested_reviewers",

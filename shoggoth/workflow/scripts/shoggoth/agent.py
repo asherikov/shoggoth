@@ -12,6 +12,31 @@ from .otlp import OtlpLogger
 from .util import die, log, run
 from .state import params
 
+
+def _normalise_diff_path(path):
+    """Strip prefixes the agent may prepend to a repo-relative path.
+
+    The ``git diff`` ``+++ b/<path>`` header and Gitea's
+    ``comments[].path`` both use the repo-root-relative
+    form (no leading ``./``, no leading ``/``). The agent,
+    however, sometimes reports paths with a leading ``./``
+    (``./README.md`` from a relative-path read) or a
+    leading ``/`` (``/README.md`` from an absolute read).
+    Strip those so the inline-anchor lookup in
+    ``commands/pr_update.py:_post_review_followup_with_links``
+    keys the agent's normalised path against the GET
+    response consistently.
+    """
+    if not path:
+        return path
+    p = path
+    while p.startswith("./"):
+        p = p[2:]
+    if p.startswith("/"):
+        p = p[1:]
+    return p
+
+
 class Agent:
     # Default per-invocation wall-clock cap for ``prompt()`` / the
     # ``pr-comment`` per-comment retries. The workflow template's
@@ -156,12 +181,58 @@ class Agent:
         return data
 
     @staticmethod
-    def _format_review_json(review_data, pr_title, pr_url):
+    def _format_review_json(review_data, pr_title, pr_url,
+                             diff_text=None):
         """Render a qwen review run --json result as a Markdown review body
         suitable for posting as a single Gitea PR review.
+
+        When ``diff_text`` is provided, also returns a list of
+        inline comments (``{path, body, new_position}``) for
+        the findings that have a resolvable path/line.
+        Returns the tuple ``(markdown_body, inline_comments)``
+        in that case; returns just the markdown string when
+        ``diff_text`` is ``None`` (backwards compatible).
+
+        ``new_position`` is a FILE LINE NUMBER, not a
+        unified-diff position. The Gitea API field is
+        named ``new_position`` (see
+        ``modules/structs/pull_review.go``) but the struct
+        comment is explicit — "if comment to new file line
+        or 0" — and the swagger maps it to ``NewLineNum``.
+        Gitea uses the value to cut the diff context around
+        that line (``git.GetFileDiffCutAroundLine``) and
+        stores it as ``LineNum`` in the comment. The field
+        name is misleading; treating it as a diff position
+        is a common source of off-by-N bugs in review bots
+        (the symptom: a comment at "file:493" lands at
+        line 12 because the diff position 12 was sent
+        instead of the line number 493).
+
+        A finding becomes an inline comment when:
+          - ``path`` and ``line`` are present
+          - ``line`` is a positive integer
+
+        Gitea generates the diff context for unchanged
+        lines too (``GeneratePatchForUnchangedLine``), so
+        there's no need to validate that the line falls in
+        a changed hunk — Gitea handles that itself. If the
+        line is invalid (e.g. past EOF), Gitea rejects
+        the whole review and the caller falls back to
+        body-only via ``post_pr_review_chunked``.
+
+        Inline comment body always carries the full finding
+        text plus the ``path:line`` location, so reviewers
+        see the context at the anchor without cross-
+        referencing the rolled-up list. The review body
+        only shows a reference to the inline comment
+        (not the full text) for findings that were posted
+        inline — duplicating the full text in the body
+        would be noisy. Findings without a resolvable
+        path/line keep their full text in the body so
+        reviewers still see them.
         """
         if not isinstance(review_data, dict):
-            return ""
+            return ("", []) if diff_text is not None else ""
         findings = review_data.get("findings") or []
         verdict = review_data.get("verdict") or ""
         summary = (review_data.get("summary")
@@ -174,22 +245,65 @@ class Agent:
         if summary and not findings:
             parts.append(summary.strip())
             parts.append("")
+        inline_comments = []
         if findings:
             parts.append("### Findings")
             parts.append("")
             for f in findings:
                 sev = (f.get("severity") or "info").upper()
                 path = f.get("path") or "?"
-                line = f.get("line") or f.get("start_line")
-                loc = f"{path}:{line}" if line else path
-                parts.append(f"- **[{sev}]** `{loc}`")
+                raw_line = f.get("line") or f.get("start_line")
+                # The agent sometimes reports ``line`` as a
+                # string ("260") and Gitea's API expects
+                # an int. Normalise to int before
+                # sending.
+                line = None
+                if raw_line is not None:
+                    try:
+                        line = int(raw_line)
+                    except (TypeError, ValueError):
+                        line = None
+                loc = f"{path}:{line}" if line is not None else path
                 body = (f.get("body") or f.get("message") or "").strip()
-                if body:
-                    for bl in body.splitlines():
-                        parts.append(f"  {bl}")
-                parts.append("")
+                # ``new_position`` is a file line number
+                # — see the Gitea API contract noted in
+                # the docstring above. Send the line
+                # directly; no diff-position lookup.
+                if (diff_text is not None and path != "?"
+                    and line is not None and line > 0):
+                    norm_path = _normalise_diff_path(path)
+                    # Body shows only a reference; the
+                    # full text lives in the inline
+                    # comment.
+                    parts.append(
+                        f"- **[{sev}]** `{path}:{line}` — "
+                        f"see inline comment"
+                    )
+                    parts.append("")
+                    comment_body = (
+                        f"**[{sev}]** at `{path}:{line}`\n\n{body}"
+                        if body else
+                        f"**[{sev}]** at `{path}:{line}`"
+                    )
+                    inline_comments.append({
+                        "path": norm_path,
+                        "body": comment_body,
+                        "new_position": line,
+                    })
+                else:
+                    # No inline comment (no path/line, or
+                    # non-positive line): include the full
+                    # text in the body so reviewers still
+                    # see it.
+                    parts.append(f"- **[{sev}]** `{loc}`")
+                    if body:
+                        for bl in body.splitlines():
+                            parts.append(f"  {bl}")
+                    parts.append("")
         elif not summary:
             parts.append("_No issues found._")
+        if diff_text is not None:
+            return "\n".join(parts), inline_comments
         return "\n".join(parts)
 
     def __init__(self, shoggoth):

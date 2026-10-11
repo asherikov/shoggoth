@@ -6,7 +6,7 @@ import sys
 import time
 import uuid
 
-from ..agent import Agent
+from ..agent import Agent, _normalise_diff_path
 from ..git import Git
 from ..util import die, log, normalize_for_branch
 from .base import CommandBase
@@ -22,6 +22,19 @@ class PrUpdateCommand(CommandBase):
     # do not re-fire commands (only the original invocation does).
     SLASH_COMMAND_RE = re.compile(r"^/(\w+)$")
 
+    # ``/do`` is the bare trigger: it carries no instructions
+    # itself. Posting ``/do`` on a PR tells the agent to
+    # re-read the PR's comment thread and execute the
+    # instructions left there — even instructions that were
+    # left by the slave user (which the regular review-
+    # comments flow ignores via the trusted-user filter).
+    # ``SLASH_DO_RE`` matches just the bare command word
+    # (with optional trailing whitespace); any text after
+    # ``/do`` falls through to the regular review-comments
+    # path so ``/do something`` is treated as a normal
+    # comment, not a trigger.
+    SLASH_DO_RE = re.compile(r"^/do\s*$")
+
     # Catalog surfaced by ``/help``. Tuples keep the order stable
     # without making callers depend on Python's dict ordering
     # guarantee (the file targets Python 3).
@@ -34,6 +47,24 @@ class PrUpdateCommand(CommandBase):
                    "agent from the cumulative diff"),
         ("rebase", "Rebase this PR on top of the target branch; "
                    "conflicts are resolved by an agent"),
+        ("do", "Re-read the PR's comment thread and execute the "
+               "instructions left there. The trigger must be a "
+               "reply to a specific inline review comment so the "
+               "(path, line) anchor is recoverable; a ``/do`` posted "
+               "as a top-level issue comment is a no-op. The "
+               "trigger must come from a trusted human — the slave "
+               "is allowed to leave comments in a thread but is "
+               "not allowed to press ``/do`` itself (the trust "
+               "gate in ``_handle_slash_command`` blocks the slave "
+               "for every slash command, including this one). The "
+               "command body is just ``/do``; the instructions "
+               "come from the comment thread, not from the "
+               "command itself. Unlike the regular review-"
+               "comments flow (which only addresses comments from "
+               "trusted users), this trigger treats every "
+               "unresolved comment in the thread — including any "
+               "left by the slave user — as a directive for the "
+               "agent"),
     )
 
     def __init__(self, shoggoth, gitea, redmine, agent):
@@ -63,6 +94,40 @@ class PrUpdateCommand(CommandBase):
                       f"repo={self.shoggoth.working_repo} ===", flush=True)
                 self._pr_comment(self.gitea.get_pr_number(), pr_url)
         elif action == "review_requested" and self.gitea.is_slave_user_reviewer():
+            # Gitea fires ``review_requested`` for both the
+            # first request and any re-request, so the
+            # ``is_slave_user_reviewer`` test alone is not
+            # enough: a re-request after the slave already
+            # submitted a review on the same head would
+            # cause the slave to re-run the same review
+            # over again. The state-based guard below
+            # looks up the slave's existing review rows
+            # on the current head SHA and skips the
+            # re-run when one of them is a submitted
+            # state (``COMMENT`` / ``APPROVED`` /
+            # ``REQUEST_CHANGES``). PENDING and
+            # REQUEST_REVIEW rows do not count — a draft
+            # or a fresh re-request placeholder still
+            # leaves the door open. When the head SHA
+            # changes (a push), the previous submission's
+            # ``commit_id`` no longer matches and the
+            # slave will re-review the new commit.
+            head_sha = (self.gitea._payload
+                        .get("pull_request", {})
+                        .get("head", {})
+                        .get("sha", ""))
+            slave_user = params.shoggoth_slave_user
+            if (head_sha and slave_user
+                    and self.gitea.slave_has_submitted_review_on_head(
+                        slave_user, head_sha)):
+                log(f"pr-update: slave already submitted a review on "
+                    f"head={head_sha}; skipping re-request")
+                otlp = self.agent.otlp
+                if otlp is not None:
+                    otlp._push_line(
+                        f"pr-update: slave already submitted a review on "
+                        f"head={head_sha}; skipping re-request")
+                return
             print(f"=== PR REVIEW: pr={pr_url} "
                   f"repo={self.shoggoth.working_repo} ===", flush=True)
             self._pr_review(pr_url)
@@ -120,7 +185,7 @@ class PrUpdateCommand(CommandBase):
         if not wrote:
             gitea_diff = self.gitea.get_pr_diff_text(pr_repo, pr_number)
             if gitea_diff:
-                with open(diff_path, "w") as f:
+                with open(diff_path, "w", encoding="utf-8") as f:
                     f.write(gitea_diff)
                 diff_size = len(gitea_diff)
                 log(f"pr-review: using Gitea-rendered diff "
@@ -134,6 +199,16 @@ class PrUpdateCommand(CommandBase):
             otlp._push_line(
                 f"pr-review: _write_pr_diff wrote {diff_size} bytes "
                 f"to {diff_path}")
+        # ``_format_review_json`` only consults ``diff_text is not None``
+        # to decide whether to render inline-comment placeholders in
+        # the body and emit a parallel ``inline_comments`` list; the
+        # actual content of the diff is never inspected. Pass a
+        # sentinel rather than reading the file's contents into
+        # memory (a multi-MB diff would otherwise be held in the
+        # Python process through to the end of ``_pr_review`` for
+        # no functional reason). ``None`` triggers the body-only
+        # path; any non-``None`` value triggers the inline path.
+        inline_comments_enabled = True if diff_size > 0 else None
 
         wt_path, diff_source = self.shoggoth._apply_pr_to_worktree(
             self.shoggoth.repo_dir, pr_base, pr_sha,
@@ -249,14 +324,17 @@ class PrUpdateCommand(CommandBase):
                 f"pr-review: extracted review_text length={len(review_text)}")
 
             review_data = self.agent._extract_review_json(review_text)
+            inline_comments = []
             if review_data is not None:
-                review_md = self.agent._format_review_json(
-                    review_data, pr_title, pr_url)
+                review_md, inline_comments = self.agent._format_review_json(
+                    review_data, pr_title, pr_url,
+                    diff_text=inline_comments_enabled)
                 otlp._push_line(
                     f"pr-review: parsed JSON review "
                     f"verdict={review_data.get('verdict', '?')!r} "
                     f"findings="
-                    f"{len(review_data.get('findings') or [])}")
+                    f"{len(review_data.get('findings') or [])} "
+                    f"inline_comments={len(inline_comments)}")
             else:
                 otlp._push_line(
                     "pr-review: no JSON block found in agent output; "
@@ -267,19 +345,90 @@ class PrUpdateCommand(CommandBase):
                 log("pr-review: no review text captured from agent")
                 otlp._push_line(
                     "pr-review: no review text captured from agent")
-                slave_user = params.shoggoth_slave_user
-                self.gitea.remove_requested_reviewer(pr_repo, pr_number,
-                                                    slave_user)
                 self.agent.stop_session()
                 return
 
             log(f"pr-review: posting review to gitea "
-                f"(length={len(review_md)})")
+                f"(length={len(review_md)}, inline_comments="
+                f"{len(inline_comments)})")
             otlp._push_line(
                 f"pr-review: posting review to gitea "
-                f"(length={len(review_md)})")
-            result = self.gitea.post_pr_review_chunked(pr_repo, pr_number,
-                                                      review_md)
+                f"(length={len(review_md)}, inline_comments="
+                f"{len(inline_comments)})")
+            if inline_comments and pr_sha:
+                result = self.gitea.post_pr_review_with_inline(
+                    pr_repo, pr_number, review_md, "COMMENT",
+                    inline_comments, pr_sha)
+                if result is None:
+                    log("pr-review: inline review post failed; "
+                        "falling back to body-only review")
+                    otlp._push_line(
+                        "pr-review: inline review post failed; "
+                        "falling back to body-only review")
+                    # ``review_md`` was rendered with the inline
+                    # flag (``inline_comments_enabled is True``),
+                    # so each finding's body became a placeholder
+                    # (``see inline comment``) and the full text
+                    # lives only in the inline-comment payload
+                    # Gitea rejected. Regenerate the body without
+                    # the flag so the placeholders become full
+                    # text — the fallback must carry the finding
+                    # text, not the placeholder.
+                    if review_data is not None:
+                        review_md = self.agent._format_review_json(
+                            review_data, pr_title, pr_url)
+                    result = self.gitea.post_pr_review_chunked(
+                        pr_repo, pr_number, review_md)
+                elif isinstance(result, dict):
+                    # Review posted with inline comments.
+                    # Post a follow-up issue comment with
+                    # a clickable index of the inline
+                    # comments — the review body has
+                    # "see inline comment" placeholders
+                    # (Gitea doesn't expose per-comment
+                    # URLs in the POST response and doesn't
+                    # support editing a posted review body),
+                    # so the follow-up provides the actual
+                    # links. Best-effort: if the fetch
+                    # fails, the inline comments are still
+                    # posted; only the follow-up links are
+                    # missing.
+                    review_id = result.get("id")
+                    if review_id:
+                        # ``pull_request_url`` from the
+                        # POST response is the canonical
+                        # PR URL Gitea uses internally —
+                        # use it as the base for
+                        # constructing per-comment URLs
+                        # (format:
+                        # ``{pull_request_url}#issuecomment-{id}``).
+                        # Avoids reconstructing the URL
+                        # from ``pr_repo``/``pr_number``
+                        # (which could differ in trailing
+                        # slash, query params, etc.) and
+                        # guarantees the ``#issuecomment-``
+                        # fragment resolves to the right
+                        # comment.
+                        pr_url = result.get(
+                            "pull_request_url", "")
+                        self._post_review_followup_with_links(
+                            pr_repo, pr_number, pr_url,
+                            review_id, review_data,
+                            inline_comments, otlp)
+            else:
+                # ``pr_sha`` is empty (or ``inline_comments``
+                # empty), so the inline post was skipped — but the
+                # ``review_md`` was already rendered with the
+                # inline flag set, so any finding that did have a
+                # path/line is a placeholder whose full text lives
+                # only in the inline-comment payload that will
+                # never go anywhere. Regenerate without the flag so
+                # the body carries full text.
+                if review_data is not None:
+                    review_md = self.agent._format_review_json(
+                        review_data, pr_title, pr_url)
+                result = self.gitea.post_pr_review_chunked(
+                    pr_repo, pr_number, review_md)
             if result is None:
                 otlp.last_error = "failed to post review to gitea"
                 self.agent.stop_session()
@@ -290,13 +439,151 @@ class PrUpdateCommand(CommandBase):
             self.shoggoth._remove_review_worktree(wt_path)
             otlp._push_line(f"pr-review: removed worktree {wt_path}")
 
-        slave_user = params.shoggoth_slave_user
-        log(f"pr-review: removing requested reviewer {slave_user}")
-        self.gitea.remove_requested_reviewer(pr_repo, pr_number, slave_user)
         otlp._push_line(
             f"pr-review: session done elapsed={time.time() - t0:.1f}s "
             f"review_chars={len(review_md)}")
         self.agent.stop_session()
+
+    def _post_review_followup_with_links(self, pr_repo, pr_number,
+                                           pr_url, review_id,
+                                           review_data, inline_comments,
+                                           otlp):
+        """Post a follow-up issue comment with a clickable
+        index of the inline comments posted in the review.
+
+        The review body has "see inline comment"
+        placeholders (Gitea doesn't expose per-comment
+        URLs in the POST review response and doesn't
+        support editing a posted review body), so the
+        follow-up provides the actual links. Reviewers
+        see the inline comments at the right lines AND
+        a navigable index in the PR conversation.
+
+        Best-effort: if the comments fetch fails, the
+        inline comments are still posted (they're already
+        in Gitea by the time this runs) — only the
+        follow-up links are missing. The function logs
+        a warning and returns; the workflow continues.
+
+        ``pr_url`` is ``pull_request_url`` from the
+        POST review response — the canonical PR URL
+        Gitea uses internally. Used as the base for
+        constructing per-comment URLs in the format
+        ``{pr_url}#issuecomment-{id}`` (the same format
+        Gitea itself uses in
+        ``services/convert/pull_review.go`` via
+        ``comment.HTMLURL(ctx)``). Constructing the URL
+        from the canonical base (rather than
+        reconstructing it from ``pr_repo``/``pr_number``
+        or using ``html_url`` from the GET response)
+        guarantees the fragment resolves to the right
+        comment even if the PR URL formatting differs
+        (trailing slash, query params, etc.).
+
+        ``review_data`` is the parsed review JSON
+        (verdict, summary, findings); used to render the
+        follow-up header. ``inline_comments`` is the
+        list of inline comments we sent in the review
+        (each ``{path, new_position, body}``); used to
+        build the index. The per-comment ``id`` is
+        fetched from Gitea by matching on ``(path, line)``.
+        """
+        try:
+            comments = self.gitea.get_pr_review_comments(
+                pr_repo, pr_number, review_id)
+        except Exception as e:
+            log(f"pr-review: WARNING failed to fetch "
+                f"review comments for follow-up: {e}",
+                file=sys.stderr)
+            otlp._push_line(
+                f"pr-review: WARNING failed to fetch "
+                f"review comments for follow-up: {e}")
+            return
+        if not comments:
+            log(f"pr-review: WARNING no comments returned "
+                f"for review {review_id}; skipping follow-up",
+                file=sys.stderr)
+            otlp._push_line(
+                f"pr-review: WARNING no comments returned "
+                f"for review {review_id}; skipping follow-up")
+            return
+        # Build a map of (normalised_path, line) ->
+        # comment_id from the Gitea response. The
+        # response uses ``position`` (= ``LineNum``
+        # internally, the file line number) and
+        # ``path`` exactly as we sent them. The URL
+        # is then constructed as
+        # ``{pr_url}#issuecomment-{id}`` below —
+        # using the canonical ``pr_url`` from the
+        # POST response guarantees the fragment
+        # resolves to the right comment.
+        # Normalise the path the same way
+        # ``Agent._format_review_json`` normalises the
+        # path key it stashes on each inline comment,
+        # so the lookup matches the agent's normalised
+        # form even when Gitea returns the comment
+        # with a prefix (``./README.md``,
+        # ``/README.md``) the agent never reported.
+        id_map = {}
+        for c in comments:
+            path = _normalise_diff_path(c.get("path", ""))
+            line = c.get("position", 0)
+            cid = c.get("id", 0)
+            if path and line and cid:
+                id_map[(path, line)] = cid
+        # Build the follow-up body. The verdict and
+        # summary go in the header; the inline-comment
+        # index goes under a sub-heading. The full text
+        # of each finding is NOT duplicated here — it
+        # lives in the inline comments themselves (per
+        # the "no duplication" requirement).
+        rd = review_data or {}
+        verdict = rd.get("verdict") or ""
+        summary = (rd.get("summary")
+                   or rd.get("summary_md")
+                   or rd.get("body") or "")
+        parts = ["## Code review summary", ""]
+        if verdict:
+            parts.append(f"**Verdict:** {verdict}")
+            parts.append("")
+        if summary:
+            parts.append(summary.strip())
+            parts.append("")
+        parts.append("### Inline comments")
+        parts.append("")
+        parts.append("Click a link to jump to the comment:")
+        parts.append("")
+        for ic in inline_comments:
+            path = ic.get("path", "?")
+            line = ic.get("new_position", 0)
+            cid = id_map.get((path, line), 0)
+            label = f"`{path}:{line}`"
+            if cid and pr_url:
+                url = f"{pr_url}#issuecomment-{cid}"
+                parts.append(f"- [{label}]({url})")
+            else:
+                # No comment ID matched (the GET
+                # response didn't include this path/
+                # line) or no ``pr_url`` from the POST
+                # response — fall back to plain text
+                # so the line is still listed.
+                parts.append(f"- {label}")
+        followup_body = "\n".join(parts)
+        otlp._push_line(
+            f"pr-review: posting follow-up summary with "
+            f"{len(inline_comments)} inline comment link(s)")
+        result = self.gitea.post_pr_comment(
+            pr_repo, pr_number, followup_body)
+        if result is None:
+            log(f"pr-review: WARNING failed to post "
+                f"follow-up summary comment",
+                file=sys.stderr)
+            otlp._push_line(
+                "pr-review: WARNING failed to post "
+                "follow-up summary comment")
+        else:
+            otlp._push_line(
+                "pr-review: follow-up summary posted")
 
     def _resolve_task(self, branch):
         issues = self.redmine.list_issues(self.shoggoth.project)
@@ -466,10 +753,19 @@ class PrUpdateCommand(CommandBase):
         newline before ``/help`` is still recognised) but anything
         after the command — e.g. ``/help please`` — falls through
         to ``_pr_comment`` as a normal PR comment.
+
+        ``/do`` is matched by the separate ``SLASH_DO_RE`` first;
+        it's a bare trigger (no trailing text), and the handler
+        reads the comment thread rather than executing the
+        command body itself. A ``/do something`` body does NOT
+        match ``SLASH_DO_RE`` and falls through to the normal
+        review-comments path as a regular comment.
         """
         if self.gitea.get_pr_action() != "created":
             return None
         body = self.gitea.get_pr_comment_body().strip()
+        if self.SLASH_DO_RE.match(body):
+            return "do"
         m = self.SLASH_COMMAND_RE.match(body)
         return m.group(1) if m else None
 
@@ -489,16 +785,32 @@ class PrUpdateCommand(CommandBase):
         log(f"slash-command: command=/{command} repo={pr_repo} "
             f"pr={pr_number}")
 
-        # Trust check: only ``shoggoth_trusted_users`` can drive
-        # destructive operations (force-push on /squash, /rebase,
-        # review-request on /review). Implemented here (rather than
-        # in execute()) so any future dispatch path also inherits
-        # the gate without having to remember to add it. The check
-        # is silent on rejection — posting a PR-visible "not
-        # authorized" message would leak the existence of the
-        # command names and give unauthenticated users a probe
-        # channel. The Argo log line is sufficient for the trusted
-        # user auditing what happened.
+        # Trust check: only ``shoggoth_trusted_users`` can
+        # drive ANY slash command. Implemented here (rather
+        # than in execute()) so any future dispatch path
+        # also inherits the gate without having to
+        # remember to add it. The check is silent on
+        # rejection — posting a PR-visible "not
+        # authorized" message would leak the existence of
+        # the command names and give unauthenticated
+        # users a probe channel. The Argo log line is
+        # sufficient for the trusted user auditing what
+        # happened.
+        #
+        # In particular the slave user (the agent's own
+        # account) is NOT allowed to trigger slash
+        # commands. The earlier design gave the slave
+        # an exception for ``/do`` and ``/help`` (so it
+        # could leave instructions in a review comment
+        # and trigger a pass); the trust model has since
+        # been tightened to require a trusted human in
+        # the loop. ``/do`` is now reply-only — the
+        # trusted human replies to a review comment with
+        # ``/do`` to drive the agent on that thread —
+        # so the slave's own comments inside the thread
+        # still surface (they are part of the thread
+        # body), but only the trusted human can press
+        # the trigger.
         comment = self.gitea._payload.get("comment") or {}
         author = (comment.get("user") or {}).get("login") or ""
         trusted_users = set(
@@ -506,7 +818,8 @@ class PrUpdateCommand(CommandBase):
         trusted_users.discard("")
         if not author or author not in trusted_users:
             log(f"slash-command: rejecting /{command} from "
-                f"non-trusted user {author!r} (allowed={sorted(trusted_users)})",
+                f"non-trusted user {author!r} "
+                f"(allowed={sorted(trusted_users)})",
                 file=sys.stderr)
             return
 
@@ -517,8 +830,65 @@ class PrUpdateCommand(CommandBase):
                 f"Unknown command `/{command}`. "
                 f"Type `/help` for the list of supported commands.")
             return
+        # ``/do`` needs the inline ``(path, line)`` anchor for
+        # the thread the user replied to. The webhook
+        # payload's ``IssueCommentPayload.Comment`` struct
+        # (Gitea ``modules/structs/issue_comment.go:11``) is
+        # the stripped-down ``*api.Comment`` — it carries
+        # only ``id`` (plus body, user, urls, timestamps);
+        # ``path`` and ``position`` are NOT serialised
+        # because replies to inline review comments are
+        # dispatched through
+        # ``notify_service.CreateIssueComment`` with
+        # ``convert.ToAPIComment`` rather than through
+        # ``PullRequestReview`` with
+        # ``*api.PullReviewComment``. Reading ``comment.path``/
+        # ``comment.position`` from the webhook always
+        # returns ``None`` — see the inline comments on
+        # ``Gitea.find_review_comment_by_id`` for the full
+        # trace through the Gitea source.
+        #
+        # Recovery: take the reply's ``comment.id`` (which
+        # IS the database id of the row created by
+        # ``CreateCodeComment(..., replyReviewID=parent.ReviewID, ...\,
+        # parent.Line, parent.TreePath, ...)``) and id-match
+        # it against ``/reviews/{id}/comments``. The matched
+        # row carries the same ``path``/``position`` as the
+        # parent comment (the reply row inherits them from
+        # the parent at creation time, see
+        # ``services/pull/review.go:266``), which is exactly
+        # the thread anchor ``get_pr_review_thread`` filters
+        # on.
+        #
+        # When the lookup returns ``None`` — top-level PR
+        # comments (``Type == CommentTypeComment``, which the
+        # review-comments endpoint never surfaces), or
+        # ``comment.id`` is absent on the payload, or the id
+        # belongs to a deleted comment — both ``thread_path``
+        # and ``thread_line`` stay ``None`` and the existing
+        # gate inside ``_slash_do``
+        # (``if thread_path is None or thread_line is None:
+        # return``) silently drops the trigger. That matches
+        # the original "no parent thread = no-op" policy and
+        # closes the bug where the Webhook-only lookup
+        # silently no-op'd on EVERY ``/do`` invocation
+        # (including valid inline replies).
+        thread_path = None
+        thread_line = None
+        if command == "do":
+            comment_id = comment.get("id")
+            if comment_id is not None:
+                match = self.gitea.find_review_comment_by_id(
+                    pr_repo, pr_number, comment_id)
+                if match is not None:
+                    thread_path = match.get("path")
+                    thread_line = match.get("position")
         try:
-            handler(pr_repo, pr_number, pr_url)
+            if command == "do":
+                handler(pr_repo, pr_number, pr_url,
+                        thread_path, thread_line)
+            else:
+                handler(pr_repo, pr_number, pr_url)
         except Exception as e:
             log(f"slash-command: command=/{command} failed: {e}",
                 file=sys.stderr)
@@ -580,6 +950,212 @@ class PrUpdateCommand(CommandBase):
             lines.append(f"- `/{cmd}` — {desc}")
         self._post_slash_response(pr_repo, pr_number, "\n".join(lines))
 
+    def _slash_do(self, pr_repo, pr_number, pr_url,
+                  thread_path=None, thread_line=None):
+        """``/do`` — execute the instructions in the
+        inline-review-comment conversation the user
+        replied to.
+
+        ``/do`` is REPLY-ONLY on a Gitea "conversation".
+        Gitea's "conversation" data structure is
+        defined exclusively for inline review comments
+        (``CommentTypeCode``), grouped by
+        ``(path, line)`` — see
+        ``models/issues/comment_code.go:22`` and
+        ``models/issues/review.go:935`` (the
+        ``MarkConversation`` function explicitly
+        checks ``comment.Type != CommentTypeCode``
+        and returns early for anything else).
+        Issue comments on a PR are rendered as a flat
+        chronological list with NO parent-of-reply
+        relationship in Gitea's data model, so they
+        have no "conversation" to target. The
+        ``if thread cannot be identified do nothing``
+        rule is therefore load-bearing for the
+        issue-comment case: the thread cannot be
+        identified (Gitea has no concept of an issue
+        comment thread), so the handler does nothing.
+
+        The dispatcher reads the webhook payload's
+        ``comment.path`` and ``comment.position``
+        fields. These are present only when the
+        triggering comment is a reply to an inline
+        review comment — i.e. it was posted via the
+        code-comment "Reply" form in the conversation
+        view. Top-level issue comments (and replies
+        to them, which are also top-level issue
+        comments) have no ``path``/``position``;
+        ``/do`` posted there is dropped on the floor
+        with a log line and no response comment
+        (the gate is silent, matching the
+        pre-existing trust-gate pattern).
+
+        Once the ``(path, line)`` anchor is
+        recovered, the workflow asks Gitea for JUST
+        that conversation via
+        ``get_pr_review_thread`` (a single-
+        conversation query — not a "list all +
+        filter" roundtrip) and feeds the
+        conversation's combined body to the agent as
+        the prompt. The agent prompt is the comment
+        body and ONLY the comment body — no PR URL,
+        no PR number, no references to other
+        comments, no instructions about MCP tools.
+        The agent's working tree has the PR diff
+        applied (set up elsewhere in the workflow)
+        and the codebase is available via the
+        agent's normal tools; the comment body is
+        sufficient to identify what the user wants
+        changed.
+
+        One commit per ``/do`` invocation, covering
+        whatever the agent changed. The
+        conversation's root comment id is recorded
+        in the commit body so the link back to the
+        originating comment stays intact. The
+        conversation is resolved only if the agent
+        produced a non-empty commit (mirrors the
+        ``_pr_comment`` discipline: failed/no-op
+        runs leave the conversation unresolved for
+        the next ``/do`` invocation).
+        """
+        # Conversation-identification gate. Gitea
+        # defines a "conversation" only for inline
+        # review comments (the ``(path, position)``
+        # pair); issue comments are flat
+        # chronological lists with no parent
+        # relation, so they have no conversation
+        # to address. A ``/do`` posted as a reply
+        # to an issue comment (or as a top-level
+        # issue comment) reaches here with
+        # ``thread_path``/``thread_line`` set to
+        # ``None`` (those fields are only on
+        # review-comment replies), and the
+        # handler silently returns.
+        if thread_path is None or thread_line is None:
+            log(f"slash-do: /do without identifiable thread "
+                f"(thread_path={thread_path!r} "
+                f"thread_line={thread_line!r}); ignoring")
+            return
+
+        log(f"slash-do: fetching conversation at "
+            f"{thread_path}:{thread_line} for pr={pr_url}")
+        thread = self.gitea.get_pr_review_thread(
+            pr_repo, pr_number, thread_path, thread_line)
+        if thread is None:
+            # No unresolved comments at this anchor
+            # (the conversation was the only one and
+            # is now resolved, or the anchor doesn't
+            # match any review comment). Tell the
+            # user so they can pick a different
+            # thread.
+            self._post_slash_response(
+                pr_repo, pr_number,
+                f"`/do`: no unresolved review comments "
+                f"found in the conversation at "
+                f"`{thread_path}:{thread_line}`. "
+                f"Nothing to execute.")
+            return
+
+        # The body is the conversation's combined
+        # body: ``[login1]: body1\n\n[login2]: body2\n…``
+        # All participants (slave, trusted humans,
+        # replies via follow-up reviews) are
+        # included. The agent sees exactly this
+        # text — nothing else — so the prompt
+        # cannot leak the rest of the PR.
+        prompt = thread.get("body", "")
+        thread_id = thread.get("id")
+
+        self.agent.start_session("pr-do")
+        deferred_resolves = []
+        try:
+            # ``resume=False`` (NOT ``True``): the session was
+            # JUST minted by ``start_session("pr-do")`` a
+            # microsecond ago, so qwen has no on-disk record
+            # to look up under ``--resume``. ``Agent.prompt``
+            # maps ``resume=False`` to ``--session-id <uuid>``,
+            # which tells qwen to create a fresh on-disk
+            # session under our chosen uuid (the only way to
+            # establish the session in the first place).
+            # ``resume=True`` here was a copy-paste residue from
+            # ``_pr_comment`` — that handler chains several
+            # prompts and needs ``--resume`` to keep them in
+            # one conversation; ``_slash_do`` makes a single
+            # prompt then ``stop_session``s immediately, so there
+            # is no chain to rejoin. Passing ``resume=True``
+            # against a brand-new session id surfaces as
+            # ``qwen --resume`` failing with
+            # "No saved session found with ID <uuid>",
+            # ``qwen exited with code 1``, and the run dying
+            # in ``die(f"qwen agent exited with code {rc}")``
+            # below — even though the conversation was
+            # correctly identified and the prompt body
+            # faithfully built.
+            rc = self.agent.prompt_with_retry(
+                prompt,
+                timeout=Agent.AGENT_TIMEOUT,
+                retry_label="pr-do")
+            if rc == 124:
+                anchor = (f"{thread_path}:{thread_line}"
+                          if thread_path and thread_line
+                          else "")
+                self._handle_timeout(
+                    pr_repo, pr_number, pr_url, [],
+                    caller="pr-do", context_label=anchor)
+            if rc != 0:
+                die(f"qwen agent exited with code {rc}")
+
+            summary = self.agent.otlp.get_review_text().strip()
+            # One commit per /do invocation. The
+            # subject pins the command and the
+            # conversation location; the body
+            # carries the link back to the
+            # originating review comment and
+            # (optionally) the Argo run URL and
+            # the agent's summary.
+            commit_subject = (
+                f"do: instruction(s) from PR comment conversation at "
+                f"`{thread_path}:{thread_line}`"
+            )
+            comment_links = ""
+            if thread_id is not None:
+                comment_links = (
+                    f"- {pr_url}#issuecomment-{thread_id}\n")
+            run_url = params.shoggoth_argo_run_url
+            run_url_line = (f"\nArgo run: {run_url}"
+                             if run_url else "")
+            summary_section = (
+                f"\n\nAgent summary:\n\n{summary[:2000]}"
+                if summary else ""
+            )
+            commit_msg = (
+                f"{commit_subject}\n\n"
+                f"{comment_links}{run_url_line}"
+                f"{summary_section}"
+            ).rstrip() + "\n"
+            committed = self._commit_only(commit_msg)
+            # Only resolve the conversation if a
+            # non-empty commit actually landed. A
+            # no-op agent run leaves the
+            # conversation unresolved for the next
+            # ``/do`` invocation — same discipline
+            # as ``_pr_comment``.
+            if committed and thread_id is not None:
+                deferred_resolves.append(thread_id)
+        finally:
+            self._push_pending_commits()
+            for comment_id in deferred_resolves:
+                r = self.gitea.resolve_comment(pr_repo, comment_id)
+                if r is None:
+                    log(f"slash-do: WARNING resolve failed for "
+                        f"comment {comment_id}")
+            self.agent.stop_session()
+        self._post_slash_response(
+            pr_repo, pr_number,
+            f"Executed `/do` for the conversation at "
+            f"`{thread_path}:{thread_line}`.")
+
     def _slash_review(self, pr_repo, pr_number, pr_url):
         """``/review`` — request a review from the slave user.
 
@@ -591,8 +1167,28 @@ class PrUpdateCommand(CommandBase):
         normal review flow. Posting a response comment is best-effort
         — the actual review is what the user wanted, not the
         confirmation.
+
+        If ``slave_user`` is the PR author, Gitea rejects the
+        reviewer-add with HTTP 422 ``poster of pr can't be reviewer``,
+        so the webhook never fires and the review never runs. Detect
+        this from the loaded webhook payload and run the review
+        directly so the slave still produces a review on the PR.
         """
         slave_user = params.shoggoth_slave_user
+        pr_poster = ((self.gitea._payload.get("pull_request") or {})
+                     .get("user") or {}).get("login") or ""
+        if not pr_poster:
+            # ``issue_comment`` webhooks on a PR also carry the PR
+            # under ``issue``; fall back to that key.
+            pr_poster = ((self.gitea._payload.get("issue") or {})
+                         .get("user") or {}).get("login") or ""
+        if slave_user and pr_poster and pr_poster == slave_user:
+            log(f"slash-review: {slave_user} is the author of "
+                f"{pr_repo}#{pr_number}; running review directly "
+                f"instead of the request_reviewer webhook round-trip",
+                file=sys.stderr)
+            self._pr_review(pr_url)
+            return
         log(f"slash-review: requesting review from {slave_user} "
             f"on {pr_repo}#{pr_number}")
         result = self.gitea.request_reviewer(pr_repo, pr_number, slave_user)
@@ -1273,18 +1869,58 @@ class PrUpdateCommand(CommandBase):
                 diff_text = gitea_diff
         return diff_text or None
 
-    def _handle_timeout(self, pr_repo, pr_number, pr_url, resolved_comments):
-        log(f"pr-comment: handling timeout, resolved so far={len(resolved_comments)}")
+    def _handle_timeout(self, pr_repo, pr_number, pr_url,
+                        resolved_comments, *, caller="pr-comment",
+                        context_label=""):
+        """Post a timeout message and ``die()``.
+
+        ``resolved_comments`` is the per-comment progress
+        the caller has accumulated before the timeout
+        (``_pr_comment`` populates this with each comment
+        addressed; ``_slash_do`` passes an empty list).
+
+        ``caller`` selects the message wording:
+          - ``"pr-comment"`` (default) — the per-comment
+            framing ("Addressed N comment(s) before
+            timeout").
+          - ``"pr-do"`` — the per-conversation framing
+            ("timed out on /do for the conversation at
+            path:line; the conversation was left unresolved
+            for the next /do").
+        ``context_label`` is the anchor / context the
+        caller attaches (a path:line for ``/do``; empty
+        string for ``_pr_comment``). Kept separate from
+        ``caller`` so the wording can be reused with a
+        different anchor shape if a future caller adds one.
+
+        ``die()`` fires after the body is posted, so the
+        wording in the final line of ``timeout_msg`` is
+        the last thing the workflow template surfaces —
+        it must be accurate for both call sites.
+        """
+        log(f"{caller}: handling timeout"
+            f"{(' resolved so far=' + str(len(resolved_comments))) if resolved_comments else ''}")
         self.agent.stop_session()
-        resolved_count = len(resolved_comments)
+        resolved_count = len(resolved_comments) if resolved_comments else 0
         run_url = params.shoggoth_argo_run_url
         run_url_suffix = f" Argo run: {run_url}." if run_url else ""
         self._push_pending_commits()
-        timeout_msg = (
-            f"Agent timed out after {Agent.AGENT_TIMEOUT // 60} minutes. "
-            f"Addressed {resolved_count} comment(s) before timeout. "
-            f"Committed changes have been pushed."
-            f"{run_url_suffix}"
-        )
+        if caller == "pr-do":
+            anchor_part = (f" for the conversation at {context_label}"
+                           if context_label else "")
+            timeout_msg = (
+                f"Agent timed out after {Agent.AGENT_TIMEOUT // 60} minutes"
+                f"{anchor_part}. No commits were produced and "
+                f"the conversation was left unresolved for the next "
+                f"/do invocation."
+                f"{run_url_suffix}"
+            )
+        else:
+            timeout_msg = (
+                f"Agent timed out after {Agent.AGENT_TIMEOUT // 60} minutes. "
+                f"Addressed {resolved_count} comment(s) before timeout. "
+                f"Committed changes have been pushed."
+                f"{run_url_suffix}"
+            )
         self.gitea.post_pr_review_chunked(pr_repo, pr_number, timeout_msg)
         die(timeout_msg)
