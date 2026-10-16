@@ -23,6 +23,7 @@ from .argo_webhooks import (
 )
 from .base import CommandBase, GiteaCommand
 from .ci_failure import CiFailureCommand
+from .dispatch import DispatchCommand
 from .gitea_ldap_sync import GiteaLdapSync
 from .mirror_sync import GithubMirrorSync
 from .pr_update import PrUpdateCommand

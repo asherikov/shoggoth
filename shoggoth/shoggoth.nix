@@ -53,6 +53,16 @@ let
           insecure_skip_verify: true
   '';
 in {
+  # IMPORTANT: shoggoth assumes the k3s version is at least
+  # 1.34.
+  #
+  # Features that are safe to rely on (all GA by 1.34):
+  #
+  #   * Pod-level ``spec.ttlSecondsAfterFinished`` (added
+  #     1.23, GA 1.29).
+  #   * Container-level ``restartPolicy`` for native sidecar
+  #     ordering (added 1.28, GA 1.33).
+  #   * ``Job.spec.ttlSecondsAfterFinished`` (since 1.12).
   services.k3s = {
     enable = true;
     role = "server";

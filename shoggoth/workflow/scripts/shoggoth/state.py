@@ -29,6 +29,21 @@ secrets_store = SecretStore()
 # any other shared state worth a class instance. The two sets are
 # disjoint so callers can decide which init path to take (workflow
 # commands need the git-cred sidecar; maintenance commands don't).
+#
+# ``dispatch`` and ``sandbox`` are NOT in WORKFLOW_COMMANDS:
+#   * ``dispatch`` is reached via the standalone
+#     ``shoggoth/workflow/scripts/dispatch.py`` CLI utility (the
+#     ``dispatch`` step of the ``coding-agent-dispatcher`` DAG),
+#     not via ``shoggoth.py``. The dispatcher has a different
+#     dependency surface (no agent, no git-cred sidecar) and
+#     runs in a separate ``shoggoth_tools:alpine`` pod.
+#   * ``sandbox`` is the placeholder for the future /sandbox
+#     slash command; the dispatcher handles it via
+#     ``DispatchCommand._handle_sandbox`` (in
+#     ``shoggoth/workflow/scripts/shoggoth/commands/dispatch.py``)
+#     and emits ``should_run_worker=false`` so the worker step
+#     is skipped. It is never invoked directly on the worker, so
+#     it doesn't belong in WORKFLOW_COMMANDS.
 WORKFLOW_COMMANDS = {"task", "ci-failure", "pr-update"}
 MAINTENANCE_COMMANDS = {
     "argo-webhooks", "redmine-webhooks", "redmine-argo-webhooks",

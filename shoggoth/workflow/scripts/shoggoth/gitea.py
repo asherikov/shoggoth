@@ -13,7 +13,7 @@ from .util import die, log
 from .state import params, secrets_store
 
 class Gitea(HttpApiClient):
-    def __init__(self):
+    def __init__(self, read_tokens=True):
         # Lazy validation: ``Parameters`` doesn't make GITEA_SERVER_URL
         # required because the Redmine-only maintenance steps
         # (``redmine-argo-webhooks``, ``redmine-ldap-sync``) deliberately
@@ -34,9 +34,31 @@ class Gitea(HttpApiClient):
         # the proxy replaces whatever Authorization header we send
         # with the real slave token, so an empty token is acceptable
         # in that case — see the lenience block below.
-        self.token = (secrets_store.read("gitea/server-token", key="token")
-                      or secrets_store.read("gitea/slave-token", key="token")
-                      or "")
+        #
+        # ``read_tokens=False`` skips the two ``kubectl get
+        # secret`` round-trips. The dispatcher
+        # (``shoggoth/workflow/scripts/dispatch.py``) opts into
+        # this because (a) its pod runs under
+        # ``shoggoth-coding-agent-sandbox-spawner`` SA which is
+        # scoped to pods/services CRUD only — no ``get`` on
+        # gitea-slave-token / gitea-server-token — so each read
+        # would 403 with "secrets 'gitea-server-token' is
+        # forbidden", (b) the dispatcher's Gitea usage is
+        # limited to payload introspection (read on the
+        # in-memory payload, no API calls that need a token) and
+        # the sandbox branch's ``post_pr_comment`` call goes
+        # through the api-proxy at api.${DOMAIN}/gitea, where
+        # web-internal injects the argo-webhook-receiver /
+        # gitea-slave bearer token for the dispatcher. Skipping
+        # the reads keeps the dispatcher pod logs free of the
+        # two 403 lines and avoids the wasted kubectl
+        # round-trips on every webhook delivery.
+        if read_tokens:
+            self.token = (secrets_store.read("gitea/server-token", key="token")
+                          or secrets_store.read("gitea/slave-token", key="token")
+                          or "")
+        else:
+            self.token = ""
         if not self.token:
             hostname = urlparse(self.api_url).hostname or ""
             if hostname.startswith("api."):
@@ -45,7 +67,20 @@ class Gitea(HttpApiClient):
                 die("Neither gitea-server-token nor gitea-slave-token is readable "
                     "from K8s; grant the script's SA `get` on those Secrets")
         self.domain = params.shoggoth_domain
-        self._payload = None
+        # Initialise to ``{}`` (not ``None``) so the ``get_*`` payload
+        # accessors (``get_repo_full_name`` / ``get_pr_number`` / etc.)
+        # don't ``AttributeError: 'NoneType' object has no attribute
+        # 'get'`` if ``load_payload`` is never called. The pre-fix
+        # ``None`` initialiser surfaced as a runtime crash in the
+        # dispatcher's ``_handle_sandbox`` branch — ``DispatchCommand``
+        # intentionally skips ``load_payload`` for ``sandbox`` because
+        # the sandbox handler's payload accessors all read keys that
+        # may legitimately be absent (and should return a default
+        # empty string / None rather than crashing). Maintenance
+        # commands that don't need the payload never call
+        # ``load_payload`` either, so this default matters for them
+        # too.
+        self._payload = {}
 
     def _auth_header(self):
         """Gitea auth scheme: ``Authorization: token <T>``.
@@ -92,6 +127,31 @@ class Gitea(HttpApiClient):
 
     def get_pr_branch(self):
         return self._payload.get("pull_request", {}).get("head", {}).get("ref", "")
+
+    def get_pr_head_repo_full_name(self):
+        """Repo the PR's head branch lives in.
+
+        For fork PRs this is the contributor's fork
+        (``contributor/myrepo``); for same-repo PRs it
+        matches ``get_repo_full_name()`` and is the
+        upstream. The sandbox ``ttyd`` subcommand (in
+        ``shoggoth/workflow/scripts/sandbox.py``)
+        uses this (not ``get_repo_full_name()``) when
+        building the ``git clone`` URL because the head
+        branch is physically hosted in the head repo --
+        cloning from the base repo with
+        ``--branch <head-branch>`` returns "Remote branch
+        not found in upstream origin" for every fork PR.
+        Falls back to the base repo when ``head.repo`` is
+        missing/null (a deleted fork) so the user gets a
+        clear "Remote branch not found" from git rather
+        than a NullPointer-style crash in the dispatcher.
+        """
+        head_repo = self._payload.get(
+            "pull_request", {}).get("head", {}).get("repo")
+        if head_repo and head_repo.get("full_name"):
+            return head_repo["full_name"]
+        return self.get_repo_full_name()
 
     def has_review(self):
         # Gitea's PullRequestPayload struct serialises the `Review *ReviewPayload`

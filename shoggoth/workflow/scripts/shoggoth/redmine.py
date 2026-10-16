@@ -11,7 +11,7 @@ from .util import die, log, normalize_for_branch
 from .state import params, secrets_store
 
 class Redmine(HttpApiClient):
-    def __init__(self, k8s=None):
+    def __init__(self, k8s=None, read_tokens=True):
         server = params.redmine_server
         if not server:
             if not params.shoggoth_domain:
@@ -24,7 +24,24 @@ class Redmine(HttpApiClient):
         # ``shoggoth-redmine-slave-token-read`` Role. The slave-test
         # workflow uses the web-internal api-proxy URL
         # (``api.${DOMAIN}/redmine``) and accepts an empty token.
-        self.token = secrets_store.read("redmine/slave-token", key="token")
+        #
+        # ``read_tokens=False`` skips the read. The dispatcher
+        # (``shoggoth/workflow/scripts/dispatch.py``) opts into
+        # this because its pod runs under
+        # ``shoggoth-coding-agent-sandbox-spawner`` SA which is
+        # scoped to pods/services CRUD only — no ``get`` on
+        # redmine-slave-token — so the read would 403. The
+        # dispatcher's Redmine usage is limited to
+        # ``get_issue(task_id)`` for the ``_handle_task``
+        # validation, and that call goes through the api-proxy
+        # at ``api.${DOMAIN}/redmine`` where web-internal
+        # injects the bearer token. Same reasoning as the
+        # matching ``Gitea(read_tokens=False)`` opt-in.
+        if read_tokens:
+            self.token = secrets_store.read(
+                "redmine/slave-token", key="token")
+        else:
+            self.token = ""
         if not self.token:
             # When REDMINE_SERVER is the api service (http://api.<DOMAIN>/redmine),
             # the web-internal proxy injects X-Redmine-API-Key automatically, so a

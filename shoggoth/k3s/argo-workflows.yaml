@@ -748,6 +748,15 @@ data:
   SHOGGOTH_NAMESPACE: ${SHOGGOTH_NAMESPACE}
   SHOGGOTH_GITHUB_ORG: ${SHOGGOTH_GITHUB_ORG}
   SHOGGOTH_INSTANCE_DIR: ${SHOGGOTH_INSTANCE_DIR}
+  # Custom CoreDNS service IP (shoggoth/k3s/dns.yaml). The
+  # dispatcher template propagates this to the sandbox pod
+  # spec so the pod uses the same DNS as the slave
+  # Deployments (which carry the rewrite rules that map
+  # ``*.s.local`` -> ``*.shoggoth.svc.cluster.local``).
+  # Without this the sandbox would use the default cluster
+  # DNS and the user-facing ``git.s.local`` form would
+  # fail to resolve from inside the terminal session.
+  SHOGGOTH_DNS_IP: ${SHOGGOTH_DNS_IP}
 ---
 # Controller configuration — workflow defaults that apply to every Workflow
 # created in the namespace.

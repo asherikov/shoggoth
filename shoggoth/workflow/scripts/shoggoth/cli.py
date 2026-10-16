@@ -3,7 +3,11 @@ import argparse
 import sys
 
 from .agent import Agent
-from .commands.argo_webhooks import SetupArgoWebhooks, SetupRedmineArgoWebhooks, SetupRedmineWebhooks
+from .commands.argo_webhooks import (
+    SetupArgoWebhooks,
+    SetupRedmineArgoWebhooks,
+    SetupRedmineWebhooks,
+)
 from .commands.ci_failure import CiFailureCommand
 from .commands.gitea_ldap_sync import GiteaLdapSync
 from .commands.mirror_sync import GithubMirrorSync
@@ -56,6 +60,27 @@ def _run(args):
             sys.exit(2)
 
     if args.command in WORKFLOW_COMMANDS:
+        # Workflow commands all share the same init path:
+        # gate on the git-cred sidecar's readiness flag,
+        # load the Gitea webhook payload (except ``task``,
+        # which reads the Redmine task ID from the CLI
+        # instead), check out the repo, instantiate an
+        # ``Agent``, and dispatch to one of the
+        # ``*Command`` classes.
+        #
+        # ``dispatch`` is NOT a shoggoth.py subcommand —
+        # the dispatcher is its own CLI utility
+        # (``shoggoth/workflow/scripts/dispatch.py``) and is
+        # reached via the ``dispatch`` step of the
+        # ``coding-agent-dispatcher`` DAG (see
+        # ``shoggoth/workflow/argo/templates/coding-agent-dispatcher.yaml``).
+        # ``sandbox`` is the placeholder for the future
+        # /sandbox slash command; it's handled by the
+        # dispatcher's ``_handle_sandbox`` (in
+        # ``shoggoth/workflow/scripts/shoggoth/commands/dispatch.py``)
+        # and never reaches the worker step. Neither belongs in
+        # ``WORKFLOW_COMMANDS`` — see ``state.py`` for the
+        # rationale.
         GitCredentials().wait_until_ready()
 
         gitea = Gitea()
@@ -73,8 +98,21 @@ def _run(args):
             cmd = TaskCommand(args.task_id, shoggoth, gitea, redmine, agent)
         elif args.command == "ci-failure":
             cmd = CiFailureCommand(shoggoth, gitea, redmine, agent)
-        else:  # "pr-update"
+        elif args.command == "pr-update":
             cmd = PrUpdateCommand(shoggoth, gitea, redmine, agent)
+        else:
+            # Defensive: WORKFLOW_COMMANDS is exactly
+            # {task, ci-failure, pr-update} per ``state.py``,
+            # so the membership check above already filtered
+            # out anything else. A future addition to
+            # WORKFLOW_COMMANDS without a matching branch
+            # here would land in this ``else``; fail closed
+            # with a clear message rather than silently
+            # routing to ``Agent().run()``.
+            die(f"shoggoth.py: worker step reached with command "
+                f"{args.command!r}; the worker step only handles "
+                f"'task', 'ci-failure', 'pr-update' (see "
+                f"WORKFLOW_COMMANDS in state.py)")
 
         cmd.execute()
     elif args.command == "argo-webhooks":
@@ -167,7 +205,9 @@ def _run(args):
         ldap_url = params.ldap_url
         ldap_bind_dn = f"uid=ldapauth,ou=people,{ldap_base_dn}"
         ldap_user_base_dn = f"ou=people,{ldap_base_dn}"
-        cmd = RedmineLdapSync(redmine, ldap_url, ldap_bind_dn, ldap_bind_password, ldap_user_base_dn)
+        cmd = RedmineLdapSync(
+            redmine, ldap_url, ldap_bind_dn, ldap_bind_password,
+            ldap_user_base_dn)
         cmd.execute()
     else:
         die(f"shoggoth.py: no handler for command {args.command!r} — "

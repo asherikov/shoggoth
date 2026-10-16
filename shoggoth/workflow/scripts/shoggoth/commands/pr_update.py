@@ -38,6 +38,25 @@ class PrUpdateCommand(CommandBase):
     # Catalog surfaced by ``/help``. Tuples keep the order stable
     # without making callers depend on Python's dict ordering
     # guarantee (the file targets Python 3).
+    #
+    # ``sandbox`` lives here (rather than alongside the
+    # dispatcher-only ``command: sandbox`` entry) because the
+    # help message is the user's only discoverability surface
+    # for the per-PR sandbox spawner. The handler itself
+    # never reaches this file — ``gitea-pr-sandbox-binding``'s
+    # selector pins ``comment.body == "/sandbox"`` and submits
+    # the ``coding-agent-dispatcher`` DAG with
+    # ``command: sandbox``, which routes through
+    # ``DispatchCommand._handle_sandbox`` (in
+    # ``shoggoth/workflow/scripts/shoggoth/commands/dispatch.py``)
+    # and skips the worker step entirely. The catalog entry
+    # therefore describes the dispatcher's behaviour, not
+    # this worker's, so a user who runs ``/sandbox`` on the
+    # pr-update path (a route the pr-update binding's
+    # drop-list already filters out) would see the spawner
+    # feature surface in /help but its invocation would be
+    # silently no-op'd — see ``_handle_slash_command`` for the
+    # silent-no-op design.
     SUPPORTED_COMMANDS = (
         ("help", "List available slash commands"),
         ("review", "Request a code review from the slave user "
@@ -49,22 +68,28 @@ class PrUpdateCommand(CommandBase):
                    "conflicts are resolved by an agent"),
         ("do", "Re-read the PR's comment thread and execute the "
                "instructions left there. The trigger must be a "
-               "reply to a specific inline review comment so the "
-               "(path, line) anchor is recoverable; a ``/do`` posted "
-               "as a top-level issue comment is a no-op. The "
-               "trigger must come from a trusted human — the slave "
-               "is allowed to leave comments in a thread but is "
-               "not allowed to press ``/do`` itself (the trust "
-               "gate in ``_handle_slash_command`` blocks the slave "
-               "for every slash command, including this one). The "
-               "command body is just ``/do``; the instructions "
-               "come from the comment thread, not from the "
-               "command itself. Unlike the regular review-"
-               "comments flow (which only addresses comments from "
-               "trusted users), this trigger treats every "
-               "unresolved comment in the thread — including any "
-               "left by the slave user — as a directive for the "
-               "agent"),
+               "reply to a specific inline review comment."),
+        # ``/sandbox`` is NOT handled here — it's a sibling-
+        # binding dispatch (gitea-pr-sandbox-binding) that
+        # routes through ``DispatchCommand._handle_sandbox``
+        # in shoggoth/workflow/scripts/shoggoth/commands/dispatch.py
+        # and skips the worker step. The catalog entry is here
+        # for /help discoverability only; the pr-update
+        # binding's drop-list (gitea-pr-update-binding.yaml)
+        # already filters /sandbox comments so this entry
+        # never reaches ``_handle_slash_command`` from the
+        # Gitea side. If a user lands here via a non-Gitea
+        # path, the silent-no-op design (see
+        # ``_handle_slash_command``) treats the unknown
+        # command as "no handler" and returns.
+        ("sandbox", "Spawn a per-PR sandbox pod (ttyd terminal "
+                    "exposed at /sandbox/<id>/) with the PR's "
+                    "branch already cloned. Routed via the "
+                    "gitea-pr-sandbox binding; from the "
+                    "pr-update path this is a no-op. Pod "
+                    "auto-destroys when the terminal session "
+                    "closes; multiple sandboxes can run "
+                    "concurrently"),
     )
 
     def __init__(self, shoggoth, gitea, redmine, agent):
@@ -81,8 +106,27 @@ class PrUpdateCommand(CommandBase):
         log(f"pr-update: pr_url={pr_url}")
 
         if action == "deleted":
-            print(f"=== PR COMMENT CHECK AFTER COMMENT DELETION: pr={pr_url} "
-                  f"repo={self.shoggoth.working_repo} ===", flush=True)
+            # DEFENCE IN DEPTH: the gitea-pr-update binding's
+            # selector already drops
+            # ``payload.action == "deleted"`` events before
+            # the workflow pod is even applied (see
+            # gitea-pr-update-binding.yaml:138), so this
+            # branch is unreachable on the Gitea-side
+            # path. The distinctive log line ("DEFENCE IN
+            # DEPTH") makes any future selector relaxation
+            # surface immediately in the Argo log: a
+            # workflow that runs this branch was supposed
+            # to be filtered, and the operator's first
+            # action should be to re-tighten the binding.
+            # The log line is also the load-bearing audit
+            # trail if ``_pr_comment`` ever throws on a
+            # non-Gitea code path (Redmine updates, etc.)
+            # — the operator can grep for it in the
+            # workflow log.
+            print(f"=== DEFENCE IN DEPTH: PR COMMENT CHECK "
+                  f"AFTER COMMENT DELETION: pr={pr_url} "
+                  f"repo={self.shoggoth.working_repo} ===",
+                  flush=True)
             self._pr_comment(pr_number, pr_url)
             return
 
@@ -772,14 +816,17 @@ class PrUpdateCommand(CommandBase):
     def _handle_slash_command(self, command, pr_number, pr_url):
         """Dispatch ``/command`` to its handler.
 
-        Looks up ``_slash_<command>`` on this class; unknown names
-        get a help-style response so a typo never silently no-ops.
-        Handler exceptions are caught, posted as a PR comment, and
-        then the workflow ``die()``s so the failure is visible in
-        the Argo log and the step is marked Failed — a slash
-        command that half-ran (e.g. force-pushed a squashed branch
-        but failed before reporting back) must not return success
-        to the workflow template.
+        Looks up ``_slash_<command>`` on this class; unknown
+        names silently no-op (a log line is recorded but no
+        PR-visible response is posted). Users who want to
+        discover what's supported post ``/help`` explicitly.
+        Handler exceptions are caught, posted as a PR
+        comment, and then the workflow ``die()``s so the
+        failure is visible in the Argo log and the step is
+        marked Failed — a slash command that half-ran
+        (e.g. force-pushed a squashed branch but failed
+        before reporting back) must not return success to
+        the workflow template.
         """
         pr_repo = self.shoggoth.working_repo
         log(f"slash-command: command=/{command} repo={pr_repo} "
@@ -825,10 +872,25 @@ class PrUpdateCommand(CommandBase):
 
         handler = getattr(self, f"_slash_{command}", None)
         if handler is None:
-            log(f"slash-command: no handler for /{command}")
-            self._post_slash_response(pr_repo, pr_number,
-                f"Unknown command `/{command}`. "
-                f"Type `/help` for the list of supported commands.")
+            # INTENTIONAL DESIGN: silent no-op for unknown
+            # slash commands. See the longer rationale at
+            # the SUPPORTED_COMMANDS catalog entry for
+            # ``sandbox`` (this same file): the pr-update
+            # path does not handle ``/sandbox`` (it routes
+            # via the sibling ``gitea-pr-sandbox-binding``,
+            # not via a ``_slash_sandbox`` method here) and
+            # posting a "Unknown command" PR comment surfaced
+            # noise on every typo (including ones the user
+            # wrote in a quoted code block in the
+            # conversation, never meant as a command). The
+            # documented contract: silence is the default;
+            # users discover the supported set via ``/help``
+            # explicitly. A future change could re-add the
+            # noisy comment for the trust-gated case if the
+            # signal-to-noise is judged worth it — the
+            # current judgement is no.
+            log(f"slash-command: no handler for /{command}; "
+                f"silently no-op (no PR-visible response)")
             return
         # ``/do`` needs the inline ``(path, line)`` anchor for
         # the thread the user replied to. The webhook

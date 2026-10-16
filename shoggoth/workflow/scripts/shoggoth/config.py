@@ -21,6 +21,21 @@ class Parameters:
         "Shoggoth": [
             ("shoggoth_domain", "SHOGGOTH_DOMAIN", True, ""),
             ("shoggoth_namespace", "SHOGGOTH_NAMESPACE", False, "shoggoth"),
+            # Custom CoreDNS service IP (shoggoth/k3s/dns.yaml).
+            # The dispatcher's sandbox pod spec uses this for
+            # ``dnsConfig.nameservers`` so the pod uses the
+            # same DNS as the slave Deployments -- the
+            # rewrite rules there map ``*.s.local`` to
+            # ``*.shoggoth.svc.cluster.local``, so the
+            # user-facing ``git.s.local`` form resolves from
+            # inside the sandbox terminal. Optional because
+            # the ``git.<ns>`` short form used by the
+            # inlined git-clone URL works against any DNS
+            # that has the cluster's search path; the
+            # custom DNS is only needed for the user-facing
+            # fallback. The Argo template propagates it from
+            # ``shoggoth-workflow-config`` (argo-workflows.yaml).
+            ("shoggoth_dns_ip", "SHOGGOTH_DNS_IP", False, ""),
             ("shoggoth_github_org", "SHOGGOTH_GITHUB_ORG", False, ""),
             ("shoggoth_github_api_delay", "SHOGGOTH_GITHUB_API_DELAY", False, "2"),
             ("shoggoth_slave_user", "SHOGGOTH_SLAVE_USER", False, "slave"),

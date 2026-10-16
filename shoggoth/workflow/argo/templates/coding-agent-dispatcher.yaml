@@ -3,17 +3,80 @@
 # gitea-ci-failure, redmine-task-processor) via WorkflowEventBinding.
 #
 # Equivalent to kestra's main_shoggoth_coding-agent-dispatcher.yml:
-# runs shoggoth.py inside a native k8s pod (slave_noble). No
-# docker-in-docker; the workflow-controller's k8sapi runner creates the
-# container directly.
+# single-flight, one shoggoth.py invocation per webhook. v2 splits the
+# single pod into a two-step DAG:
 #
-# Args:
+#   1. ``dispatch`` step — runs in a ``shoggoth_tools:alpine`` pod
+#      (kubectl + scripts, no qwen agent). Invokes the standalone
+#      ``shoggoth/workflow/scripts/dispatch.py`` CLI utility —
+#      decoupled from ``shoggoth.py`` because the dispatcher's
+#      dependency surface is different (no agent, no git-cred
+#      sidecar, no ``Shoggoth().checkout()``). Validates the
+#      inbound webhook event (Redmine status / assignee for
+#      ``task``, workflow_run.conclusion for ``ci-failure``,
+#      pass-through for ``pr-update``, no-op for the placeholder
+#      ``sandbox``) and emits two argo outputs:
+#
+#        * ``command`` — the original command string (``pr-update``,
+#          ``task``, ``ci-failure``). Echoed back so the worker's
+#          argv still carries the command name unchanged.
+#        * ``should_run_worker`` — ``"true"`` / ``"false"``. The
+#          DAG ``when:`` clause on the worker step gates on this.
+#
+#      For most events the dispatcher is a fast-fail pass-through
+#      (no Redmine/Gitea API call needed), so the worker pod
+#      (5–10 s image pull + sidecar + plugin install) is skipped
+#      entirely. The worker keeps the same checks as
+#      defence-in-depth in case state changes between dispatch and
+#      worker start (e.g. a Redmine status flip between the
+#      dispatch decision and the worker's API call 30 s later).
+#
+#   2. ``worker`` step — runs in a ``slave:noble`` pod (qwen
+#      agent, git-cred sidecar, ccache). Depends on ``dispatch``
+#      and only runs when ``should_run_worker == "true"``. Mirrors
+#      the old single-pod template's env / mounts — git clone,
+#      agent run, git push.
+#
+# Args (from the binding):
 #   script:   script to invoke (always shoggoth.py for now)
-#   command:  argv[1] for shoggoth.py — the subcommand to run. Supplied by
-#             each binding (pr-update, ci-failure, task, ...).
-#   task_id:  optional argv[2] for shoggoth.py — used by `task` (numeric
-#             Redmine issue ID), empty for the rest.
-#   payload:  raw JSON string from the webhook body (defaults to "")
+#   command:  the original subcommand (``pr-update`` / ``task`` /
+#             ``ci-failure`` / ``sandbox``). The dispatch template
+#             passes this into both pods: dispatch sets
+#             ``SHOGGOTH_ORIGINAL_COMMAND`` (the dispatcher reads
+#             it from the env; dispatch.py is invoked with no
+#             positional), worker sets ``SHOGGOTH_COMMAND`` (its
+#             ``args.command`` is the original command, identical
+#             to the pre-split single-pod behaviour).
+#   task_id:  optional argv[2] for the worker. Used by ``task``
+#             (numeric Redmine issue ID), empty for the rest.
+#   payload:  raw JSON string from the webhook body.
+#
+# Service-account split:
+#   * ``dispatch`` runs under
+#     ``shoggoth-coding-agent-sandbox-spawner`` (SA + Role defined
+#     in ``shoggoth/k3s/coding-agent-sandbox-spawner.yaml``) so the
+#     sandbox command can kubectl-apply / wait / delete sandbox
+#     pods. Scope is the shoggoth namespace only; pods/services
+#     CRUD + pods/log read; no pods/exec, no other namespaces.
+#   * ``worker`` uses the default ``argo`` SA (set by
+#     workflowDefaults in shoggoth/k3s/argo-workflows.yaml:798)
+#     because its only special resource access is the
+#     git-cred-bootstrap wait on the four externalsecrets the
+#     existing wait-bootstrap Role covers.
+#
+# Single-flight applies to the WORKER pod only, not the
+# whole workflow. The mutex lives on the ``worker-step``
+# template (see its ``synchronization.mutexes`` block below)
+# so the dispatcher's validation step can run in parallel
+# for multiple webhooks. Same observable effect on the
+# in-pod work as the deleted Kestra subflow's
+# ``concurrency: { limit: 1, behavior: QUEUE }`` and the
+# same reason: two simultaneous
+# ``git push origin<branch>`` calls would race on the
+# same ref and the second would overwrite the first's
+# commits. ``/sandbox`` commands skip the worker step via
+# the dispatcher's ``should_run_worker=false`` output, so
+# the worker mutex is irrelevant for sandboxes.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -22,27 +85,35 @@ metadata:
   labels:
     app.kubernetes.io/part-of: shoggoth-argo
 spec:
-  entrypoint: dispatch
+  entrypoint: run
   arguments:
     parameters:
-    - name: script
-      value: "shoggoth.py"
     - name: command
       value: "pr-update"
     - name: task_id
       value: ""
     - name: payload
       value: ""
-    # The four parameters below are required because the submit-time
-    # validator (workflow/validate/validate.go, Workflow()) merges
-    # WorkflowTemplate.spec.arguments.parameters into the new Workflow's
-    # spec.arguments.parameters and rejects any {{workflow.parameters.X}}
-    # reference in a template that doesn't resolve to one of them.
-    # Values are fetched from the shoggoth-workflow-config ConfigMap at
-    # admission time (see shoggoth/k3s/argo-workflows.yaml) — the
-    # ConfigMap holds the actual domain/namespace/org/instance-dir
-    # because `make up`'s envsubst pass renders its `${SHOGGOTH_*}`
-    # placeholders to literal values before applying.
+    # The five ConfigMap-bound parameters below are required because
+    # the submit-time validator (workflow/validate/validate.go,
+    # Workflow()) merges WorkflowTemplate.spec.arguments.parameters
+    # into the new Workflow's spec.arguments.parameters and rejects
+    # any {{workflow.parameters.X}} reference in a template that
+    # doesn't resolve to one of them. ``SHOGGOTH_NAMESPACE`` is
+    # included so a staging-instance override that flips the
+    # namespace in the ConfigMap flows through to BOTH the
+    # dispatch step (which kubectl-applies the sandbox pod into
+    # that namespace) and the worker step (which the dispatcher's
+    # pre-existing ``if action == "deleted"`` defence-in-depth
+    # branch used to hardcode but is now an explicit
+    # ``{{workflow.parameters.SHOGGOTH_NAMESPACE}}`` so the
+    # worker can be rescheduled into a non-default namespace
+    # without code changes). Values are fetched from the
+    # shoggoth-workflow-config ConfigMap at admission time (see
+    # shoggoth/k3s/argo-workflows.yaml) — the ConfigMap holds the
+    # actual domain/org/instance-dir/namespace because `make up`'s
+    # envsubst pass renders its `${SHOGGOTH_*}` placeholders to
+    # literal values before applying.
     - name: SHOGGOTH_DOMAIN
       valueFrom:
         configMapKeyRef:
@@ -58,34 +129,269 @@ spec:
         configMapKeyRef:
           name: shoggoth-workflow-config
           key: SHOGGOTH_INSTANCE_DIR
+    - name: SHOGGOTH_DNS_IP
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_DNS_IP
+    - name: SHOGGOTH_NAMESPACE
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_NAMESPACE
+  activeDeadlineSeconds: 14400
+  # No workflow-level synchronization here -- the dispatcher
+  # step (shoggoth_tools:alpine) is intentionally unconstrained
+  # so multiple webhooks can validate in parallel. The
+  # single-flight constraint lives on the ``worker`` template
+  # instead (see ``worker-step.synchronization`` below), so only
+  # the slave:noble worker is serialised. This split matters
+  # because:
+  #   * Two concurrent ``/sandbox`` webhook calls would otherwise
+  #     queue at the dispatcher, leaving the second user waiting
+  #     for the first to apply its pod -- the dispatch step is
+  #     fast (a few seconds) but the queue is unbounded.
+  #   * Two concurrent ``/task`` webhooks would similarly queue,
+  #     even though the dispatcher only does a Redmine read.
+  #   * The actual contention is on the git push (the worker's
+  #     ``shoggoth.py pr-update`` / ``shoggoth.py task`` force-
+  #     pushes the PR branch); the slave pod is the only place
+  #     that holds the in-memory work, so the mutex belongs on
+  #     it. The Kestra flow that this replaced used
+  #     ``concurrency: { limit: 1, behavior: QUEUE }`` for the
+  #     same reason -- the per-step mutex is the Argo
+  #     equivalent. Sandbox commands never reach the worker
+  #     step (the dispatcher's ``should_run_worker=false`` output
+  #     makes the worker's ``when:`` clause skip the pod), so
+  #     the worker mutex does not gate them.
   templates:
-  - name: dispatch
+  # ----- DAG entrypoint ----------------------------------------------
+  - name: run
+    dag:
+      tasks:
+      - name: dispatch
+        template: dispatch-step
+        # Forward the workflow's input parameters to
+        # ``dispatch-step`` so its declared
+        # ``inputs.parameters`` (command, task_id, payload)
+        # are all supplied. Without ``arguments.parameters``
+        # here the DAG task passes none of the workflow's
+        # args through, and the submit-time validator
+        # rejects the workflow at admission with
+        # "templates.run.tasks.dispatch
+        # templates.dispatch-step inputs.parameters.<name>
+        # was not supplied" for whichever declared input
+        # the task omits. The worker task below does the
+        # same forwarding (for command/task_id/payload).
+        arguments:
+          parameters:
+          - name: command
+            value: "{{workflow.parameters.command}}"
+          - name: task_id
+            value: "{{workflow.parameters.task_id}}"
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+      - name: worker
+        template: worker-step
+        # ``depends`` is required on the worker task because Argo's
+        # validator flips ``usingDepends`` true at the template
+        # level the moment any task declares ``depends:``; the
+        # only-declares-``when`` form is also valid but combining
+        # both is more explicit about the data flow (worker
+        # consumes dispatch.outputs.parameters.command).
+        depends: "dispatch"
+        # Gate on dispatcher's validation result. ``when`` is
+        # evaluated against each task's resolved arguments
+        # before the pod is spun up.
+        #
+        # NB: the right-hand side is the unquoted bool
+        # literal ``true``, NOT the string ``"true"``. Argo's
+        # output-parameter loader (parseOutputValue at
+        # workflow/executor/common/common.go) auto-types the
+        # file contents: ``"true"`` and ``"false"`` come out
+        # as Go bools (true / false), numeric strings as
+        # int/float. The dispatcher writes the literal
+        # strings ``"true"`` / ``"false"`` to
+        # ``/tmp/dispatch-should-run-worker`` (via
+        # ``_emit_output``), so the worker's expression sees
+        # a bool, and ``== "true"`` would coerce the bool
+        # literal to a string only to fail-compare against
+        # the bool -- which Argo's expression engine reports
+        # as ``when 'true == "true"' evaluated false`` and
+        # silently skips the worker. The unquoted bool
+        # literal matches the auto-typed value directly.
+        # An empty / missing ``should_run_worker`` (e.g. the
+        # dispatch template is ever changed in a way that
+        # drops the output) is treated as ``""`` (the empty
+        # string) by expr-lang, which fails the ``== true``
+        # test and skips the worker — same fail-closed
+        # behaviour as the dispatcher's own "exit 0 on not
+        # actionable" path.
+        when: "{{tasks.dispatch.outputs.parameters.should_run_worker}} == true"
+        arguments:
+          parameters:
+          - name: command
+            value: "{{tasks.dispatch.outputs.parameters.command}}"
+          - name: task_id
+            value: "{{workflow.parameters.task_id}}"
+          - name: payload
+            value: "{{workflow.parameters.payload}}"
+
+  # ----- dispatch step -----------------------------------------------
+  - name: dispatch-step
+    # The dispatcher is its own CLI utility
+    # (``shoggoth/workflow/scripts/dispatch.py``), not a
+    # ``shoggoth.py`` subcommand — decoupling lets it run in
+    # the slim ``shoggoth_tools:alpine`` image (no agent, no
+    # git-cred sidecar, no ``Shoggoth().checkout()``) while
+    # the worker runs in ``slave:noble``. The script is
+    # invoked with an absolute path so the executor doesn't
+    # need to put the scripts dir in ``PATH`` (it does anyway
+    # because the shoggoth package is on ``sys.path`` — see
+    # the script's leading ``sys.path.insert``).
+    #
+    # Forward ``command`` / ``task_id`` / ``payload`` as env
+    # vars (``SHOGGOTH_ORIGINAL_COMMAND`` /
+    # ``SHOGGOTH_TASK_ID`` / ``GITEA_PAYLOAD``) rather than
+    # argv so a value containing shell metacharacters
+    # (e.g. ``pr-update; touch /tmp/pwned; #``) cannot
+    # execute arbitrary commands inside the workflow pod —
+    # exec with ``"${VAR}"`` passes each value as a single
+    # argv element to the inner python invocation, and the
+    # dispatcher's argparse (none, in this case) sees them
+    # cleanly. The dispatcher reads the original command
+    # from ``SHOGGOTH_ORIGINAL_COMMAND`` set from
+    # ``{{inputs.parameters.command}}`` (the binding-supplied
+    # original command).
     inputs:
       parameters:
-      - name: script
       - name: command
       - name: task_id
       - name: payload
-    # Single-flight serialization. The deleted Kestra subflow enforced
-    # concurrency: { limit: 1, behavior: QUEUE } so two webhook
-    # deliveries (e.g. two pull_request_review events for the same PR
-    # in quick succession) could not run the agent at the same time —
-    # both pods would clone the same PR, run `git push origin<branch>`
-    # in parallel, and race on the same ref, with the second push
-    # overwriting the first's commits. The mutex blocks the second
-    # submitter at admission time until the first finishes, the same
-    # observable effect as Kestra's QUEUE. Held alongside the same
-    # activeDeadlineSeconds (4 h cap below) a wedged holder blocks
-    # others for 4 h; the workflowDefaults.ttlStrategy
-    # (secondsAfterCompletion: 86400 in argo-workflows.yaml:864)
-    # bounds the post-completion lifetime if desired. Naming the
-    # mutex `coding-agent-dispatcher-mutex` keeps it distinct from
-    # the per-workflow mutexes on slave-test / github-mirror-sync /
-    # maintenance — those run different scripts that benefit from
-    # running in parallel with the dispatcher.
+    outputs:
+      parameters:
+      # Paths must match the dispatch script's OUTPUT_PATHS
+      # (shoggoth/workflow/scripts/shoggoth/commands/dispatch.py).
+      # Argo's executor reads each file after the container exits
+      # and propagates its contents as
+      # ``outputs.parameters.<name>``.
+      - name: command
+        valueFrom:
+          path: /tmp/dispatch-cmd
+      - name: should_run_worker
+        valueFrom:
+          path: /tmp/dispatch-should-run-worker
+    serviceAccountName: shoggoth-coding-agent-sandbox-spawner
+    container:
+      image: asherikov/shoggoth_tools:alpine
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      args:
+      - |
+        exec /shoggoth/workflow/scripts/dispatch.py 2>&1
+      env:
+      - name: SHOGGOTH_ORIGINAL_COMMAND
+        value: "{{inputs.parameters.command}}"
+      - name: SHOGGOTH_TASK_ID
+        value: "{{inputs.parameters.task_id}}"
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://otelcol:4318"
+      - name: GITEA_PAYLOAD
+        value: "{{inputs.parameters.payload}}"
+      - name: SHOGGOTH_DOMAIN
+        value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      # Required by the Gitea client constructor (see
+      # ``Gitea.__init__``); without it dispatch.py dies
+      # with "GITEA_SERVER_URL is required for Gitea-using
+      # commands". The api-gateway hostname is intentional:
+      # the dispatcher pod has no Gitea credentials, but
+      # web-internal (api.{DOMAIN}) injects the
+      # argo-webhook-receiver / gitea-slave token for
+      # outgoing calls. The same api.gateway URL the
+      # worker uses — see worker-step env below.
+      - name: GITEA_SERVER_URL
+        value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/gitea"
+      # Gitea SSH host override — the slave image's
+      # default ``git`` is the local pod hostname, not
+      # the ingress. Without this, the dispatcher's
+      # git-cred sidecar would keyscan ``git`` (which
+      # doesn't resolve) and the sandbox pod's
+      # ``git-clone`` init container would fail on
+      # the missing keyscan output.
+      - name: GITEA_INSTANCE_SSH_HOST
+        value: "git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      - name: REDMINE_SERVER
+        value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/redmine"
+      # Namespace for the sandbox pod/service the
+      # dispatcher's _handle_sandbox applies via
+      # kubectl, and the namespace the worker step's
+      # commands run in. Wired from the workflow
+      # parameter (sourced from the shoggoth-workflow-config
+      # ConfigMap, which `make up` renders to the
+      # cluster's namespace) so a staging-instance
+      # override that flips the namespace in the
+      # ConfigMap flows through to both steps without
+      # code changes.
+      - name: SHOGGOTH_NAMESPACE
+        value: "{{workflow.parameters.SHOGGOTH_NAMESPACE}}"
+      # _handle_task compares the Redmine assignee
+      # against this login (shoggoth/k3s/openldap.yaml
+      # sets ``uid: slave``); a non-default namespace /
+      # non-default slave user would otherwise see every
+      # /task invocation rejected.
+      - name: SHOGGOTH_SLAVE_USER
+        value: "slave"
+      # Custom CoreDNS service IP (shoggoth/k3s/dns.yaml).
+      # Forwarded to the sandbox pod spec so the pod uses
+      # the same DNS as the slave Deployments -- which
+      # carries the rewrite rules that map ``*.s.local``
+      # to ``*.shoggoth.svc.cluster.local``. Without this
+      # the user-facing ``git.s.local`` form wouldn't
+      # resolve from inside the sandbox terminal even
+      # though it does from the host network.
+      - name: SHOGGOTH_DNS_IP
+        value: "{{workflow.parameters.SHOGGOTH_DNS_IP}}"
+      volumeMounts:
+      - name: workflow-scripts
+        mountPath: /shoggoth/workflow/scripts
+        readOnly: true
+    volumes:
+    - name: workflow-scripts
+      hostPath:
+        path: /var/lib/rancher/k3s/storage/{{workflow.parameters.SHOGGOTH_INSTANCE_DIR}}/workflow-scripts
+        type: DirectoryOrCreate
+
+  # ----- worker step -------------------------------------------------
+  - name: worker-step
+    # Receives the validated command from the dispatch task's
+    # outputs.parameters. ``task_id`` and ``payload`` are passed
+    # through unchanged from the workflow arguments — they were
+    # already validated by the dispatcher for ``task`` and
+    # ``ci-failure``, and for ``pr-update`` they pass through.
+    inputs:
+      parameters:
+      - name: command
+      - name: task_id
+      - name: payload
+    # Per-template mutex: only one worker pod (slave:noble)
+    # runs at a time. Replaces the workflow-level mutex the
+    # pre-fix template carried (``spec.synchronization`` at
+    # the top level, which blocked admission of any second
+    # workflow and therefore serialised the dispatcher too).
+    # The contention is on the in-pod work -- the slave runs
+    # the Qwen agent and force-pushes the PR branch -- so
+    # the gate belongs here, not on the dispatcher's webhook
+    # validation. Two ``/sandbox`` workflows can therefore
+    # both apply their pods in parallel; the dispatcher's
+    # ``should_run_worker=false`` output makes the worker's
+    # ``when:`` clause skip the worker pod for ``sandbox``
+    # anyway, so the mutex isn't even contested on the
+    # sandbox path.
     synchronization:
       mutexes:
-        - name: coding-agent-dispatcher-mutex
+        - name: coding-agent-dispatcher-worker-mutex
     container:
       image: registry.{{workflow.parameters.SHOGGOTH_DOMAIN}}/slave:noble
       imagePullPolicy: IfNotPresent
@@ -101,10 +407,8 @@ spec:
       args:
       - |
         export PATH="/shoggoth/workflow/scripts:${PATH}"
-        exec "${SHOGGOTH_SCRIPT_NAME}" "${SHOGGOTH_COMMAND}" "${SHOGGOTH_TASK_ID}" 2>&1
+        exec shoggoth.py "${SHOGGOTH_COMMAND}" "${SHOGGOTH_TASK_ID}" 2>&1
       env:
-      - name: SHOGGOTH_SCRIPT_NAME
-        value: "{{inputs.parameters.script}}"
       - name: SHOGGOTH_COMMAND
         value: "{{inputs.parameters.command}}"
       - name: SHOGGOTH_TASK_ID
@@ -135,6 +439,8 @@ spec:
         value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_GITHUB_ORG
         value: "{{workflow.parameters.SHOGGOTH_GITHUB_ORG}}"
+      - name: SHOGGOTH_NAMESPACE
+        value: "{{workflow.parameters.SHOGGOTH_NAMESPACE}}"
       - name: SHOGGOTH_SLAVE_USER
         value: "slave"
       - name: GITEA_PAYLOAD
@@ -163,4 +469,3 @@ spec:
     - name: ci-cache
       persistentVolumeClaim:
         claimName: shoggoth-shared-cache
-    activeDeadlineSeconds: 14400

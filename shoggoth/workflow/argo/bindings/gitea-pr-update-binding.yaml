@@ -17,6 +17,40 @@
 #     (also an expr-lang expression). Bare strings inside the expression must be
 #     quoted (`"shoggoth.py"`), and Go-template `{{...}}` wrapping
 #     (v3) is gone — the entire expression is the value of that field.
+#
+# Selector filtering (the drop-list):
+#   The hook subscribes to three event types — pull_request_review,
+#   pull_request_review_request, and pull_request_comment — each with its
+#   own sub-action set. Most sub-actions are interesting (submitted,
+#   review_requested, created, deleted); a small set are no-ops that
+#   nevertheless pass the Gitea-side subscription filter and would
+#   otherwise spawn a workflow pod. The selector drops those before any
+#   pod is created, so the per-event cost collapses.
+#
+#   Dropped actions:
+#     payload.action == "dismissed"
+#         pull_request_review only. The review was dismissed.
+#     payload.action == "review_request_removed"
+#         pull_request_review_request only.
+#     payload.action == "deleted"
+#         pull_request_comment only. The comment body was removed.
+#     payload.comment != nil && (payload.sender.login == "slave"
+#                                  || payload.sender.login startsWith "slave@")
+#         pull_request_comment only. Comments authored by the
+#         slave are dropped before any pod spin-up. The slave
+#         is a bot account.
+#
+#   Kept actions (NOT dropped by the selector):
+#     payload.action == "submitted"
+#         pull_request_review. The main review case.
+#     payload.action == "review_requested"
+#         pull_request_review_request. The F2 case (state-gated by
+#         the worker's `slave_has_submitted_review_on_head` check).
+#     payload.action in {"created", "edited"}
+#         pull_request_comment. `created` triggers the slash-command
+#         path; `edited` re-reads the comment thread after a user
+#         fixes their request, which can be actionable (a wording
+#         change may unblock the agent).
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowEventBinding
 metadata:
@@ -26,15 +60,45 @@ metadata:
     app.kubernetes.io/part-of: shoggoth-argo
 spec:
   event:
-    selector: 'discriminator == "gitea-pr-update"'
+    # Note on ``!payload.sender.login startsWith "slave@"``
+    # precedence: expr-lang parses unary ``!`` at a higher
+    # precedence than infix operators, so an unparenthesised
+    # ``!x startsWith y`` becomes ``(!x) startsWith y`` —
+    # which is a TYPE ERROR (bool has no startsWith
+    # method) and the entire selector evaluation returns an
+    # error. The parenthesised form
+    # ``!(payload.sender.login startsWith "slave@")`` parses
+    # as the intended negation-over-whole-comparison.
+    #
+    # Note on the ``(payload.comment == nil || !(payload.comment.body startsWith "/sandbox"))``
+    # clause: the ``payload.comment == nil`` half is the
+    # nil-guard for the body access — ``pull_request_review``
+    # and ``pull_request_review_request`` events have no
+    # ``comment`` field (only ``pull_request_comment``
+    # payloads carry it), so the inner ``.body`` access
+    # would nil-deref and the entire selector would error
+    # out, dropping the event before the worker could see
+    # it. With the nil-guard the body clause is true when
+    # comment is nil and the selector falls through to the
+    # other clauses (action checks), so the F2 state-gate
+    # (slave_has_submitted_review_on_head) still runs for
+    # review_requested events. The negation half of the
+    # clause is unchanged: for pull_request_comment events
+    # with body starting ``/sandbox`` the negation fires
+    # and the pr-update binding drops the event so only
+    # the sibling gitea-pr-sandbox binding matches.
+    selector: |
+      discriminator == "gitea-pr-update" &&
+      payload.action != "dismissed" &&
+      payload.action != "review_request_removed" &&
+      payload.action != "deleted" &&
+      (payload.comment == nil || (payload.sender.login != "slave" && !(payload.sender.login startsWith "slave@"))) &&
+      (payload.comment == nil || !(payload.comment.body startsWith "/sandbox"))
   submit:
     workflowTemplateRef:
       name: coding-agent-dispatcher
     arguments:
       parameters:
-      - name: script
-        valueFrom:
-          event: '"shoggoth.py"'
       - name: command
         valueFrom:
           event: '"pr-update"'
