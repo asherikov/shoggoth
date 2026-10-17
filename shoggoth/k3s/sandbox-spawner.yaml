@@ -1,6 +1,6 @@
 ---
-# coding-agent-sandbox-spawner — ServiceAccount + RBAC for the
-# `coding-agent-dispatcher` DAG's `dispatch` step (and the parallel
+# sandbox-spawner — ServiceAccount + RBAC for the
+# `command-handler` DAG's `dispatch` step (and the parallel
 # sandbox-only template). Lets the dispatch pod:
 #
 #   * Apply / delete Pod + Service objects it creates itself.
@@ -24,7 +24,7 @@
 # principle of least privilege says the dispatcher should not be able
 # to mutate pods it did not create. A dedicated SA also makes the
 # audit trail unambiguous (`kubectl get pod --as=
-# system:serviceaccount:shoggoth:shoggoth-coding-agent-sandbox-spawner`
+# system:serviceaccount:shoggoth:shoggoth-sandbox-spawner`
 # shows only dispatch-initiated changes).
 #
 # Why not a `resourceNames` allow-list (e.g. only `pods/sandbox-pr-*`):
@@ -41,7 +41,7 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: shoggoth-coding-agent-sandbox-spawner
+  name: shoggoth-sandbox-spawner
   namespace: ${SHOGGOTH_NAMESPACE}
   labels:
     app.kubernetes.io/part-of: shoggoth
@@ -49,7 +49,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: shoggoth-coding-agent-sandbox-spawner
+  name: shoggoth-sandbox-spawner
   namespace: ${SHOGGOTH_NAMESPACE}
   labels:
     app.kubernetes.io/part-of: shoggoth
@@ -101,17 +101,17 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: shoggoth-coding-agent-sandbox-spawner
+  name: shoggoth-sandbox-spawner
   namespace: ${SHOGGOTH_NAMESPACE}
   labels:
     app.kubernetes.io/part-of: shoggoth
 subjects:
 - kind: ServiceAccount
-  name: shoggoth-coding-agent-sandbox-spawner
+  name: shoggoth-sandbox-spawner
   namespace: ${SHOGGOTH_NAMESPACE}
 roleRef:
   kind: Role
-  name: shoggoth-coding-agent-sandbox-spawner
+  name: shoggoth-sandbox-spawner
   apiGroup: rbac.authorization.k8s.io
 ---
 # `kubectl get externalsecret ... -o json | jq -e ...` in a
@@ -133,13 +133,13 @@ roleRef:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: shoggoth-coding-agent-sandbox-spawner-bootstrap-wait
+  name: shoggoth-sandbox-spawner-bootstrap-wait
   namespace: ${SHOGGOTH_NAMESPACE}
   labels:
     app.kubernetes.io/part-of: shoggoth
 subjects:
 - kind: ServiceAccount
-  name: shoggoth-coding-agent-sandbox-spawner
+  name: shoggoth-sandbox-spawner
   namespace: ${SHOGGOTH_NAMESPACE}
 roleRef:
   kind: Role
@@ -158,7 +158,7 @@ roleRef:
 # injects the argo-webhook-receiver / gitea-slave token
 # for outgoing calls) — the dispatch pod has no K8s
 # Secret reads on its own. The pre-fix bindings
-# (`shoggott-coding-agent-sandbox-spawner-ldap-ssh-read`,
+# (`shoggott-sandbox-spawner-ldap-ssh-read`,
 # `-redmine-read`) granted read on five Secrets the SA
 # never used; dropping them keeps a compromised dispatcher
 # pod from gaining `get` on `redmine-slave-token`,
@@ -174,20 +174,20 @@ roleRef:
 #     cannot create resource "workflowtaskresults" in API group "argoproj.io"
 # mirroring the maintenance pod's argo-executor binding at
 # `maintenance-secret-writer.yaml:131-147`. The dispatch template
-# runs under `shoggoth-coding-agent-sandbox-spawner` (set explicitly
-# in the new `coding-agent-dispatcher` DAG), so the executor
+# runs under `shoggoth-sandbox-spawner` (set explicitly
+# in the new `command-handler` DAG), so the executor
 # permissions must be bound to that SA, not to the default `argo`
 # SA.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: shoggoth-coding-agent-sandbox-spawner-argo
+  name: shoggoth-sandbox-spawner-argo
   namespace: ${SHOGGOTH_NAMESPACE}
   labels:
     app.kubernetes.io/part-of: shoggoth
 subjects:
 - kind: ServiceAccount
-  name: shoggoth-coding-agent-sandbox-spawner
+  name: shoggoth-sandbox-spawner
   namespace: ${SHOGGOTH_NAMESPACE}
 roleRef:
   kind: Role

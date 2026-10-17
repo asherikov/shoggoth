@@ -45,7 +45,7 @@ class PrUpdateCommand(CommandBase):
     # for the per-PR sandbox spawner. The handler itself
     # never reaches this file — ``gitea-pr-sandbox-binding``'s
     # selector pins ``comment.body == "/sandbox"`` and submits
-    # the ``coding-agent-dispatcher`` DAG with
+    # the ``command-handler`` DAG with
     # ``command: sandbox``, which routes through
     # ``DispatchCommand._handle_sandbox`` (in
     # ``shoggoth/workflow/scripts/shoggoth/commands/dispatch.py``)
@@ -993,8 +993,21 @@ class PrUpdateCommand(CommandBase):
         ``git commit`` but a rejected ``git push``: the local
         branch is squashed, the remote is not, the next push is a
         force-push onto a divergence the user did not intend).
+
+        The response is posted via
+        ``post_pr_comment_attributed`` so the comment
+        thread carries an ``@<commenter>,`` prefix —
+        the worker runs in response to a single
+        comment event per workflow, and
+        ``payload.sender.login`` is the user who
+        posted the slash command. Non-slash-command PR
+        comments (e.g. ``_pr_review``'s follow-up
+        summary) keep the plain ``post_pr_comment`` so
+        the bot's review summary is not misattributed to
+        whichever user last commented.
         """
-        result = self.gitea.post_pr_comment(pr_repo, pr_number, body)
+        result = self.gitea.post_pr_comment_attributed(
+            pr_repo, pr_number, body)
         if result is None:
             log(f"slash-command: WARNING failed to post response "
                 f"comment to {pr_repo}#{pr_number}",
@@ -1226,15 +1239,25 @@ class PrUpdateCommand(CommandBase):
         ``/repos/{repo}/pulls/{n}/requested_reviewers`` which fires
         a ``pull_request_review_request`` webhook. The existing
         review handler in ``execute()`` picks that up and runs the
-        normal review flow. Posting a response comment is best-effort
-        — the actual review is what the user wanted, not the
-        confirmation.
+        normal review flow. Only the REVIEW RESULT is posted back
+        to the PR — there is intentionally no "Review requested
+        from ..." confirmation comment because that message would
+        sit next to the actual review in the PR thread and add
+        noise without information (the user already knows they
+        asked for a review, and the Gitea UI shows the reviewer
+        assignment in the sidebar).
 
-        If ``slave_user`` is the PR author, Gitea rejects the
-        reviewer-add with HTTP 422 ``poster of pr can't be reviewer``,
-        so the webhook never fires and the review never runs. Detect
-        this from the loaded webhook payload and run the review
-        directly so the slave still produces a review on the PR.
+        Failure modes that DO post:
+          * ``request_reviewer`` returned ``None`` (Gitea
+            rejected the add) — fatal comment, then ``die()`` so
+            the workflow is marked Failed.
+          * The slave user is the PR author — Gitea would 422
+            the reviewer-add with ``poster of pr can't be
+            reviewer``, so the webhook never fires and the
+            review never runs. Detect this from the loaded
+            webhook payload and run the review directly via
+            ``_pr_review`` (no PR comment — the review itself
+            posts the result).
         """
         slave_user = params.shoggoth_slave_user
         pr_poster = ((self.gitea._payload.get("pull_request") or {})
@@ -1261,9 +1284,14 @@ class PrUpdateCommand(CommandBase):
                 f"Failed to request review from `{slave_user}`.",
                 fatal=True, command="review")
             return
-        self._post_slash_response(pr_repo, pr_number,
-            f"Review requested from `{slave_user}`. "
-            f"The review will be posted once it completes.")
+        # No success comment posted: the
+        # ``pull_request_review_request`` webhook fires
+        # next, the existing review handler runs, and
+        # that handler's output IS the result the user
+        # sees in the PR thread. A "Review requested
+        # from ..." comment here would be redundant
+        # noise between the user's ``/review`` command
+        # and the review itself.
 
     def _slash_squash(self, pr_repo, pr_number, pr_url):
         """``/squash`` — squash all PR commits into one.

@@ -91,7 +91,7 @@ spec:
       payload.data.issue.assigned_to != nil
   submit:
     workflowTemplateRef:
-      name: coding-agent-dispatcher
+      name: command-handler
     arguments:
       parameters:
       - name: command

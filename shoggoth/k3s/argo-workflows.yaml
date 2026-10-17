@@ -822,7 +822,7 @@ data:
         secondsAfterCompletion: 86400
       # podSpecPatch adds the git-cred sidecar (and its init container)
       # to every workflow pod so SSH/HTTPS git operations in
-      # coding-agent-dispatcher, slave-test, and github-mirror-sync have
+      # command-handler, slave-test, and github-mirror-sync have
       # access to ssh-agent + known_hosts + git-credential-cache at
       # /shoggoth/git-cred. The init container must run first: kubelet
       # mounts the emptyDir as root:root with default perms, the sidecar

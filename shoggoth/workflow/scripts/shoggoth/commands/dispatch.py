@@ -72,7 +72,7 @@ class _SandboxPodNotReadyError(Exception):
 
 
 class DispatchCommand(CommandBase):
-    """Control-plane pod for the `coding-agent-dispatcher` DAG.
+    """Control-plane pod for the `command-handler` DAG.
 
     The dispatcher runs in a `shoggoth_tools:alpine` pod with
     kubectl available. Its job is to validate the inbound webhook
@@ -121,7 +121,7 @@ class DispatchCommand(CommandBase):
 
     # Dispatcher's workflow outputs. Keyed by the argo
     # ``outputs.parameters[*].name`` in the
-    # `coding-agent-dispatcher` DAG.
+    # `command-handler` DAG.
     OUTPUTS = ("command", "should_run_worker")
 
     # File paths the dispatcher writes each output to.
@@ -372,7 +372,7 @@ class DispatchCommand(CommandBase):
             body = (
                 f"Sandbox ready: {sandbox_url}"
             )
-            result = self.gitea.post_pr_comment(
+            result = self.gitea.post_pr_comment_attributed(
                 repo_full_name, pr_number, body)
             if result is None:
                 # The pod is up but the user has no way to
@@ -429,7 +429,7 @@ class DispatchCommand(CommandBase):
                 # the failure category; the operator
                 # investigating dives into the argo log
                 # for the diagnostic.
-                self.gitea.post_pr_comment(
+                self.gitea.post_pr_comment_attributed(
                     self.gitea.get_repo_full_name(),
                     self.gitea.get_pr_number(),
                     f"Sandbox creation failed. "
@@ -456,7 +456,7 @@ class DispatchCommand(CommandBase):
             # load-bearing die() below (the user wants the
             # workflow Failed, not a silent success).
             try:
-                self.gitea.post_pr_comment(
+                self.gitea.post_pr_comment_attributed(
                     self.gitea.get_repo_full_name(),
                     self.gitea.get_pr_number(),
                     f"Sandbox failed to start: `{e}`\n\n"
@@ -576,7 +576,7 @@ class DispatchCommand(CommandBase):
             },
             "spec": {
                 "serviceAccountName":
-                    "shoggoth-coding-agent-sandbox-spawner",
+                    "shoggoth-sandbox-spawner",
                 "restartPolicy": "Never",
                 # Use the same custom DNS as the slave
                 # Deployments (shoggoth/k3s/slave-term.yaml,

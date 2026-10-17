@@ -1,8 +1,8 @@
 ---
-# coding-agent-dispatcher — invoked by every webhook flow (gitea-pr-update,
+# command-handler — invoked by every webhook flow (gitea-pr-update,
 # gitea-ci-failure, redmine-task-processor) via WorkflowEventBinding.
 #
-# Equivalent to kestra's main_shoggoth_coding-agent-dispatcher.yml:
+# Equivalent to kestra's main_shoggoth_command-handler.yml:
 # single-flight, one shoggoth.py invocation per webhook. v2 splits the
 # single pod into a two-step DAG:
 #
@@ -53,8 +53,8 @@
 #
 # Service-account split:
 #   * ``dispatch`` runs under
-#     ``shoggoth-coding-agent-sandbox-spawner`` (SA + Role defined
-#     in ``shoggoth/k3s/coding-agent-sandbox-spawner.yaml``) so the
+#     ``shoggoth-sandbox-spawner`` (SA + Role defined
+#     in ``shoggoth/k3s/sandbox-spawner.yaml``) so the
 #     sandbox command can kubectl-apply / wait / delete sandbox
 #     pods. Scope is the shoggoth namespace only; pods/services
 #     CRUD + pods/log read; no pods/exec, no other namespaces.
@@ -80,7 +80,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: coding-agent-dispatcher
+  name: command-handler
   namespace: shoggoth
   labels:
     app.kubernetes.io/part-of: shoggoth-argo
@@ -281,7 +281,7 @@ spec:
       - name: should_run_worker
         valueFrom:
           path: /tmp/dispatch-should-run-worker
-    serviceAccountName: shoggoth-coding-agent-sandbox-spawner
+    serviceAccountName: shoggoth-sandbox-spawner
     container:
       image: asherikov/shoggoth_tools:alpine
       imagePullPolicy: IfNotPresent
@@ -391,7 +391,7 @@ spec:
     # sandbox path.
     synchronization:
       mutexes:
-        - name: coding-agent-dispatcher-worker-mutex
+        - name: command-handler-worker-mutex
     container:
       image: registry.{{workflow.parameters.SHOGGOTH_DOMAIN}}/slave:noble
       imagePullPolicy: IfNotPresent

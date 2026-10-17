@@ -488,6 +488,256 @@ records on start/stop.
 - <https://github.com/volcengine/OpenViking>
   - requires llm
 
+### Context compression
+
+Tools that shrink the token volume flowing into/out of the LLM gateway
+(`shoggoth/k3s/litellm.yaml`, currently `ghcr.io/berriai/litellm:v1.102.0`)
+or the agent runtime. Two integration shapes exist:
+
+- **Sidecar / proxy in front of LiteLLM** — sits between every
+  LiteLLM request and the upstream provider, so every model shoggoth
+  routes through gets compressed uniformly. Affects *all* clients
+  (Qwen Code, `shoggoth.py` agent, MCP servers, any future code agents).
+- **Inline / SDK in the agent runtime** — wraps individual agent
+  calls; more granular but requires code changes per call site and
+  breaks when new agents (or other tools) are added.
+
+shoggoth's value proposition (LiteLLM as the single LLM gateway) makes
+the sidecar shape the natural integration point: one deployment covers
+every consumer, no per-client rewiring, and the same compression policy
+applies to ad-hoc operator sessions via `ANTHROPIC_BASE_URL` /
+`OPENAI_BASE_URL` redirects through LiteLLM.
+
+Common to all candidates: they claim 20–95% input token reductions and
+~5–75% output token reductions, run locally, do not call out to
+third-party models for compression, and preserve prompt-cache prefixes
+(Anthropic `cache_control` markers are explicitly excluded from
+rewriting). None are currently deployed in shoggoth — selection is a
+follow-up decision.
+
+- **[Headroom](https://github.com/headroomlabs-ai/headroom)** (selected, Apache 2.0)
+  - <https://docs.litellm.ai/docs/proxy/headroom>
+  - Deployed in-cluster as a headroom Service + Deployment in
+    `shoggoth/k3s/headroom.yaml`; wired as a `pre_call` guardrail in
+    `shoggoth/k3s/litellm.yaml` (in the `litellm-templates` ConfigMap
+    under `guardrails:`). Model cache lives on a `headroom-cache` PVC
+    (`/data` → `HF_HOME=/data/huggingface`) so the Kompress-v2-base
+    + Rust-core embedder + ONNX runtime survive pod restarts.
+    `default_on: false`; opt-in per key via the LiteLLM virtual-key
+    admin API (`POST /key/generate` with `"guardrails":
+    ["headroom-compression"]`) or per request via the
+    `guardrails`/`litellm_metadata.guardrails` body field. Bypass:
+    `x-headroom-bypass: true`. Headroom Service endpoints are awaited
+    by the litellm `wait-bootstrap` init container before the litellm
+    pod becomes Ready, so the first request after a cold start does
+    not race headroom's model download.
+  - **Image pin:** `ghcr.io/headroomlabs-ai/headroom:code-nonroot-4630602`
+    (short-SHA pin to the most recent `code-nonroot` build;
+    v0.41.0 / 2026-10-14). Headroom does **not** publish semver
+    image tags — the docs' `<version>` placeholder form does not
+    exist in the registry. Only moving aliases (`latest`, `nonroot`,
+    `code-nonroot`, ...) and short-SHA pins are published. The
+    `code` extra adds tree-sitter for AST-aware code compression,
+    which is the dominant traffic shape for shoggoth's `shoggoth.py`
+    agent (PR review, code generation, the `commands/pr_update.py`
+    review-comment flow). To upgrade, bump the SHA in
+    `shoggoth/k3s/headroom.yaml` and rerun `make up`; the latest
+    SHA is on
+    <https://github.com/headroomlabs-ai/headroom/pkgs/container/headroom>.
+  - Local compression layer for tool outputs, logs, files, RAG chunks, and
+    conversation history; ships as a Python library, a TS SDK, a CLI, a
+    drop-in `headroom proxy --port 8787`, an MCP server
+    (`headroom_compress`, `headroom_retrieve`, `headroom_stats`), and a
+    `headroom wrap` command for Claude Code / Codex / Grok / Copilot CLI
+    / Cursor / Aider / OpenCode / Cline / Continue / Goose / OpenHands
+  - Native LiteLLM integration as a **`pre_call` guardrail**
+    (<https://docs.litellm.ai/docs/proxy/headroom>): registered in
+    `config.yaml` under `guardrails:`, gated per-key, per-request, or
+    globally via `default_on: true`; LiteLLM v1.92.x+ is required, and
+    shoggoth already runs v1.102.0
+  - Rust core + Python wrapper; published image
+    `ghcr.io/headroomlabs-ai/headroom:latest` (Dockerfile in repo); one
+    line for the sidecar: `headroom proxy --host 0.0.0.0 --port 8787`
+  - Compression pipeline: `CacheAligner` (never rewrites
+    `cache_control`-marked messages) → `ContentRouter` (Magika-based
+    type detection) → `SmartCrusher` (JSON) / `CodeCompressor`
+    (tree-sitter AST for 8 languages) / `Kompress-v2-base` (HF text
+    model) → CCR (Compress-Cache-Retrieve) so the model can re-pull
+    original bytes via `headroom_retrieve`
+  - **Live-zone compression** keeps the frozen prefix byte-identical so
+    Anthropic prompt-cache hits still apply; **output shaper**
+    (`HEADROOM_OUTPUT_SHAPER=1`) appends a terseness hint to the system
+    prompt and downshifts `reasoning_effort` / `thinking.budget_tokens`
+    on routine turns (claimed ~31.7% output-token reduction)
+  - Cross-agent shared memory across Claude / Codex / Gemini / Grok with
+    dedup; `headroom learn` mines failed sessions and writes
+    corrections to `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` / `GROK.md`
+  - **Reported benchmarks** (run with
+    `uv run python benchmarks/index_proof_table.py --seed 20260902`):
+    21% on 100-result code search, 57% on SRE incident debugging, 42%
+    on codebase exploration, 30% on GitHub issue triage; p50 0.21 ms
+    on 10K-token JSON, 1.4 ms at 100K tokens
+  - **Reported accuracy**: GSM8K unchanged, TruthfulQA +0.03 (within
+    CI), SQuAD v2 97% at 19% compression, BFCL 97% at 32% compression
+  - + most active project in the space (~75.5k stars, 3.3k commits,
+    Apache 2.0) with first-class LiteLLM support — wire-up matches
+    shoggoth's existing guardrail pattern in
+    `shoggoth/k3s/litellm.yaml`
+  - + one sidecar covers every consumer of `litellm.s.local`; per-key
+    opt-in via the existing LiteLLM virtual-key admin API; per-request
+    bypass via `x-headroom-bypass: true` for debugging
+  - + output shaper reduces the verbose Qwen Code / Claude Code replies
+    that dominate shoggoth's `pr_update.py` review-comment turnaround
+  - + multi-agent memory + `headroom learn` would slot into the
+    `Update basic memory with any new information` post-step that
+    `shoggoth.py` already runs after every agent invocation
+  - + Kompress-v2-base is HF-published, ONNX-runtime backed, can run
+    CPU-only; no GPU requirement
+  - - **bypass header is one-way**: `x-headroom-bypass: true` only
+    turns compression *off*; cannot enable it inline — must go through
+    the guardrail/key/metadata path
+  - - **`user`/`system` messages are not compressed by default** — the
+    default deployment compresses effectively none of Claude Code's
+    `user`-role traffic. Opt-in via
+    `HEADROOM_COMPRESS_USER_MESSAGES=1` on the Headroom container
+    itself (not in LiteLLM's `config.yaml`), and the option is in a
+    single env var shared by every model — coarse for the
+    mixed-traffic shape shoggoth has
+  - - **Anthropic `cache_control` messages are never compressed** —
+    `CacheAligner` rejects them with no override; any request that
+    uses prompt caching pays the full prefix cost (still reduces
+    everything outside the cache, but the win is bounded by what is
+    *not* cache-controlled)
+  - - **`pre_call` only** — responses are never compressed; output
+    shaping is the separate `HEADROOM_OUTPUT_SHAPER=1` flag
+  - - adds one network hop per request to the sidecar, visible as an
+    extra `pre-call` step in the LiteLLM Admin UI
+  - - `default_on: true` would compress every request, including the
+    ad-hoc operator sessions routed through the same proxy — rollout
+    docs recommend per-key opt-in; per-key issuance is an additional
+    admin workflow
+  - - repo is large (Rust + Python + TS workspaces); HF model and
+    ONNX runtime add ~hundreds of MB to the sidecar image and require
+    AVX2 on x86
+- <https://github.com/fkiene/llmtrim> (MPL-2.0)
+  - Local MITM-style proxy (modeled on mitmproxy) that compresses
+    LLM API requests before they reach providers (OpenAI, Anthropic,
+    Google, DeepSeek, Mistral, xAI, Moonshot, Zhipu, Qwen,
+    OpenRouter, any OpenAI-compatible endpoint)
+  - **No LiteLLM integration** — sits in front of the provider, not in
+    front of LiteLLM. Integrations are: a local proxy honoured by
+    `HTTPS_PROXY`, language libraries (Rust crate, Python `pip install
+    llmtrim`, Ruby gem, Kotlin, SwiftPM, `@llmtrim/js` WASM), an MCP
+    server (`llmtrim_compress`, `llmtrim_compress_text`, `llmtrim_stats`),
+    a CLI (`llmtrim status`, `llmtrim send`, `llmtrim compress`),
+    and a desktop tray app
+  - Installs a name-constrained private CA in `~/.llmtrim/` (cannot
+    intercept bank/email traffic) and sets `HTTPS_PROXY` in the shell
+    environment; daemonised at login
+  - **10 compressor stages**: tool-output (lossless template fold +
+    log/diff/grep windowing), cache discipline (stabilise invariant
+    prefix), BM25+RM3+TextTiling retrieval, tree-sitter
+    `skeletonization` (14 languages), JSON minify / TOON / CSV
+    encoding, JSON sample down-sampling, dedup, output control
+    (Chain-of-Draft + terse instruction + anti-overthink), static
+    tool selection + description trim, image downscaling
+  - **No model calls** — compression is deterministic and quality-gated
+    (each stage re-measured with the provider's real tokenizer; reverted
+    if it does not save tokens). Worst case is zero savings — cannot
+    raise the bill or break a request
+  - **Reported savings** (live A/B across 112 cases): input −31%,
+    output −74%, round-trip cost −66% (projected −57% at GPT-4o rates,
+    −59% at Claude Sonnet rates). Reported accuracy preserved on
+    TruthfulQA, SQuAD v2, BFCL; GSM8K shows −8pp at −71% cost
+  - + no model calls in the compression path — no GPU, no HF model,
+    no ONNX runtime, single Rust binary, ~5 ms/call
+  - + name-constrained private CA (cannot intercept bank/email
+    traffic) is a meaningful security improvement over an unrestricted
+    MITM proxy
+  - + wide library coverage (Rust/Python/Ruby/Kotlin/Swift/JS-WASM)
+    means a future shoggoth service written in any of these can embed
+    compression directly
+  - + published image `ghcr.io/fkiene/llmtrim` (`docker run -d -p
+    43117:43117 -v llmtrim-state:/data ghcr.io/fkiene/llmtrim`)
+  - + deterministic + quality-gated pipeline means the worst-case
+    behaviour is "no change" — safer to enable globally than ML-based
+    compressors
+  - - **no LiteLLM integration** — to use it with shoggoth, every
+    consumer (LiteLLM, MCP clients, the `shoggoth.py` agent, operator
+    sessions) would point at llmtrim instead of LiteLLM, and the
+    `shoggoth/k3s/litellm.yaml` model-list / virtual-key / cost-tracking
+    stack stops being the single source of truth
+  - - **MITM CA model** is incompatible with the Anthropic prompt-cache
+    design (which relies on the SDK sending exact bytes to the
+    endpoint) — would need a separate `anthropic-` shim that bypasses
+    the proxy for `cache_control`-marked requests, or accept losing
+    prompt caching entirely
+  - - **MPL-2.0 file-level copyleft**: the only file affected by
+    linking is llmtrim itself; shoggoth's own code is unaffected, but
+    it is the only entry in this list with a copyleft licence
+  - - smaller project (~245 stars, 690 commits) than Headroom; single
+    author, narrower ecosystem
+  - - per-developer `HTTPS_PROXY` + CA-trust setup is an additional
+    step on every workstation and inside every container (MCP server
+    pods, runner pods) that wants to use it — fails closed if the env
+    var is not set
+- <https://docs.litellm.ai/docs/proxy/headroom> (same project as
+  headroom above — first-class LiteLLM guardrail; the relevant
+  integration details are folded into the headroom entry)
+  - + the only one in this list with first-class LiteLLM guardrail
+    support — wire-up matches the existing `guardrails:` mechanism
+    in `shoggoth/k3s/litellm.yaml`
+  - - same caveats as the headroom entry (no override for
+    `cache_control` exclusion, `user`/`system` default exclusion,
+    `pre_call`-only, one-way bypass header)
+  - - `default_on: true` would compress every request through the
+    proxy; the LiteLLM docs recommend per-key opt-in for rollout,
+    which adds an admin workflow on top of the existing
+    virtual-key issuance
+
+### Other approaches considered
+
+- **LiteLLM built-in callbacks** — LiteLLM ships a `Presidio` /
+  `Lakera` / `prompt_injection` callback layer and an OTel exporter
+  but no built-in token compressor. The closest built-in is the
+  `success_callback` / `failure_callback` hooks in
+  `litellm_settings.callbacks` (already used by shoggoth for
+  `prometheus` and `otel` in `shoggoth/k3s/litellm.yaml`); these
+  observe calls but do not transform the request payload
+- **Anthropic prompt caching alone** — shoggoth's LiteLLM config
+  does not currently use Anthropic `cache_control` markers; adding
+  them reduces cost on repeated prefixes but is a different
+  mechanism (it does not reduce the bytes that flow into the model,
+  it just bills them at a lower rate). Orthogonal to compression —
+  Headroom and llmtrim both preserve cache hits
+- **Per-agent `compress(messages)` SDK calls in
+  `shoggoth/workflow/scripts/shoggoth/agent.py`** — would work
+  for the one agent that lives in that file, but every other
+  consumer (LiteLLM-routed MCP servers, ad-hoc operator sessions,
+  any future code agent) is bypassed. The sidecar shape is the
+  single-deployment option; the inline shape is a per-call-site
+  refactor
+- <https://github.com/microsoft/llmlingua> — Microsoft's prompt
+  compressor; research-grade (paper: "LLMLingua: Compressing
+  Prompts for Accelerated Inference of Large Language Models"),
+  no first-class proxy, no maintenance cadence suitable for a
+  production deployment
+- <https://github.com/ajndkr/token-compressor> /
+  <https://github.com/mangiucugna/json_reducer> — ad-hoc one-off
+  compressors without proxy/SDK/MCP shapes; not viable as
+  shoggoth infrastructure
+- **Provider-side context management** (Anthropic's
+  `cache_control` / OpenAI's automatic prefix caching) — reduces
+  *cost* but not *bytes sent*; the LLM still spends the same
+  forward-pass compute on the same input. Compressors reduce
+  both; the two approaches are complementary, not substitutes
+- **Self-hosted LLM via LocalAI + reduced context window** —
+  `shoggoth/k3s/localai.yaml` already runs LocalAI as the
+  embedding / fallback provider; shrinking the model's
+  `max_context_len` is a hard cap, not a compressor, and applies
+  only to LocalAI-routed requests (not the Ollama / Anthropic
+  cloud traffic that dominates `shoggoth-default`)
+
 ## Software forge
 
 - **[Gitea](https://gitea.io)** (selected)
@@ -1080,3 +1330,361 @@ k8s-compatible and would transition cleanly.
   - - small community — limited troubleshooting resources
   - - no Helm addon catalog; standard Helm works but no curated charts
   - - custom NodeSetter scheduler replaces standard scheduler — some k8s features may behave differently
+
+---
+
+## Cluster visualization
+
+Tools that produce static or interactive diagrams of the shoggoth stack
+from the manifests in `shoggoth/k3s/*.yaml` (and the Argo CRD submodule
+in `shoggoth/argo-workflows/manifests/base/crds/full/`). The choice is
+between two operating modes:
+
+- **Offline (manifest files only)** — read YAML, no cluster access needed.
+  Output is reproducible and reviewable as part of a PR. Matches the
+  existing `docs/architecture.svg` / `docs/bringup.svg` pattern (both
+  are manifest snapshots, hand-rendered).
+- **Live (kubeconfig / cluster API)** — query the running cluster, show
+  actual state including drift. Cannot run in CI without a live cluster;
+  output is not reproducible.
+
+A leading offline candidate is KubeDiagrams (see below). Selection
+pending — this document is research only.
+
+### Offline (manifest files)
+
+- <https://github.com/philippemerle/KubeDiagrams> (Apache 2.0)
+  - + the de-facto manifest visualizer — 2.7k stars, actively maintained
+  - + reads Kubernetes manifest files, kustomize output, Helm charts,
+    helmfile descriptors, OR a live cluster (hybrid input)
+  - + output formats cover the entire proposal set: SVG, PNG, Mermaid,
+    Graphviz DOT/dot_json, draw.io (editable), D2, PDF, GIF/JPEG/TIFF
+  - + 51 built-in K8s kinds — Deployment, StatefulSet, Job/CronJob,
+    Service, Ingress, ConfigMap, Secret, ServiceAccount, Role/ClusterRole
+    + Bindings, HPA/VPA, NetworkPolicy, PDB, PVC/PV, Node, Namespace,
+    HPA, ResourceQuota, LimitRange, PriorityClass, RuntimeClass, CRD,
+    Validating/MutatingWebhookConfiguration, APIService — covers
+    everything the shoggoth stack uses
+  - + first-class CRD support with vendored example configs for the
+    shoggoth-relevant CRDs: Argo (`Workflow`, `WorkflowTemplate`,
+    `Application`, `Rollout`, `EventBus`, `EventSource`, `Sensor`),
+    External Secrets (`ExternalSecret`, `SecretStore`), Prometheus
+    kube-prometheus-stack, cert-manager, Knative, OpenShift, k0s,
+    LeaderWorkerSet
+  - + four edge kinds with distinct visual styles: `REFERENCE` (solid
+    black, direct refs like `serviceAccountName` / `volumes` /
+    `envFrom`), `SELECTOR` (dashed black, label/field selectors like
+    `Service.spec.selector` and `NetworkPolicy.podSelector`),
+    `OWNER` (dotted black, `ownerReferences` chain),
+    `COMMUNICATION` (solid brown, NetworkPolicy ingress/egress)
+  - + auto-clustering by namespace, then by `app.kubernetes.io/instance` /
+    `helm.sh/chart` / `app.kubernetes.io/name` / `tier` / `component`
+    — matches the shoggoth stack's labeling convention
+  - + declarative custom diagrams — add clusters / nodes / edges in
+    `.kd` files (see `examples/wordpress/custom_diagram.kd`); useful
+    for adding shoggoth-specific annotations on top of the auto-graph
+  - + multiple install paths: `pip install KubeDiagrams`,
+    Docker (`philippemerle/kubediagrams`), Podman, Nix shell
+    (`nix shell github:philippemerle/KubeDiagrams`), kubectl plugin
+    (symlink `bin/kubectl-diagrams` into `$PATH` → `kubectl diagrams`),
+    GitHub Action (`uses: philippemerle/KubeDiagrams@main`), and a
+    JetBrains IDE plugin
+  - + online demo at <https://kubediagrams.lille.inria.fr/> for previewing
+    without installing
+  - + supports stdin pipe (`kube-diagrams -` reads manifests from stdin)
+    — useful for `kubectl kustomize path/ | kube-diagrams - -o out.svg`
+    and `helmfile template -f helmfile.yaml | kube-diagrams - -o out.svg`
+  - + interactive viewer from `dot_json` output: zoom, tooltips, filter,
+    drag, save as PNG/JPG
+  - + namespace filter (`-n`) and `--without-namespace` for cross-NS views
+  - + the `.dot_json` output has tooltips on every cluster/node/edge
+  - - pulls in `mingrammer/diagrams` as a Python dependency for the
+    icon library, plus `graphviz2drawio` for draw.io output — heavier
+    Python footprint than a from-scratch script
+  - - requires `dot` (Graphviz) binary at runtime; the system has
+    `/usr/bin/dot` available
+  - - default output is PNG, not SVG — needs `-f svg` for SVG
+  - - clustering by Helm chart can over-cluster when many resources
+    share the same chart but live in different namespaces
+  - - declarative `.kd` files use a custom DSL with limited docs;
+    shoggoth-specific annotations would be a learning investment
+- <https://github.com/dcasati/kubernetes-PlantUML> (MIT)
+  - + uses PlantUML stencils for K8s resources — visually distinct
+    style, embedded into VS Code rendering pipeline
+  - + renders to any format PlantUML supports (PNG, SVG, PDF, LaTeX)
+  - + reads manifest files directly (offline)
+  - - no built-in support for CRDs (Argo, External Secrets, etc.) —
+    would need a custom mapping
+  - - requires PlantUML server or CLI as a render dependency
+    (extra infrastructure beyond `dot`)
+  - - 280 stars, less momentum than KubeDiagrams; last meaningful
+    activity 2+ years ago
+  - - VS Code extension model doesn't fit the Makefile-driven build
+    pipeline; would need a separate CI integration
+- <https://github.com/viralpoetry/kubesurveyor> (MIT)
+  - + Python script, Graphviz SVG output
+  - + namespace-grouped visualization
+  - - 90 stars, last updated Sep 2024 — low maintenance momentum
+  - - no CRD support for shoggoth-relevant kinds (Argo, ExtSec)
+  - - no Helm / kustomize / hybrid input — manifests only
+  - - output format is limited to Graphviz SVG (no Mermaid, draw.io,
+    or other modern formats)
+- <https://github.com/Gihchathur/kubemotion> (MIT)
+  - + TypeScript / web app that takes YAML / Helm chart input and
+    produces an Argo CD-style resource view
+  - + actively maintained (~28 days ago at fetch time)
+  - - Argo CD-style output is opinionated — assumes the user wants
+    the same visual vocabulary as the Argo CD web UI
+  - - requires `helm` + `node` runtime
+  - - 31 stars, small user base
+  - - limited CRD support compared to KubeDiagrams
+- <https://github.com/jeremykross/konstellate> — **deprecated**; last commit Jul 2019, effectively unmaintained (Electron GUI, 1.5k stars at peak)
+- <https://github.com/same7ammar/kube-composer> (MIT)
+  - + YAML builder with dynamic visualization (web app)
+  - + 482 stars
+  - - GUI builder, not a visualizer — the diagram is a side effect of
+    building YAML, not the primary output
+  - - no CLI mode; would need to be wrapped to fit the Makefile pipeline
+  - - no CRD mapping
+- <https://github.com/holooooo/kube-topo> — **deprecated**; last commit Jun 2020, abandoned (4 stars, web page only)
+
+### Live cluster (kubeconfig / API)
+
+- <https://github.com/mkimuram/k8sviz> (MIT)
+  - + Go binary, Graphviz output (DOT, PNG)
+  - + uses Kubernetes community icons for the node shapes — visually
+    consistent with the broader K8s ecosystem
+  - + simple CLI: `k8sviz -k kubeconfig -n namespace -o out.dot`
+  - - despite the name, this is a LIVE-CLUSTER tool — does NOT read
+    static manifest files; queries the cluster via the discovery API
+  - - output is DOT / PNG, not SVG by default (needs `dot -Tsvg` for SVG)
+  - - limited CRD support — recognizes built-in kinds only
+  - - 338 stars but only one maintainer, low activity
+- <https://github.com/derailed/k9s> (Apache 2.0)
+  - + 30k+ stars, the de-facto terminal UI for K8s
+  - + TUI for live cluster inspection (pods, services, logs, exec)
+  - - terminal UI, not a static diagram generator — doesn't produce
+    the file artifacts needed for `docs/cluster.svg` review
+  - - no manifest-file mode (operates on live cluster only)
+- <https://github.com/vmware-tanzu/octant> (Apache 2.0)
+  - + 6k stars, well-established web-based K8s dashboard
+  - + plugin-based CRD support via the `octant-plugin` ecosystem
+  - + resource graphs and event timelines
+  - - web UI only — requires a browser to view, not a static artifact
+  - - heavy dependency footprint for what should be a CI step
+  - - heavyweight for the shoggoth project, which has no web-UI for
+    infra today
+- <https://github.com/lensapp/lens> (MIT)
+  - + 23k+ stars, the most popular K8s desktop IDE
+  - + comprehensive K8s management (live cluster, logs, exec, etc.)
+  - - Electron desktop app — not a static diagram generator
+  - - overkill for "produce one diagram from manifests"
+- <https://github.com/hjacobs/kube-ops-view> — **deprecated**; moved to Codeberg Oct 2020, effectively unmaintained, license is GPL-3.0 (incompatible with the shoggoth repo's permissive licensing)
+- <https://github.com/benc-uk/kubeview> (MIT)
+  - + graphical graph representation of K8s resources and their
+    relationships
+  - + real-time updates via Server-Sent Events (SSE) — the graph
+    refreshes without polling
+  - + color-coded health (Red / Green / Grey), pod logs, events,
+    search and filtering
+  - + three install paths: standalone binary, container, OR
+    in-cluster via the shipped Helm chart (sets up read-only RBAC
+    automatically; uses the pod's ServiceAccount to talk to the
+    API server)
+  - + JSON API endpoints exposed for tooling reuse: `/api/namespaces`,
+    `/api/fetch/{namespace}?clientID={cid}`, `/api/logs/{ns}/{pod}`,
+    `/api/status`, and `/updates?clientID={cid}` for the SSE stream
+  - + no built-in auth on the UI itself — relies on K8s API server
+    RBAC (so it composes cleanly with shoggoth's existing
+    namespace-scoped RBAC)
+  - - live cluster only — no manifest-file mode
+  - - web UI, not a static artifact
+  - - the 8000 default port requires Ingress or `kubectl port-forward`
+  - - note: a separate project `bencoates/kubeview` (~300 stars,
+    less active) appears in some registries; that is a different
+    tool — the actively maintained one is `benc-uk/kubeview`
+- <https://github.com/steveteuber/kubectl-graph> (MIT)
+  - + `kubectl` plugin distributed via krew — install with
+    `kubectl krew install graph`, invoke as `kubectl graph ...`
+  - + multiple output formats tuned to different consumers:
+    Graphviz DOT (renderable to SVG via `dot -Tsvg`), Mermaid
+    (for GitHub / Gitea Markdown rendering), Cypher for Neo4j
+    (graph DB queries), and AQL for ArangoDB
+  - + resolves resource dependencies before printing the graph —
+    walks the reference graph (Pod → SA, Service → Pod labels,
+    etc.) the same way KubeDiagrams does
+  - + concise shorthand: `kubectl graph all -n N` dumps the
+    whole-namespace reference graph in one line
+  - - live cluster only — no manifest-file mode
+  - - one-maintainer project, narrow scope (~low star count)
+  - - output is stdout text (DOT / Mermaid / Cypher / AQL) — needs
+    `dot`, a Mermaid renderer, or a graph DB downstream to view
+- <https://github.com/derailed/popeye> (MIT)
+  - + K8s cluster sanitizer / auditor
+  - + text-based report with severity grading
+  - - not a diagram generator — produces a sanity report, not a
+    visual graph
+  - - live cluster only
+- <https://github.com/cilium/k8s-iptables-diagram> (Apache 2.0)
+  - + visualizes kube-proxy iptables rules as a directed graph
+  - - specific to kube-proxy internals — not a general cluster
+    visualizer
+  - - live cluster only (operates on `iptables-save` output)
+
+### In-cluster services (Helm-deployed web UIs / dashboards)
+
+Tools deployed as Services inside the cluster and exposed as web UIs.
+Unlike the "Live cluster" section above (which runs on the operator's
+laptop / outside the cluster), these require a `helm install` or
+`kubectl apply`, consume cluster resources (a Deployment + Service
++ RBAC), and provide a team-shared browser view of cluster state.
+Useful for debugging in-session but not for producing static diagrams
+in the docs/ tree.
+
+- <https://github.com/kubernetes-sigs/headlamp> (Apache 2.0)
+  - + Kubernetes SIG project — the official lineage successor to
+    `kubernetes/dashboard` (which was archived Jan 21, 2026)
+  - + 7.5k stars, actively maintained (kubernetes-sigs org)
+  - + in-cluster deployment via the shipped `charts/headlamp/` Helm
+    chart, OR `kubectl apply -f kubernetes-headlamp.yaml` (the
+    repo also ships `kubernetes-headlamp-ingress-sample.yaml` and
+    a `monitoring.yaml` with a ServiceMonitor)
+  - + extensible via the separate `headlamp-k8s/plugins` repo —
+    graph / topology / CRD views are first-class plugins
+  - + multi-cluster support (one UI, many kubeconfigs)
+  - + RBAC-scoped write actions (create / update / delete) honour
+    the user's K8s permissions — same auth model as shoggoth's
+    existing namespace-scoped RBAC
+  - - web UI only, not a static artifact — doesn't fit the
+    shoggoth project's "diagram checked into docs/" workflow
+  - - in-cluster deployment adds Deployment / Service / RBAC
+    overhead — needs Ingress or `kubectl port-forward` to reach
+  - - no offline / manifest-file mode
+  - - **no diagram export** — graph / topology views are
+    interactive in the browser only; no built-in SVG / PNG /
+    Mermaid save
+- <https://github.com/kubernetes/dashboard> — **archived** Jan 21, 2026;
+  README redirects to Headlamp. Removed from the live list above.
+- <https://github.com/skooner-k8s/skooner> (Apache 2.0)
+  - + CNCF Sandbox project (formerly k8dash)
+  - + simple `kubectl apply -f kubernetes-skooner.yaml` install —
+    no Helm chart required (lower barrier than chart publishers)
+  - + OIDC support built in
+  - + real-time updates without page refresh
+  - - 1.4k stars, moderate activity — not a high-velocity project
+  - - management UI (CRUD on resources) — not a graph / topology
+    visualizer
+  - - no offline / manifest-file mode
+- <https://github.com/skyhook-io/radar> (Apache 2.0)
+  - + 3.8k stars, actively maintained (Skyhook, YC W23)
+  - + multiple install paths: laptop binary (`curl -fsSL
+    https://get.radarhq.io | sh`), Homebrew, krew
+    (`kubectl krew install radar`), Scoop, AND Helm chart for
+    in-cluster mode (`helm install radar skyhook/radar -n radar
+    --create-namespace`)
+  - + explicit "Topology" view (interactive ELK.js graph, live
+    SSE), plus Resources, Traffic, Timeline, Helm, GitOps,
+    Cluster Audit, Upgrade Impact, RBAC visibility, Cost, and
+    Network Path views
+  - + built-in MCP server so AI agents (Claude Code, Codex,
+    Cursor, GitHub Copilot) can inspect the cluster via
+    token-optimized data instead of raw `kubectl` YAML
+  - + in-cluster Helm install requires no in-pod agents / CRDs /
+    service-mesh sidecars
+  - - in-cluster mode still requires a Deployment + Service +
+    port 9280
+  - - no offline / manifest-file mode
+  - - **no diagram export** — Topology view is interactive only
+    (ELK.js with keyboard shortcuts for fit / zoom / pan); no
+    built-in SVG / PNG / Mermaid save
+- <https://github.com/kubevious/kubevious> (Apache 2.0)
+  - + app-centric validation + dependency graph ("Kubernetes
+    without disasters" tagline)
+  - + 1.8k stars, active; ships both a CLI for manifest validation
+    AND a Dashboard for runtime introspection
+  - + Docker images at `hub.docker.com/r/kubevious/kubevious`
+  - - two products maintained together — heavier surface to
+    evaluate vs single-purpose dashboards
+  - - install steps not in the README front page
+  - - no offline / manifest-file mode
+  - - **no diagram export** — dependency graph is interactive in
+    the dashboard only; no built-in SVG / PNG / Mermaid save
+- <https://github.com/KusionStack/karpor> (Apache 2.0)
+  - + 1.7k stars, branded as a "Kubernetes Visualization Tool"
+  - + multi-cluster topology + resource graphs + Kubernetes-native
+    observability in one UI
+  - + actively developed
+  - - less known in the western K8s ecosystem
+  - - no offline / manifest-file mode
+  - - in-cluster install path not documented in the front-page
+    README
+  - - **no diagram export** — Resource Topology is interactive
+    only; no built-in SVG / PNG / Mermaid save
+- <https://github.com/kiali/kiali> (Apache 2.0)
+  - + best-in-class service-mesh graph for Istio — dedicated
+    `/graph/namespaces?namespaces=X` view
+  - + in-cluster via the Kiali Operator + Kiali CR
+  - - only useful if the cluster runs Istio — shoggoth doesn't
+    (no Istio manifests in `shoggoth/k3s/`), so this would be a
+    one-off dependency
+  - - no offline / manifest-file mode
+  - - **no diagram export** — Graph page is interactive; README
+    documents "Kiosk mode" for embedding the view in an iframe
+    but no built-in SVG / PNG save-as (the Kiali frontend source
+    has a "Save as image" button in some versions, but it's not
+    documented in the README and is not part of the public API)
+- <https://github.com/intelops/kubviz> (Apache 2.0)
+  - + 42 stars, fresh (Feb 2025) — actively developed
+  - + DevSecOps + GitOps + container-registry + SBOM (CycloneDX
+    JSON) + vulnerability scanning (Trivy) in one tool
+  - + multi-cluster via a NATS JetStream bridge between the
+    client and the agent
+  - - small community
+  - - focused on the security / SBOM story; adding it for
+    graph-viz alone is overkill
+  - - heavy deployment (NATS + Clickhouse + Grafana + optional
+    Postgres for persistence)
+  - - no offline / manifest-file mode
+- <https://github.com/oslabs-beta/spyglass> (MIT)
+  - + wraps Kubeview + Prometheus + Grafana + Kubecost in one
+    web UI
+  - + React + Material UI frontend
+  - - 126 stars, low community
+  - - bundle-of-other-tools — adds multiple in-cluster
+    dependencies (Prometheus + Grafana + Kubecost + Kubeview) for
+    one dashboard
+  - - no offline / manifest-file mode
+  - - **no diagram export** — relies on the underlying
+    Kubeview's interactive graph (no SVG / PNG); the embedded
+    Grafana panels support PNG export within Grafana, but the
+    cluster-topology view does not
+
+### Hybrid (offline + live)
+
+- <https://github.com/philippemerle/KubeDiagrams> (Apache 2.0)
+  - + the only hybrid tool with first-class offline AND live input —
+    same CLI works on manifests OR `kubectl get -o yaml | kube-diagrams -`
+  - + could power both the static `docs/cluster.svg` (offline,
+    reproducible, committed) AND a one-shot `make clusterviz-live`
+    (drift view, release-time check)
+  - + see full feature list in the "Offline" section above — same tool
+- <https://github.com/tracettronic/kubeviewr> (MIT)
+  - + reads manifest files OR queries live cluster
+  - + interactive web-based output
+  - - 30 stars, small user base
+  - - interactive web — not a static artifact; doesn't fit the
+    shoggoth project's Makefile-driven build pipeline
+
+### Notes
+
+- The Argo CRD submodule
+  (`shoggoth/argo-workflows/manifests/base/crds/full/argoproj.io_*.yaml`)
+  is rsync'd to the host by `make sync` (see
+  `shoggoth/argo-workflows/manifests/base/crds/full/`). Any chosen
+  tool needs to scan both `shoggoth/k3s/*.yaml` and the CRD submodule
+  to graph Argo `Workflow` / `WorkflowTemplate` / `EventBus` /
+  `EventSource` / `Sensor` objects.
+- KubeDiagrams is the only tool with vendored, ready-to-use config
+  examples for both shoggoth-relevant CRD families (Argo, External
+  Secrets). Using any other tool would require writing custom CRD
+  mapping from scratch.

@@ -1324,6 +1324,279 @@ data:
                         "calcs": ["lastNotNull"]
                     }
                 }
+            },
+            {
+                "title": "Headroom Tokens Saved Rate",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 0,
+                    "y": 90
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(rate(headroom_tokens_saved_total{job_name=\"headroom\"}[5m]))",
+                        "legendFormat": "tokens saved/s",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum(rate(headroom_compression_tokens_saved_total{job_name=\"headroom\"}[5m]))",
+                        "legendFormat": "compression /s",
+                        "refId": "B"
+                    },
+                    {
+                        "expr": "sum(rate(headroom_proxy_tokens_tool_schema_saved_total{job_name=\"headroom\"}[5m]))",
+                        "legendFormat": "tool-schema deferred /s",
+                        "refId": "C"
+                    }
+                ],
+                "description": "Tokens saved per second by headroom, broken down by layer (compression vs. tool-schema deferral). The two are summed in headroom_proxy_tokens_saved_total upstream; this view shows the split. Sourced from headroom's /metrics via the headroom scrape job in shoggoth/k3s/otelcol.yaml.",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "tok/s",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Headroom Compression Keep Ratio (P50)",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 8,
+                    "y": 90
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "1 - histogram_quantile(0.5, sum(rate(headroom_compression_ratio_bucket{job_name=\"headroom\"}[15m])) by (le))",
+                        "legendFormat": "p50 reduction",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "1 - histogram_quantile(0.95, sum(rate(headroom_compression_ratio_bucket{job_name=\"headroom\"}[15m])) by (le))",
+                        "legendFormat": "p95 reduction",
+                        "refId": "B"
+                    }
+                ],
+                "description": "How aggressively headroom is shrinking payloads. headroom_compression_ratio_bucket reports the keep-ratio (output/input); we subtract from 1 so the line trends up = more compression. P50 reflects typical traffic; P95 catches outliers where a content type resists compression.",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "percentunit",
+                        "min": 0,
+                        "max": 1,
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Headroom Pre-Call Latency (p50 / p95 / p99)",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 16,
+                    "y": 90
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "histogram_quantile(0.5, sum(rate(headroom_latency_seconds_bucket{job_name=\"headroom\"}[5m])) by (le))",
+                        "legendFormat": "p50",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.95, sum(rate(headroom_latency_seconds_bucket{job_name=\"headroom\"}[5m])) by (le))",
+                        "legendFormat": "p95",
+                        "refId": "B"
+                    },
+                    {
+                        "expr": "histogram_quantile(0.99, sum(rate(headroom_latency_seconds_bucket{job_name=\"headroom\"}[5m])) by (le))",
+                        "legendFormat": "p99",
+                        "refId": "C"
+                    }
+                ],
+                "description": "Overhead headroom adds to each LLM call (compress + cache lookup, pre-call hook). Compare against the LiteLLM LLM Request Latency panels above to confirm headroom is a small fraction of total latency — p99 should stay well below the upstream LLM TTFT.",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "s",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Headroom Request Rate by Mode",
+                "type": "timeseries",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 0,
+                    "y": 99
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(rate(headroom_requests_total{job_name=\"headroom\"}[5m])) by (mode)",
+                        "legendFormat": "{{mode}}",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum(rate(headroom_cache_hits_total{job_name=\"headroom\"}[5m]))",
+                        "legendFormat": "cache hits",
+                        "refId": "B"
+                    }
+                ],
+                "description": "Headroom calls per second, broken down by mode (cache vs. token). Cache hits shown as a second series for the cost-saving ratio.",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "reqps",
+                        "custom": {
+                            "drawStyle": "line",
+                            "lineInterpolation": "smooth",
+                            "lineWidth": 1.5,
+                            "showPoints": "never",
+                            "fillOpacity": 10
+                        }
+                    },
+                    "overrides": []
+                }
+            },
+            {
+                "title": "Headroom Persistent Savings (Lifetime)",
+                "type": "stat",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 8,
+                    "y": 99
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(headroom_persistent_savings_tokens_saved_total{job_name=\"headroom\"})",
+                        "legendFormat": "lifetime tokens saved",
+                        "refId": "A"
+                    },
+                    {
+                        "expr": "sum(headroom_tokens_saved_total{job_name=\"headroom\"})",
+                        "legendFormat": "current process tokens",
+                        "refId": "B"
+                    }
+                ],
+                "description": "Lifetime and current-process savings counters. Persistent counter survives proxy restarts; current counter resets when the pod rolls. The gap grows with every restart that occurs mid-conversation.",
+                "fieldConfig": {
+                    "defaults": {
+                        "thresholds": {
+                            "mode": "absolute",
+                            "steps": [
+                                {
+                                    "color": "green",
+                                    "value": null
+                                }
+                            ]
+                        },
+                        "color": {
+                            "mode": "thresholds"
+                        },
+                        "unit": "none"
+                    },
+                    "overrides": []
+                },
+                "options": {
+                    "reduceOptions": {
+                        "calcs": [
+                            "lastNotNull"
+                        ],
+                        "fields": "",
+                        "values": false
+                    }
+                }
+            },
+            {
+                "title": "Headroom Cache Hit Ratio",
+                "type": "stat",
+                "gridPos": {
+                    "h": 9,
+                    "w": 8,
+                    "x": 16,
+                    "y": 99
+                },
+                "datasource": {
+                    "uid": "vm"
+                },
+                "targets": [
+                    {
+                        "expr": "sum(rate(headroom_cache_hits_total{job_name=\"headroom\"}[15m])) / clamp_min(sum(rate(headroom_requests_total{job_name=\"headroom\"}[15m])), 1)",
+                        "legendFormat": "cache hit ratio (15m)",
+                        "refId": "A"
+                    }
+                ],
+                "description": "Fraction of pre-call invocations served from the semantic cache vs. recomputed. High values mean headroom is saving work; low values mean cache keys are not colliding (which is expected with diverse agent traffic).",
+                "fieldConfig": {
+                    "defaults": {
+                        "unit": "percentunit",
+                        "thresholds": {
+                            "mode": "absolute",
+                            "steps": [
+                                {
+                                    "color": "yellow",
+                                    "value": null
+                                },
+                                {
+                                    "color": "green",
+                                    "value": 0.3
+                                }
+                            ]
+                        },
+                        "color": {
+                            "mode": "thresholds"
+                        }
+                    },
+                    "overrides": []
+                },
+                "options": {
+                    "reduceOptions": {
+                        "calcs": [
+                            "lastNotNull"
+                        ],
+                        "fields": "",
+                        "values": false
+                    }
+                }
             }
         ],
         "refresh": "30s",

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Dispatch CLI utility — coding-agent-dispatcher control plane.
+"""Dispatch CLI utility — command-handler control plane.
 
 Standalone CLI binary invoked by the ``dispatch`` step of the
-``coding-agent-dispatcher`` Argo WorkflowTemplate (see
-``shoggoth/workflow/argo/templates/coding-agent-dispatcher.yaml``).
+``command-handler`` Argo WorkflowTemplate (see
+``shoggoth/workflow/argo/templates/command-handler.yaml``).
 The dispatcher runs in a ``shoggoth_tools:alpine`` pod with
 kubectl and validates the inbound webhook event before deciding
 whether the worker step (``shoggoth.py <command>`` in a separate
@@ -86,7 +86,7 @@ def main():
     # ``read_tokens=False`` skips the Gitea/Redmine ``kubectl
     # get secret`` round-trips the constructors otherwise
     # perform. The dispatcher pod runs under the
-    # shoggoth-coding-agent-sandbox-spawner SA which is scoped
+    # shoggoth-sandbox-spawner SA which is scoped
     # to pods/services CRUD only — no ``get`` on
     # gitea-slave-token / gitea-server-token / redmine-slave-
     # token — so each read would 403. The api-proxy

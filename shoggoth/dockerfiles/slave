@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=asherikov/ccws_qwen:noble
+ARG BASE_IMAGE=asherikov/ccws:noble
 FROM ${BASE_IMAGE}
 
 ARG SHOGGOTH_DOMAIN=
@@ -51,6 +51,7 @@ ENV OPENAI_API_KEY="litellm"
 ENV BM_MCP_URL="http://litellm/mcp"
 ENV CCACHE_REMOTE_STORAGE="http://build-cache"
 ENV CCACHE_REMOTE_ONLY="true"
+ENV BUILDCACHE_REMOTE="http://build-cache"
 ENV OPENBAO_ADDR="http://openbao:80"
 ENV SHOGGOTH_SLAVE_USER="slave"
 ENV OTEL_EXPORTER_OTLP_ENDPOINT="http://otelcol:4318"

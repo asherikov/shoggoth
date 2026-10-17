@@ -122,7 +122,7 @@ spec:
       # interpolation of {{inputs.parameters.action}} into bash source lets
       # a value containing shell metacharacters (e.g. `gitea-ldap-sync; ...`)
       # execute arbitrary commands inside the workflow pod. Mirrors the
-      # coding-agent-dispatcher pattern.
+      # command-handler pattern.
       args:
       - |
         exec python3 /shoggoth/workflow/scripts/shoggoth.py "${SHOGGOTH_ACTION}" 2>&1
@@ -248,7 +248,7 @@ spec:
       # a value containing shell metacharacters (e.g. `slave-token; ...`)
       # execute arbitrary commands inside the workflow pod under the
       # shoggoth-maintenance-secret-writer SA. Mirrors the
-      # coding-agent-dispatcher pattern.
+      # command-handler pattern.
       args:
       - |
         exec python3 /shoggoth/workflow/scripts/shoggoth.py "${SHOGGOTH_ACTION}" 2>&1

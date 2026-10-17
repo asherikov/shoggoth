@@ -3,7 +3,7 @@
 #   - gitea-runner job pods (mount at /cache; slave:noble image's
 #     CCWS_CACHE=/cache/ccws/ + PIP_CACHE_DIR=/cache/ccws/pip expect it)
 #   - slave-term interactive web terminal (mount at /cache)
-#   - Argo workflow pods (coding-agent-dispatcher, github-mirror-sync,
+#   - Argo workflow pods (command-handler, github-mirror-sync,
 #     slave-test) mount /cache from the shoggoth-shared-cache PVC below.
 #
 # Replaces the per-consumer PVCs that this file obsoletes:

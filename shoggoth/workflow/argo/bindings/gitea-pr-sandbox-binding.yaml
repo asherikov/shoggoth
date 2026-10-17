@@ -4,7 +4,7 @@
 # Webhook endpoint (set up by shoggoth.py argo-webhooks):
 #   POST http://api.{domain}/argo/api/v1/events/shoggoth/gitea-pr-sandbox
 #
-# Submits the `coding-agent-dispatcher` DAG with `command: sandbox` so
+# Submits the `command-handler` DAG with `command: sandbox` so
 # the dispatcher's `_handle_sandbox` runs: kubectl-apply a unique
 # `sandbox-<id>` Pod (git-cred sidecar + ttyd main container + init
 # container that clones the PR's repo) + matching Service, wait
@@ -75,7 +75,7 @@ spec:
       (payload.comment == nil || (payload.sender.login != "slave" && !(payload.sender.login startsWith "slave@")))
   submit:
     workflowTemplateRef:
-      name: coding-agent-dispatcher
+      name: command-handler
     arguments:
       parameters:
       - name: command

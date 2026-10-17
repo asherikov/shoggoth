@@ -63,7 +63,7 @@ class SetupArgoWebhooks(GiteaCommand):
             # shoggoth/workflow/argo/bindings/ and re-introduce the
             # entry below — with the maintainer understanding that
             # every workflow_run: failure event will spawn a
-            # coding-agent-dispatcher pod.
+            # command-handler pod.
             #
             # Webhook URL points at api.<DOMAIN>/argo/, not argo.<DOMAIN>:
             # web-internal (shoggoth/k3s/web-internal.yaml) injects the

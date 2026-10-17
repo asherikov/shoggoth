@@ -85,7 +85,42 @@ spec:
                       gitea-slave-token) wait_for_externalsecret gitea-slave-token || exit 1 ;;
                     esac
           done
-          echo "wait-bootstrap: all K8s Secrets Ready"
+                    # Block until the headroom Service has at least one
+                    # ready endpoint subset (i.e. the headroom pod's
+                    # readinessProbe is passing). Without this the
+                    # litellm pod would race headroom's cold start and
+                    # the first 1-2 minutes of pre_call guardrail calls
+                    # would fail (the proxy is busy downloading
+                    # Kompress-v2-base + the ONNX runtime on a fresh
+                    # PVC). Budget: 5 minutes — on a brand-new cluster
+                    # the Service object appears within seconds; the
+                    # 5-minute ceiling covers a slow image pull.
+                    wait_for_service_endpoints() {
+                      local svc="$1"
+                      local budget_seconds="${2:-300}"
+                      local step_seconds=5
+                      echo "wait-bootstrap: waiting for service/${svc} ready endpoints in namespace ${NS}..."
+                      for i in $(seq 1 $((budget_seconds / step_seconds))); do
+                        if ! kubectl get service "${svc}" -n "${NS}" -o name >/dev/null 2>&1; then
+                          sleep "${step_seconds}"
+                          continue
+                        fi
+                        if kubectl get endpoints "${svc}" -n "${NS}" -o json 2>/dev/null \
+                            | jq -e '.subsets // [] | map(.addresses // []) | add // [] | length > 0' >/dev/null; then
+                          echo "wait-bootstrap: service/${svc} has ready endpoints (after $((i*step_seconds))s)"
+                          return 0
+                        fi
+                        sleep "${step_seconds}"
+                      done
+                      echo "FAIL: service/${svc} has no ready endpoints after ${budget_seconds}s"
+                      echo "      Diagnostics:"
+                      kubectl -n "${NS}" get svc "${svc}" -o yaml 2>&1 | sed 's/^/      svc: /' | head -40
+                      kubectl -n "${NS}" get endpoints "${svc}" -o yaml 2>&1 | sed 's/^/      ep:  /' | head -40
+                      kubectl -n "${NS}" get pods -l app="${svc}" -o wide 2>&1 | sed 's/^/      pod: /' | head -10
+                      return 1
+                    }
+          wait_for_service_endpoints headroom 300 || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready, headroom reachable"
 
         resources:
           requests:
@@ -151,6 +186,30 @@ spec:
           value: otlp
         - name: SHOGGOTH_DOMAIN
           value: ${SHOGGOTH_DOMAIN}
+        # Headroom guardrail endpoint. Mirrors the `api_base` value
+        # in the guardrails section of the rendered config.yaml so
+        # the URL is also visible from `kubectl exec ... env`
+        # without grepping the rendered file. The headroom guardrail
+        # implementation reads `api_base` from the YAML; the env
+        # var is only the documented fallback for the same field.
+        - name: HEADROOM_API_BASE
+          value: http://headroom:8787
+        # Bearer token for the headroom guardrail. The litellm
+        # headroom guardrail
+        # (litellm/proxy/guardrails/guardrail_hooks/headroom/headroom.py)
+        # reads `api_key` from litellm_params and falls back to this
+        # env var, then sets `Authorization: Bearer <key>` on every
+        # /v1/compress request. Without this the headroom proxy's
+        # bind_policy rejects the call with 401 and the guardrail
+        # surfaces as a 502 to the LLM caller
+        # ("Headroom compression service returned an error").
+        # Same Secret as the otelcol bearer_token_file scrape —
+        # defined in shoggoth/k3s/headroom-proxy-token.yaml.
+        - name: HEADROOM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: headroom-proxy-token
+              key: token
         volumeMounts:
         - name: rendered-config
           mountPath: /shoggoth/litellm
@@ -226,6 +285,35 @@ rules:
   - gitea-slave-token
   verbs:
   - get
+# `wait_for_service_endpoints` (see the wait-bootstrap init container
+# in this Deployment) polls `kubectl get services/endpoints` to block
+# the main litellm container until the headroom Service has at least
+# one ready endpoint subset. Without these rules the poll 403s on
+# "services is forbidden" / "endpoints is forbidden" and the init
+# container exhausts its 300s budget, surfacing the FAIL log line
+# instead of progressing to the main container. The pods `list` is
+# used only by the same function's diagnostic dump on the failure
+# path (`kubectl get pods -l app=${svc}`) — leaving it in place keeps
+# the diagnostic useful when readiness genuinely fails. Scope is
+# namespace-local (Role, not ClusterRole) and read-only.
+- apiGroups:
+  - ''
+  resources:
+  - services
+  verbs:
+  - get
+- apiGroups:
+  - ''
+  resources:
+  - endpoints
+  verbs:
+  - get
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -282,6 +370,32 @@ data:
         drop_params: true
     general_settings:
         store_model_in_db: true
+    # Headroom compression guardrail. Compresses tool output, logs, and
+    # RAG chunks in `pre_call` before the request is forwarded to the
+    # upstream model. The proxy is deployed in shoggoth/k3s/headroom.yaml
+    # and reached in-cluster at http://headroom:8787.
+    #
+    # default_on: true — every virtual key and every request goes
+    # through headroom unless the caller passes `x-headroom-bypass: true`.
+    # Was false (LiteLLM's recommended opt-in posture) so an
+    # accidentally-enrolled key couldn't get tripped up by a content
+    # type headroom refuses; flipped to true so the savings show up
+    # on the shoggoth_ai Grafana dashboard without per-key wiring. To
+    # exclude a single caller, send `x-headroom-bypass: true`. To
+    # exclude specific keys, regenerate via `POST /key/generate` with
+    # `"guardrails": []`. Per upstream behaviour:
+    #   - Anthropic `cache_control` messages: NEVER compressed
+    #     (CacheAligner refuses; preserve prompt-cache byte matching)
+    #   - `user`/`system` messages: not compressed by default; opt in
+    #     with `HEADROOM_COMPRESS_USER_MESSAGES=1` on the headroom pod
+    #   - responses: never (pre_call hook only)
+    guardrails:
+        - guardrail_name: headroom-compression
+          litellm_params:
+              guardrail: headroom
+              mode: pre_call
+              api_base: http://headroom:8787
+              default_on: true
     mcp_servers:
         mcp_gitea:
             url: "http://mcp-gitea:80/mcp"

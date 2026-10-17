@@ -28,7 +28,7 @@ class Redmine(HttpApiClient):
         # ``read_tokens=False`` skips the read. The dispatcher
         # (``shoggoth/workflow/scripts/dispatch.py``) opts into
         # this because its pod runs under
-        # ``shoggoth-coding-agent-sandbox-spawner`` SA which is
+        # ``shoggoth-sandbox-spawner`` SA which is
         # scoped to pods/services CRUD only — no ``get`` on
         # redmine-slave-token — so the read would 403. The
         # dispatcher's Redmine usage is limited to

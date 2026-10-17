@@ -96,7 +96,7 @@ spec:
       (payload.comment == nil || !(payload.comment.body startsWith "/sandbox"))
   submit:
     workflowTemplateRef:
-      name: coding-agent-dispatcher
+      name: command-handler
     arguments:
       parameters:
       - name: command

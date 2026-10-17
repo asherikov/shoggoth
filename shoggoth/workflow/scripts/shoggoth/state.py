@@ -33,7 +33,7 @@ secrets_store = SecretStore()
 # ``dispatch`` and ``sandbox`` are NOT in WORKFLOW_COMMANDS:
 #   * ``dispatch`` is reached via the standalone
 #     ``shoggoth/workflow/scripts/dispatch.py`` CLI utility (the
-#     ``dispatch`` step of the ``coding-agent-dispatcher`` DAG),
+#     ``dispatch`` step of the ``command-handler`` DAG),
 #     not via ``shoggoth.py``. The dispatcher has a different
 #     dependency surface (no agent, no git-cred sidecar) and
 #     runs in a separate ``shoggoth_tools:alpine`` pod.

@@ -40,7 +40,7 @@ def _normalise_diff_path(path):
 class Agent:
     # Default per-invocation wall-clock cap for ``prompt()`` / the
     # ``pr-comment`` per-comment retries. The workflow template's
-    # ``activeDeadlineSeconds`` (4 h on coding-agent-dispatcher) is
+    # ``activeDeadlineSeconds`` (4 h on command-handler) is
     # the outer safety net; this is the per-prompt ceiling so a
     # single hung agent doesn't burn the whole pod's budget.
     AGENT_TIMEOUT = 1200
@@ -142,6 +142,37 @@ class Agent:
         dict passes if at least one of the keys is present, matching
         the lenient "any of these keys indicates a real review"
         contract ``_extract_review_json`` historically enforced.
+
+        When the agent wraps the JSON in ```json ... ```
+        fences the fenced block is preferred (the prompt asks
+        for that format). When the agent omits the fence — the
+        common real-world case when the model first emits
+        reasoning prose ("With 2 high issues, the verdict should
+        be ...") and then the JSON — we fall back to a brace
+        search over the text up to ``end_marker``.
+
+        The brace search iterates ``{`` positions in REVERSE,
+        not forward. Rationale: the review JSON is almost always
+        the LAST dict-shaped object the model emits in its
+        response, and the prose that precedes it commonly
+        contains stray ``{`` characters (template variables,
+        JSON snippets the model is quoting as examples, brace
+        quotes in English prose). Forward iteration would
+        match those first and return a non-review object;
+        reverse iteration skips past the prose and lands on
+        the review object's opening brace. ``raw_decode``
+        itself handles brace balancing, so the LAST ``{`` that
+        decodes to a dict is the outermost object whose
+        opening brace is at that position — typically the
+        review JSON itself.
+
+        If no fenced block is found and no ``{`` decodes to a
+        usable dict, this returns ``None`` and the caller
+        falls back to posting the raw assistant text as
+        Markdown (see ``pr_update.py`` ``_pr_review`` — the
+        "no JSON block found in agent output; posting raw
+        assistant text as Markdown" log line is the user-
+        visible signal that the fallback fired).
         """
         if not text:
             return None
@@ -156,16 +187,39 @@ class Agent:
             else:
                 head = text
             decoder = json.JSONDecoder()
-            for i, ch in enumerate(head):
-                if ch != "{":
-                    continue
+            # Walk ``{`` positions from the END of the text
+            # backwards. The review JSON is typically the
+            # last object the model emits, and prose that
+            # precedes it often contains stray ``{``
+            # characters (template variables, quoted JSON
+            # snippets, English prose with brace quotes).
+            # Forward iteration would match the first stray
+            # ``{`` and return a non-review object; reverse
+            # iteration skips past the prose.
+            brace_positions = [i for i, ch in enumerate(head)
+                                if ch == "{"]
+            for i in reversed(brace_positions):
                 try:
                     obj, consumed = decoder.raw_decode(head, i)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(obj, dict):
-                    candidate = head[i:i + consumed]
-                    break
+                if not isinstance(obj, dict):
+                    continue
+                # When ``required_keys`` is set, the LAST
+                # ``{`` is often the innermost object (e.g.
+                # a single finding inside the review's
+                # ``findings`` array), not the review
+                # itself. ``raw_decode`` at that position
+                # returns the inner object, which lacks the
+                # review-level keys. Skip positions whose
+                # decoded dict has none of the required
+                # keys, and continue walking backwards to
+                # the outer review object.
+                if required_keys and not any(
+                        key in obj for key in required_keys):
+                    continue
+                candidate = head[i:i + consumed]
+                break
             else:
                 return None
         if not candidate:

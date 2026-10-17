@@ -72,8 +72,8 @@ def _run(args):
         # the dispatcher is its own CLI utility
         # (``shoggoth/workflow/scripts/dispatch.py``) and is
         # reached via the ``dispatch`` step of the
-        # ``coding-agent-dispatcher`` DAG (see
-        # ``shoggoth/workflow/argo/templates/coding-agent-dispatcher.yaml``).
+        # ``command-handler`` DAG (see
+        # ``shoggoth/workflow/argo/templates/command-handler.yaml``).
         # ``sandbox`` is the placeholder for the future
         # /sandbox slash command; it's handled by the
         # dispatcher's ``_handle_sandbox`` (in

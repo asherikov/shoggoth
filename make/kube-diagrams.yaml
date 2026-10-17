@@ -1,0 +1,24 @@
+# Custom KubeDiagrams configuration for shoggoth.
+#
+# This file is MERGED with the bundled default config
+# (https://github.com/philippemerle/KubeDiagrams/blob/main/bin/kube-diagrams.yaml) —
+# keys not present here are inherited unchanged. Only `clusters:` is
+# overridden below; `edges:`, `nodes:`, `cluster-resources:`, and
+# `default_namespace:` continue to come from the bundled defaults.
+#
+# What this overlay adds:
+#   A project-level clustering key. The only meaningful project-wide
+#   label on shoggoth resources is `app.kubernetes.io/part-of` (values:
+#   "shoggoth" for the main project, "external-secrets" for the ESO
+#   sub-stack). With this mapping the full cluster diagram groups
+#   resources by sub-project, which dramatically improves readability
+#   compared to the unbucketed default layout.
+#
+# Pass to kube-diagrams via `-c shoggoth/k3s/kube-diagrams.yaml`.
+
+clusters:
+  - label: app.kubernetes.io/part-of
+    title: "Project: {}"
+    recommended: true
+    graph_attr:
+      bgcolor: "#FFF3E0"

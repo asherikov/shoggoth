@@ -13,5 +13,5 @@ docker_build:
 			#--build-arg SHOGGOTH_DOMAIN=${DOMAIN} \
 
 slave:
-	${MAKE} docker_build IMAGE=slave BASE_IMAGE=asherikov/ccws_qwen:${DOCKER_DISTRO}
+	${MAKE} docker_build IMAGE=slave BASE_IMAGE=asherikov/ccws:${DOCKER_DISTRO}
 

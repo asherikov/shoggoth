@@ -143,6 +143,31 @@ data:
                           - source_labels: [job]
                             target_label: job_name
                             regex: "(.+)"
+                    # headroom exposes /metrics in Prometheus format,
+                    # but the upstream bind_policy enforces
+                    # token-or-loopback on every non-loopback caller
+                    # (see headroom/proxy/bind_policy.py). otelcol is
+                    # a DaemonSet running in its own pods, so the
+                    # token is required. The Secret is mounted from
+                    # shoggoth/k3s/headroom-proxy-token.yaml below;
+                    # `bearer_token_file` keeps the token out of
+                    # this ConfigMap. Headroom-side config
+                    # (HEADROOM_TELEMETRY=on and HEADROOM_PROXY_TOKEN)
+                    # lives in shoggoth/k3s/headroom.yaml.
+                    - job_name: headroom
+                      scrape_interval: 15s
+                      metrics_path: /metrics
+                      bearer_token_file: /etc/otelcol-contrib/secrets/headroom-proxy-token/token
+                      static_configs:
+                          - targets:
+                                - headroom:8787
+                      metric_relabel_configs:
+                          - source_labels: [instance]
+                            target_label: hostname
+                            regex: "([^:]+):.*"
+                          - source_labels: [job]
+                            target_label: job_name
+                            regex: "(.+)"
 
     processors:
         memory_limiter:
@@ -355,6 +380,16 @@ spec:
         - name: podlogs
           mountPath: /var/log/pods
           readOnly: true
+        # Shared bearer token for scraping the headroom proxy's
+        # /metrics endpoint. The Secret is created by
+        # shoggoth/k3s/headroom-proxy-token.yaml; the headroom
+        # Deployment reads the same Secret via env:HEADROOM_PROXY_TOKEN.
+        # bearer_token_file in the prometheus receiver points at the
+        # `token` key projected here so the value never appears in
+        # the otelcol-config ConfigMap.
+        - name: headroom-proxy-token
+          mountPath: /etc/otelcol-contrib/secrets/headroom-proxy-token
+          readOnly: true
         resources:
           requests:
             memory: 256Mi
@@ -396,6 +431,18 @@ spec:
         hostPath:
           path: /var/log/pods
           type: ''
+      # Projected Secret volume for the headroom proxy's bearer
+      # token. Same Secret consumed via env:HEADROOM_PROXY_TOKEN by
+      # shoggoth/k3s/headroom.yaml. The Secret itself is created
+      # by shoggoth/k3s/headroom-proxy-token.yaml and applied by
+      # `make up` Pass 2 (it has apiVersion/kind, so the manifest
+      # loop picks it up and kubectl apply installs it).
+      - name: headroom-proxy-token
+        secret:
+          secretName: headroom-proxy-token
+          items:
+            - key: token
+              path: token
 ---
 apiVersion: v1
 kind: ServiceAccount

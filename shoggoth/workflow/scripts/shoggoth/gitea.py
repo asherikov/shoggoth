@@ -39,7 +39,7 @@ class Gitea(HttpApiClient):
         # secret`` round-trips. The dispatcher
         # (``shoggoth/workflow/scripts/dispatch.py``) opts into
         # this because (a) its pod runs under
-        # ``shoggoth-coding-agent-sandbox-spawner`` SA which is
+        # ``shoggoth-sandbox-spawner`` SA which is
         # scoped to pods/services CRUD only — no ``get`` on
         # gitea-slave-token / gitea-server-token — so each read
         # would 403 with "secrets 'gitea-server-token' is
@@ -829,6 +829,63 @@ class Gitea(HttpApiClient):
         """
         comment = self._payload.get("comment") or {}
         return comment.get("body") or ""
+
+    def get_pr_commenter_login(self):
+        """Return the login of the user who submitted the comment
+        that triggered the workflow event.
+
+        Reads ``payload.sender.login`` — Gitea populates ``sender``
+        for every ``pull_request_comment`` / ``pull_request_review``
+        / ``issues`` / ``pull_request`` event (and the
+        ``command-handler`` bindings for ``/sandbox``, ``/help``,
+        ``/do``, ``/review``, ``/squash``, ``/rebase`` all carry a
+        comment field whose ``action == "created"`` was posted by a
+        human user). Returns the empty string when the payload has
+        no ``sender`` (e.g. a synthetic / non-user event); the
+        caller is expected to treat empty as "no attribution
+        available" and skip the prefix.
+        """
+        return self._payload.get("sender", {}).get("login", "")
+
+    def post_pr_comment_attributed(self, repo, pr_number, body):
+        """Post a slash-command response PR comment that
+        references the commenter who triggered the command.
+
+        Prefixes the body with ``@user,`` so the PR-thread
+        reader (and the Gitea notification fan-out, which
+        fires on the ``@`` mention) can tell at a glance
+        which slash command invocation the bot is
+        responding to. Important for ``/sandbox`` in
+        particular — multiple users can post ``/sandbox`` on
+        the same PR over its lifetime, and each comment-
+        thread response is otherwise indistinguishable
+        without the attribution.
+
+        Used by ``DispatchCommand._handle_sandbox`` (the
+        ``/sandbox`` command, where each workflow run maps to
+        one commenter's request) and by every
+        ``_slash_<command>`` handler in
+        ``shoggoth/commands/pr_update.py`` via
+        ``_post_slash_response`` (the ``/help`` / ``/do`` /
+        ``/review`` / ``/squash`` / ``/rebase`` commands).
+        Non-slash-command callers (e.g. the pr-review follow-up
+        summary at ``pr_update.py:619``) keep the plain
+        ``post_pr_comment`` so the bot's review summary isn't
+        misattributed to whichever user last commented.
+
+        Empty ``sender`` (synthetic event, unrecognised
+        payload) falls through to a plain ``post_pr_comment`` —
+        the prefix is suppressed rather than emitting a stray
+        ``@``.
+
+        Returns the ``post_pr_comment`` result unchanged (the
+        underlying comment JSON or ``None`` on failure).
+        """
+        commenter = self.get_pr_commenter_login()
+        if not commenter:
+            return self.post_pr_comment(repo, pr_number, body)
+        attributed = f"@{commenter}, {body}"
+        return self.post_pr_comment(repo, pr_number, attributed)
 
     # ----- orgs / org-hooks (maintenance) ----------------------------
 

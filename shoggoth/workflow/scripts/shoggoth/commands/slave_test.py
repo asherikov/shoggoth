@@ -194,7 +194,7 @@ class SlaveTest:
         # (/shoggoth/git-cred/git_credential_sock). The slave image's
         # `git config --system credential.helper 'cache --socket=...'`
         # makes git use this socket for HTTP auth, so this check exercises
-        # the same path the coding-agent-dispatcher workflow relies on for
+        # the same path the command-handler workflow relies on for
         # git operations that go over HTTP.
         # Distinguish ENOENT (sidecar never produced the file) from
         # PermissionError (sidecar ran but main container cannot traverse
@@ -269,7 +269,7 @@ class SlaveTest:
         # file. The slave image's /etc/ssh/ssh_config.d/shoggoth.conf points
         # UserKnownHostsFile=/shoggoth/git-cred/known_hosts and SSH_AUTH_SOCK
         # is set in its ENV block, so this check exercises the same SSH path
-        # as coding-agent-dispatcher clones.
+        # as command-handler clones.
         sock_path = params.ssh_auth_sock
         log(f"[git-ssh]: SSH_AUTH_SOCK env var = {sock_path!r}")
         if not sock_path:
