@@ -74,26 +74,15 @@ class SetupArgoWebhooks(GiteaCommand):
             # by the Authorization header and argo-server's gatekeeper does
             # bearer validation against k8s instead.
             #
-            # gitea-pr-sandbox is a SEPARATE webhook pointing at its own
-            # Argo URL (``.../gitea-pr-sandbox``), not a route on the pr-update
-            # one — Argo's event controller matches the discriminator segment
-            # of the URL path verbatim (server/event/dispatch/operation.go),
-            # so each WorkflowEventBinding is reachable only via its own
-            # URL. Gitea fans out subscribed events to every matching hook,
-            # so registering both URLs for ``pull_request_comment`` events
-            # delivers the same payload to both bindings; the pr-update
-            # binding's ``!payload.comment.body startsWith "/sandbox"``
-            # clause (``gitea-pr-update-binding.yaml``) drops the
-            # ``/sandbox`` case so the two bindings don't double-fire. The
-            # sandbox binding's selector (``gitea-pr-sandbox-binding.yaml``)
-            # pins ``payload.comment.body == "/sandbox"`` exactly, so it
-            # ignores ordinary conversation comments — the second hook
-            # incurs only the per-event delivery cost, no out-of-context
-            # pod spin-up.
+            # Single Gitea webhook (gitea-pr-update) for ALL Gitea
+            # events. Slash-command body-shape routing (``/sandbox``,
+            # ``/help``) is the dispatcher's responsibility
+            # (``DispatchCommand._handle_pr_update`` reads
+            # ``payload.comment.body`` and dispatches accordingly) —
+            # the selector here is a cheap pre-filter (drop dismissed,
+            # deleted, slave-authored), not a router.
             (f"http://api.{self.gitea.domain}/argo/api/v1/events/{self.namespace}/gitea-pr-update",
              ["pull_request_review", "pull_request_review_request", "pull_request_comment"]),
-            (f"http://api.{self.gitea.domain}/argo/api/v1/events/{self.namespace}/gitea-pr-sandbox",
-             ["pull_request_comment"]),
         ]
 
         for project in projects:

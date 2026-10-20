@@ -16,7 +16,13 @@ Subcommands
                    git-cred emptyDir before the sidecar starts.
   ttyd             main container (slave image): wait for the
                    git-cred sidecar's ready flag, git-clone the
-                   PR's branch, exec ttyd.
+                   PR's branch, touch the repo-ready flag the
+                   sshd container polls, exec ttyd.
+  sshd             main container (slave image): wait for
+                   git-cred + the repo-ready flag, then exec
+                   sshd (the slave image bakes a no-password
+                   sshd_config + a cleared ccws account, so
+                   no per-sandbox credential is needed here).
   cleanup          sidecar (tools image): watch the ttyd
                    container's state, kubectl delete pod once
                    ttyd is dead.
@@ -64,6 +70,31 @@ SANDBOX_READY_FLAG = "/shoggoth/git-cred/ready"
 
 TTYD_READY_TIMEOUT_S = 90
 REPO_MOUNT = "/repo"
+# Touched by the ``ttyd`` container after the git clone
+# finishes, polled by the ``sshd`` container so it knows /repo
+# is populated before it lets users log in. Lives in the
+# shared emptyDir that both containers mount (alongside
+# /repo), so it survives the kubelet's parallel-container
+# startup order. 120 s matches the ttyd subcommand's
+# worst-case clone budget (large repo + cold image pull).
+# Cross-container readiness signal: the ttyd subcommand
+# touch()es this file under the shared `sandbox-state`
+# emptyDir (mounted at /shoggoth/sandbox-state in both
+# containers per dispatch.py:_apply_sandbox_pod); the sshd
+# subcommand polls the same path. Must live under the
+# emptyDir's mount point -- a path outside (e.g. /shoggoth/)
+# would land in the writer's overlay, invisible to the
+# reader, and sshd would always time out at REPO_READY_TIMEOUT_S.
+REPO_READY_FLAG = "/shoggoth/sandbox-state/repo-ready"
+REPO_READY_TIMEOUT_S = 180
+# Note: the sandbox-pod sshd binds 22 (OpenSSH default), the
+# slave image's sshd_config locks the daemon to the ``ccws``
+# user (``AllowUsers ccws`` in shoggoth/dockerfiles/slave),
+# and the dispatcher's per-sandbox Service exposes port 22.
+# These three literals are kept in sync by hand -- no
+# parametrization -- so the constants that used to live here
+# (SLAVE_USER, SLAVE_SSHD_PORT) were dead code (referenced
+# only by one log line) and have been removed.
 
 # Cleanup budgets (matching SANDBOX_CLEANUP_SCRIPT):
 #   MAX_LIFETIME  hard cap so a script bug in the detection logic
@@ -207,8 +238,31 @@ def _clone_url(repo):
         "cannot build clone URL")
 
 
+def _wait_for_repo_ready():
+    """Block until the ttyd container's repo-ready flag is set.
+
+    Used by the ``sshd`` container to gate user logins on
+    the git clone having finished. The flag lives in the
+    shared ``sandbox-state`` emptyDir (see
+    ``REPO_READY_FLAG``), so the kubelet's parallel
+    container startup order is irrelevant: whichever
+    container is ready first simply blocks on the flag.
+    Budget is ``REPO_READY_TIMEOUT_S`` (180 s, well past
+    the ttyd subcommand's 90 s ready + 10-60 s clone
+    path documented in the ttyd subcommand).
+    """
+    for i in range(REPO_READY_TIMEOUT_S):
+        if os.path.exists(REPO_READY_FLAG):
+            log(f"sshd: repo ready after {i}s")
+            return
+        time.sleep(1)
+    die(f"sshd: /repo not ready after {REPO_READY_TIMEOUT_S}s "
+        f"-- check 'kubectl logs <pod> -c ttyd'")
+
+
 def ttyd(repo, branch):
-    """Main container: wait for git-cred, git clone, exec ttyd.
+    """Main container (ttyd): wait for git-cred, git clone,
+    touch the repo-ready flag, exec ttyd.
 
     Replaces SANDBOX_TTYD_SCRIPT. Two correctness improvements
     over the shell version:
@@ -240,6 +294,10 @@ def ttyd(repo, branch):
     token ``"ttyd"`` as a positional and fail with
     "unrecognized arguments: ttyd" (the exact bug this
     signature was introduced to fix).
+
+    The new ``REPO_READY_FLAG`` touch()ed below is the
+    signal the parallel ``sshd`` container waits on; see
+    ``_wait_for_repo_ready``.
     """
     _wait_for_git_cred()
     clone_url = _clone_url(repo)
@@ -253,7 +311,20 @@ def ttyd(repo, branch):
     # "dubious ownership" guard.
     run(["git", "config", "--global", "--add", "safe.directory",
          REPO_MOUNT])
-    log(f"sandbox: ready in {REPO_MOUNT} on branch {branch}")
+    # Publish that /repo is populated. The sshd container
+    # is in a parallel ``containers:`` entry in the same
+    # pod; the kubelet starts both at the same time, so
+    # sshd needs an explicit signal that the clone
+    # finished (the emptyDir is freshly created and
+    # empty when the pod starts). Touch AFTER the
+    # git config above so a user who SSHes in and runs
+    # ``git push`` immediately after seeing the
+    # ready-flag has the safe.directory already wired
+    # in their config.
+    with open(REPO_READY_FLAG, "w") as f:
+        f.write("ready\n")
+    log(f"sandbox: ready in {REPO_MOUNT} on branch {branch}; "
+        f"touched {REPO_READY_FLAG}")
     # User exit is expected behavior, not a fault. ttyd --once
     # exits when the browser WebSocket closes; tmux's session
     # also ends. exec ttyd so it becomes the container PID 1;
@@ -270,6 +341,85 @@ def ttyd(repo, branch):
     except OSError as e:
         log(f"ttyd: exec ttyd failed: {e}")
         sys.exit(0)
+
+
+def sshd():
+    """Main container (sshd): wait for git-cred + repo, exec sshd.
+
+    Parallel sibling of the ``ttyd`` container in the same
+    pod (the dispatcher writes both entries into
+    ``spec.containers``). Shares the slave image (so sshd
+    is already installed) and the ``repo`` / ``sandbox-state``
+    / ``git-cred`` emptyDirs.
+
+    Lifecycle:
+
+      1. ``_wait_for_git_cred`` -- sshd starts before the
+         user can authenticate, but we want SSH-based git
+         pushes from inside the sandbox to work, so the
+         ssh-agent socket under /shoggoth/git-cred must
+         be live first.
+      2. ``_wait_for_repo_ready`` -- the ttyd container
+         touch()es REPO_READY_FLAG after the git clone
+         finishes; we gate user logins on it so an SSH
+         user doesn't land in an empty /repo.
+      3. ``exec sshd -D -e`` -- foreground; kubelet
+         ``terminationMessagePolicy: FallbackToLogsOnError``
+         surfaces sshd's auth log to ``kubectl describe
+         pod`` on a non-zero exit.
+
+    There is no per-sandbox credential to install: the
+    slave image (shoggoth/dockerfiles/slave) bakes a
+    sshd_config with ``PermitEmptyPasswords yes`` and
+    pre-clears the ccws account's password hash
+    (``passwd -d ccws``) at build time, so any user with
+    network access to port 22 can log in as ccws by
+    pressing Enter at the password prompt. The PAM
+    config for sshd is also rewritten at build time to
+    use ``pam_unix.so nullok`` (the Ubuntu default
+    ``@include common-auth`` chain pulls in
+    ``pam_unix.so nullok_secure`` which blocks empty
+    passwords on remote ttys). See the Dockerfile
+    comment for the full rationale.
+
+    ``runAsUser: 0`` is required so sshd can bind port
+    22 (the dispatcher's per-sandbox Service maps host
+    port 22 to the pod's 22 and the slave image's
+    sshd_config does not set ``Port > 1024``). sshd + PAM
+    drop privileges to ccws after the password check
+    passes (``UsePAM yes`` in sshd_config, the upstream
+    Debian default). The container's
+    ``readOnlyRootFilesystem: true`` (set by the
+    dispatcher) is safe here -- we do not write to
+    ``/etc/shadow`` or any other mutable path.
+    """
+    _wait_for_git_cred()
+    _wait_for_repo_ready()
+    # /run/sshd is the privilege-separation chroot on
+    # Debian/Ubuntu; sshd refuses to start without it.
+    # The slave Dockerfile creates it at build time, but
+    # the kubelet's emptyDir mounts can mask it on some
+    # hosts. Recreate defensively.
+    os.makedirs("/run/sshd", exist_ok=True)
+    # ``sshd -t`` parses sshd_config and returns non-zero
+    # on a parse error. Catches a misformatted
+    # sshd_config before exec'ing sshd in the foreground
+    # (a half-broken sshd would otherwise refuse all
+    # connections and we'd lose the diagnostic).
+    test = subprocess.run(
+        ["/usr/sbin/sshd", "-t"],
+        capture_output=True, text=True)
+    if test.returncode != 0:
+        die(f"sshd: sshd -t failed: "
+            f"{(test.stderr or test.stdout).strip()}")
+    log(f"sshd: launching on port 22 "
+        f"(user=ccws, empty-password auth)")
+    # -D foreground (so kubelet PID 1 monitoring works);
+    # -e routes the auth log to stderr (the kubelet
+    # captures stderr into the container log + the
+    # FallbackToLogsOnError termination message).
+    os.execv("/usr/sbin/sshd",
+             ["/usr/sbin/sshd", "-D", "-e"])
 
 
 def _ttyd_state(pod_json):
@@ -427,6 +577,10 @@ def main():
                         help="Gitea repo full name")
     p_ttyd.add_argument("--branch", required=True,
                         help="Branch name to clone")
+    p_sshd = sub.add_parser(
+        "sshd",
+        help="main container: wait for git-cred + repo, exec sshd",
+    )
     sub.add_parser(
         "cleanup",
         help="sidecar: watch ttyd, delete pod on ttyd death",
@@ -435,6 +589,7 @@ def main():
     {"wait-bootstrap": lambda: wait_bootstrap(),
      "init-perms": lambda: init_perms(),
      "ttyd": lambda: ttyd(args.repo, args.branch),
+     "sshd": lambda: sshd(),
      "cleanup": lambda: cleanup()}[args.cmd]()
 
 

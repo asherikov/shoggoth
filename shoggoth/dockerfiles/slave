@@ -26,7 +26,29 @@ RUN \
     && ${APT_INSTALL} \
         docker-ce-cli \
         docker-buildx-plugin \
+        openssh-server \
         ttyd
+
+RUN mkdir -p /run/sshd /home/ccws/.ssh \
+    && { printf 'HostKey /etc/ssh/ssh_host_ed25519_key\n'; \
+         printf 'PidFile /run/sshd.pid\n'; \
+         printf 'PermitRootLogin no\n'; \
+         printf 'PasswordAuthentication yes\n'; \
+         printf 'PermitEmptyPasswords yes\n'; \
+         printf 'KbdInteractiveAuthentication no\n'; \
+         printf 'PubkeyAuthentication no\n'; \
+         printf 'ChallengeResponseAuthentication no\n'; \
+         printf 'AllowUsers ccws\n'; \
+         printf 'AllowTcpForwarding no\n'; \
+         printf 'UsePAM yes\n'; \
+         printf 'ClientAliveInterval 30\n'; \
+         printf 'ClientAliveCountMax 6\n'; \
+         printf 'LoginGraceTime 30\n'; \
+         printf 'MaxAuthTries 3\n'; \
+         printf 'MaxSessions 4\n'; \
+       } > /etc/ssh/sshd_config \
+    && chown -R ccws /home/ccws/.ssh \
+    && chmod 0700 /home/ccws/.ssh
 
 RUN printf 'Acquire::http::Proxy "http://apt-cache";\nAcquire::https::Proxy "false";\n' > /etc/apt/apt.conf.d/00-shoggoth-apt-cache
 

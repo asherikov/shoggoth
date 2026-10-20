@@ -1,6 +1,7 @@
 ---
 # command-handler — invoked by every webhook flow (gitea-pr-update,
-# gitea-ci-failure, redmine-task-processor) via WorkflowEventBinding.
+# redmine-task-processor; gitea-ci-failure intentionally unregistered)
+# via WorkflowEventBinding.
 #
 # Equivalent to kestra's main_shoggoth_command-handler.yml:
 # single-flight, one shoggoth.py invocation per webhook. v2 splits the
@@ -13,13 +14,17 @@
 #      dependency surface is different (no agent, no git-cred
 #      sidecar, no ``Shoggoth().checkout()``). Validates the
 #      inbound webhook event (Redmine status / assignee for
-#      ``task``, workflow_run.conclusion for ``ci-failure``,
-#      pass-through for ``pr-update``, no-op for the placeholder
-#      ``sandbox``) and emits two argo outputs:
+#      ``task``, pass-through for ``pr-update`` — and for the
+#      slash-command bodies ``/sandbox`` / ``/help`` that arrive
+#      via the gitea-pr-update binding, the dispatcher's
+#      ``_handle_pr_update`` routes them to ``_handle_sandbox`` /
+#      ``_handle_help`` directly, which execute the work and
+#      emit ``should_run_worker=false`` so the worker pod is
+#      skipped) and emits two argo outputs:
 #
 #        * ``command`` — the original command string (``pr-update``,
-#          ``task``, ``ci-failure``). Echoed back so the worker's
-#          argv still carries the command name unchanged.
+#          ``task``). Echoed back so the worker's argv still
+#          carries the command name unchanged.
 #        * ``should_run_worker`` — ``"true"`` / ``"false"``. The
 #          DAG ``when:`` clause on the worker step gates on this.
 #
@@ -39,14 +44,20 @@
 #
 # Args (from the binding):
 #   script:   script to invoke (always shoggoth.py for now)
-#   command:  the original subcommand (``pr-update`` / ``task`` /
-#             ``ci-failure`` / ``sandbox``). The dispatch template
-#             passes this into both pods: dispatch sets
-#             ``SHOGGOTH_ORIGINAL_COMMAND`` (the dispatcher reads
-#             it from the env; dispatch.py is invoked with no
-#             positional), worker sets ``SHOGGOTH_COMMAND`` (its
-#             ``args.command`` is the original command, identical
-#             to the pre-split single-pod behaviour).
+#   command:  the original subcommand (``pr-update`` / ``task``).
+#             ``sandbox`` and ``help`` no longer arrive as their
+#             own binding-level command — the single gitea-pr-update
+#             binding always passes ``"pr-update"`` and the
+#             dispatcher's ``_handle_pr_update`` body-shape router
+#             detects ``/sandbox`` and ``/help`` comments and
+#             dispatches them to the dedicated handlers. The
+#             dispatch template passes this into both pods:
+#             dispatch sets ``SHOGGOTH_ORIGINAL_COMMAND`` (the
+#             dispatcher reads it from the env; dispatch.py is
+#             invoked with no positional), worker sets
+#             ``SHOGGOTH_COMMAND`` (its ``args.command`` is the
+#             original command, identical to the pre-split
+#             single-pod behaviour).
 #   task_id:  optional argv[2] for the worker. Used by ``task``
 #             (numeric Redmine issue ID), empty for the rest.
 #   payload:  raw JSON string from the webhook body.

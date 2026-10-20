@@ -60,6 +60,14 @@ metadata:
     app.kubernetes.io/part-of: shoggoth-argo
 spec:
   event:
+    # Selector is a CHEAP PRE-FILTER: drop events that
+    # obviously shouldn't spawn a workflow. Body-shape
+    # routing for slash commands (e.g. ``/sandbox``,
+    # ``/help``) is the dispatcher's job
+    # (``DispatchCommand._handle_pr_update`` reads
+    # ``payload.comment.body`` and dispatches accordingly)
+    # — no command-specific clauses live here.
+    #
     # Note on ``!payload.sender.login startsWith "slave@"``
     # precedence: expr-lang parses unary ``!`` at a higher
     # precedence than infix operators, so an unparenthesised
@@ -69,36 +77,24 @@ spec:
     # error. The parenthesised form
     # ``!(payload.sender.login startsWith "slave@")`` parses
     # as the intended negation-over-whole-comparison.
-    #
-    # Note on the ``(payload.comment == nil || !(payload.comment.body startsWith "/sandbox"))``
-    # clause: the ``payload.comment == nil`` half is the
-    # nil-guard for the body access — ``pull_request_review``
-    # and ``pull_request_review_request`` events have no
-    # ``comment`` field (only ``pull_request_comment``
-    # payloads carry it), so the inner ``.body`` access
-    # would nil-deref and the entire selector would error
-    # out, dropping the event before the worker could see
-    # it. With the nil-guard the body clause is true when
-    # comment is nil and the selector falls through to the
-    # other clauses (action checks), so the F2 state-gate
-    # (slave_has_submitted_review_on_head) still runs for
-    # review_requested events. The negation half of the
-    # clause is unchanged: for pull_request_comment events
-    # with body starting ``/sandbox`` the negation fires
-    # and the pr-update binding drops the event so only
-    # the sibling gitea-pr-sandbox binding matches.
     selector: |
       discriminator == "gitea-pr-update" &&
       payload.action != "dismissed" &&
       payload.action != "review_request_removed" &&
       payload.action != "deleted" &&
-      (payload.comment == nil || (payload.sender.login != "slave" && !(payload.sender.login startsWith "slave@"))) &&
-      (payload.comment == nil || !(payload.comment.body startsWith "/sandbox"))
+      (payload.comment == nil || (payload.sender.login != "slave" && !(payload.sender.login startsWith "slave@")))
   submit:
     workflowTemplateRef:
       name: command-handler
     arguments:
       parameters:
+      # The literal ``"pr-update"`` is a default; the
+      # dispatcher overrides the effective command for
+      # ``/sandbox`` and ``/help`` bodies by inspecting
+      # ``payload.comment.body``. All comment events
+      # (including ``/sandbox`` and ``/help``) reach the
+      # dispatcher through this single binding — there are
+      # no per-command bindings any more.
       - name: command
         valueFrom:
           event: '"pr-update"'

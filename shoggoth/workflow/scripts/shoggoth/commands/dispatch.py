@@ -10,6 +10,7 @@ import time
 from ..util import die, log, run
 from .base import CommandBase
 from ..state import params
+from . import slash_commands
 
 
 # ----- sandbox runtime -----------------------------------------------
@@ -151,9 +152,10 @@ class DispatchCommand(CommandBase):
         # comment action / body / sender; ``sandbox`` reads
         # ``repository.full_name`` / ``pull_request.number`` /
         # ``pull_request.head.ref`` to populate the per-sandbox
-        # pod manifest and Service URL. The pre-fix logic
-        # excluded ``sandbox`` from the load list and the
-        # sandbox handler then crashed with
+        # pod manifest and Service URL; ``help`` reads the
+        # same to determine the PR to post the catalog comment
+        # to. The pre-fix logic excluded ``sandbox`` from the
+        # load list and the sandbox handler then crashed with
         # ``AttributeError: 'NoneType' object has no attribute
         # 'get'`` from ``Gitea.get_repo_full_name`` on the
         # uninitialised ``_payload`` (``Gitea._payload`` is now
@@ -162,13 +164,21 @@ class DispatchCommand(CommandBase):
         # the actual fields -- loading an empty / Redmine-only
         # payload is a no-op cost).
         if self.original_command in ("ci-failure", "pr-update",
-                                      "sandbox"):
+                                      "sandbox", "help"):
             self.gitea.load_payload()
 
     def execute(self):
         log(f"dispatch: original_command={self.original_command}")
         self._emit_output("command", self.original_command)
 
+        # The single Gitea binding (gitea-pr-update-binding.yaml)
+        # always passes ``original_command == "pr-update"``; slash-
+        # command body-shape routing for ``/sandbox`` and ``/help``
+        # happens inside ``_handle_pr_update`` so the body is
+        # inspected only once (the dispatcher pod is already
+        # running) and not in the binding's expr-lang selector.
+        # ``task`` and ``ci-failure`` still arrive as distinct
+        # ``original_command`` values from their own bindings.
         if self.original_command == "task":
             self._handle_task()
             return
@@ -177,9 +187,6 @@ class DispatchCommand(CommandBase):
             return
         if self.original_command == "pr-update":
             self._handle_pr_update()
-            return
-        if self.original_command == "sandbox":
-            self._handle_sandbox()
             return
         die(f"dispatch: unknown command {self.original_command!r} "
             f"(add a branch in DispatchCommand.execute)")
@@ -248,15 +255,152 @@ class DispatchCommand(CommandBase):
         self._emit_output("should_run_worker", "true")
 
     def _handle_pr_update(self):
-        """Pass-through for the pr-update command.
+        """Route a pr-update event by comment body shape.
 
-        The selector drop-list in the binding already filters
-        the bulk of no-op events. The remaining per-event
-        validation lives in the worker because it depends on
-        Gitea state at the moment the worker runs.
+        The ``gitea-pr-update`` binding now subscribes to all
+        three Gitea event classes (review, review_request,
+        comment) and its selector is a pure cheap pre-filter
+        (drop dismissed/deleted/slave-authored). Slash-command
+        body-shape routing for ``/sandbox`` and ``/help``
+        happens here so the dispatcher's pod is the only
+        place that inspects the body:
+
+          * ``/sandbox`` -> ``_handle_sandbox`` (worker skipped,
+            dispatcher kubectl-applies the sandbox pod and
+            posts the URL).
+          * ``/help`` -> ``_handle_help`` (worker skipped,
+            dispatcher posts the static catalog).
+          * Everything else (reviews, review_requests, plain
+            comments, ``/do`` / ``/review`` / ``/squash`` /
+            ``/rebase``) -> pass-through. The remaining
+            per-event validation lives in the worker
+            because it depends on Gitea state at the moment
+            the worker runs.
         """
+        # Non-comment events (review / review_request) have
+        # no ``comment`` field; the helper returns ``None``
+        # and we fall through to pass-through.
+        slash = self._detect_slash_command_from_body()
+        if slash == "sandbox":
+            self._handle_sandbox()
+            return
+        if slash == "help":
+            self._handle_help()
+            return
         log("dispatch: pr-update: pass-through")
         self._emit_output("should_run_worker", "true")
+
+    def _detect_slash_command_from_body(self):
+        """Return ``"sandbox"`` / ``"help"`` / ``None``.
+
+        Reads ``payload.comment.body`` and matches the
+        dispatcher's slash-command surface exactly:
+
+          * ``"/sandbox"`` -> ``"sandbox"`` (exact match; no
+            trailing args, mirroring the previous dedicated
+            binding's contract).
+          * ``"/help"`` -> ``"help"`` (exact match; same
+            contract).
+          * Anything else (other comments, reviews,
+            review_requests) -> ``None``.
+
+        Body is trimmed before comparison so leading / trailing
+        whitespace doesn't silently break the exact-match
+        contract — a user who types ``"/help "`` (with a
+        trailing space) still triggers the help post.
+        """
+        comment = self.gitea._payload.get("comment") or {}
+        body = (comment.get("body") or "").strip()
+        if body == "/sandbox":
+            return "sandbox"
+        if body == "/help":
+            return "help"
+        return None
+
+    def _handle_help(self):
+        """Post the slash-command catalog as a PR comment.
+
+        Triggered by a ``/help`` PR comment. The dispatcher
+        is the SOLE owner of the catalog (see
+        ``shoggoth/workflow/scripts/shoggoth/commands/slash_commands.py``
+        -- ``SUPPORTED_COMMANDS`` and ``format_help_text()``).
+        The pr-update worker does NOT have a ``_slash_help``
+        handler, so a ``/help`` body that reaches the worker
+        path (e.g. during a brief dispatcher-code rollout
+        window where ``_detect_slash_command_from_body``
+        hasn't been redeployed yet) silently no-ops rather
+        than rendering a duplicate catalog post.
+
+        Like ``_handle_sandbox``, this is a dispatcher-only
+        handler: the worker step is skipped via
+        ``should_run_worker=false``. End-to-end latency is
+        ~2-5 s on the ``shoggoth_tools:alpine`` pod -- the
+        worker path would otherwise spend ~60-90 s on a cold
+        ``slave:noble`` image pull + agent init, which is
+        unacceptable for a static catalog post.
+
+        Trust gate: mirrors the pr-update worker's
+        ``_handle_slash_command`` exactly. Posting the
+        catalog is read-only, but the catalog itself names
+        the surface (e.g. ``/drop <sha> [<sha> ...]`` syntax,
+        the ``/sandbox`` sshd endpoint) -- a non-trusted
+        user with PR-write access who could otherwise trigger
+        ``/help`` would gain a probe channel to enumerate
+        what the trusted humans can do, and the worker
+        code's own comment cited exactly that
+        ("posting a PR-visible 'not authorized' message
+        would leak the existence of the command names and
+        give unauthenticated users a probe channel") --
+        so the rejection is silent, just like the worker.
+        The check is a duplication of the worker's because
+        the dispatcher route bypasses the worker entirely;
+        the only alternative is a binding-level filter,
+        but the binding's expr-lang cannot read
+        ``params.shoggoth_trusted_users`` (a runtime
+        config value), so the check has to live here.
+        """
+        # Trust gate (mirrors pr_update.PrUpdateCommand.
+        # _handle_slash_command's gate; the dispatcher
+        # route bypasses the worker, so the check has to
+        # be duplicated here).
+        comment = self.gitea._payload.get("comment") or {}
+        author = (comment.get("user") or {}).get("login") or ""
+        trusted_users = set(
+            (params.shoggoth_trusted_users or "").split(","))
+        trusted_users.discard("")
+        if not author or author not in trusted_users:
+            log(f"dispatch: help: rejecting /help from "
+                f"non-trusted user {author!r} "
+                f"(allowed={sorted(trusted_users)})",
+                file=sys.stderr)
+            return
+
+        repo_full_name = self.gitea.get_repo_full_name()
+        pr_number = self.gitea.get_pr_number()
+        body = slash_commands.format_help_text()
+        result = self.gitea.post_pr_comment_attributed(
+            repo_full_name, pr_number, body)
+        if result is None:
+            # Same fail-loud contract as ``_handle_sandbox``:
+            # the dispatcher is the entire lifecycle of the
+            # ``/help`` command, and a silent success on a
+            # failed post would leave the user with no
+            # discoverability surface -- the very thing
+            # ``/help`` is supposed to fix. ``die()``
+            # surfaces the failure in the Argo log and
+            # marks the workflow Failed so the operator
+            # can investigate (Gitea API auth / quota /
+            # repo-permission issues all land here).
+            log("dispatch: help: WARNING failed to post PR "
+                "comment with the help catalog",
+                file=sys.stderr)
+            die("help: pod is Ready but PR comment with the "
+                "catalog was not posted -- user has no way "
+                "to discover the supported slash commands")
+        # Worker step is unnecessary for a static catalog
+        # post; skipping it avoids the 60-90 s
+        # ``slave:noble`` image pull on a cold cache.
+        self._emit_output("should_run_worker", "false")
 
     def _handle_sandbox(self):
         """Launch a per-request sandbox pod + Service and post its URL.
@@ -346,6 +490,23 @@ class DispatchCommand(CommandBase):
                 f"head_repo={head_repo_full_name} "
                 f"pr={pr_number} branch={pr_branch}")
 
+            # No per-sandbox credential is generated or
+            # passed: the slave image (shoggoth/dockerfiles/slave)
+            # bakes a no-password sshd_config
+            # (``PermitEmptyPasswords yes`` + the ccws
+            # account's shadow hash cleared via
+            # ``passwd -d ccws`` at build time) and a
+            # rewritten ``/etc/pam.d/sshd`` that uses
+            # ``pam_unix.so nullok`` (the default Ubuntu
+            # ``nullok_secure`` blocks empty passwords
+            # on remote ttys). The user just runs
+            # ``ssh ccws@<sandbox-host>`` and presses
+            # Enter at the password prompt. Anyone who
+            # can reach the per-sandbox Service (cluster
+            # + the external DNS rewrite) can log in --
+            # the same blast-radius as the existing ttyd
+            # web terminal, which is also reachable by
+            # anyone with the PR comment URL.
             self._apply_sandbox_pod(
                 sandbox_id, head_repo_full_name, pr_branch)
             self._apply_sandbox_service(sandbox_id)
@@ -369,9 +530,8 @@ class DispatchCommand(CommandBase):
             self._wait_sandbox_ready(
                 sandbox_id, pre_wait_state=pre_wait_state)
 
-            body = (
-                f"Sandbox ready: {sandbox_url}"
-            )
+            body = self._format_sandbox_pr_comment(
+                sandbox_url, sandbox_id)
             result = self.gitea.post_pr_comment_attributed(
                 repo_full_name, pr_number, body)
             if result is None:
@@ -534,6 +694,33 @@ class DispatchCommand(CommandBase):
         return (
             f"http://sandbox-{sandbox_id}."
             f"{params.shoggoth_domain}/"
+        )
+
+    def _format_sandbox_pr_comment(self, sandbox_url, sandbox_id):
+        """Build the PR comment body for a successful sandbox.
+
+        Includes the ttyd web URL and the SSH access
+        details. No password is shown -- the slave image
+        bakes a no-password sshd_config
+        (``PermitEmptyPasswords yes`` + ``passwd -d
+        ccws`` at build time) and a rewritten
+        ``/etc/pam.d/sshd`` that uses ``pam_unix.so
+        nullok``, so the user just runs the SSH command
+        and presses Enter at the password prompt. The
+        comment deliberately does NOT include the
+        sandbox id's host key fingerprint (the user
+        will see a "host key changed" warning on first
+        connect -- acceptable for the per-cluster
+        host-key model).
+        """
+        host = f"sandbox-{sandbox_id}.{params.shoggoth_domain}"
+        return (
+            f"Sandbox ready.\n\n"
+            f"**Web terminal (ttyd):** {sandbox_url}\n\n"
+            f"**SSH:** `ssh -p 22 -o "
+            f"StrictHostKeyChecking=accept-new ccws@{host}`\n\n"
+            f"Press Enter when prompted for a password "
+            f"(the ccws account has no password).\n"
         )
 
     def _apply_sandbox_pod(self, sandbox_id, repo_full_name, branch):
@@ -820,6 +1007,157 @@ class DispatchCommand(CommandBase):
                              "mountPath": "/shoggoth/git-cred"},
                             {"name": "repo",
                              "mountPath": "/repo"},
+                            {"name": "sandbox-state",
+                             "mountPath": "/shoggoth/sandbox-state"},
+                            {"name": "workflow-scripts",
+                             "mountPath": "/shoggoth/workflow-scripts"},
+                        ],
+                    },
+                    {
+                        # SSH sidecar. Parallel sibling of the
+                        # ``ttyd`` container in the same pod
+                        # (both are regular ``containers:``
+                        # entries, started by the kubelet at
+                        # the same time, sharing the
+                        # ``repo`` / ``sandbox-state`` /
+                        # ``git-cred`` emptyDirs).
+                        #
+                        # The container:
+                        #   1. waits for the git-cred ready flag
+                        #      (so SSH users can run ``git
+                        #      push`` from the sandbox),
+                        #   2. waits for the repo-ready flag the
+                        #      ttyd container touch()es after
+                        #      the git clone (so the user
+                        #      doesn't land in an empty /repo),
+                        #   3. execs sshd in the foreground.
+                        #
+                        # No per-sandbox credential is needed
+                        # here -- the slave image bakes a
+                        # no-password sshd_config
+                        # (``PermitEmptyPasswords yes``) and
+                        # a cleared ccws account (built
+                        # ``passwd -d ccws``), so any
+                        # network-reachable user can log in
+                        # as ccws by pressing Enter. The args
+                        # list is fixed (no per-sandbox
+                        # values), keeping the manifest
+                        # diff-friendly across sandbox
+                        # invocations.
+                        #
+                        # ``runAsUser: 0`` is required so sshd
+                        # can bind port 22 (the slave
+                        # image's sshd_config does not set a
+                        # non-privileged port). ``AllowUsers
+                        # ccws`` in the slave image's
+                        # sshd_config locks the accepted
+                        # user. ``readOnlyRootFilesystem:
+                        # true`` is safe -- the sandbox.py
+                        # ``sshd`` subcommand does not write
+                        # to any mutable path (the previous
+                        # chpasswd step was removed when the
+                        # credential model was simplified).
+                        "name": "sshd",
+                        "image":
+                            f"registry.{domain}/slave:noble",
+                        "imagePullPolicy": "IfNotPresent",
+                        "command": ["/usr/bin/python3"],
+                        "args": [
+                            SANDBOX_PATH, "sshd",
+                        ],
+                        "env": [
+                            {"name": "SHOGGOTH_DOMAIN",
+                             "value": domain},
+                            {"name": "SHOGGOTH_NAMESPACE",
+                             "value": namespace},
+                        ],
+                        "ports": [{"containerPort": 22,
+                                   "name": "ssh",
+                                   "protocol": "TCP"}],
+                        "securityContext": {
+                            # sshd needs root to bind 22 on
+                            # Linux; the slave image's
+                            # sshd_config does not set a
+                            # non-privileged port. The
+                            # ``readOnlyRootFilesystem: true``
+                            # is the strict default -- the
+                            # sandbox.py ``sshd`` subcommand
+                            # does not write to ``/etc/shadow``
+                            # or any other mutable path
+                            # (the per-sandbox password /
+                            # authorized_keys flow was
+                            # removed when the credential
+                            # model was simplified to
+                            # "no password, just press
+                            # Enter" -- see the slave
+                            # Dockerfile for the rationale).
+                            # sshd needs ``CAP_NET_BIND_SERVICE``
+                            # to bind 22 (the Linux kernel's
+                            # bind(2) on a privileged port
+                            # checks the capability, NOT the
+                            # UID -- root without the cap is
+                            # functionally identical to a
+                            # non-root user for ports < 1024).
+                            # ``capabilities.drop: [ALL]``
+                            # strips every cap, so the bind
+                            # would EACCES without an explicit
+                            # ``add: [NET_BIND_SERVICE]``.
+                            # Project precedent: see
+                            # shoggoth/k3s/argo-workflows.yaml
+                            # and shoggoth/k3s/apt-cache.yaml,
+                            # which use the same
+                            # ``drop: [ALL]`` + ``add:
+                            # [NET_BIND_SERVICE]`` shape for
+                            # containers binding privileged
+                            # ports. All other hardening (cap
+                            # drop, seccomp,
+                            # no-priv-escalation) stays in
+                            # place.
+                            "runAsUser": 0,
+                            "allowPrivilegeEscalation": False,
+                            "readOnlyRootFilesystem": True,
+                            "capabilities": {
+                                "drop": ["ALL"],
+                                "add": ["NET_BIND_SERVICE"],
+                            },
+                            "seccompProfile":
+                                {"type": "RuntimeDefault"},
+                        },
+                        "resources": {
+                            "requests": {"memory": "64Mi",
+                                         "cpu": "50m"},
+                            "limits": {"memory": "128Mi",
+                                       "cpu": "200m"},
+                        },
+                        # The kubelet's ``httpGet`` /
+                        # ``tcpSocket`` / ``exec`` probes
+                        # all require a port the kubelet can
+                        # hit; the dispatcher's
+                        # ``_wait_sandbox_ready`` blocks on
+                        # the ttyd container's readinessProbe,
+                        # which is sufficient for the user-
+                        # facing Ready signal. sshd does not
+                        # expose a health endpoint, so a probe
+                        # here is omitted and the
+                        # ``cleanup`` sidecar's not-ready
+                        # watchdog (``CLEANUP_NOT_READY_BUDGET_S``
+                        # in sandbox.py) is the de-facto
+                        # liveness check for the whole pod.
+                        # Without a probe, a hung sshd (e.g.
+                        # crashed during a config reload)
+                        # would not be restarted by the
+                        # kubelet -- but the pod's
+                        # ``restartPolicy: Never`` means the
+                        # whole pod goes away once the ttyd
+                        # container exits, so a per-container
+                        # restart buys us nothing here.
+                        "volumeMounts": [
+                            {"name": "git-cred",
+                             "mountPath": "/shoggoth/git-cred"},
+                            {"name": "repo",
+                             "mountPath": "/repo"},
+                            {"name": "sandbox-state",
+                             "mountPath": "/shoggoth/sandbox-state"},
                             {"name": "workflow-scripts",
                              "mountPath": "/shoggoth/workflow-scripts"},
                         ],
@@ -885,6 +1223,15 @@ class DispatchCommand(CommandBase):
                          "defaultMode": 493,
                      }},
                     {"name": "repo", "emptyDir": {}},
+                    # Shared between the ttyd and sshd
+                    # containers; the ttyd container
+                    # touch()es /shoggoth/sandbox-state/repo-ready
+                    # after the git clone, the sshd
+                    # container polls for it. Lives in a
+                    # separate emptyDir from /repo so a
+                    # ``rm -rf /repo/.ready`` by the user
+                    # can't break the readiness signal.
+                    {"name": "sandbox-state", "emptyDir": {}},
                     # HostPath of the cluster-node's workflow-
                     # scripts directory. The Makefile's
                     # `workflow-scripts:workflow/scripts`
@@ -948,6 +1295,29 @@ class DispatchCommand(CommandBase):
                 "selector": {"sandbox-id": sandbox_id},
                 "ports": [
                     {"name": "http", "port": 80, "targetPort": 80},
+                    # sshd is exposed on the same Service
+                    # (and therefore the same user-facing
+                    # hostname ``sandbox-<id>.${SHOGGOTH_DOMAIN}``)
+                    # so the user only needs the single
+                    # PR-comment URL + the single ``ssh
+                    # ccws@... -p 22`` command. The
+                    # ``ssh`` port name matches the
+                    # container's named port in
+                    # ``_apply_sandbox_pod`` so kube-proxy
+                    # DNATs correctly. Per-sandbox port
+                    # (targetPort 22) is required because
+                    # the slave image's sshd_config binds
+                    # 22 (no Port directive override);
+                    # changing it would require baking a
+                    # new slave image and rebuilding every
+                    # sandbox. The Service port is also 22
+                    # (cluster-local) so clients on the
+                    # cluster network reach sshd on its
+                    # native port -- the PR-comment
+                    # ``ssh -p 22`` is the same value the
+                    # cluster-internal kube-proxy expects.
+                    {"name": "ssh", "port": 22,
+                     "targetPort": 22, "protocol": "TCP"},
                 ],
                 "type": "ClusterIP",
             },
