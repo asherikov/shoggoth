@@ -17,7 +17,7 @@ class CommandBase:
 
         Identical step sequence between `_commit_only_ccws` (review-comment
         fix) and `commit_push_and_create_mr_ccws` (task implementation):
-        for every modified sub-repo `git add -A`, then one manifest-wide
+        for every modified sub-repo `git add -A`, then one repo-wide
         `wshandler commit` that walks all sub-repos and creates a commit per
         repo that has staged changes. Failure at any step is fatal — the
         workflow script's caller is a webhook (Argo WorkflowEventBinding),

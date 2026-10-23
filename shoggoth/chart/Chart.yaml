@@ -1,0 +1,39 @@
+apiVersion: v2
+name: shoggoth
+description: Shoggoth self-hosted agentic development multitool (single-node K3s).
+type: application
+# Chart version bumps per docs/helm-migration-plan.md §3 — tracked in CHANGELOG.md.
+version: 0.1.1
+# appVersion reflects the upstream "shoggoth" image — updated by `make chart-version-bump`
+# (todo: add to make/chore.mk) by reading the tag from CHANGELOG.md or git describe.
+#
+# 0.1.1 (2026-10-21): chart-restoration of the 22 per-instance
+# ExternalSecret/PushSecret resources from the deleted
+# shoggoth/k3s/external-secrets/ tree. Upgrades the chart's effective
+# release record so `helm upgrade --install` re-reconciles every prior
+# CR with the chart's now-complete spec (including
+# `metadata.app.kubernetes.io/component`, which the legacy
+# ApplyConfiguration did not emit).
+appVersion: "0.1.1"
+home: https://github.com/asherikov/shoggoth
+sources:
+  - https://github.com/asherikov/shoggoth
+keywords:
+  - shoggoth
+  - agentic
+  - k3s
+  - self-hosted
+maintainers:
+  - name: asherikov
+# Argo Workflows CRDs ship via charts/crds/argo/ (vendored from the
+# `shoggoth/argo-workflows` git submodule, pinned to v4.1.5). External
+# Secrets CRDs ship via charts/crds/external-secrets/ (split from the
+# vendored `external-secrets/deploy/crds/bundle.yaml`).
+#
+# We deliberately keep these directories versioned instead of declaring
+# Helm `dependencies:` for argo-workflows / external-secrets charts —
+# per docs/helm-migration-plan.md §8 — to preserve offline-first deploys:
+# `helm install` on an air-gapped host must not require network egress.
+dependencies: []
+kubeVersion: ">=1.24.0-0"
+icon: https://raw.githubusercontent.com/asherikov/shoggoth/main/docs/shoggoth.svg

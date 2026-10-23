@@ -64,13 +64,13 @@
 #
 # Service-account split:
 #   * ``dispatch`` runs under
-#     ``shoggoth-sandbox-spawner`` (SA + Role defined
-#     in ``shoggoth/k3s/sandbox-spawner.yaml``) so the
+#     ``shoggoth-sandbox-spawner`` (SA + Role defined in the
+#     sandbox-spawner chart template) so the
 #     sandbox command can kubectl-apply / wait / delete sandbox
 #     pods. Scope is the shoggoth namespace only; pods/services
 #     CRUD + pods/log read; no pods/exec, no other namespaces.
 #   * ``worker`` uses the default ``argo`` SA (set by
-#     workflowDefaults in shoggoth/k3s/argo-workflows.yaml:798)
+#     workflowDefaults in the argo-workflows chart template)
 #     because its only special resource access is the
 #     git-cred-bootstrap wait on the four externalsecrets the
 #     existing wait-bootstrap Role covers.
@@ -120,9 +120,8 @@ spec:
     # ``{{workflow.parameters.SHOGGOTH_NAMESPACE}}`` so the
     # worker can be rescheduled into a non-default namespace
     # without code changes). Values are fetched from the
-    # shoggoth-workflow-config ConfigMap at admission time (see
-    # shoggoth/k3s/argo-workflows.yaml) — the ConfigMap holds the
-    # actual domain/org/instance-dir/namespace because `make up`'s
+    # shoggoth-workflow-config ConfigMap at admission time — the ConfigMap holds
+    # the actual domain/org/instance-dir/namespace because `make up`'s
     # envsubst pass renders its `${SHOGGOTH_*}` placeholders to
     # literal values before applying.
     - name: SHOGGOTH_DOMAIN
@@ -309,6 +308,10 @@ spec:
         value: "{{inputs.parameters.task_id}}"
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "http/protobuf"
+      - name: OTEL_EXPORTER_OTLP_TIMEOUT
+        value: "2000"
       - name: GITEA_PAYLOAD
         value: "{{inputs.parameters.payload}}"
       - name: SHOGGOTH_DOMAIN
@@ -348,13 +351,13 @@ spec:
       - name: SHOGGOTH_NAMESPACE
         value: "{{workflow.parameters.SHOGGOTH_NAMESPACE}}"
       # _handle_task compares the Redmine assignee
-      # against this login (shoggoth/k3s/openldap.yaml
+      # against this login (the openldap chart template
       # sets ``uid: slave``); a non-default namespace /
       # non-default slave user would otherwise see every
       # /task invocation rejected.
       - name: SHOGGOTH_SLAVE_USER
         value: "slave"
-      # Custom CoreDNS service IP (shoggoth/k3s/dns.yaml).
+      # Custom CoreDNS service IP.
       # Forwarded to the sandbox pod spec so the pod uses
       # the same DNS as the slave Deployments -- which
       # carries the rewrite rules that map ``*.s.local``
@@ -426,6 +429,10 @@ spec:
         value: "{{inputs.parameters.task_id}}"
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "http/protobuf"
+      - name: OTEL_EXPORTER_OTLP_TIMEOUT
+        value: "2000"
       - name: OPENAI_API_KEY
         value: "litellm"
       - name: OPENAI_BASE_URL

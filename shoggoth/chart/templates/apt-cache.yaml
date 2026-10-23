@@ -1,0 +1,154 @@
+{{- /*
+  templates/apt-cache.yaml — Debian/Ubuntu package caching proxy
+  (apt-cacher-ng). PVC + Service + ConfigMap + Deployment.
+
+  ghcr.io/sameersbn/apt-cacher-ng is the upstream image; this chart
+  pins it to the same tag as the legacy file.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "apt-cache")) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: apt-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: apt-cache
+    app.kubernetes.io/component: apt-cache
+  annotations:
+    # Kept across `helm uninstall` so `make down` stops workloads but
+    # preserves data, matching the legacy envsubst path. Reinstall adopts
+    # it: shoggoth.labels survives uninstall, so Helm's ownership check
+    # still passes.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apt-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: apt-cache
+    app.kubernetes.io/component: apt-cache
+spec:
+  selector:
+    app: apt-cache
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: apt-cache-conf
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: apt-cache
+    app.kubernetes.io/component: apt-cache
+data:
+  port.conf: |
+    Port: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apt-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: apt-cache
+    app.kubernetes.io/component: apt-cache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: apt-cache
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.selectorLabels" . | nindent 8 }}
+        app: apt-cache
+        app.kubernetes.io/component: apt-cache
+    spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - {{ .Values.identity.dnsIp }}
+        searches:
+        - {{ .Release.Namespace }}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+      initContainers: []
+      containers:
+      - name: apt-cache
+        image: sameersbn/apt-cacher-ng:3.7.4-20220421
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          capabilities:
+            add: ["NET_BIND_SERVICE"]
+        env:
+        - name: SHOGGOTH_DOMAIN
+          value: {{ .Values.identity.domain }}
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4318
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          requests:
+            memory: 128Mi
+            cpu: 50m
+          limits:
+            memory: 256Mi
+            cpu: 200m
+        readinessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          failureThreshold: 3
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - chown -R apt-cacher-ng:apt-cacher-ng /var/cache/apt-cacher-ng /var/log/apt-cacher-ng
+        volumeMounts:
+        - name: cache
+          mountPath: /var/cache/apt-cacher-ng
+        - name: logs
+          mountPath: /var/log/apt-cacher-ng
+        - name: port-conf
+          mountPath: /etc/apt-cacher-ng/port.conf
+          subPath: port.conf
+      volumes:
+      - name: cache
+        persistentVolumeClaim:
+          claimName: apt-cache
+      - name: logs
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/{{ .Values.identity.instanceDir }}/apt-cache-logs
+          type: DirectoryOrCreate
+      - name: port-conf
+        configMap:
+          name: apt-cache-conf
+{{- end }}

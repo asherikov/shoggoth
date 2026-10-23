@@ -1,0 +1,373 @@
+{{- /*
+  templates/slave-term.yaml — interactive web terminal (ttyd + tmux + Qwen Code).
+
+  Replaces the privileged `slave-dind` service for interactive use (no dockerd,
+  no DinD). Uses the shared git-cred-bootstrap sidecar (same one slave-dind
+  mounts) so ssh-agent + git-credential-cache are initialized in one place and
+  live for the lifetime of the pod.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "slave-term")) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: slave-term
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: slave-term
+    app.kubernetes.io/component: slave-term
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: slave-term-bootstrap-wait
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: slave-term
+    app.kubernetes.io/component: slave-term
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: slave-term-bootstrap-wait
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: slave-term
+    app.kubernetes.io/component: slave-term
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: slave-term-bootstrap-wait
+subjects:
+- kind: ServiceAccount
+  name: slave-term
+  namespace: {{ .Release.Namespace }}
+---
+# The /cache persistent storage is shared across all CI consumers
+# (gitea-runner job pods and slave-term; the Kestra migration removed
+# the Kestra Docker task runner path that previously consumed this PVC
+# via slave-dind's DinD). See templates/shared-cache.yaml for the
+# single PVC definition.
+apiVersion: v1
+kind: Service
+metadata:
+  name: slave-term
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: slave-term
+    app.kubernetes.io/component: slave-term
+spec:
+  selector:
+    app: slave-term
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slave-term
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: slave-term
+    app.kubernetes.io/component: slave-term
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: slave-term
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.selectorLabels" . | nindent 8 }}
+        app: slave-term
+        app.kubernetes.io/component: slave-term
+      annotations:
+        secret.reloader.stakater.com/reload: gitea-slave-token,ssh-slave-private-key
+    spec:
+      serviceAccountName: slave-term
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - {{ .Values.identity.dnsIp }}
+        searches:
+        - {{ .Release.Namespace }}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+      initContainers:
+      - name: wait-bootstrap
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SHOGGOTH_NAMESPACE
+          value: {{ .Release.Namespace }}
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          NS="{{ .Release.Namespace }}"
+          wait_for_externalsecret() {
+            local name="$1"
+            echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
+            for i in $(seq 1 60); do
+              if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
+                echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
+                return 0
+              fi
+              sleep 10
+            done
+            echo "FAIL: externalsecret/${name} not Ready after 10m"
+            return 1
+          }
+          wait_for_externalsecret gitea-slave-token || exit 1
+          wait_for_externalsecret ssh-slave-private-key || exit 1
+          echo "wait-bootstrap: all K8s Secrets Ready"
+
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+      - name: init-git-cred-perms
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        args:
+        - |
+          set -eu
+          # kubelet mounts the emptyDir as root:root with default perms;
+          # the git-cred sidecar runs as uid 1000 (securityContext.runAsUser)
+          # and needs to chmod the mountpoint to 0700 so git-credential-cache
+          # accepts the directory (it refuses any mode looser than 0700 with
+          # "permissions on your socket directory are too loose"). uid 1000
+          # cannot chmod a root-owned directory, so we chown+chmod here as
+          # root before the sidecar starts. The sidecar re-applies chmod 0700
+          # defensively, which is now a no-op (it owns the directory).
+          chown 1000:1000 /shoggoth/git-cred
+          chmod 0700 /shoggoth/git-cred
+        volumeMounts:
+        - name: git-cred
+          mountPath: /shoggoth/git-cred
+        resources:
+          requests:
+            memory: 16Mi
+            cpu: 10m
+          limits:
+            memory: 32Mi
+            cpu: 50m
+      containers:
+      - name: git-cred
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - /git-cred/bootstrap.sh
+        env:
+        - name: SHOGGOTH_DOMAIN
+          value: {{ .Values.identity.domain }}
+        - name: SHOGGOTH_NAMESPACE
+          value: {{ .Release.Namespace }}
+        - name: SSH_ID_RSA
+          valueFrom:
+            secretKeyRef:
+              name: ssh-slave-private-key
+              key: ssh-id-rsa
+              optional: true
+        - name: GITEA_SLAVE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: gitea-slave-token
+              key: token
+              optional: true
+        volumeMounts:
+        - name: git-cred
+          mountPath: /shoggoth/git-cred
+        - name: git-cred-bootstrap
+          mountPath: /git-cred
+          readOnly: true
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 20m
+          limits:
+            memory: 64Mi
+            cpu: 100m
+        # Sibling of `image:` and `securityContext:`, not a field inside
+        # securityContext (kube-apiserver rejects the latter with "field not
+        # declared in schema"). On non-zero exit kubelet normally leaves
+        # containerState.Terminated.Message empty, so the FATAL stderr line
+        # bootstrap.sh writes (e.g. "git-cred-bootstrap: FATAL: ssh-keyscan
+        # failed on git.s.local") is invisible from `kubectl describe pod`.
+        # FallbackToLogsOnError makes kubelet populate the message from the
+        # last 2048 bytes / 80 lines of the container's log on exit.
+        # https://kubernetes.io/docs/tasks/debug/debug-application/determine-reason-pod-failure/
+        terminationMessagePolicy: FallbackToLogsOnError
+        securityContext:
+          runAsUser: 1000
+        # `restartPolicy: Always` makes git-cred a native sidecar
+        # (long-running, restart on failure, started before any
+        # non-sidecar container that depends on its outputs). K8s 1.28+
+        # also exposes a `startOrder` field on Container that would
+        # gate `term` on git-cred's readinessProbe; we intentionally do
+        # not set it because shoggoth's running k3s build (v1.34.3+k3s3)
+        # does not expose `startOrder` in its apiserver OpenAPI v2 —
+        # `kubectl apply` rejects it with "field not declared in schema",
+        # and even if accepted, the kubelet would not honour it. The
+        # `term` entrypoint waits inline for the sidecar's ready flag
+        # instead (see `command:` below). The readinessProbe is purely
+        # diagnostic (kubectl describe pod, Events). failureThreshold 60
+        # is 2× the 30 s sidecar bootstrap budget to cover a freshly-
+        # started gitea-ssh pod. The probe checks the consumer-facing
+        # ready flag the sidecar touch()es after ssh-agent + credential-
+        # cache are both alive (with a 3 s grace — see
+        # templates/git-cred-bootstrap.yaml "Ready flag").
+        restartPolicy: Always
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - test -f /shoggoth/git-cred/ready
+          initialDelaySeconds: 0
+          periodSeconds: 1
+          timeoutSeconds: 1
+          successThreshold: 1
+          failureThreshold: 60
+      - name: term
+        image: registry.{{ .Values.identity.domain }}/slave:noble
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: SHOGGOTH_DOMAIN
+          value: {{ .Values.identity.domain }}
+        # Slave image's ENV hardcodes GITEA_SSH_HOST="git" so it works without
+        # a templated Dockerfile. The bare service resolves in DNS via the pod's
+        # `dnsConfig.searches`, but the git-cred-bootstrap sidecar keyscans
+        # only `git.${SHOGGOTH_DOMAIN}` — if the user's known_hosts file is
+        # populated for `git.${SHOGGOTH_DOMAIN}` but git then uses `git`,
+        # StrictHostKeyChecking refuses the connection. Override here so
+        # `git clone` from the terminal builds the URL against the same
+        # hostname the sidecar keyscanned.
+        - name: GITEA_SSH_HOST
+          value: git.{{ .Values.identity.domain }}
+        # Direct service access (bypasses Angie `server_name api.${DOMAIN}`
+        # routing). Picked over `http://api.${DOMAIN}/gitea` because the
+        # maintenance flow already uses this form and the term user has
+        # GITEA_SLAVE_TOKEN set above for Authorization headers. Same logic
+        # for REDMINE_SERVER — the Angie proxy path would need a separate
+        # REDMINE_TOKEN env var wired here, and shoggoth.py
+        # already handles the direct form by reading REDMINE_SERVER and
+        # SHOGGOTH_DOMAIN separately.
+        - name: GITEA_SERVER_URL
+          value: http://git.{{ .Values.identity.domain }}
+        - name: REDMINE_SERVER
+          value: http://redmine.{{ .Values.identity.domain }}
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Wait for the git-cred sidecar to populate /shoggoth/git-cred
+          # before launching ttyd. The kubelet starts this container in
+          # parallel with git-cred (no `startOrder` gate — the running
+          # k3s build, v1.34.3+k3s3, does not expose the field in its
+          # apiserver OpenAPI v2 and `kubectl apply` rejects it anyway),
+          # so this inline poll is the actual gate. Budget 60 s matches
+          # the sidecar's readinessProbe failureThreshold. We wait on
+          # /shoggoth/git-cred/ready — the single flag the sidecar
+          # touch()es after ssh-agent and git-credential-cache--daemon
+          # are both alive (with a 3 s grace — see
+          # templates/git-cred-bootstrap.yaml "Ready flag"). Polling
+          # one file instead of three sockets (known_hosts,
+          # ssh_auth_sock, git_credential_sock) matches what workflow
+          # main containers do via _wait_for_git_cred in
+          # shoggoth.py.
+          ready_flag="/shoggoth/git-cred/ready"
+          i=0
+          while [ "$i" -lt 60 ]; do
+            if [ -f "$ready_flag" ]; then
+              break
+            fi
+            i=$((i + 1))
+            sleep 1
+          done
+          if ! [ -f "$ready_flag" ]; then
+            echo "term: git-cred not ready after ${i}s — proceeding anyway (git/ssh will fail until sidecar catches up); check 'kubectl logs <pod> -c git-cred'" >&2
+          fi
+
+          # User exit is expected behavior, not a fault. ttyd --once exits
+          # when the browser WebSocket closes; tmux's session also ends.
+          # Force exit 0 so kubelet restarts the container without
+          # CrashLoopBackOff (any non-zero exit triggers exponential
+          # backoff: 10s, 20s, 40s, 80s, 160s, 300s). With this wrapper
+          # the pod is back to Ready in ~1s after the WebSocket closes.
+          exec ttyd --max-clients 1 --port 80 --writable -t disableReconnect=true --once tmux -u new-session bash || true
+          exit 0
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 200m
+          limits:
+            memory: 1Gi
+            cpu: '1'
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          failureThreshold: 6
+        volumeMounts:
+        - name: git-cred
+          mountPath: /shoggoth/git-cred
+        - name: ci-cache
+          mountPath: /cache
+      volumes:
+      - name: git-cred
+        emptyDir: {}
+      - name: git-cred-bootstrap
+        configMap:
+          name: git-cred-bootstrap
+          defaultMode: 493
+      - name: ci-cache
+        persistentVolumeClaim:
+          claimName: shoggoth-shared-cache
+{{- end }}

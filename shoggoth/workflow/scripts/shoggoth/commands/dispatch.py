@@ -416,9 +416,8 @@ class DispatchCommand(CommandBase):
 
           * User opens URL -> browser resolves
             ``sandbox-<id>.${SHOGGOTH_DOMAIN}`` against
-            the host's DNS (the external CoreDNS rewrite
-            in shoggoth/k3s/dns.yaml maps the user-facing
-            suffix to the in-cluster Service) -> kube-proxy
+            the host's DNS (an external CoreDNS rewrite maps the
+            user-facing suffix to the in-cluster Service) -> kube-proxy
             DNATs to the pod's port 80 -> ttyd WebSocket
             on the pod. No nginx hop.
           * User closes the browser -> ttyd ``--once`` exits.
@@ -717,7 +716,7 @@ class DispatchCommand(CommandBase):
         return (
             f"Sandbox ready.\n\n"
             f"**Web terminal (ttyd):** {sandbox_url}\n\n"
-            f"**SSH:** `ssh -p 22 -o "
+            f"**SSH:** `ssh -o "
             f"StrictHostKeyChecking=accept-new ccws@{host}`\n\n"
             f"Press Enter when prompted for a password "
             f"(the ccws account has no password).\n"
@@ -726,7 +725,7 @@ class DispatchCommand(CommandBase):
     def _apply_sandbox_pod(self, sandbox_id, repo_full_name, branch):
         """kubectl-apply the sandbox Pod manifest.
 
-        Pod layout (mirrors ``shoggoth/k3s/slave-term.yaml``):
+        Pod layout:
 
           * ``git-cred`` sidecar -- same shared sidecar as the
             worker pod / slave-term Deployment; populates
@@ -766,16 +765,13 @@ class DispatchCommand(CommandBase):
                     "shoggoth-sandbox-spawner",
                 "restartPolicy": "Never",
                 # Use the same custom DNS as the slave
-                # Deployments (shoggoth/k3s/slave-term.yaml,
-                # slave-dind.yaml). The default
+                # Deployments. The default
                 # ``dnsPolicy: ClusterFirst`` would resolve
                 # the in-cluster short form
                 # ``git.${SHOGGOTH_NAMESPACE}`` via the
-                # kubelet's auto-generated search path, but
-                # it doesn't carry the CoreDNS rewrite rules
-                # (shoggoth/k3s/dns.yaml) that map the
-                # user-facing ``git.${SHOGGOTH_DOMAIN}``
-                # form to its in-cluster equivalent -- so
+                # kubelet's auto-generated search path, but it doesn't carry the
+                # CoreDNS rewrite rules that map the user-facing
+                # ``git.${SHOGGOTH_DOMAIN}`` form to its in-cluster equivalent -- so
                 # anyone who runs ``git clone`` from the
                 # sandbox terminal against the user-facing
                 # URL (the GITEA_SERVER_URL / GITEA_SSH_HOST
@@ -846,6 +842,38 @@ class DispatchCommand(CommandBase):
                              "mountPath": "/shoggoth/git-cred"},
                             {"name": "workflow-scripts",
                              "mountPath": "/shoggoth/workflow-scripts"},
+                        ],
+                        "resources": {
+                            "requests": {"memory": "16Mi", "cpu": "10m"},
+                            "limits": {"memory": "32Mi", "cpu": "50m"},
+                        },
+                    },
+                    {
+                        # OpenSSH's privilege-separation chroot.
+                        # The sshd container runs with
+                        # readOnlyRootFilesystem, so it cannot
+                        # create /run/sshd itself -- sandbox.py's
+                        # defensive `os.makedirs` raises EROFS and
+                        # the container dies before sshd ever
+                        # starts. Mounting an emptyDir over
+                        # /run/sshd gives sshd a writable path
+                        # without relaxing readOnlyRootFilesystem.
+                        # kubelet creates emptyDirs mode 0777 and
+                        # sshd refuses a group/world-writable
+                        # privsep dir, so the perms are fixed here
+                        # (the same emptyDir mounted at a staging
+                        # path, since chmod must target the
+                        # volume, not the mount point).
+                        # Runs as root -- chown needs CAP_CHOWN.
+                        "name": "init-sshd-run",
+                        "image": "asherikov/shoggoth_tools:alpine",
+                        "imagePullPolicy": "IfNotPresent",
+                        "securityContext": {"runAsUser": 0},
+                        "command": ["/bin/sh", "-c"],
+                        "args": ["set -eu\nchown root:root /shoggoth/sshd-run\nchmod 0755 /shoggoth/sshd-run"],
+                        "volumeMounts": [
+                            {"name": "sshd-run",
+                             "mountPath": "/shoggoth/sshd-run"},
                         ],
                         "resources": {
                             "requests": {"memory": "16Mi", "cpu": "10m"},
@@ -952,8 +980,7 @@ class DispatchCommand(CommandBase):
                             # this is set -- the user-facing form
                             # matches the credential cache key the
                             # git-cred sidecar populates
-                            # (`host=git.${SHOGGOTH_DOMAIN}` in
-                            # shoggoth/k3s/git-cred-bootstrap.yaml).
+                            # (`host=git.${SHOGGOTH_DOMAIN}`).
                             *([{"name": "SHOGGOTH_DNS_IP",
                                 "value": params.shoggoth_dns_ip}]
                               if params.shoggoth_dns_ip else []),
@@ -1102,10 +1129,8 @@ class DispatchCommand(CommandBase):
                             # strips every cap, so the bind
                             # would EACCES without an explicit
                             # ``add: [NET_BIND_SERVICE]``.
-                            # Project precedent: see
-                            # shoggoth/k3s/argo-workflows.yaml
-                            # and shoggoth/k3s/apt-cache.yaml,
-                            # which use the same
+                            # Project precedent: the
+                            # workflow controller uses the same
                             # ``drop: [ALL]`` + ``add:
                             # [NET_BIND_SERVICE]`` shape for
                             # containers binding privileged
@@ -1118,7 +1143,96 @@ class DispatchCommand(CommandBase):
                             "readOnlyRootFilesystem": True,
                             "capabilities": {
                                 "drop": ["ALL"],
-                                "add": ["NET_BIND_SERVICE"],
+                                # ``DAC_OVERRIDE`` is required, not
+                                # optional hardening. ``drop: [ALL]``
+                                # strips it, and without it uid 0 is
+                                # subject to *normal* permission
+                                # checks -- root gets no automatic
+                                # bypass. Two things break without
+                                # it:
+                                #   1. sandbox.py's ``_wait_for_git_cred``
+                                #      polls /shoggoth/git-cred/ready,
+                                #      but that emptyDir is 0700 owned
+                                #      by uid 1000 (set by the
+                                #      init-git-cred-perms init
+                                #      container, because
+                                #      git credential-cache refuses
+                                #      a looser directory). The wait
+                                #      can never succeed, so sshd
+                                #      exits 1 after TTYD_READY_TIMEOUT_S.
+                                #   2. sshd itself needs it to read
+                                #      /etc/shadow (0640 root:shadow)
+                                #      for PAM auth.
+                                # Consequence of (1) beyond sshd:
+                                # pod Ready is a conjunction over all
+                                # containers, and sshd has no
+                                # readinessProbe, so a dead sshd means
+                                # the pod never goes Ready, the
+                                # Service keeps the pod IP in
+                                # notReadyAddresses, and *ttyd becomes
+                                # unreachable too* even though it is
+                                # serving happily. The sandbox looks
+                                # alive in `kubectl get pod` and is
+                                # dead for the user.
+                            #
+                            # Verified on k3s v1.35.8: a uid-0
+                            # container with CapEff 0x400 (this cap
+                            # set) cannot stat a 0700 uid-1000 dir;
+                            # the same container with CapEff 0x402
+                            # (+DAC_OVERRIDE) can.
+                            #
+                            # ``SYS_CHROOT`` + ``SETUID`` + ``SETGID``
+                            # are OpenSSH privilege separation:
+                            # privsep chroots the unprivileged monitor
+                            # into /run/sshd and then drops root ->
+                            # ccws. Each missing cap is its own preauth
+                            # connection reset, in this order:
+                            #   without SYS_CHROOT:
+                            #     chroot("/run/sshd"): Operation not
+                            #     permitted [preauth]
+                            #   with SYS_CHROOT, without SETGID:
+                            #     setgroups: Operation not permitted
+                            #     [preauth]
+                            # Only with all three does the connection
+                            # reach PAM authentication. (NET_BIND_SERVICE
+                            # alone -- the old set -- never got past
+                            # the git-cred wait, so this was masked.)
+                            #
+                            # Verified on k3s v1.35.8 by connecting to
+                            # a probe sshd per cap set and reading the
+                            # preauth failure out of the container log.
+                            #
+                            # ``CHOWN`` and ``AUDIT_WRITE`` are
+                            # required for the *interactive session*
+                            # (not for reaching PAM auth). Without
+                            # them, `mm_answer_pty` fails and the
+                            # client gets "Connection to ... closed
+                            # by remote host" immediately after a
+                            # successful password prompt:
+                            #   without CHOWN:
+                            #     chown(/dev/pts/N, <uid>, 5)
+                            #     failed: Operation not permitted
+                            #   without AUDIT_WRITE (CHOWN present):
+                            #     linux_audit_write_entry failed:
+                            #     Operation not permitted
+                            # Both abort the session teardown before
+                            # the shell starts, so the user never gets
+                            # a prompt while `kubectl get pod` still
+                            # shows sshd running. Neither is a
+                            # privilege-escalation risk here: CHOWN
+                            # only applies to the fresh PTY sshd
+                            # creates for this login, and AUDIT_WRITE
+                            # is a log-write capability (the
+                            # audit-*CONTROL* caps, which actually
+                            # allow reconfiguration, stay dropped).
+                            #
+                            # Only these seven are re-added;
+                            # everything else stays dropped (and
+                            # seccomp, no-priv-escalation,
+                            # readOnlyRootFilesystem remain in place).
+                            "add": ["NET_BIND_SERVICE", "DAC_OVERRIDE",
+                                    "SYS_CHROOT", "SETUID", "SETGID",
+                                    "CHOWN", "AUDIT_WRITE"],
                             },
                             "seccompProfile":
                                 {"type": "RuntimeDefault"},
@@ -1160,6 +1274,13 @@ class DispatchCommand(CommandBase):
                              "mountPath": "/shoggoth/sandbox-state"},
                             {"name": "workflow-scripts",
                              "mountPath": "/shoggoth/workflow-scripts"},
+                            # Writable privilege-separation chroot
+                            # (chowned root:root 0755 by the
+                            # init-sshd-run init container).
+                            # readOnlyRootFilesystem means /run
+                            # itself cannot be written.
+                            {"name": "sshd-run",
+                             "mountPath": "/run/sshd"},
                         ],
                     },
                     {
@@ -1222,6 +1343,7 @@ class DispatchCommand(CommandBase):
                          "name": "git-cred-bootstrap",
                          "defaultMode": 493,
                      }},
+                    {"name": "sshd-run", "emptyDir": {}},
                     {"name": "repo", "emptyDir": {}},
                     # Shared between the ttyd and sshd
                     # containers; the ttyd container
@@ -1300,7 +1422,7 @@ class DispatchCommand(CommandBase):
                     # hostname ``sandbox-<id>.${SHOGGOTH_DOMAIN}``)
                     # so the user only needs the single
                     # PR-comment URL + the single ``ssh
-                    # ccws@... -p 22`` command. The
+                    # ccws@...`` command. The
                     # ``ssh`` port name matches the
                     # container's named port in
                     # ``_apply_sandbox_pod`` so kube-proxy
@@ -1313,9 +1435,10 @@ class DispatchCommand(CommandBase):
                     # sandbox. The Service port is also 22
                     # (cluster-local) so clients on the
                     # cluster network reach sshd on its
-                    # native port -- the PR-comment
-                    # ``ssh -p 22`` is the same value the
-                    # cluster-internal kube-proxy expects.
+                    # native port. The user-facing
+                    # ``ssh`` command omits ``-p 22``
+                    # because sshd listens on the default
+                    # SSH port.
                     {"name": "ssh", "port": 22,
                      "targetPort": 22, "protocol": "TCP"},
                 ],

@@ -38,9 +38,9 @@ class SlaveTest:
         # `git_url` is the direct HTTPS URL used by `git clone` /
         # `git push` / `git ls-remote`. Separate from gitea_url because
         # git-cred-bootstrap populates the credential cache for
-        # `host=git.${DOMAIN}` (see shoggoth/k3s/git-cred-bootstrap.yaml),
-        # so a clone through the gateway at `host=api.${DOMAIN}` would
-        # have no matching credential and git would fail. Falls back to
+        # `host=git.${DOMAIN}`, so a clone through the gateway at
+        # `host=api.${DOMAIN}` would have no matching credential and git
+        # would fail. Falls back to
         # `gitea_url` if the template doesn't set GITEA_GIT_URL (legacy
         # setups that put the gateway URL in GITEA_SERVER_URL and never
         # clone over HTTPS in this script).

@@ -1,0 +1,35 @@
+{{- /*
+  templates/cdash-app-key.yaml — ExternalSecret projecting the CDash
+  application shared key into a K8s Secret.
+
+  Restores shoggoth/k3s/external-secrets/cdash-app-key.yaml, which the
+  chart migration dropped. openbao-bootstrap Phase B seeds
+  ``cdash/app-key`` with a random value on a fresh install, so this
+  only has to project it. The resulting Secret is referenced by
+  cdash.yaml as the application shared key.
+
+  Gated on ``cdash``: the only consumer.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "cdash")) }}
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: cdash-app-key
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cdash-app-key
+spec:
+  secretStoreRef:
+    name: shoggoth-openbao
+    kind: SecretStore
+  target:
+    name: cdash-app-key
+    creationPolicy: Owner
+  data:
+    - secretKey: app-key
+      remoteRef:
+        key: cdash/app-key
+        property: value
+  refreshInterval: 5m
+{{- end }}

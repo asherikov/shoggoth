@@ -1,0 +1,44 @@
+{{- /*
+  templates/gitea-runner-token.yaml — ExternalSecret projecting the
+  Gitea action-runner PAT into a K8s Secret.
+
+  Restores shoggoth/k3s/external-secrets/gitea-runner-token.yaml, which
+  the chart migration dropped. The initContainer in gitea.yaml waits
+  on ``externalsecret/gitea-runner-token`` and the resulting Secret is
+  also referenced by ``argo-workflows.yaml`` (workflow trigger token)
+  and the action-runner registration flow.
+
+  ``creationPolicy: Orphan`` + ``refreshInterval: 0s`` is load-bearing
+  for the same reason as ``gitea-slave-token.yaml``: the
+  ``gitea-runner-token-push`` PushSecret is the authority on the Secret
+  value, and an ExternalSecret reconcile must not race the script's
+  fresh write with stale OpenBao data. See the legacy
+  ``target.creationPolicy`` comment for the controller-side reasoning.
+
+  Gated on ``gitea-runner``: the runner registration deploys only when
+  that service is enabled, so ``make stop SERVICE=gitea-runner`` cleanly
+  retires both the Deployment and the credential.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: gitea-runner-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gitea-runner-token
+spec:
+  secretStoreRef:
+    name: shoggoth-openbao
+    kind: SecretStore
+  target:
+    name: gitea-runner-token
+    creationPolicy: Orphan
+  data:
+    - secretKey: token
+      remoteRef:
+        key: gitea/runner-token
+        property: value
+  refreshInterval: 0s
+{{- end }}

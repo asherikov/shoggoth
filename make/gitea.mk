@@ -41,7 +41,7 @@ github_to_gitea_repo:
 
 github_to_gitea_user:
 	${MAKE} gitea_create_project GITEA_PROJECT=${GITHUB_USER}
-	@page=1; \
+	page=1; \
 	while true; do \
 		headerfile=$$(mktemp); \
 		curl -s --dump-header "$$headerfile" "https://api.github.com/users/${GITHUB_USER}/repos?page=$${page}&per_page=100" \
@@ -59,7 +59,7 @@ github_to_gitea_user:
 	done
 
 gitea_create_project:
-	@echo "Creating Gitea project: ${GITEA_PROJECT}"
+	echo "Creating Gitea project: ${GITEA_PROJECT}"
 	curl -s -o /dev/null -w "%{http_code}" \
 		"${GITEA_API}/orgs" \
 		-H "accept: application/json" \
@@ -73,20 +73,20 @@ gitea_create_project:
 		(echo "Failed to create project ${GITEA_PROJECT}" && exit 1)
 
 gitea_push_repos:
-	@echo "Pushing repositories from ${SOURCES_DIR} to Gitea project ${GITEA_PROJECT}"
+	echo "Pushing repositories from ${SOURCES_DIR} to Gitea project ${GITEA_PROJECT}"
 	find ${SOURCES_DIR} -mindepth 2 -maxdepth 2 -type d -name ".git" \
 		| sed 's|/\.git$$||' \
 		| xargs -I {} basename {} \
 		| xargs -P ${JOBS} -I {} ${MAKE} gitea_push_repo REPO_NAME={} REPO_PATH=${SOURCES_DIR}/{} GITEA_PROJECT=${GITEA_PROJECT}
 
 gitea_push_repo:
-	@echo "Processing repository: ${REPO_NAME}"
-	@echo "Checking if Gitea repository ${REPO_NAME} already exists"
+	echo "Processing repository: ${REPO_NAME}"
+	echo "Checking if Gitea repository ${REPO_NAME} already exists"
 	curl -s -o /dev/null \
 		"${GITEA_API}/repos/${GITEA_PROJECT}/${REPO_NAME}" \
 		-H "accept: application/json" \
 		-H "Authorization: token ${GITEA_TOKEN}"
-	@echo "Creating Gitea repository: ${REPO_NAME}"
+	echo "Creating Gitea repository: ${REPO_NAME}"
 	curl -s -X POST \
 		"${GITEA_API}/orgs/${GITEA_PROJECT}/repos" \
 		-H "accept: application/json" \
@@ -97,20 +97,20 @@ gitea_push_repo:
 			\"private\": false \
 			}"
 	# \"default_branch\": \"main\",
-	@echo "Adding shoggoth remote to ${REPO_NAME}"
+	echo "Adding shoggoth remote to ${REPO_NAME}"
 	cd "${REPO_PATH}" \
 		&& (git remote remove shoggoth 2>/dev/null || true) \
 		&& git remote add shoggoth "ssh://git@${GITEA_URL}/${GITEA_PROJECT}/${REPO_NAME}.git" \
 		&& git push --mirror shoggoth
 
 gitea_import:
-	@echo "Importing repositories from ${SOURCES_DIR} to Gitea project ${GITEA_PROJECT}"
+	echo "Importing repositories from ${SOURCES_DIR} to Gitea project ${GITEA_PROJECT}"
 	${MAKE} gitea_create_project
 	${MAKE} gitea_push_repos
 
 gitea_delete_repos:
-	@echo "Deleting all repositories in Gitea project: ${GITEA_PROJECT}"
-	@while true; do \
+	echo "Deleting all repositories in Gitea project: ${GITEA_PROJECT}"
+	while true; do \
 		repos=$$(curl -s \
 			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=1&limit=50" \
 			-H "accept: application/json" \
@@ -122,22 +122,22 @@ gitea_delete_repos:
 	done
 
 gitea_delete_repo:
-	@echo "Deleting repository: ${GITEA_PROJECT}/${REPO_NAME}"
-	@curl -s -X DELETE \
+	echo "Deleting repository: ${GITEA_PROJECT}/${REPO_NAME}"
+	curl -s -X DELETE \
 		"${GITEA_API}/repos/${GITEA_PROJECT}/${REPO_NAME}" \
 		-H "accept: application/json" \
 		-H "Authorization: token ${GITEA_TOKEN}"
 
 gitea_delete_org:
-	@echo "Deleting Gitea organization: ${GITEA_PROJECT}"
-	@curl -s -X DELETE \
+	echo "Deleting Gitea organization: ${GITEA_PROJECT}"
+	curl -s -X DELETE \
 		"${GITEA_API}/orgs/${GITEA_PROJECT}" \
 		-H "accept: application/json" \
 		-H "Authorization: token ${GITEA_TOKEN}"
 
 gitea_make_all_repos_public:
-	@echo "Making all repositories public in all Gitea projects"
-	@page=1; \
+	echo "Making all repositories public in all Gitea projects"
+	page=1; \
 	while true; do \
 		orgs=$$(curl -s \
 			"${GITEA_API}/orgs?page=$${page}&limit=50" \
@@ -155,8 +155,8 @@ gitea_make_all_repos_public:
 	done
 
 gitea_make_repos_public:
-	@echo "Making all repositories public in Gitea project ${GITEA_PROJECT}"
-	@page=1; \
+	echo "Making all repositories public in Gitea project ${GITEA_PROJECT}"
+	page=1; \
 	while true; do \
 		repos=$$(curl -s \
 			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=$${page}&limit=50" \
@@ -180,8 +180,8 @@ gitea_make_repos_public:
 	done
 
 gitea_enable_actions:
-	@echo "Enabling Actions for all repositories in Gitea project ${GITEA_PROJECT}"
-	@page=1; \
+	echo "Enabling Actions for all repositories in Gitea project ${GITEA_PROJECT}"
+	page=1; \
 	while true; do \
 		repos=$$(curl -s \
 			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=$${page}&limit=50" \
@@ -205,8 +205,8 @@ gitea_enable_actions:
 	done
 
 gitea_unmirror_repos:
-	@echo "Converting all mirror repositories to normal in Gitea project ${GITEA_PROJECT}"
-	@page=1; \
+	echo "Converting all mirror repositories to normal in Gitea project ${GITEA_PROJECT}"
+	page=1; \
 	while true; do \
 		repos=$$(curl -s \
 			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=$${page}&limit=50" \
@@ -224,8 +224,8 @@ gitea_unmirror_repos:
 	done
 
 gitea_unmirror_repo:
-	@echo "Converting mirror repository to normal: ${GITEA_PROJECT}/${REPO_NAME}"
-	@TMP_PASS="$$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 20)"; \
+	echo "Converting mirror repository to normal: ${GITEA_PROJECT}/${REPO_NAME}"
+	TMP_PASS="$$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 20)"; \
 	trap 'rm -f "$${cookiefile}"; \
 		curl -sfS -X PATCH "${GITEA_API}/admin/users/admin" \
 			-H "Authorization: token ${GITEA_TOKEN}" \
@@ -250,6 +250,6 @@ gitea_unmirror_repo:
 		-o /dev/null -w "%{http_code}" | grep -qE "303|200" || { echo "Convert failed"; exit 1; }
 
 gitea_remove_project:
-	@echo "Removing Gitea project ${GITEA_PROJECT} with all repositories"
+	echo "Removing Gitea project ${GITEA_PROJECT} with all repositories"
 	${MAKE} gitea_delete_repos
 	${MAKE} gitea_delete_org

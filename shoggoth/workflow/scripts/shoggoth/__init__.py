@@ -6,7 +6,7 @@ pr-update) and the cron-style maintenance pod (webhook setup, mirror
 sync, slave user lifecycle, ldap sync). Split into this package so
 each subsystem can be read in isolation; the ``shoggoth.py`` shim
 at the parent directory re-exports ``main()`` and is the entrypoint
-every workflow manifest invokes.
+every caller invokes.
 
 Public surface (re-exported for backward compat):
   * ``Gitea`` / ``Redmine`` / ``Github`` — HTTP clients.
@@ -40,8 +40,8 @@ from urllib.request import Request, urlopen, HTTPCookieProcessor, build_opener
 from urllib.error import URLError, HTTPError
 
 # Re-exports: the original shoggoth.py exported every top-level name
-# into the script's namespace; callers (and the workflow manifests
-# that use the shim) don't care which submodule the name came from.
+# into the script's namespace; callers don't care which submodule the
+# name came from.
 # Keep the list explicit so adding a new public class is a conscious
 # decision rather than an accidental import.
 from .state import (

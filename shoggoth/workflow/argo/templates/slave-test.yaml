@@ -34,9 +34,8 @@ spec:
   # Required by the submit-time validator (workflow/validate/validate.go):
   # templates referencing {{workflow.parameters.SHOGGOTH_*}} must resolve
   # to a declared parameter here. Values are fetched from the
-  # shoggoth-workflow-config ConfigMap at admission time (see
-  # shoggoth/k3s/argo-workflows.yaml). Domain and instance-dir are the
-  # only two this template references.
+  # shoggoth-workflow-config ConfigMap at admission time. Domain and
+  # instance-dir are the only two this template references.
   arguments:
     parameters:
     - name: SHOGGOTH_DOMAIN
@@ -160,6 +159,10 @@ spec:
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "http/protobuf"
+      - name: OTEL_EXPORTER_OTLP_TIMEOUT
+        value: "2000"
       - name: SHOGGOTH_CHECK_NAME
         value: "{{inputs.parameters.check_name}}"
       - name: GITEA_SERVER_URL
@@ -175,9 +178,8 @@ spec:
         # Direct HTTP URL for git clone/push. Separate from
         # GITEA_SERVER_URL because the gateway path doesn't match the
         # credential-cache entry — git-cred-bootstrap populates the
-        # cache for `protocol=http host=git.${SHOGGOTH_DOMAIN}` (see
-        # shoggoth/k3s/git-cred-bootstrap.yaml), so a clone through
-        # the gateway at `host=api.${SHOGGOTH_DOMAIN}` would have no
+        # cache for `protocol=http host=git.${SHOGGOTH_DOMAIN}`, so a clone
+        # through the gateway at `host=api.${SHOGGOTH_DOMAIN}` would have no
         # matching credential and git would fail.
         #
         # Scheme is http (not https) because the in-cluster gitea

@@ -1,0 +1,51 @@
+# Per-instance shoggoth configuration.
+#
+# THIS FILE IS THE SOURCE OF TRUTH. `make up` passes it to Helm with
+# --values; the chart derives every SHOGGOTT_* pod environment variable from
+# it (see e.g. chart/templates/git-pages.yaml, wireguard.yaml, openldap.yaml).
+#
+# There is no variable injection: nothing is passed with --set, and the
+# Makefile reads values out of this file rather than defining them separately.
+#
+# `shoggoth/chart/values.yaml` documents every key and its default; anything
+# omitted here falls back to that default. Ports are quoted strings to match
+# the chart's own types.
+#
+# The pre-chart `shoggoth.env` remains only for host-install rendering
+# (shoggoth.nix, ports.nix via envsubst in make/k3s.mk:32). It is no longer a
+# source for anything Helm reads.
+
+identity:
+  # Also SHOGGOTH_DOMAIN for pods; the domain every service is reachable at.
+  domain: s.local
+  # SHOGGOTT_GITHUB_ORG
+  githubOrg: asherikov
+  # SHOGGOTT_DNS_IP — the CoreDNS service IP. See chart/templates/dns.yaml.
+  dnsIp: 10.43.0.53
+  # Release/instance name. Drives the host paths under
+  # /var/lib/rancher/k3s/storage/<instanceDir>/. Normally $(INSTANCE); the
+  # lint config overrides it to a throwaway so `make helm_lint` never touches
+  # a real deployment's data.
+  instanceDir: shoggoth
+
+network:
+  webExternal:
+    # Port for the wireguard-over-HTTPS endpoint (SHOGGOTT_WEB_EXT_PORT).
+    hostPort: "51443"
+  wireguard:
+    udpPort: "51820"
+    uiPort: "51821"
+  registry:
+    # In-cluster registry Service port (SHOGGOTT_REGISTRY_PORT). Rendered
+    # unquoted into `port:`, so it must be a positive integer — a non-numeric
+    # or empty value renders as 0 and the API server rejects the Service.
+    hostPort: "80"
+
+ai:
+  defaultModel: openai/MiniMax-M3
+  defaultApi: https://api.minimax.io/v1
+  # Path to the K8s Secret holding the token, not the token itself.
+  defaultTokenFileRef: /shoggoth/private/ai-default-token.txt
+
+gitea:
+  serverTokenFileRef: /shoggoth/private/gitea-server-token.txt

@@ -1,0 +1,30 @@
+# Per-instance shoggoth configuration — test instance.
+#
+# Same contract as shoggoth/shoggoth.yaml; see that file for the full
+# description. Selected with `make up INSTANCE=shoggoth-test`.
+#
+# identity.instanceDir must be unique per instance: it is what keeps the
+# hostPath volumes under /var/lib/rancher/k3s/storage/ from colliding.
+
+identity:
+  domain: s.local
+  githubOrg: asherikov
+  dnsIp: 10.43.0.53
+  instanceDir: shoggoth-test
+
+network:
+  webExternal:
+    hostPort: "51443"
+  wireguard:
+    udpPort: "51820"
+    uiPort: "51821"
+  registry:
+    hostPort: "80"
+
+ai:
+  defaultModel: openai/MiniMax-M3
+  defaultApi: https://api.minimax.io/v1
+  defaultTokenFileRef: /shoggoth/private/ai-default-token.txt
+
+gitea:
+  serverTokenFileRef: /shoggoth/private/gitea-server-token.txt

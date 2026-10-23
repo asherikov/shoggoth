@@ -1,0 +1,165 @@
+{{- /*
+  templates/git-cred-bootstrap.yaml — ConfigMap carrying the long bash
+  bootstrap script for the git-cred sidecar used by slave-dind and
+  slave-term.
+
+  The script is preserved verbatim except for shell `${SHOGGOTH_DOMAIN}`
+  and `${SHOGGOTH_NAMESPACE}` references inside its body, which must be
+  replaced with `{{ .Values.identity.domain }}` / `{{ .Release.Namespace }}`
+  for render-time substitution (Helm does not process `${VAR}` placeholders;
+  legacy applied envsubst at deploy time).
+
+  Gating: git-cred-bootstrap ships whenever any of its consumers
+  (slave-dind, slave-term, argo-workflows) is enabled. All three consumer
+  Deployments mount this ConfigMap, so its lifetime matches the union of the
+  consumer services.
+
+  There is deliberately no `services.git-cred-bootstrap` toggle of its own: the
+  ConfigMap cannot outlive its consumers, so it has no independent on/off
+  state. Disabling it while a consumer stayed enabled would leave that pod
+  unable to start on a missing ConfigMap volume.
+
+  KNOWN, INTENTIONAL DIVERGENCE from the legacy envsubst tree:
+  legacy envsubst expands `${SHOGGOTH_DOMAIN:-<unset>}` and
+  `${SHOGGOTH_DOMAIN:-}` down to a baked `s.local`, which silently turns
+  the "is SHOGGOTH_DOMAIN set?" guard into dead code. Here the script
+  keeps the runtime env read so the guard stays live. Both forms resolve
+  to the same string, because the sidecar's Deployment sets
+  SHOGGOTH_DOMAIN from .Values.identity.domain. Every other line of the
+  script is byte-identical to the legacy render.
+*/}}
+{{- if or (include "shoggoth.isServiceEnabled" (list . "slave-dind")) (include "shoggoth.isServiceEnabled" (list . "slave-term")) (include "shoggoth.isServiceEnabled" (list . "argo-workflows")) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: git-cred-bootstrap
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+data:
+  bootstrap.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    SSH_AUTH_SOCK="/shoggoth/git-cred/ssh_auth_sock"
+    GIT_CRED_SOCK="/shoggoth/git-cred/git_credential_sock"
+    KNOWN_HOSTS="/shoggoth/git-cred/known_hosts"
+    CRED_TIMEOUT=31536000
+    TERMINATION_LOG="${TERMINATION_LOG:-/dev/termination-log}"
+
+    fatal() {
+        local msg="git-cred-bootstrap: FATAL: $*"
+        echo "${msg}" >&2
+        echo "${msg}" 2>/dev/null >> "${TERMINATION_LOG}" || true
+        exit 1
+    }
+
+    # ${SHOGGOTH_DOMAIN} is injected as a pod env var by the sidecar's
+    # container spec (see slave-dind.yaml / slave-term.yaml env: entries);
+    # this script reads it via `${SHOGGOTH_DOMAIN:-<unset>}` below.
+    echo "git-cred-bootstrap: starting (pod=$(hostname -s 2>/dev/null || echo unknown), domain=${SHOGGOTH_DOMAIN:-<unset>})" >&2
+
+    mkdir -p /shoggoth/git-cred
+    chmod 0700 /shoggoth/git-cred
+    touch /shoggoth/git-cred/bootstrap.log
+    exec 2> >(tee -a /shoggoth/git-cred/bootstrap.log >&2)
+    rm -f "${SSH_AUTH_SOCK}" "${GIT_CRED_SOCK}"
+    rm -f /shoggoth/git-cred/ready
+
+    if [ -z "${SHOGGOTH_DOMAIN:-}" ]; then
+        fatal "SHOGGOTH_DOMAIN env var is empty (pod $(hostname -s 2>/dev/null || echo unknown))"
+    fi
+
+    echo "git-cred-bootstrap: scanning git.{{ .Values.identity.domain }} SSH host keys..." >&2
+    KEYSCAN_OUT="$(mktemp)"
+    if ! ssh-keyscan "git.{{ .Values.identity.domain }}" "git" > "${KNOWN_HOSTS}" 2> "${KEYSCAN_OUT}"; then
+        KEYSCAN_ERR="$(head -c 1500 "${KEYSCAN_OUT}" \
+            | tr -d '\r' \
+            | awk 'NF && !seen[$0]++ { printf "%s ", $0 }' \
+            | tr -s '[:space:]' ' ')"
+        rm -f "${KEYSCAN_OUT}"
+        fatal "ssh-keyscan failed on git.{{ .Values.identity.domain }}: ${KEYSCAN_ERR:-<no stderr>} (check DNS resolves git.{{ .Values.identity.domain }} inside the pod, and port 22/TCP)"
+    fi
+    rm -f "${KEYSCAN_OUT}"
+    chmod 644 "${KNOWN_HOSTS}"
+
+    echo "git-cred-bootstrap: starting ssh-agent at ${SSH_AUTH_SOCK}..." >&2
+    eval "$(ssh-agent -a "${SSH_AUTH_SOCK}")"
+    SSH_AGENT_PID="$(echo "${SSH_AGENT_PID}" | head -1)"
+    chmod 600 "${SSH_AUTH_SOCK}"
+
+    SSH_ID_RSA="${SSH_ID_RSA:-}"
+    if [ -z "${SSH_ID_RSA}" ]; then
+        fatal "SSH_ID_RSA env var is empty (expected source: K8s Secret 'ssh-slave-private-key' key 'ssh-id-rsa' in namespace '{{ .Release.Namespace }}')"
+    fi
+
+    FIRST_LINE=$(printf '%s' "${SSH_ID_RSA}" | head -n 1)
+    case "${FIRST_LINE}" in
+        "-----BEGIN"*) ;;
+        *) fatal "SSH_ID_RSA does not start with a BEGIN marker (first line: ${FIRST_LINE})" ;;
+    esac
+    LAST_LINE=$(printf '%s' "${SSH_ID_RSA}" | awk 'NF{last=$0} END{print last}')
+    case "${LAST_LINE}" in
+        "-----END"*) ;;
+        *) fatal "SSH_ID_RSA does not end with an END marker (last line: ${LAST_LINE})" ;;
+    esac
+
+    printf '%s\n' "${SSH_ID_RSA}" > /tmp/git-cred-bootstrap-key
+    chmod 400 /tmp/git-cred-bootstrap-key
+    SSH_ADD_ERR_FILE="$(mktemp)"
+    if ! ssh-add /tmp/git-cred-bootstrap-key > "${SSH_ADD_ERR_FILE}" 2>&1; then
+        SSH_ADD_ERR="$(head -c 800 "${SSH_ADD_ERR_FILE}" | tr '\n' ' ' | tr -s ' ')"
+        rm -f /tmp/git-cred-bootstrap-key "${SSH_ADD_ERR_FILE}"
+        fatal "ssh-add failed: ${SSH_ADD_ERR:-<no stderr>}"
+    fi
+    rm -f /tmp/git-cred-bootstrap-key "${SSH_ADD_ERR_FILE}"
+
+    if ! ssh-add -l > /dev/null 2>&1; then
+        fatal "ssh-agent has no identities after ssh-add (agent says: $(ssh-add -l 2>&1 | head -c 400))"
+    fi
+    IDENTITY_COUNT=$(ssh-add -l | grep -cE '^[0-9a-f]+ ' || true)
+    echo "git-cred-bootstrap: ssh-agent has ${IDENTITY_COUNT} identity(ies)" >&2
+
+    echo "git-cred-bootstrap: starting git credential-cache daemon..." >&2
+    git credential-cache--daemon "${GIT_CRED_SOCK}" &
+    sleep 1
+    chmod 600 "${GIT_CRED_SOCK}"
+
+    GITEA_SLAVE_TOKEN="${GITEA_SLAVE_TOKEN:-}"
+    if [ -z "${GITEA_SLAVE_TOKEN}" ]; then
+        echo "git-cred-bootstrap: WARNING: GITEA_SLAVE_TOKEN empty; HTTPS pushes will 401" >&2
+    else
+        printf 'protocol=http\nhost=git.%s\nusername=token\npassword=%s\n' \
+            "{{ .Values.identity.domain }}" "${GITEA_SLAVE_TOKEN}" \
+          | git credential-cache --socket "${GIT_CRED_SOCK}" \
+              --timeout "${CRED_TIMEOUT}" store
+    fi
+
+    echo "git-cred-bootstrap: complete; keeping ssh-agent and git-credential-cache alive" >&2
+
+    sleep 3
+    touch /shoggoth/git-cred/ready
+    echo "git-cred-bootstrap: ready flag created at /shoggoth/git-cred/ready" >&2
+
+    # SIGTERM handling. Argo's cleanUpPod -> TerminateContainers sends
+    # SIGTERM to this container once the workflow step's `main` and `wait`
+    # containers have completed.
+    #
+    # The backgrounded `sleep` + `wait` form is load-bearing: bash defers
+    # a trap until the currently running *foreground* job finishes, and
+    # only PID 1 receives the signal. With `sleep infinity` in the
+    # foreground the sleep never receives SIGTERM, so the trap would never
+    # fire and the container would only die on SIGKILL at the end of the
+    # grace period. `wait` is a shell builtin that is interruptible, so the
+    # trap runs the moment SIGTERM arrives.
+    #
+    # Exiting 0 makes the pod phase PodSucceeded, which argo maps straight
+    # to NodeSucceeded. (If the trap did not fire and the container were
+    # SIGKILLed instead, argo would still resolve the node as Succeeded —
+    # inferFailedReason ignores sidecar exit codes 137/143 — just 30s
+    # later.) INT is trapped for symmetry; SIGTERM is the only signal argo
+    # sends here.
+    trap 'exit 0' TERM INT
+    sleep infinity &
+    wait $!
+{{- end }}

@@ -1,0 +1,42 @@
+{{- /*
+  templates/cdash-api-token.yaml — ExternalSecret projecting the CDash
+  API token into a K8s Secret.
+
+  Restores shoggoth/k3s/external-secrets/cdash-api-token.yaml, which the
+  chart migration dropped. openbao-bootstrap Phase B seeds
+  ``cdash/api-token`` with a random value on a fresh install, so this
+  only has to project it. The initContainer in cdash.yaml waits on
+  ``externalsecret/cdash-api-token``; the resulting Secret is
+  referenced via ``secretKeyRef`` in cdash.yaml and web-internal.yaml
+  (the latter proxies a webhook to cdash).
+
+  ``creationPolicy: Orphan``: the cdash container overwrites the Secret
+  during its own first-run setup if the API token it generated differs
+  from the bootstrap-time seed; letting ESO overwrite that write would
+  cause an unnecessary churn loop.
+
+  Gated on ``cdash``: the only consumer.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "cdash")) }}
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: cdash-api-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cdash-api-token
+spec:
+  secretStoreRef:
+    name: shoggoth-openbao
+    kind: SecretStore
+  target:
+    name: cdash-api-token
+    creationPolicy: Orphan
+  data:
+    - secretKey: token
+      remoteRef:
+        key: cdash/api-token
+        property: value
+  refreshInterval: 5m
+{{- end }}

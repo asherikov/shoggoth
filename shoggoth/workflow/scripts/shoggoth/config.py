@@ -21,7 +21,7 @@ class Parameters:
         "Shoggoth": [
             ("shoggoth_domain", "SHOGGOTH_DOMAIN", True, ""),
             ("shoggoth_namespace", "SHOGGOTH_NAMESPACE", False, "shoggoth"),
-            # Custom CoreDNS service IP (shoggoth/k3s/dns.yaml).
+            # Custom CoreDNS service IP.
             # The dispatcher's sandbox pod spec uses this for
             # ``dnsConfig.nameservers`` so the pod uses the
             # same DNS as the slave Deployments -- the
@@ -103,8 +103,8 @@ class SecretStore:
     # Centralised so writers (K8s.upsert_secret) and readers
     # (K8s.read_secret, SecretStore.read) agree on the names. SSO
     # synced the kv values into these Secrets via the
-    # ``creationPolicy: Owner`` / ``creationPolicy: Orphan`` rules in
-    # shoggoth/k3s/external-secrets/.
+    # ``creationPolicy: Owner`` / ``creationPolicy: Orphan`` rules on the
+    # SecretStore.
     K8S_PATHS = {
         "gitea/server-token": ("gitea-server-token", "token"),
         "gitea/slave-token": ("gitea-slave-token", "token"),

@@ -252,7 +252,7 @@ class Shoggoth:
         caller's responsibility (use _remove_review_worktree).
 
         For ccws sub-repos, worktrees are created from the sub-repo's own
-        .git (not the manifest) so the resulting tree matches the sub-repo
+        .git (not the ccws repo) so the resulting tree matches the sub-repo
         layout the agent will review.
         """
         wt_path = (f"/tmp/shoggoth-review-{pr_number}-"
@@ -344,7 +344,7 @@ class Shoggoth:
     @staticmethod
     def _rewrite_patch_paths(patch_text, review_repo_dir=None):
         """Rewrite `diff --git a/<path> b/<path>` headers so the patch can be
-        applied at a sub-repo path instead of the manifest root.
+        applied at a sub-repo path instead of the ccws repo root.
         Strips the longest common top-level directory prefix.
         ``review_repo_dir`` is the sub-repo path the patch is being
         applied at; currently unused beyond keeping the call-site
@@ -425,5 +425,5 @@ class Shoggoth:
                 return path
         if len(prefixes) > 1:
             log(f"_resolve_review_repo_dir: PR touches {len(prefixes)} "
-                f"sub-repos, reviewing at manifest level")
+                f"sub-repos, reviewing at the ccws level")
         return self.repo_dir

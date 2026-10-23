@@ -1,0 +1,163 @@
+{{- /*
+  templates/headroom.yaml — headroom LLM context-compression sidecar for
+  LiteLLM.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "headroom")) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: headroom
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: headroom
+    app.kubernetes.io/component: headroom
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: headroom-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: headroom
+    app.kubernetes.io/component: headroom
+  annotations:
+    # Kept across `helm uninstall` so `make down` stops workloads but
+    # preserves data, matching the legacy envsubst path. Reinstall adopts
+    # it: shoggoth.labels survives uninstall, so Helm's ownership check
+    # still passes.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: headroom
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: headroom
+    app.kubernetes.io/component: headroom
+spec:
+  selector:
+    app: headroom
+  ports:
+  - name: http
+    port: 8787
+    targetPort: http
+    protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: headroom
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: headroom
+    app.kubernetes.io/component: headroom
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: headroom
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.selectorLabels" . | nindent 8 }}
+        app: headroom
+        app.kubernetes.io/component: headroom
+    spec:
+      serviceAccountName: headroom
+      automountServiceAccountToken: false
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - {{ .Values.identity.dnsIp }}
+        searches:
+        - {{ .Release.Namespace }}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+      containers:
+      - name: headroom
+        image: ghcr.io/headroomlabs-ai/headroom:code-nonroot-4630602
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "-c"]
+        args:
+        - "import logging, sys; logging.getLogger('headroom.proxy').setLevel(logging.WARNING); from headroom.cli import main; sys.exit(main())"
+        - proxy
+        - --host
+        - 0.0.0.0
+        - --port
+        - "8787"
+        env:
+        - name: HOME
+          value: /data
+        - name: HF_HOME
+          value: /data/huggingface
+        - name: HEADROOM_TELEMETRY
+          value: "on"
+        - name: HEADROOM_PROXY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: headroom-proxy-token
+              key: token
+        - name: HEADROOM_COMPRESS_ALLOW_REMOTE
+          value: "1"
+        - name: HEADROOM_UPDATE_CHECK
+          value: "off"
+        - name: HEADROOM_TLS_STRICT
+          value: "0"
+        - name: HEADROOM_LOG_LEVEL
+          value: warning
+        ports:
+        - containerPort: 8787
+          name: http
+          protocol: TCP
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          seccompProfile:
+            type: RuntimeDefault
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 1Gi
+            cpu: 1000m
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 180
+          periodSeconds: 30
+          failureThreshold: 6
+        volumeMounts:
+        - name: cache
+          mountPath: /data
+      volumes:
+      - name: cache
+        persistentVolumeClaim:
+          claimName: headroom-cache
+{{- end }}

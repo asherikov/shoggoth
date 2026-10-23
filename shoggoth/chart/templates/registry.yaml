@@ -1,0 +1,202 @@
+{{- /*
+  templates/registry.yaml — zot container image registry with pull-through
+  caching.
+
+  Uses identity.namespace for service-account set-up and
+  .Values.network.registry.hostPort for both the Service port and the
+  embedded zot config.json. The init-container `cleanup-sync-staging`
+  scrubs zot's sync staging dirs on every pod start.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "registry")) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: registry
+    app.kubernetes.io/component: registry
+  annotations:
+    # Kept across `helm uninstall` so `make down` stops workloads but
+    # preserves data, matching the legacy envsubst path. Reinstall adopts
+    # it: shoggoth.labels survives uninstall, so Helm's ownership check
+    # still passes.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: registry
+    app.kubernetes.io/component: registry
+spec:
+  selector:
+    app: registry
+  ports:
+  - name: registry
+    port: {{ .Values.network.registry.hostPort }}
+    targetPort: {{ .Values.network.registry.hostPort }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: registry-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: registry
+    app.kubernetes.io/component: registry
+data:
+  config.json: |
+    {
+      "storage": {
+        "rootDirectory": "/var/lib/zot",
+        "gc": true,
+        "retention": {
+          "policies": [
+            {
+              "repositories": ["**"],
+              "deleteUntagged": true
+            }
+          ]
+        }
+      },
+      "http": {
+        "address": "0.0.0.0",
+        "port": "{{ .Values.network.registry.hostPort }}",
+        "readTimeout": "0s",
+        "writeTimeout": "0s",
+        "compat": ["docker2s2"]
+      },
+      "log": {
+        "level": "info"
+      },
+      "extensions": {
+        "sync": {
+          "registries": [
+            { "urls": ["https://registry-1.docker.io"], "onDemand": true },
+            { "urls": ["https://ghcr.io"], "onDemand": true },
+            { "urls": ["https://gcr.io"], "onDemand": true },
+            { "urls": ["https://quay.io"], "onDemand": true },
+            { "urls": ["https://mcr.microsoft.com"], "onDemand": true },
+            { "urls": ["https://codeberg.org"], "onDemand": true },
+            { "urls": ["https://docker.gitea.com"], "onDemand": true },
+            { "urls": ["https://docker.angie.software"], "onDemand": true },
+            { "urls": ["https://public.ecr.aws"], "onDemand": true }
+          ]
+        },
+        "ui": {
+          "enable": true
+        },
+        "search": {
+          "enable": true
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: registry
+    app.kubernetes.io/component: registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.selectorLabels" . | nindent 8 }}
+        app: registry
+        app.kubernetes.io/component: registry
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      initContainers:
+      - name: cleanup-sync-staging
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          DATA_DIR="${ZOT_DATA_DIR:-/var/lib/zot}"
+          if [ -d "${DATA_DIR}" ]; then
+            while IFS= read -r -d '' dir; do
+              echo "cleanup-sync-staging: removing ${dir}"
+              rm -rf -- "${dir}"
+            done < <(find "${DATA_DIR}" -type d -name .sync -print0)
+            echo "cleanup-sync-staging: done"
+          else
+            echo "cleanup-sync-staging: ${DATA_DIR} not present, skipping"
+          fi
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/zot
+      containers:
+      - name: registry
+        image: ghcr.io/project-zot/zot:v2.1.21
+        imagePullPolicy: IfNotPresent
+        args:
+        - serve
+        - /etc/zot/config.json
+        ports:
+        - containerPort: {{ .Values.network.registry.hostPort }}
+          name: registry
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 1Gi
+            cpu: '1'
+        readinessProbe:
+          httpGet:
+            path: /v2/
+            port: {{ .Values.network.registry.hostPort }}
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /v2/
+            port: {{ .Values.network.registry.hostPort }}
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/zot
+        - name: config
+          mountPath: /etc/zot
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: registry
+      - name: config
+        configMap:
+          name: registry-config
+{{- end }}

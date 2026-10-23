@@ -1,0 +1,47 @@
+{{- /*
+  templates/gitea-runner-token-push.yaml — PushSecret synchronizing
+  the K8s ``Secret/gitea-runner-token`` *back* into OpenBao at
+  ``gitea/runner-token``.
+
+  Restores shoggoth/k3s/external-secrets/gitea-runner-token-push.yaml,
+  which the chart migration dropped. Paired with
+  ``gitea-runner-token.yaml``: the runner registration script writes
+  a fresh token into the K8s Secret, this PushSecret mirrors it to
+  OpenBao so the corresponding ``ExternalSecret`` (and any second
+  cluster using the same OpenBao backend) can project the same value.
+  Read it as a one-way K8s → OpenBao write, controlled by the
+  ``Orphan`` ExternalSecret that has already declared the Secret
+  ownerless.
+
+  Uses the write-scoped ``SecretStore/shoggoth-openbao-write``
+  (``templates/secret-store-write.yaml``); a read token cannot push.
+
+  Gated on ``secret-store-write``: the PushSecret itself requires the
+  write SecretStore to be enabled. Default-on, so a default install is
+  unaffected.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "secret-store-write")) }}
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: gitea-runner-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gitea-runner-token
+spec:
+  secretStoreRefs:
+    - name: shoggoth-openbao-write
+      kind: SecretStore
+  selector:
+    secret:
+      name: gitea-runner-token
+  data:
+    - match:
+        secretKey: token
+        remoteRef:
+          remoteKey: gitea/runner-token
+          property: value
+  refreshInterval: 5m
+  updatePolicy: Replace
+{{- end }}

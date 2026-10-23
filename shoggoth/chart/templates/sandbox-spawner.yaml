@@ -1,0 +1,94 @@
+{{- /*
+  templates/sandbox-spawner.yaml — ServiceAccount + Role + 3 RoleBindings for
+  the sandbox dispatcher (command-handler DAG). Replaces
+*/}}
+{{- /* internal artifact — toggled via services.sandbox-spawner.enabled */ -}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "sandbox-spawner")) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: shoggoth-sandbox-spawner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shoggoth-sandbox-spawner
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: shoggoth-sandbox-spawner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shoggoth-sandbox-spawner
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - services
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - delete
+  - patch
+- apiGroups:
+  - ''
+  resources:
+  - pods/log
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shoggoth-sandbox-spawner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shoggoth-sandbox-spawner
+subjects:
+- kind: ServiceAccount
+  name: shoggoth-sandbox-spawner
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: shoggoth-sandbox-spawner
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shoggoth-sandbox-spawner-bootstrap-wait
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shoggoth-sandbox-spawner
+subjects:
+- kind: ServiceAccount
+  name: shoggoth-sandbox-spawner
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: argo-workflow-controller-bootstrap-wait
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: shoggoth-sandbox-spawner-argo
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shoggoth-sandbox-spawner
+subjects:
+- kind: ServiceAccount
+  name: shoggoth-sandbox-spawner
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: argo-workflow-executor
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

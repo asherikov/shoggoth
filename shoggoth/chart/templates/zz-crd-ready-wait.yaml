@@ -1,0 +1,149 @@
+{{- /*
+  zz-crd-ready-wait.yaml — Waits for CRDs to become Established before any
+  service template that depends on them is interpreted.
+
+  Replaces the inline `kubectl wait --for=condition=Established customresourcedefinition ...`
+  loop in make/k3s.mk:248-255 with a helm hook-driven Job. Re-runs on every
+  upgrade via the post-upgrade hook.
+
+  The CRDs themselves are NOT in the chart — they live in shoggoth/crds/ and
+  are applied by `make crds_apply` before Helm runs, because a chart's crds/
+  tree is embedded in the release Secret (see make/k3s.mk crds_apply, where
+  the byte-budget math lives). This hook is the safety net for a `helm upgrade`
+  run outside `make up`.
+
+  Cluster-scoped RBAC: CRDs are not namespaced, so this needs a ClusterRole.
+  A namespaced Role cannot authorize them at all.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-crd-ready-wait
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crd-ready-wait
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-crd-ready-wait
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crd-ready-wait
+rules:
+# `kubectl wait` does an internal LIST + WATCH, not just GET: the initial
+# LIST establishes the resourceVersion, the WATCH streams condition changes.
+# Without list + watch the wait fails with "cannot list resource
+# customresourcedefinitions" — the same trap as the wait-bootstrap Role in
+# argo-workflows.yaml.
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-crd-ready-wait
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crd-ready-wait
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "shoggoth.fullname" . }}-crd-ready-wait
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "shoggoth.fullname" . }}-crd-ready-wait
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-crd-ready-wait-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crd-ready-wait
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.labels" . | nindent 8 }}
+        app.kubernetes.io/component: crd-ready-wait
+    spec:
+      serviceAccountName: {{ include "shoggoth.fullname" . }}-crd-ready-wait
+      restartPolicy: Never
+      {{- with .Values.image.registries }}
+      imagePullSecrets:
+      {{- range . }}
+        - name: {{ . }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: wait
+          # Same tools image as every other kubectl-using container in this
+          # chart. It must NOT be registry.k8s.io/*: that registry is not in
+          # the k3s mirror list (shoggoth/shoggoth.nix) and the cluster is
+          # offline-first, so such a pod never pulls and the Job dies with
+          # BackoffLimitExceeded — which fails the whole release.
+          image: asherikov/shoggoth_tools:alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KUBECTL_NAMESPACE
+              value: {{ .Release.Namespace }}
+            # The chart's services.cc extras can opt services out of the wait by
+            # listing them here; default empty means wait for CRD existence only
+            # (Established is up to API server regardless of service flag).
+            - name: CRD_GROUPS
+              value: "argoproj.io,external-secrets.io"
+            - name: WAIT_TIMEOUT
+              value: "120s"
+          command:
+            - /bin/bash
+            - -ec
+            # Single `$`, deliberately. Helm copies template text that sits
+            # outside a template action verbatim and has NO `$$` escape — that
+            # is a shell heredoc convention, not a Helm one. So `$${VAR}`
+            # reaches bash as `$$` (the shell PID) followed by a literal
+            # `{VAR}`, every expansion below resolved to garbage, and the
+            # whole script fell through to the "no CRDs found -> exit 0"
+            # branch. This hook has therefore never actually waited for
+            # anything. Every other script in this chart uses single `$`.
+            - |
+              set -euo pipefail
+              : "${KUBECTL_NAMESPACE:?}"
+              : "${CRD_GROUPS:?}"
+              : "${WAIT_TIMEOUT:?}"
+              # Named CRD_GROUP_LIST, not GROUPS: GROUPS is a bash special
+              # array (the caller's group IDs) and `read -a GROUPS` fails on
+              # it, which under `set -e` aborted the script at this line.
+              IFS=',' read -r -a CRD_GROUP_LIST <<< "${CRD_GROUPS}"
+              NAMES=()
+              for g in "${CRD_GROUP_LIST[@]}"; do
+                # No `2>/dev/null || true` here on purpose. A Forbidden or an
+                # unreachable API server must fail this hook loudly; it used to
+                # be swallowed, leaving the list empty, which fell into the
+                # "no CRDs found -> exit 0" branch and skipped the wait
+                # entirely. That is how a broken ClusterRole stayed invisible.
+                # Newline-delimited so names stay separate: a space-separated
+                # string plus a "${NAMES// /}" squeeze glued the two groups
+                # into one giant bogus CRD name.
+                jp='{range .items[?(@.spec.group=="'"${g}"'")]}{.metadata.name}{"\n"}{end}'
+                while IFS= read -r n; do
+                  [ -n "${n}" ] && NAMES+=("${n}")
+                done < <(kubectl get crd -o jsonpath="${jp}")
+              done
+              if [ ${#NAMES[@]} -eq 0 ]; then
+                echo "FAIL: no CRDs found for groups: ${CRD_GROUPS}" >&2
+                echo "      run 'make crds_apply' — the CRDs live outside the chart." >&2
+                exit 1
+              fi
+              echo "Waiting for ${#NAMES[@]} CRDs to be Established: ${NAMES[*]}"
+              kubectl wait --for=condition=Established --timeout="${WAIT_TIMEOUT}" customresourcedefinition "${NAMES[@]}"

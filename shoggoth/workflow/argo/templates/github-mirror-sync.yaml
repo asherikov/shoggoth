@@ -57,6 +57,10 @@ spec:
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "http/protobuf"
+      - name: OTEL_EXPORTER_OTLP_TIMEOUT
+        value: "2000"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_DOMAIN

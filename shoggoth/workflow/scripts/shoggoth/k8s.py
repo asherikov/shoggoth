@@ -64,7 +64,7 @@ class K8s:
         The caller is responsible for RBAC (the
         shoggoth-maintenance-secret-writer ServiceAccount grants
         namespaced create/update/patch on the specific Secret
-        names in shoggoth/k3s/maintenance-secret-writer.yaml).
+        names it writes).
         """
         if not name or not self.namespace:
             print("ERROR: K8s.upsert_secret requires name and namespace",

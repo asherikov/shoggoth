@@ -1,0 +1,45 @@
+{{- /*
+  templates/gitea-slave-token-push.yaml — PushSecret synchronizing
+  the K8s ``Secret/gitea-slave-token`` *back* into OpenBao at
+  ``gitea/slave-token``.
+
+  Restores shoggoth/k3s/external-secrets/gitea-slave-token-push.yaml,
+  which the chart migration dropped. Paired with
+  ``gitea-slave-token.yaml``: the ``slave-token`` script writes a
+  fresh token into the K8s Secret, this PushSecret mirrors it to
+  OpenBao. The corresponding ``ExternalSecret`` has
+  ``creationPolicy: Orphan`` and ``refreshInterval: 0s`` so it does
+  not race the script's write — the PushSecret is the only writer
+  that goes *out* to OpenBao.
+
+  Uses the write-scoped ``SecretStore/shoggoth-openbao-write``
+  (``templates/secret-store-write.yaml``).
+
+  Gated on ``secret-store-write``: the PushSecret itself requires the
+  write SecretStore to be enabled.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "secret-store-write")) }}
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: gitea-slave-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gitea-slave-token
+spec:
+  secretStoreRefs:
+    - name: shoggoth-openbao-write
+      kind: SecretStore
+  selector:
+    secret:
+      name: gitea-slave-token
+  data:
+    - match:
+        secretKey: token
+        remoteRef:
+          remoteKey: gitea/slave-token
+          property: value
+  refreshInterval: 5m
+  updatePolicy: Replace
+{{- end }}

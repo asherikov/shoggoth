@@ -51,8 +51,7 @@ import subprocess
 import sys
 import time
 
-# External-secrets the git-cred sidecar reads. The names match the
-# shoggoth/k3s/git-cred-bootstrap.yaml input list; the pod's RBAC
+# External-secrets the git-cred sidecar reads; the pod's RBAC
 # grants the sandbox SA `get` on these.
 WAIT_BOOTSTRAP_SECRETS = ("gitea-slave-token", "ssh-slave-private-key")
 WAIT_BOOTSTRAP_TIMEOUT_S = 600
@@ -60,8 +59,7 @@ WAIT_BOOTSTRAP_POLL_S = 10
 
 # Path the git-cred sidecar touch()es after both ssh-agent and
 # git-credential-cache--daemon are bound and have accepted their
-# first identity / store request (with a 3 s grace; see
-# shoggoth/k3s/git-cred-bootstrap.yaml "Ready flag"). The
+# first identity / store request (with a 3 s grace). The
 # ttyd container polls this single file rather than each
 # daemon's socket (matches the slave-term pattern and the
 # workflow _wait_for_git_cred helper).
@@ -196,8 +194,8 @@ def init_perms():
 def _wait_for_git_cred():
     """Block until the git-cred sidecar's ready flag is set.
 
-    Matches the slave-term pattern (`shoggoth/k3s/slave-term.yaml`
-    `term.command`) and the workflow `_wait_for_git_cred` helper:
+    Matches the slave-term `term.command` pattern and the workflow
+    `_wait_for_git_cred` helper:
     poll a single sentinel file the sidecar touch()es after
     ssh-agent and git-credential-cache--daemon are both bound.
     90 s budget matches the kubelet readinessProbe failureThreshold
@@ -221,8 +219,7 @@ def _clone_url(repo):
     params.shoggoth_dns_ip that rewrites *.${SHOGGOTH_DOMAIN} ->
     *.${SHOGGOTH_NAMESPACE}.svc.cluster.local) so the URL host
     matches the credential cache key the sidecar populates
-    (`host=git.${SHOGGOTH_DOMAIN}` in
-    shoggoth/k3s/git-cred-bootstrap.yaml). Fall back to the short
+    (`host=git.${SHOGGOTH_DOMAIN}`). Fall back to the short
     in-cluster form http://git.${SHOGGOTH_NAMESPACE}/<repo>.git
     on test/dev runs where the custom DNS is not wired (the
     kubelet's resolv.conf search path resolves the short form
@@ -280,8 +277,7 @@ def ttyd(repo, branch):
       2. The pre-fix script used the in-cluster short form
          `http://git.${SHOGGOTH_NAMESPACE}/...` unconditionally,
          but the git-cred sidecar's credential cache is keyed
-         on `host=git.${SHOGGOTH_DOMAIN}` (per
-         shoggoth/k3s/git-cred-bootstrap.yaml). On private repos
+         on `host=git.${SHOGGOTH_DOMAIN}`. On private repos
          the credential lookup misses and the clone 401s.
          The Python version uses the user-facing form when
          SHOGGOTH_DNS_IP is wired (which is the production
@@ -368,19 +364,20 @@ def sshd():
          surfaces sshd's auth log to ``kubectl describe
          pod`` on a non-zero exit.
 
-    There is no per-sandbox credential to install: the
-    slave image (shoggoth/dockerfiles/slave) bakes a
-    sshd_config with ``PermitEmptyPasswords yes`` and
-    pre-clears the ccws account's password hash
-    (``passwd -d ccws``) at build time, so any user with
-    network access to port 22 can log in as ccws by
-    pressing Enter at the password prompt. The PAM
-    config for sshd is also rewritten at build time to
-    use ``pam_unix.so nullok`` (the Ubuntu default
-    ``@include common-auth`` chain pulls in
-    ``pam_unix.so nullok_secure`` which blocks empty
-    passwords on remote ttys). See the Dockerfile
-    comment for the full rationale.
+    The sshd the slave image (shoggoth/dockerfiles/slave)
+    bakes needs no per-sandbox credential: it sets
+    ``PasswordAuthentication yes`` with
+    ``PermitEmptyPasswords yes``, and the ccws account
+    keeps the password the base image assigned
+    (``ccws/ccws``, from ccws/examples/Dockerfile), so a
+    login supplies that password at the prompt.
+
+    The pod also has to grant sshd enough capabilities
+    to finish *session* setup, which is a separate step
+    from reaching the password prompt -- see the
+    ``capabilities.add`` rationale in
+    shoggoth/commands/dispatch.py for CHOWN and
+    AUDIT_WRITE.
 
     ``runAsUser: 0`` is required so sshd can bind port
     22 (the dispatcher's per-sandbox Service maps host
@@ -396,10 +393,16 @@ def sshd():
     _wait_for_git_cred()
     _wait_for_repo_ready()
     # /run/sshd is the privilege-separation chroot on
-    # Debian/Ubuntu; sshd refuses to start without it.
-    # The slave Dockerfile creates it at build time, but
-    # the kubelet's emptyDir mounts can mask it on some
-    # hosts. Recreate defensively.
+    # Debian/Ubuntu; sshd refuses to start without it. The slave
+    # image ships it, but the sandbox pod built by dispatch.py mounts
+    # a writable emptyDir over this exact path (the container runs with
+    # readOnlyRootFilesystem, so /run itself cannot be written), and
+    # kubelet creates emptyDirs mode 0777 -- which sshd rejects with
+    # "/run/sshd must be owned by root and not group or
+    # world-writable". A dedicated init container chowns it to
+    # root:root and chmods 0755 before the sshd container starts, so
+    # exist_ok=True is a no-op that simply keeps this working if that
+    # init container is ever dropped.
     os.makedirs("/run/sshd", exist_ok=True)
     # ``sshd -t`` parses sshd_config and returns non-zero
     # on a parse error. Catches a misformatted
@@ -418,35 +421,69 @@ def sshd():
     # -e routes the auth log to stderr (the kubelet
     # captures stderr into the container log + the
     # FallbackToLogsOnError termination message).
+    # PidFile keeps the pid file inside the writable
+    # /run/sshd emptyDir; the default /run/sshd.pid sits
+    # on the read-only rootfs and makes sshd log "Couldn't
+    # create pid file" on every start. Note this must be
+    # `-o PidFile=...`: sshd's `-p` is the *port* flag, so
+    # `-p /run/sshd/sshd.pid` makes sshd abort with "Bad
+    # port number.".
     os.execv("/usr/sbin/sshd",
-             ["/usr/sbin/sshd", "-D", "-e"])
+             ["/usr/sbin/sshd", "-D", "-e",
+              "-o", "PidFile=/run/sshd/sshd.pid"])
 
 
-def _ttyd_state(pod_json):
-    """Extract the ttyd container's state from the pod JSON.
+def _container_state(pod_json, name):
+    """Extract a container's state from the pod JSON.
 
     Returns a dict with keys: terminated (bool), waiting (bool),
-    ready (bool), waiting_reason (str). Returns None if ttyd
-    is not yet visible in containerStatuses (the sidecar may
-    start polling before ttyd's status is populated).
+    ready (bool), waiting_reason (str), exit_code (int).
+    Returns None if the container is not yet visible in
+    containerStatuses (the sidecar may start polling before the
+    other containers' status is populated).
     """
     pod = json.loads(pod_json)
     for cs in pod.get("status", {}).get("containerStatuses", []):
-        if cs.get("name") != "ttyd":
+        if cs.get("name") != name:
             continue
         state = cs.get("state", {})
         waiting = state.get("waiting") or {}
+        terminated = state.get("terminated") or {}
         return {
-            "terminated": bool(state.get("terminated")),
+            "terminated": bool(terminated),
             "waiting": bool(waiting),
             "ready": bool(cs.get("ready")),
             "waiting_reason": waiting.get("reason", ""),
+            "exit_code": terminated.get("exitCode"),
         }
     return None
 
 
+def _pod_ready(pod_json):
+    """True if the pod carries a Ready=True condition.
+
+    Pod Ready is a conjunction over every container, so a single
+    dead container keeps the whole pod out of the Service's ready
+    endpoints -- which makes *every* container unreachable, not just
+    the dead one. The cleanup watchdog uses this to tell "this
+    container is broken" apart from "this sandbox is unreachable".
+    """
+    pod = json.loads(pod_json)
+    for cond in pod.get("status", {}).get("conditions", []):
+        if cond.get("type") == "Ready":
+            return cond.get("status") == "True"
+    return False
+
+
 def cleanup():
-    """Sidecar: watch ttyd, delete the pod on ttyd death.
+    """Sidecar: watch the access containers, delete the pod once none
+    of them can serve.
+
+    Watches both ``ttyd`` and ``sshd``. Pod Ready is a conjunction
+    over every container, so a container that dies takes the whole
+    pod out of the Service's ready endpoints and makes *both* access
+    paths unreachable -- which is why an sshd failure has to end the
+    pod even though ttyd is still serving.
 
     Replaces SANDBOX_CLEANUP_SCRIPT. The shell version used
     `kubectl get -o json` + `printf | python3 -c` invocations
@@ -481,10 +518,40 @@ def cleanup():
         if not pod_json or pod_json.strip() in ("", "{}"):
             log("cleanup: pod gone, exiting")
             return
-        state = _ttyd_state(pod_json)
+        state = _container_state(pod_json, "ttyd")
         if state is None:
             # ttyd container not yet visible -- wait.
             time.sleep(CLEANUP_POLL_S)
+            continue
+        # 0) sshd is gone. sshd has no readinessProbe, so while it is
+        # alive it counts as Ready and the pod can go Ready; the
+        # moment it exits, the pod can never be Ready again (there is
+        # no restartPolicy to bring it back). A not-Ready pod is kept
+        # in the Service's notReadyAddresses, so this takes *both*
+        # access paths down -- ttyd keeps serving happily and stays
+        # unreachable. This is the "neither ssh nor ttyd usable" case
+        # and it is terminal, so it does not wait on the
+        # not-ready budget: the pod can never recover.
+        #
+        # Only `terminated` / `waiting` are treated as fatal. A
+        # `running` sshd is the normal startup state (it blocks in
+        # _wait_for_git_cred and _wait_for_repo_ready before exec'ing
+        # sshd), so it must not be mistaken for a failure.
+        sshd = _container_state(pod_json, "sshd")
+        if sshd is not None and (sshd["terminated"] or sshd["waiting"]):
+            reason = (f"exit_code={sshd['exit_code']}"
+                      if sshd["terminated"]
+                      else f"waiting_reason={sshd['waiting_reason']}")
+            if seen_terminated_at == 0:
+                seen_terminated_at = time.time()
+                log(f"cleanup: sshd is down ({reason}) and pod Ready="
+                    f"{_pod_ready(pod_json)}; without sshd the pod can "
+                    f"never go Ready, so neither ttyd nor ssh is "
+                    f"reachable. Deleting after {CLEANUP_GRACE_S}s "
+                    f"grace. Check 'kubectl logs {pod_name} -c sshd'")
+            if (time.time() - seen_terminated_at) >= CLEANUP_GRACE_S:
+                break
+            time.sleep(5)
             continue
         # 1) ttyd exited cleanly. Common path: user closed the
         # browser, ttyd --once exits, the kubelet marks the

@@ -34,14 +34,14 @@ class PushSecretCheck:
     ``die()``s the workflow when any condition is not ``Ready``.
 
     RBAC: the maintenance SA needs ``get`` on ``pushsecrets`` in
-    the namespace — see the
+    the namespace — the
     ``shoggoth-maintenance-secret-writer-pushsecrets-read`` Role
-    in ``shoggoth/k3s/maintenance-secret-writer.yaml``.
+    grants it.
     """
 
     # PushSecrets whose OpenBao round-trip the maintenance workflow
-    # should verify. Centralised so adding a new PushSecret to
-    # ``shoggoth/k3s/external-secrets/`` is a one-line change here.
+    # should verify. Centralised so adding a PushSecret to the SecretStore
+    # is a one-line change here.
     # ``redmine-slave-token`` is included even though the redmine
     # pod's ``slave_token_init.rb`` POST caller — not the
     # maintenance workflow — is what writes its K8s Secret: the
@@ -182,8 +182,8 @@ class PushSecretCheck:
                   "http://openbao:80/v1/secret/metadata/<path>`` (then "
                   "force the PushSecret to re-evaluate via "
                   "``kubectl annotate pushsecret <name> "
-                  "force-sync=$(date +%s) --overwrite``). See "
-                  "shoggoth/k3s/openbao.yaml Phase B.5 for procedures (1) "
+                  "force-sync=$(date +%s) --overwrite``). See Phase B.5 in "
+                  "shoggoth/chart/templates/openbao.yaml for procedures (1) "
                   "and (2); for a fresh cluster the bootstrap needs the "
                   "``bao_put_metadata`` helper added (the script can't fix "
                   "existing kv data).",

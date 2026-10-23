@@ -1,0 +1,42 @@
+{{- /*
+  templates/gitea-server-token.yaml — ExternalSecret projecting the
+  Gitea server bootstrap token into a K8s Secret.
+
+  Restores shoggoth/k3s/external-secrets/gitea-server-token.yaml, which
+  the chart migration dropped. The maintenance job in
+  ``workflow/scripts/shoggoth/commands/dispatch.py`` and the gitea
+  bootstrap pod read this token via ``secretKeyRef`` to authenticate
+  ``git push`` webhooks and the api-token bootstrap calls. If the file
+  at ``.shoggoth.private.gitea-server-token`` is present, openbao-bootstrap
+  Phase B mirrors its contents to ``gitea/server-token`` in OpenBao so
+  that this ExternalSecret projects the same value into the K8s Secret.
+
+  ``creationPolicy: Orphan``: the script that owns the file on disk is
+  authoritative, and a controller refresh must not race the disk read.
+
+  Gated on ``gitea``: the only consumer is the gitea bootstrap path,
+  and gitea is on-by-default.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "gitea")) }}
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: gitea-server-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gitea-server-token
+spec:
+  secretStoreRef:
+    name: shoggoth-openbao
+    kind: SecretStore
+  target:
+    name: gitea-server-token
+    creationPolicy: Orphan
+  data:
+    - secretKey: token
+      remoteRef:
+        key: gitea/server-token
+        property: value
+  refreshInterval: 5m
+{{- end }}

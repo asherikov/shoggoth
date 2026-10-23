@@ -1,0 +1,98 @@
+{{- /*
+  templates/mcp-gitea.yaml — Gitea MCP server (HTTP-mode).
+  Consumed by litellm via the API gateway.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "mcp-gitea")) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-gitea
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: mcp-gitea
+    app.kubernetes.io/component: mcp-gitea
+spec:
+  selector:
+    app: mcp-gitea
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-gitea
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: mcp-gitea
+    app.kubernetes.io/component: mcp-gitea
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-gitea
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.selectorLabels" . | nindent 8 }}
+        app: mcp-gitea
+        app.kubernetes.io/component: mcp-gitea
+    spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - {{ .Values.identity.dnsIp }}
+        searches:
+        - {{ .Release.Namespace }}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+      initContainers: []
+      containers:
+      - name: mcp-gitea
+        image: docker.gitea.com/gitea-mcp-server:1.7.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - /app/gitea-mcp
+        - --port
+        - '80'
+        ports:
+        - containerPort: 80
+          name: http
+        env:
+        - name: MCP_MODE
+          value: http
+        - name: GITEA_HOST
+          value: http://git:80
+        - name: GITEA_INSECURE
+          value: 'true'
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4318
+        - name: SHOGGOTH_DOMAIN
+          value: {{ .Values.identity.domain }}
+        resources:
+          requests:
+            memory: 64Mi
+            cpu: 50m
+          limits:
+            memory: 128Mi
+            cpu: 200m
+        readinessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          tcpSocket:
+            port: 80
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          failureThreshold: 6
+        volumeMounts: []
+      volumes: []
+{{- end }}

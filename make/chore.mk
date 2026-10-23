@@ -70,11 +70,10 @@ graph:
 #
 # Known limitation: KubeDiagrams does not resolve ${SHOGGOTH_NAMESPACE}
 # placeholders in the input manifests, so node.namespace fields render
-# as the literal string "${SHOGGOTH_NAMESPACE}" in the diagram. Pipe
-# the manifests through `envsubst` first to get a namespace-resolved
-# diagram (e.g. `envsubst < shoggoth/k3s/foo.yaml | kube-diagrams -`).
-# Left as a follow-up since the current cluster uses a single
-# namespace in practice.
+# as the literal string "${SHOGGOTH_NAMESPACE}" in the diagram. This used to
+# matter when the inputs were the raw envsubst manifests; the chart renders
+# through `helm template` with a real namespace, so the rendered stream no
+# longer carries unresolved placeholders.
 #
 # Does NOT touch docs/architecture.svg, docs/bringup.svg, etc. — the
 # `graph` target above is the one that regenerates the architecture
@@ -86,46 +85,42 @@ DOCS_CLUSTER_DIAGRAM_STORAGE  := docs/cluster-storage.svg
 DOCS_CLUSTER_DIAGRAM_NETWORKING := docs/cluster-networking.svg
 DOCS_CLUSTER_DIAGRAM_SECRETS  := docs/cluster-secrets.svg
 
+empty :=
+space := $(empty) $(empty)
+
 CLUSTERVIZ_CONFIG := make/kube-diagrams.yaml
 
-# Local copy of the manifest list. make/chore.mk is included
-# alphabetically before make/k3s.mk (where K3S_ALL_MANIFESTS /
-# K3S_ARGO_CRD_FILES are defined with `:=` immediate evaluation), so
-# those variables are empty when this target is parsed. Duplicating
-# the find here is cheaper than reordering the includes. If the
-# source-of-truth paths in make/k3s.mk change, mirror them here.
-CLUSTERVIZ_INPUTS := \
-    $(shell find shoggoth/k3s -name '*.yaml' \
-        ! -path '*/kube-diagrams.yaml' | sort) \
-    $(shell find shoggoth/argo-workflows/manifests/base/crds/full \
-        -maxdepth 1 -name 'argoproj.io_*.yaml' | sort)
-
-# Subset filters — grep the manifests for the relevant `kind:` lines.
-# Each `$(shell ...)` runs at parse time; an empty result just means
-# the subset target is a no-op for that view (e.g. no CronJob in this
-# cluster). Sort + uniq keeps the input list deterministic.
-CLUSTERVIZ_INPUTS_RBAC := \
-    $(shell grep -lE '^kind: (ClusterRole|ClusterRoleBinding|Role|RoleBinding|ServiceAccount)$$' \
-        $(CLUSTERVIZ_INPUTS) 2>/dev/null | sort -u)
-CLUSTERVIZ_INPUTS_WORKLOADS := \
-    $(shell grep -lE '^kind: (Deployment|StatefulSet|DaemonSet|Job)$$' \
-        $(CLUSTERVIZ_INPUTS) 2>/dev/null | sort -u)
-CLUSTERVIZ_INPUTS_STORAGE := \
-    $(shell grep -lE '^kind: (PersistentVolumeClaim|ConfigMap|Secret)$$' \
-        $(CLUSTERVIZ_INPUTS) 2>/dev/null | sort -u)
-CLUSTERVIZ_INPUTS_NETWORKING := \
-    $(shell grep -lE '^kind: Service$$' \
-        $(CLUSTERVIZ_INPUTS) 2>/dev/null | sort -u)
-CLUSTERVIZ_INPUTS_SECRETS := \
-    $(shell grep -lE '^kind: (ExternalSecret|SecretStore|PushSecret)$$' \
-        $(CLUSTERVIZ_INPUTS) 2>/dev/null | sort -u)
-
-# Render one view: $1 = output name (e.g. "cluster" for cluster.svg),
-# $2 = space-separated input manifest list. The intermediate .dot
-# file lives under .tmp/ which is already .gitignore'd.
+# Diagram inputs are the chart, rendered and filtered in one pipeline:
+#
+#     helm template | yq 'select(kind in ...)' | kube-diagrams -
+#
+# kube-diagrams reads stdin when the filename is `-` (that is how its own README
+# pipes `helmfile template` and `kubectl kustomize` into it, both of which emit
+# multi-document YAML), and yq emits exactly such a stream. So there is no
+# intermediate file, no per-document split, and no script.
+#
+# This used to be `find shoggoth/k3s/*.yaml` + `grep -l`, which only worked
+# because those legacy manifests were already one-resource-per-file. That
+# directory is gone; the chart renders as a single multi-doc stream, so the
+# selection has to happen on the stream.
+#
+# $1 = output name (e.g. "cluster-rbac" for docs/cluster-rbac.svg)
+# $2 = space-separated set of kinds for that view
 define clusterviz_run
-	@mkdir -p .tmp/clusterviz
-	kube-diagrams -c ${CLUSTERVIZ_CONFIG} -o .tmp/clusterviz/$1.dot -f dot $2
+	set -e; mkdir -p .tmp/clusterviz; \
+	KIND_RE='^($(subst $(space),|,$(2)))$$'; \
+	N=$$(helm template shoggoth-clusterviz $(SHOGGOTH_CHART_ROOT) --namespace $(INSTANCE) $(SHOGGOTH_HELM_VALUES) \
+		| yq ea -r "select(.kind != null and (.kind | test(\"$$KIND_RE\"))) | .kind" \
+		| grep -v '^---$$' | wc -l); \
+	if [ "$$N" -eq 0 ]; then \
+		echo "FAIL: view '$1' matched no resources — the render produced nothing for kinds: $(2)"; \
+		exit 1; \
+	fi; \
+	echo "  $$N manifests for view '$1'"; \
+	helm template shoggoth-clusterviz $(SHOGGOTH_CHART_ROOT) --namespace $(INSTANCE) $(SHOGGOTH_HELM_VALUES) \
+		| yq ea "select(.kind != null and (.kind | test(\"$$KIND_RE\")))" \
+		| kube-diagrams -c ${CLUSTERVIZ_CONFIG} -o .tmp/clusterviz/$1.dot -f dot - \
+		|| { echo "FAIL: kube-diagrams failed for '$1'"; exit 1; }
 	dot -Grankdir=TB -Gsplines=spline -Tsvg:cairo .tmp/clusterviz/$1.dot -o docs/$1.svg
 endef
 
@@ -137,28 +132,28 @@ clusterviz: clusterviz-rbac clusterviz-workloads clusterviz-storage clusterviz-n
 
 .PHONY: clusterviz-rbac
 clusterviz-rbac: ${DOCS_CLUSTER_DIAGRAM_RBAC}
-${DOCS_CLUSTER_DIAGRAM_RBAC}: ${CLUSTERVIZ_INPUTS_RBAC} ${CLUSTERVIZ_CONFIG}
-	$(call clusterviz_run,cluster-rbac,${CLUSTERVIZ_INPUTS_RBAC})
+${DOCS_CLUSTER_DIAGRAM_RBAC}: $(SHOGGOTH_CONFIG) $(SHOGGOTH_CHART_ROOT)/templates/*.yaml ${CLUSTERVIZ_CONFIG}
+	$(call clusterviz_run,cluster-rbac,ClusterRole ClusterRoleBinding Role RoleBinding ServiceAccount)
 
 .PHONY: clusterviz-workloads
 clusterviz-workloads: ${DOCS_CLUSTER_DIAGRAM_WORKLOADS}
-${DOCS_CLUSTER_DIAGRAM_WORKLOADS}: ${CLUSTERVIZ_INPUTS_WORKLOADS} ${CLUSTERVIZ_CONFIG}
-	$(call clusterviz_run,cluster-workloads,${CLUSTERVIZ_INPUTS_WORKLOADS})
+${DOCS_CLUSTER_DIAGRAM_WORKLOADS}: $(SHOGGOTH_CONFIG) $(SHOGGOTH_CHART_ROOT)/templates/*.yaml ${CLUSTERVIZ_CONFIG}
+	$(call clusterviz_run,cluster-workloads,Deployment StatefulSet DaemonSet Job)
 
 .PHONY: clusterviz-storage
 clusterviz-storage: ${DOCS_CLUSTER_DIAGRAM_STORAGE}
-${DOCS_CLUSTER_DIAGRAM_STORAGE}: ${CLUSTERVIZ_INPUTS_STORAGE} ${CLUSTERVIZ_CONFIG}
-	$(call clusterviz_run,cluster-storage,${CLUSTERVIZ_INPUTS_STORAGE})
+${DOCS_CLUSTER_DIAGRAM_STORAGE}: $(SHOGGOTH_CONFIG) $(SHOGGOTH_CHART_ROOT)/templates/*.yaml ${CLUSTERVIZ_CONFIG}
+	$(call clusterviz_run,cluster-storage,PersistentVolumeClaim ConfigMap Secret)
 
 .PHONY: clusterviz-networking
 clusterviz-networking: ${DOCS_CLUSTER_DIAGRAM_NETWORKING}
-${DOCS_CLUSTER_DIAGRAM_NETWORKING}: ${CLUSTERVIZ_INPUTS_NETWORKING} ${CLUSTERVIZ_CONFIG}
-	$(call clusterviz_run,cluster-networking,${CLUSTERVIZ_INPUTS_NETWORKING})
+${DOCS_CLUSTER_DIAGRAM_NETWORKING}: $(SHOGGOTH_CONFIG) $(SHOGGOTH_CHART_ROOT)/templates/*.yaml ${CLUSTERVIZ_CONFIG}
+	$(call clusterviz_run,cluster-networking,Service)
 
 .PHONY: clusterviz-secrets
 clusterviz-secrets: ${DOCS_CLUSTER_DIAGRAM_SECRETS}
-${DOCS_CLUSTER_DIAGRAM_SECRETS}: ${CLUSTERVIZ_INPUTS_SECRETS} ${CLUSTERVIZ_CONFIG}
-	$(call clusterviz_run,cluster-secrets,${CLUSTERVIZ_INPUTS_SECRETS})
+${DOCS_CLUSTER_DIAGRAM_SECRETS}: $(SHOGGOTH_CONFIG) $(SHOGGOTH_CHART_ROOT)/templates/*.yaml ${CLUSTERVIZ_CONFIG}
+	$(call clusterviz_run,cluster-secrets,ExternalSecret SecretStore PushSecret)
 
 fmt:
 	cp README.md .tmp/README.md.back
@@ -199,7 +194,15 @@ ghpages_action:
 
 yamlfmt:
 	# https://github.com/google/yamlfmt/blob/main/docs/config-file.md#basic-formatter
-	yamlfmt -formatter indent=4,retain_line_breaks=true shoggoth/k3s/*.yaml
+	# indent=2 matches the rest of the repo's YAML (shoggoth/<instance>.yaml,
+	# make/kube-diagrams.yaml, docs/arch_*.yaml); indent=4 re-indents even
+	# Chart.yaml's list entries, which is a different style, not a fix.
+	#
+	# `chart/templates/` is deliberately NOT in this glob. Those files are Go
+	# templates, not YAML: a bare `{{- /* ... */}}` header at column 0 opens a
+	# flow mapping, so all 62 fail to parse and the target exits 2. To check
+	# what the chart actually emits, run `make helm_lint`.
+	yamlfmt -formatter indent=2,retain_line_breaks=true shoggoth/chart/*.yaml
 
 
 get_skill:

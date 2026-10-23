@@ -67,11 +67,9 @@ class Redmine(HttpApiClient):
         self._user_logins = {}
 
     def _get_slave_password(self):
-        # Read the LDAP slave user's bind password from K8s. The
-        # maintenance SA's
-        # ``shoggoth-maintenance-secret-writer-ldap-ssh-read`` Role
-        # grants ``get`` on the four LDAP/SSH Secrets (see
-        # ``shoggoth/k3s/maintenance-secret-writer.yaml``).
+        # Read the LDAP slave user's bind password from K8s. The maintenance SA's
+        # ``shoggoth-maintenance-secret-writer-ldap-ssh-read`` Role grants
+        # ``get`` on the four LDAP/SSH Secrets.
         k8s = self._k8s or K8s()
         password = secrets_store.read("openldap/slave-password", key="password",
                                      k8s=k8s)

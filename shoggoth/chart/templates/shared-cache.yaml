@@ -1,0 +1,38 @@
+{{- /*
+  templates/shared-cache.yaml — single PVC shared across CI consumers.
+
+  Consumers: gitea-runner job pods (mount at /cache; slave:noble image's
+  CCWS_CACHE=/cache/ccws/ + PIP_CACHE_DIR=/cache/ccws/pip expect it),
+  slave-term interactive web terminal, Argo workflow pods (command-handler,
+  github-mirror-sync, slave-test) mount /cache from this PVC.
+
+  Capacity: 30Gi (covers pip wheels + ccws cache state with headroom).
+  Bump via storageClass.resources.patch if a project outgrows this; do not
+  re-create per-consumer PVCs.
+
+  No `app:` label — this is an internal artifact, not a service. It is
+  always-on as long as services.shared-cache.enabled is true.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "shared-cache")) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shoggoth-shared-cache
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shared-cache
+  annotations:
+    # Kept across `helm uninstall` so `make down` stops workloads but
+    # preserves data, matching the legacy envsubst path. Reinstall adopts
+    # it: shoggoth.labels survives uninstall, so Helm's ownership check
+    # still passes.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi
+  storageClassName: local-path
+{{- end }}

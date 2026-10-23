@@ -44,7 +44,7 @@ class SetupArgoWebhooks(GiteaCommand):
         # so the v4 webhook interceptor (which has no gitea parser)
         # is short-circuited by the Authorization header and
         # argo-server's gatekeeper does bearer validation against k8s.
-        # See shoggoth/k3s/web-internal.yaml for the gateway contract.
+        # The gateway contract is defined by the web-internal chart template.
         self.namespace = params.shoggoth_namespace
 
     def execute(self, projects=None):
@@ -66,7 +66,7 @@ class SetupArgoWebhooks(GiteaCommand):
             # command-handler pod.
             #
             # Webhook URL points at api.<DOMAIN>/argo/, not argo.<DOMAIN>:
-            # web-internal (shoggoth/k3s/web-internal.yaml) injects the
+            # web-internal injects the
             # argo-webhook-receiver SA token before proxying to argo:80,
             # so the v4 webhook interceptor (which has no gitea parser and
             # would 403 raw gitea payloads — webhookParsers at
@@ -167,7 +167,7 @@ class SetupRedmineArgoWebhooks:
             die("SHOGGOTH_DOMAIN is required for argo-webhook URL")
         # Same pattern as SetupArgoWebhooks above: deliver through
         # api.<DOMAIN>/argo/ so web-internal injects the argo-webhook-receiver
-        # bearer token (shoggoth/k3s/web-internal.yaml + argo-webhook-receiver.yaml)
+        # bearer token (web-internal.yaml + argo-webhook-receiver.yaml)
         # before forwarding to argo:80. Going directly (http://argo:80/...)
         # would trip the v4 interceptor's gitea/redmine signature matcher
         # absence (webhookParsers at interceptor.go:25-30 has no entry for

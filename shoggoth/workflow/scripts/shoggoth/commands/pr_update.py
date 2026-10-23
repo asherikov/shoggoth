@@ -1352,12 +1352,12 @@ class PrUpdateCommand(CommandBase):
         followed by a single ``git commit`` with the generated
         message. The squashed branch is then force-pushed.
 
-        ccws note: this operates on the manifest repo (the one
+        ccws note: this operates on the ccws repo (the one
         holding the working branch). Sub-repos keep their per-PR
         commit history; a full cross-repo squash would require a
         separate per-sub-repo reset+recommit loop that this handler
-        does not implement. For standalone repos the manifest is
-        the only repo and the squash is exact.
+        does not implement. For standalone repos the repo is the
+        only repo and the squash is exact.
         """
         repo_dir = self.shoggoth.repo_dir
         pr_branch = self.shoggoth.working_branch
@@ -1564,7 +1564,7 @@ class PrUpdateCommand(CommandBase):
         rebase is aborted and a failure comment posted. The
         rebased branch is force-pushed on success.
 
-        ccws note: same caveat as ``_slash_squash`` — the manifest
+        ccws note: same caveat as ``_slash_squash`` — the ccws repo
         is rebased; sub-repo branches are not.
         """
         repo_dir = self.shoggoth.repo_dir

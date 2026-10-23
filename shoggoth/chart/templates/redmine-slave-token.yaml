@@ -1,0 +1,41 @@
+{{- /*
+  templates/redmine-slave-token.yaml — ExternalSecret projecting the
+  Redmine slave (REST API) token into a K8s Secret.
+
+  Restores shoggott/k3s/external-secrets/redmine-slave-token.yaml,
+  which the chart migration dropped. The ``redmine-slave-token-push``
+  PushSecret reads this K8s Secret and pushes it back to OpenBao;
+  the ``slave_token_init.rb`` post-deploy hook (called from
+  redmine.yaml) is the authority on the Secret value. Without
+  ``creationPolicy: Orphan`` and ``refreshInterval: 0s`` the
+  ExternalSecret would race the script's fresh write, leaving the
+  OpenBao value stale.
+
+  See ``gitea-slave-token.yaml`` for the full controller-side reasoning;
+  the same comment applies verbatim to this file.
+
+  Gated on ``redmine``: the only consumer of the K8s Secret itself.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "redmine")) }}
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: redmine-slave-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redmine-slave-token
+spec:
+  secretStoreRef:
+    name: shoggoth-openbao
+    kind: SecretStore
+  target:
+    name: redmine-slave-token
+    creationPolicy: Orphan
+  data:
+    - secretKey: token
+      remoteRef:
+        key: redmine/slave-token
+        property: value
+  refreshInterval: 0s
+{{- end }}

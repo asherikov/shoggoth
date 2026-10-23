@@ -1,9 +1,11 @@
 - [Introduction](#introduction)
   - [Goals](#goals)
   - [Disclaimer](#disclaimer)
+  - [Requirements](#requirements)
   - [Comparison](#comparison)
 - [Features](#features)
 - [Architecture](#architecture)
+  - [Services outside of VPN](#services-outside-of-vpn)
   - [Service interaction diagram](#service-interaction-diagram)
   - [Interaction with the client and external
     services](#interaction-with-the-client-and-external-services)
@@ -18,7 +20,10 @@
 - [Troubleshooting](#troubleshooting)
 - [Known issues](#known-issues)
 - [References](#references)
+  - [Helm migration](#helm-migration)
   - [Agentic coding](#agentic-coding)
+- [TODO](#todo)
+  - [Gitea](#gitea)
 
 Introduction
 ============
@@ -46,6 +51,20 @@ Disclaimer
 
 - The project is tailored for my primary stack (Ubuntu/C++/python) and working
   style (no IDE, everything-as-code).
+
+Requirements
+------------
+
+The Makefile and chart assume specific tool versions. The "Version" column
+lists the minimum; newer is fine unless called out.
+
+| Tool        | Version   | Notes                                                                                                                                                                              |
+|-------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| k3s         | ≥ 1.34    | Required for the GA features the chart relies on: pod-level `ttlSecondsAfterFinished` (GA 1.29), container-level `restartPolicy` for native sidecar ordering (GA 1.33). Pinned in `shoggoth/shoggoth.nix`. |
+| helm        | ≥ 3.17.0  | Required for `--take-ownership`, which `make up` / `make start` / `make stop` / `make restart_service` rely on to adopt resources left unlabelled by the pre-chart envsubst path. The flag does not exist before 3.17.0 — an older helm aborts with `unknown flag: --take-ownership`. `make helm_version_gate` checks this and is a prerequisite of all four targets. |
+| kubectl     | bundled   | Comes with k3s; the operator host uses the same version (transferred via the SSH-tunneled kubeconfig).                                                                              |
+| yq          | mikefarah v4 | The `Makefile` reads every configuration value out of `shoggoth/<instance>.yaml` through yq. The Python `yq` package is a *different* tool with a different CLI — install mikefarah's release (https://github.com/mikefarah/yq). |
+| envsubst    | gettext   | Used by `make host_install_nixos` to render `shoggoth.nix` and `ports.nix`. Bundled with most distros; on Alpine it is in the `gettext` package. |
 
 Comparison
 ----------
@@ -87,8 +106,8 @@ configurable domain, set to `s.local` by default.
   - `web-external.` — TLS-terminating reverse proxy
     (<https://en.angie.software/angie/>) that provides HTTPS access to the
     WireGuard web UI from outside the VPN, by server IP address
-  - `dns.` — CoreDNS <https://coredns.io/> domain aliasing and DNS
-    blacklisting with StevenBlack/hosts <https://github.com/StevenBlack/hosts>.
+  - `dns.` — CoreDNS <https://coredns.io/> domain aliasing and DNS blacklisting
+    with StevenBlack/hosts <https://github.com/StevenBlack/hosts>.
 - Caching:
   - `apt-cache.` — Debian/Ubuntu package caching proxy
     <https://github.com/sameersbn/docker-apt-cacher-ng>.
@@ -104,10 +123,11 @@ configurable domain, set to `s.local` by default.
     - `git-pages.` — Git Pages static site hosting <https://git-pages.org/>.
     - `gitea-runner` — Gitea Actions runner
       <https://docs.gitea.com/next/usage/actions/act-runner>.
-  - `argo.` — Argo Workflows orchestration <https://argo-workflows.readthedocs.io/>.
-  - `slave-dind.` – Docker-in-Docker service for CI and workflow executors:
-    DinD daemon + ci-cache + git-cred sidecar (ssh-agent + git-credential-cache
-    for every CI container).
+  - `argo.` — Argo Workflows orchestration
+    <https://argo-workflows.readthedocs.io/>.
+  - `slave-dind.` – Docker-in-Docker service for CI and workflow executors: DinD
+    daemon + ci-cache + git-cred sidecar (ssh-agent + git-credential-cache for
+    every CI container).
   - `slave-term.` — interactive web terminal:
     <https://github.com/tsl0922/ttyd> + tmux + Qwen Code. Separate Deployment
     that shares the git-cred-bootstrap sidecar with `slave-dind.`
@@ -137,7 +157,7 @@ configurable domain, set to `s.local` by default.
   - `openbao.` — secret management <https://openbao.org/>.
 - Web (internal):
   - `<domain>` — static welcome home page, served by `angie`.
-  - `api.` — single entry point for other services' API, served by `angie`.
+  - `api.` — single entry point for other services’ API, served by `angie`.
 
 Architecture
 ============
@@ -215,11 +235,11 @@ LDAP directory for user authentication across services that support it.
 
 Three LDAP accounts exist, each serving a distinct role:
 
-| Account | Purpose |
-|----|----|----|
-| `admin` | OpenLDAP administrator (`cn=admin`); used for LDAP management and as Grafana’s local admin login |
-| `ldapauth` | Service bind account — services that authenticate users via LDAP bind as this account |
-| `slave` | CI/automation account — reserved for slave containers and workflows |
+| Account    | Purpose                                                                                          |     |
+|------------|--------------------------------------------------------------------------------------------------|-----|
+| `admin`    | OpenLDAP administrator (`cn=admin`); used for LDAP management and as Grafana’s local admin login |     |
+| `ldapauth` | Service bind account — services that authenticate users via LDAP bind as this account            |     |
+| `slave`    | CI/automation account — reserved for slave containers and workflows                              |     |
 
 ### Password management
 
@@ -254,12 +274,12 @@ granting full access to OpenBao’s secret store. This allows human operators in
 
 ### Services
 
-| Service | Auth method | Notes |
-|----|----|----|
-| Gitea | LDAP (bind as `ldapauth`) | On-the-fly account creation; `admins` group members become Gitea admins |
-| Redmine | LDAP (bind as `ldapauth`) | On-the-fly account creation; auto-configured via entrypoint |
-| CDash | LDAP (bind as `ldapauth`) | Configured in entrypoint |
-| OpenBao | LDAP (bind as `ldapauth`) | `admins` → `shoggoth-admin` policy |
+| Service | Auth method               | Notes                                                                   |
+|---------|---------------------------|-------------------------------------------------------------------------|
+| Gitea   | LDAP (bind as `ldapauth`) | On-the-fly account creation; `admins` group members become Gitea admins |
+| Redmine | LDAP (bind as `ldapauth`) | On-the-fly account creation; auto-configured via entrypoint             |
+| CDash   | LDAP (bind as `ldapauth`) | Configured in entrypoint                                                |
+| OpenBao | LDAP (bind as `ldapauth`) | `admins` → `shoggoth-admin` policy                                      |
 
 Client Configuration
 ====================
@@ -291,11 +311,11 @@ Run the setup script on each client machine.
 
 The script generates the following files when `--client-conf` is used:
 
-| File | Description |
-|----|----|
-| `env` | Environment variables for all services |
-| `apt-cache.conf` | APT cache configuration |
-| `qwen-settings.json` | Qwen Code telemetry configuration |
+| File                 | Description                            |
+|----------------------|----------------------------------------|
+| `env`                | Environment variables for all services |
+| `apt-cache.conf`     | APT cache configuration                |
+| `qwen-settings.json` | Qwen Code telemetry configuration      |
 
 MCP server configuration and skills are provided by the shoggoth Qwen Code
 plugin. Install it after running `setup-client.sh`:
@@ -320,17 +340,17 @@ environment variables. Moreover gitea cli requires user name to be specified in
 addition to a token for smooth operation.
 
 The container image registry (zot) is affected by upstream issue
-[#4357](https://github.com/project-zot/zot/issues/4357): an on-demand sync
-that is interrupted (host reboot, pod restart, client disconnect at the wrong
-moment) leaves a stale `.sync/<uuid>/` staging directory. On the next start,
-zot does not clean these up — re-pulling the same image may re-download
-already-cached layers, and in some cases every by-tag manifest GET across all
-repositories hangs indefinitely. The `registry` Deployment works around this
-with a `cleanup-sync-staging` initContainer that removes any `.sync` directories
-before zot starts on every pod restart; if a registry pull ever hangs and
+[\#4357](https://github.com/project-zot/zot/issues/4357): an on-demand sync that
+is interrupted (host reboot, pod restart, client disconnect at the wrong moment)
+leaves a stale `.sync/<uuid>/` staging directory. On the next start, zot does
+not clean these up — re-pulling the same image may re-download already-cached
+layers, and in some cases every by-tag manifest GET across all repositories
+hangs indefinitely. The `registry` Deployment works around this with a
+`cleanup-sync-staging` initContainer that removes any `.sync` directories before
+zot starts on every pod restart; if a registry pull ever hangs and
 `kubectl logs deploy/registry -p` shows no progress, restart the pod to clear
-the stale state. The pod's persistent volume is preserved across restarts,
-so no cached images are lost.
+the stale state. The pod’s persistent volume is preserved across restarts, so no
+cached images are lost.
 
 Service Usage Examples
 ----------------------
@@ -404,12 +424,12 @@ and restarting the service.
 ### Redmine MCP Server (AI Agent Integration)
 
 1.  Log in to Redmine with administrator privileges
-2.  Go to "Administration" → "Settings" → "API" tab
-3.  Check "Enable REST web service"
-4.  Generate "API access key" in personal settings.
+2.  Go to “Administration” → “Settings” → “API” tab
+3.  Check “Enable REST web service”
+4.  Generate “API access key” in personal settings.
 
-MCP server configuration is provided by the shoggoth Qwen Code plugin (see
-Gitea MCP section above).
+MCP server configuration is provided by the shoggoth Qwen Code plugin (see Gitea
+MCP section above).
 
 ### Git Pages (Static Site Hosting)
 
@@ -419,23 +439,71 @@ an example.
 Server Management
 -----------------
 
-Use the Makefile targets for server management:
+Workload lifecycle is managed by the Helm chart in `shoggoth/chart/`. The
+Makefile targets below are thin wrappers around `helm upgrade --install`,
+`helm uninstall`, and `helm upgrade` with a single toggle flipped. The legacy
+`envsubst | kubectl apply` path that used to back `make up` and `make down` was
+removed in phase 4 of
+[`docs/helm-migration-plan.md`](docs/helm-migration-plan.md); everything applied
+by these targets is owned by the chart release `shoggoth-${INSTANCE}` in
+namespace `${INSTANCE}`.
+
+Key consequences of the Helm takeover, all covered by tests in
+[`docs/helm-migration-parity-check.md`](docs/helm-migration-parity-check.md):
+
+- `make down` is `helm uninstall`, but every chart-owned Secret and PVC carries
+  `helm.sh/resource-policy: keep`, so data persists. The Namespace itself is
+  never part of the release manifest (it is created by `--create-namespace`),
+  which avoids the namespace-cascade that would otherwise drop the kept
+  resources.
+- `make purge` still deletes the namespace and host data; it deliberately does
+  **not** run `helm uninstall` first, because the release’s record lives in the
+  namespace being deleted and the cluster-scoped ClusterRoles in
+  `argo-workflows.yaml` / `otelcol.yaml` are shared across instances.
+- Per-service on/off goes through `helm upgrade --reuse-values --set
+  services.<label>.enabled=<bool>` (Helm 3.13+). The release Secret
+  (`sh.helm.release.v1.shoggoth-${INSTANCE}.v<n>`) is the only place the
+  current toggles live — inspect it with
+  `helm get values shoggoth-${INSTANCE} -n ${INSTANCE}`. Edit the per-instance
+  config (`shoggoth/<instance>.yaml`) and run a toggle in the same call to
+  apply both at once: `--values` and `--set` are layered, last write wins.
 
 ``` bash
-# Start all services
+# Start (or upgrade) the chart release for INSTANCE=shoggoth:
+#   helm upgrade --install shoggoth-shoggoth shoggoth/chart \
+#     --namespace shoggoth --create-namespace \
+#     --reuse-values \
+#     --values shoggoth/shoggoth.yaml
 make up
 
-# Stop all services
+# Stop all services (helm uninstall); PVCs and Secrets preserved:
 make down
 
-# View logs
+# Flip a single service (no file edit; carried by --reuse-values):
+make start  SERVICE=gitea-runner
+make stop   SERVICE=gitea-runner
+make restart_service SERVICE=gitea-runner
+
+# Re-apply the CRDs on their own (`make up` already does this first):
+make crds_apply
+
+# View logs (kubectl + host-side pod-log fallback)
 make log SERVICE=localai
 
-# SSH to server
+# SSH to the host
 make ssh
 
-# Sync changes and restart
+# Sync the local tree to the host and bring it back up from scratch
 make sync_restart
+```
+
+Destructive operations live next door:
+
+``` bash
+make purge                  # delete namespace, host data, remote dir
+make wipe_openbao           # wipe OpenBao raft + unseal-key secret
+make k3s_purge_secrets      # delete every Secret in the namespace
+make drop_image_tag IMAGE=<repo> TAG=<tag>   # evict a registry tag
 ```
 
 Troubleshooting
@@ -459,70 +527,65 @@ Troubleshooting
 Known issues
 ============
 
-- Argo Workflows v4.1.4 webhook dispatch produces duplicate `Workflow` CRDs
-  from a single webhook delivery. `argo-server` wraps the per-binding
-  `client.Workflows(...).Create(...)` call in a `waitutil.Backoff` retry
-  loop using `retry.DefaultRetry` (5 steps × 10 ms,
-  `k8s.io/client-go/util/retry`). When the apiserver accepts the Create
-  but the response is lost before argo-server reads it (transient network
-  blip, apiserver load, kube-apiserver connection reaper), the client
-  returns a transient error and Backoff retries — and because the workflow
-  `Name` is freshly randomised per call
-  (`wf.SetName(wf.GetGenerateName() + util.RandSuffix())`), every
-  successful retry produces a fresh `Workflow` CRD. Result: one webhook
-  delivery → two (or occasionally more) workflows, each spawning its own
-  pod.
+- Argo Workflows v4.1.4 webhook dispatch produces duplicate `Workflow` CRDs from
+  a single webhook delivery. `argo-server` wraps the per-binding
+  `client.Workflows(...).Create(...)` call in a `waitutil.Backoff` retry loop
+  using `retry.DefaultRetry` (5 steps × 10 ms, `k8s.io/client-go/util/retry`).
+  When the apiserver accepts the Create but the response is lost before
+  argo-server reads it (transient network blip, apiserver load, kube-apiserver
+  connection reaper), the client returns a transient error and Backoff retries —
+  and because the workflow `Name` is freshly randomised per call
+  (`wf.SetName(wf.GetGenerateName() + util.RandSuffix())`), every successful
+  retry produces a fresh `Workflow` CRD. Result: one webhook delivery → two (or
+  occasionally more) workflows, each spawning its own pod.
 
-  v3.7.0 and the previous kestra-based dispatch did not have this issue:
-  neither wrapped the workflow/execution Create in a retry loop, so a
-  transient response-loss could not produce duplicates. v4's retry was
-  introduced as part of broader "make event dispatch more resilient"
-  changes; the resilience comes at the cost of double-creation on flaky
-  networks.
+  v3.7.0 and the previous kestra-based dispatch did not have this issue: neither
+  wrapped the workflow/execution Create in a retry loop, so a transient
+  response-loss could not produce duplicates. v4’s retry was introduced as part
+  of broader “make event dispatch more resilient” changes; the resilience comes
+  at the cost of double-creation on flaky networks.
 
-  Patchable upstream by either (a) hashing `{binding-name,
-  payload-sha256, discriminator}` for an idempotent workflow
-  `generateName` so retries produce `AlreadyExists: Conflict` that
-  Backoff treats as success, or (b) lowering the retry budget to
-  `Steps: 1` for the dispatch's Create call (keeping retry on
-  Watch/List operations only). In the meantime, the doubling is
-  accepted. If the noise becomes problematic, a post-creation dedup
-  pass can be added to the maintenance DAG
-  (`shoggoth/workflow/argo/templates/maintenance.yaml`) that finds
-  duplicate workflows by `workflowEventBinding` label and sub-second
-  `creationTimestamp` deltas and deletes all but the oldest — this is
-  not implemented because the duplicates are inert (each is a normal
-  Failed workflow, not a corrupted one).
+  Patchable upstream by either (a) hashing
+  `{binding-name, payload-sha256, discriminator}` for an idempotent workflow
+  `generateName` so retries produce `AlreadyExists: Conflict` that Backoff
+  treats as success, or (b) lowering the retry budget to `Steps: 1` for the
+  dispatch’s Create call (keeping retry on Watch/List operations only). In the
+  meantime, the doubling is accepted. If the noise becomes problematic, a
+  post-creation dedup pass can be added to the maintenance DAG
+  (`shoggoth/workflow/argo/templates/maintenance.yaml`) that finds duplicate
+  workflows by `workflowEventBinding` label and sub-second `creationTimestamp`
+  deltas and deletes all but the oldest — this is not implemented because the
+  duplicates are inert (each is a normal Failed workflow, not a corrupted one).
 
-  Source: `server/event/dispatch/operation.go`, the `Dispatch` and
-  `dispatch` functions. To confirm argo-side (vs. gitea-side) is the
-  source, compare
+  Source: `server/event/dispatch/operation.go`, the `Dispatch` and `dispatch`
+  functions. To confirm argo-side (vs. gitea-side) is the source, compare
   `kubectl get workflows -n shoggoth -l workflows.argoproj.io/workflow-event-binding=gitea-pr-update`
-  against gitea's *Recent Deliveries* count for the argo webhook URL —
-  if the workflow count exceeds the delivery count, the doubling is on
-  the argo side.
+  against gitea’s *Recent Deliveries* count for the argo webhook URL — if the
+  workflow count exceeds the delivery count, the doubling is on the argo side.
 
-- `kubectl` jsonpath extraction broken for several common forms in Alpine's
+- `kubectl` jsonpath extraction broken for several common forms in Alpine’s
   `kubectl` 1.32 (the version packaged in `tools` and used by every
-  `wait-bootstrap` init container). The forms
-  `{.data.tls.crt}` (dot notation for keys with dots), `{.data["X"]}`
-  (double-quoted bracket form for any key), and bare `jsonpath='{.data[K]}'`
-  inside a YAML literal block scalar (bash strips the inner quotes via
-  word-splitting, leaving `{.data[K]}` with an unquoted key) either crash or
-  silently return empty. Symptom: `wait-bootstrap` polls 60 times × 10 s and
-  then `FAIL`s even though the Secret is populated.
+  `wait-bootstrap` init container). The forms `{.data.tls.crt}` (dot notation
+  for keys with dots), `{.data["X"]}` (double-quoted bracket form for any key),
+  and bare `jsonpath='{.data[K]}'` inside a YAML literal block scalar (bash
+  strips the inner quotes via word-splitting, leaving `{.data[K]}` with an
+  unquoted key) either crash or silently return empty. Symptom: `wait-bootstrap`
+  polls 60 times × 10 s and then `FAIL`s even though the Secret is populated.
 
   Convention: all `wait-bootstrap` loops must read Secret data keys via `jq`:
 
-  ```bash
+  ``` bash
   kubectl get secret X -n N -o json 2>/dev/null \
       | jq -e --arg k KEY '(.data[$k] // "") | length > 0' >/dev/null 2>&1
   ```
 
   Do not reintroduce `kubectl get secret ... -o jsonpath=...` in any new
   `wait-bootstrap` loop. To diagnose a similar failure without restarting a
-  deployment, run
-  `make k3s_diag_wait_bootstrap_pod SERVICE=<name>` from this repository.
+  deployment, run `make log SERVICE=<name>` (init-container states, container
+  logs and recent events) and `make k3s_check_secret SECRET=<name>` (whether a
+  Secret exists and which of its data keys are populated). If a
+  `helm uninstall --wait` is itself wedged, `make down` reports the stuck CR
+  kinds and `FORCE=1 make down` clears their finalizers and retries.
 
 References
 ==========
@@ -534,6 +597,85 @@ References
 - <https://leviwheatcroft.github.io/selfhosted-awesome-unlist/> (not maintained)
 - <https://gitea.com/gitea/awesome-gitea>
 - <https://github.com/trueforge-org/truecharts>
+
+Helm migration
+--------------
+
+The deployment story used to be `make up → envsubst | kubectl apply`. It is now
+`make up → helm upgrade --install shoggoth-${INSTANCE} shoggoth/chart --create-namespace ...`.
+Two documents describe the migration and how the chart is kept byte-equivalent
+to the legacy apply path:
+
+- [`docs/helm-migration-plan.md`](docs/helm-migration-plan.md) — the original
+  nine-phase plan (`§12`), with the per-service mapping table (`§7`), the values
+  schema (`§6`), the rollout / parallel-run strategy (`§13`), risks (`§14`),
+  open decisions (`§15`), and the acceptance criteria (`§16`).
+- [`docs/helm-migration-parity-check.md`](docs/helm-migration-parity-check.md) —
+  the operational log: which checks caught which bugs at each phase, which
+  `services.<x>.enabled` toggles were added or removed, and what is still owed
+  (notably a first real `helm lint && make helm_lint` run against the chart,
+  since helm is not installed in this dev container).
+
+Operator notes:
+
+- `make helm_lint` runs `helm lint --strict`, renders the chart **once** with
+  `shoggoth/shoggoth.yaml` (which sets no `services:` block, so that render is
+  everything-on), and checks the render for duplicate mapping keys. It does
+  **not** verify the per-service `services.*.enabled` gates: `helm lint` only
+  proves a template parses, so a template that lost its gate ships silently and
+  `make stop SERVICE=<x>` has no effect. Gate coverage is manual. To check one
+  service, render it off and confirm its resources are gone — here `3` becomes
+  `0`:
+
+      helm template shoggoth-gate shoggoth/chart -n lint \
+        --values shoggoth/shoggoth.yaml | grep -cE '^[[:space:]]*app:[[:space:]]*grafana[[:space:]]*$'
+      helm template shoggoth-gate shoggoth/chart -n lint \
+        --values shoggoth/shoggoth.yaml --set services.grafana.enabled=false \
+        | grep -cE '^[[:space:]]*app:[[:space:]]*grafana[[:space:]]*$'
+
+  Anchor the pattern: `grep 'app: gitea'` also matches `app: gitea-runner`, and
+  two services (`gitea`, `openbao`) currently keep resources in the render with
+  their own `services.<x>.enabled` set to `false`. That check used to run against
+  a `chart/test/values-no-services.yaml`; both that file and the second render
+  are gone, along with the rest of `chart/test/`.
+- `shoggoth/shoggoth.yaml` is the per-instance configuration and the single
+  source of truth. `make up` hands it to Helm with `--values` and the chart
+  derives every `SHOGGOTT_*` pod environment variable from it. It is
+  hand-maintained, not generated: nothing is passed with `--set`, and the
+  Makefile reads values out of this one file (`SHOGGOTH_CFG` in `Makefile`) rather
+  than defining them separately. `shoggoth/chart/values.yaml` documents every
+  key; anything omitted here falls back to that default. Requires `yq`
+  (mikefarah v4 — the Python `yq` package is a different tool).
+- `shoggoth/<instance>.env` (the old `KEY=VALUE` form) now serves only
+  `make host_install_nixos`, which renders `shoggoth.nix` / `ports.nix` with
+  envsubst. That is the one deliberate exception to "no variable injection":
+  those are NixOS host files, not Helm input.
+- `shoggoth/private/services-<instance>.yaml` does not exist; there is no
+  per-service toggle file to keep separate from config. `make start` /
+  `make stop` carry the current set of toggles inside the release Secret
+  via `helm upgrade --reuse-values --set services.<label>.enabled=<bool>`.
+  Hand-edit `shoggoth/<instance>.yaml` is still the source of truth for the
+  per-instance config (`identity.domain`, ports, etc.) and is passed via
+  `--values` on every helm call — `make up` does both the install and the
+  initial config overlay.
+- `shoggoth/k3s/` — the pre-chart envsubst manifest tree — has been **removed**.
+  Every file in it was superseded by `shoggoth/chart/templates/<name>.yaml` and
+  carried a `# DEPRECATED:` header. `scripts/parity_check.py`, which diffed each
+  template against its legacy counterpart, was removed with it: its entire value
+  was that fixed baseline, so it had nothing left to compare against. Recover a
+  file with `git show e43fd56:shoggoth/k3s/<name>.yaml`. Template comments cite
+  that tree as `legacy shoggoth/k3s/<name>.yaml` so the provenance survives.
+- `make crds_apply` applies the CRDs straight from their upstream sources with
+  `kubectl apply --server-side`: the Argo submodule's per-CRD files and the
+  External Secrets bundle. There is no vendored copy and no generator — see
+  `make/k3s.mk` for why they must stay out of the chart.
+- `make clusterviz` diagrams are one pipeline:
+  `helm template | yq 'select(kind in …)' | kube-diagrams -`.
+- `make up` validates `shoggoth/<instance>.yaml` indirectly: the file is
+  handed straight to helm with `--values`, so a missing or malformed one
+  surfaces as a helm parse error rather than a quieter half-rendered
+  Service. Service on/off state lives in the release Secret, set via
+  `make start` / `make stop` — there is no per-service toggle file.
 
 Agentic coding
 --------------
@@ -559,9 +701,10 @@ Gitea
 
 - Migration of gitea action runner to kubernetes backend. New feature,
   presumably buggy, currently fails with
-```
-Run actions/checkout@v7
-Error: extract to /: Process completed with exit code 2.: tar:
-var/run/act/actions/.../.gitattributes attributes: Cannot open: Invalid
-cross-device link
-```
+
+<!-- -->
+
+    Run actions/checkout@v7
+    Error: extract to /: Process completed with exit code 2.: tar:
+    var/run/act/actions/.../.gitattributes attributes: Cannot open: Invalid
+    cross-device link

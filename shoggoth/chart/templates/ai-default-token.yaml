@@ -1,0 +1,46 @@
+{{- /*
+  templates/ai-default-token.yaml — ExternalSecret projecting the
+  shoggoth-wide AI default token (litellm, localai, headroom) into a
+  K8s Secret.
+
+  Restores shoggoth/k3s/external-secrets/ai-default-token.yaml, which
+  the chart migration dropped. The initContainer in litellm.yaml waits
+  on ``externalsecret/ai-default-token``; the resulting Secret is
+  referenced by ``secretKeyRef`` in litellm.yaml and (transitively) by
+  every AI consumer routing through it.
+
+  ``creationPolicy: Orphan``: when ``.Values.ai.defaultTokenFileRef``
+  is set, openbao-bootstrap Phase B mirrors the file contents to
+  ``ai/default-token`` in OpenBao on every bootstrap run. The file is
+  authoritative; a controller refresh must not race the bootstrap.
+
+  Gated on ``secret-store``: no single service dominates; ``litellm``,
+  ``localai``, and ``headroom`` all consume the result, and using
+  ``secret-store`` (the read-side SecretStore gate) keeps the
+  ``make start|stop SERVICE=<consumer>`` toggles independent of the
+  Secret projection. ``secret-store`` is default-on, so a default
+  install is unaffected.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "secret-store")) }}
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: ai-default-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ai-default-token
+spec:
+  secretStoreRef:
+    name: shoggoth-openbao
+    kind: SecretStore
+  target:
+    name: ai-default-token
+    creationPolicy: Orphan
+  data:
+    - secretKey: token
+      remoteRef:
+        key: ai/default-token
+        property: value
+  refreshInterval: 5m
+{{- end }}

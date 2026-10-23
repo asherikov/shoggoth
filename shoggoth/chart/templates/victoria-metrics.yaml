@@ -1,0 +1,123 @@
+{{- /*
+  templates/victoria-metrics.yaml — VictoriaMetrics metrics backend.
+  1-year retention, local-path
+  storage, OpenTelemetry traces exporter wired to otelcol.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "victoria-metrics")) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoria-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: victoria-metrics
+    app.kubernetes.io/component: victoria-metrics
+spec:
+  selector:
+    app: victoria-metrics
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: victoria-metrics-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: victoria-metrics
+    app.kubernetes.io/component: victoria-metrics
+  annotations:
+    # Kept across `helm uninstall` so `make down` stops workloads but
+    # preserves data, matching the legacy envsubst path. Reinstall adopts
+    # it: shoggoth.labels survives uninstall, so Helm's ownership check
+    # still passes.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victoria-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: victoria-metrics
+    app.kubernetes.io/component: victoria-metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: victoria-metrics
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.selectorLabels" . | nindent 8 }}
+        app: victoria-metrics
+        app.kubernetes.io/component: victoria-metrics
+    spec:
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+        - {{ .Values.identity.dnsIp }}
+        searches:
+        - {{ .Release.Namespace }}.svc.cluster.local
+        - svc.cluster.local
+        - cluster.local
+      initContainers: []
+      containers:
+      - name: victoria-metrics
+        image: victoriametrics/victoria-metrics:v1.152.0
+        imagePullPolicy: IfNotPresent
+        args:
+        - -retentionPeriod=1y
+        - -selfScrapeInterval=15s
+        - -httpListenAddr=:80
+        ports:
+        - containerPort: 80
+          name: http
+        env:
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4318
+        - name: SHOGGOTH_DOMAIN
+          value: {{ .Values.identity.domain }}
+        volumeMounts:
+        - name: data
+          mountPath: /victoria-metrics-data
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 100m
+          limits:
+            memory: 512Mi
+            cpu: 1000m
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 6
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: victoria-metrics-data
+{{- end }}

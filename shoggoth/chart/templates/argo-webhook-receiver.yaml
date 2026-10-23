@@ -1,0 +1,83 @@
+{{- /*
+  templates/argo-webhook-receiver.yaml — minimal SA + RBAC for delivering
+  gitea/redmine webhook events to argo-server via web-internal.
+
+  Why a separate Role (not argo-workflow-executor): the v4 event controller
+  reads workfloweventbindings; the executor Role is missing that permission.
+  See the upstream controller code paths that drove this split.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "argo-webhook-receiver")) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-webhook-receiver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: argo-webhook-receiver
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-webhook-receiver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: argo-webhook-receiver
+rules:
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workfloweventbindings
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflowtemplates
+  verbs:
+  - get
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflows
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-webhook-receiver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: argo-webhook-receiver
+subjects:
+- kind: ServiceAccount
+  name: argo-webhook-receiver
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: argo-webhook-receiver
+  apiGroup: rbac.authorization.k8s.io
+---
+# Long-lived bearer token consumed by web-internal. K8s populates
+# .data.token automatically when the Secret has type
+# kubernetes.io/service-account-token and an annotation naming the SA.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: argo-webhook-receiver-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: argo-webhook-receiver
+  annotations:
+    # Kept across `helm uninstall` so `make down` stops workloads but
+    # preserves data, matching the legacy envsubst path.
+    helm.sh/resource-policy: keep
+    kubernetes.io/service-account.name: argo-webhook-receiver
+type: kubernetes.io/service-account-token
+{{- end }}
