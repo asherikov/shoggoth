@@ -115,6 +115,17 @@ CLEANUP_GRACE_S = 180
 CLEANUP_NOT_READY_BUDGET_S = 120
 CLEANUP_POLL_S = 10
 
+# Container `waiting` reasons that are a normal pre-start state, not a
+# failure. The kubelet reports a container this way from the moment the pod is
+# created until the image is pulled and the process starts; containers in the
+# same pod start in parallel, so the cleanup sidecar routinely polls and sees
+# sshd waiting this way while ttyd is already up. Treating it as terminal
+# armed the grace timer on a healthy sandbox.
+CLEANUP_TRANSIENT_WAITING_REASONS = frozenset({
+    "ContainerCreating",
+    "PodInitializing",
+})
+
 
 def log(msg):
     """stderr log; the kubelet captures the init/main/cleanup
@@ -498,7 +509,13 @@ def cleanup():
     # Track the first time each termination signal was observed.
     # The first signal starts the grace timer; once that timer
     # elapses, the pod is deleted.
+    #
+    # `seen_terminated_at` belongs to the ttyd branches alone. The sshd
+    # branch keeps its own clock so that a signal which later clears -- or
+    # which was never real -- cannot leave a stale timestamp behind that
+    # silently consumes the next branch's grace window.
     seen_terminated_at = 0.0
+    seen_sshd_down_at = 0.0
     seen_not_ready_at = 0.0
     while time.time() < deadline:
         try:
@@ -533,26 +550,40 @@ def cleanup():
         # and it is terminal, so it does not wait on the
         # not-ready budget: the pod can never recover.
         #
-        # Only `terminated` / `waiting` are treated as fatal. A
-        # `running` sshd is the normal startup state (it blocks in
-        # _wait_for_git_cred and _wait_for_repo_ready before exec'ing
-        # sshd), so it must not be mistaken for a failure.
+        # Only a genuinely terminated sshd, or one waiting for a reason
+        # that will not resolve on its own, is fatal. A `running` sshd is
+        # the normal startup state (it blocks in _wait_for_git_cred and
+        # _wait_for_repo_ready before exec'ing sshd), and the transient
+        # waiting reasons (ContainerCreating, PodInitializing) are how the
+        # kubelet reports every container between pod creation and process
+        # start -- the normal pre-start state, not a failure. This runs on
+        # its own clock: a signal that clears below resets it, so it can
+        # never pre-arm the ttyd branches' shared grace window.
         sshd = _container_state(pod_json, "sshd")
-        if sshd is not None and (sshd["terminated"] or sshd["waiting"]):
+        sshd_down = False
+        if sshd is not None:
+            if sshd["terminated"]:
+                sshd_down = True
+            elif (sshd["waiting"]
+                  and sshd["waiting_reason"]
+                  not in CLEANUP_TRANSIENT_WAITING_REASONS):
+                sshd_down = True
+        if sshd_down:
             reason = (f"exit_code={sshd['exit_code']}"
                       if sshd["terminated"]
                       else f"waiting_reason={sshd['waiting_reason']}")
-            if seen_terminated_at == 0:
-                seen_terminated_at = time.time()
+            if seen_sshd_down_at == 0:
+                seen_sshd_down_at = time.time()
                 log(f"cleanup: sshd is down ({reason}) and pod Ready="
                     f"{_pod_ready(pod_json)}; without sshd the pod can "
                     f"never go Ready, so neither ttyd nor ssh is "
                     f"reachable. Deleting after {CLEANUP_GRACE_S}s "
                     f"grace. Check 'kubectl logs {pod_name} -c sshd'")
-            if (time.time() - seen_terminated_at) >= CLEANUP_GRACE_S:
+            if (time.time() - seen_sshd_down_at) >= CLEANUP_GRACE_S:
                 break
             time.sleep(5)
             continue
+        seen_sshd_down_at = 0.0
         # 1) ttyd exited cleanly. Common path: user closed the
         # browser, ttyd --once exits, the kubelet marks the
         # container terminated. Wait CLEANUP_GRACE_S so the

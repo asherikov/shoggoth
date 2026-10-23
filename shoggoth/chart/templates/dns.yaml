@@ -108,6 +108,7 @@ spec:
       containers:
       - name: coredns
         image: rancher/mirrored-coredns-coredns:1.14.7
+        imagePullPolicy: IfNotPresent
         args:
         - -conf
         - /etc/coredns/Corefile

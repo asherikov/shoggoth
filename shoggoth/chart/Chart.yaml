@@ -2,10 +2,11 @@ apiVersion: v2
 name: shoggoth
 description: Shoggoth self-hosted agentic development multitool (single-node K3s).
 type: application
-# Chart version bumps per docs/helm-migration-plan.md §3 — tracked in CHANGELOG.md.
+# Chart version. Bump it on any change to what the chart renders; the
+# rationale for each bump is recorded in the comment block below.
 version: 0.1.1
 # appVersion reflects the upstream "shoggoth" image — updated by `make chart-version-bump`
-# (todo: add to make/chore.mk) by reading the tag from CHANGELOG.md or git describe.
+# (todo: add to make/chore.mk) by reading the tag from `git describe`.
 #
 # 0.1.1 (2026-10-21): chart-restoration of the 22 per-instance
 # ExternalSecret/PushSecret resources from the deleted
@@ -31,9 +32,27 @@ maintainers:
 # vendored `external-secrets/deploy/crds/bundle.yaml`).
 #
 # We deliberately keep these directories versioned instead of declaring
-# Helm `dependencies:` for argo-workflows / external-secrets charts —
-# per docs/helm-migration-plan.md §8 — to preserve offline-first deploys:
+# Helm `dependencies:` for argo-workflows / external-secrets charts, to
+# preserve offline-first deploys:
 # `helm install` on an air-gapped host must not require network egress.
 dependencies: []
-kubeVersion: ">=1.24.0-0"
+# Minimum Kubernetes version. Do not lower this without auditing every use of
+# the features below -- an API server older than the floor silently prunes the
+# unknown field rather than rejecting the manifest, so the chart installs and
+# then misbehaves instead of failing loudly.
+#
+#   * container-level `restartPolicy: Always` (native sidecar ordering):
+#     openbao.yaml (the unseal sidecar) and slave-term.yaml (git-cred).
+#     Added 1.28, GA 1.33. If the API server drops this field, git-cred
+#     silently demotes from a native sidecar to an ordinary init container
+#     and inherits the pod's restartPolicy -- the unbreakable loop
+#     argo-workflows.yaml documents for its own git-cred sidecar.
+#   * pod-level `spec.ttlSecondsAfterFinished`: zz-crd-ready-wait.yaml.
+#     Added 1.23, GA 1.29.
+#
+# 1.33 is the true API floor; this is set to 1.34 to match the k3s floor the
+# project deploys and documents (README version table, and the comment on
+# `services.k3s` in shoggoth/shoggoth.nix). Loosen it only alongside a
+# deliberate decision to support upstream Kubernetes.
+kubeVersion: ">=1.34.0-0"
 icon: https://raw.githubusercontent.com/asherikov/shoggoth/main/docs/shoggoth.svg

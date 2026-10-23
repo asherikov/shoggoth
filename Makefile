@@ -1,6 +1,5 @@
 JOBS?=4
 INSTANCE?=shoggoth
-SHOGGOTH_ENV=shoggoth/${INSTANCE}.env
 # Per-instance configuration. This YAML file is the source of truth: `make up`
 # hands it to Helm with --values, and the chart derives every SHOGGOTT_* pod
 # environment variable from it. Nothing is injected with --set, and no value
@@ -17,24 +16,17 @@ SHOGGOTH_CHART_ROOT?=$(CURDIR)/shoggoth/chart
 # recipes; never for handing a value to another tool as a CLI argument.
 SHOGGOTH_CFG = $(shell yq -r '$(1)' $(SHOGGOTH_CONFIG) 2>/dev/null)
 DOMAIN?=$(call SHOGGOTH_CFG,.identity.domain)
-GITHUB_ORG?=$(call SHOGGOTH_CFG,.identity.githubOrg)
 WEB_EXT_PORT?=$(call SHOGGOTH_CFG,.network.webExternal.hostPort)
 WG_PORT?=$(call SHOGGOTH_CFG,.network.wireguard.udpPort)
 DNS_IP?=$(call SHOGGOTH_CFG,.identity.dnsIp)
 REGISTRY_PORT?=$(call SHOGGOTH_CFG,.network.registry.hostPort)
 WG_UI_PORT?=$(call SHOGGOTH_CFG,.network.wireguard.uiPort)
-AI_DEFAULT_MODEL?=$(call SHOGGOTH_CFG,.ai.defaultModel)
-AI_DEFAULT_API?=$(call SHOGGOTH_CFG,.ai.defaultApi)
-AI_DEFAULT_TOKEN_FILE?=$(call SHOGGOTH_CFG,.ai.defaultTokenFileRef)
-GITEA_SERVER_TOKEN_FILE?=$(call SHOGGOTH_CFG,.gitea.serverTokenFileRef)
-# SHOGGOTH_ENV survives only for `make host_install_nixos`, which renders
-# shoggoth.nix and ports.nix with envsubst. That is the one deliberate
-# exception to "no variable injection": those are NixOS host files, not Helm
-# input, and envsubst is the right tool for a 6-line template. The values it
-# consumes are the ones read from $(SHOGGOTH_CONFIG) above. See make/k3s.mk
-# `host_install_nixos`.
-
-LDAP_BASE_DN?=$(shell printf '%s' "${DOMAIN}" | sed 's/\./,dc=/g; s/^/dc=/')
+# No Make variable exists for .identity.githubOrg, .ai.*, .gitea.serverTokenFileRef
+# or the LDAP base DN. The chart reads those from $(SHOGGOTH_CONFIG) at render
+# time, and `make host_install_nixos` -- the only recipe needing a value outside
+# Helm -- consumes exactly the six above. A Make-level copy would be a second
+# definition of one value, which is what the SHOGGOTT_CONFIG comment above
+# forbids.
 HOST?=host.${DOMAIN}
 HOST_IP?=$(shell getent hosts ${HOST} | cut -f 1 -d ' ')
 GITEA_TOKEN?=$(shell cat shoggoth/private/gitea-server-token.txt)

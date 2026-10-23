@@ -1,84 +1,12 @@
 {{- /*
   templates/web-external.yaml — TLS-terminating reverse proxy (Angie) that
   exposes wireguard over HTTPS.
+
+  The angie.conf ConfigMap lives in web-external-config.yaml so this
+  Deployment can checksum it and roll when it changes; see the annotation on
+  spec.template.metadata.annotations below.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "web-external")) }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: web-external-config
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-data:
-  angie.conf: |
-    load_module modules/ngx_otel_module.so;
-
-    events {
-        worker_connections 1024;
-    }
-
-    error_log /dev/stderr debug;
-
-    http {
-        resolver {{ .Values.identity.dnsIp }} valid=30s;
-        access_log /dev/stdout;
-
-        map $http_upgrade $connection_upgrade {
-            default upgrade;
-            ''      close;
-        }
-
-        otel_exporter {
-            endpoint http://otelcol:4317;
-        }
-        otel_service_name web-external;
-
-        upstream wireguard {
-            zone wireguard 1m;
-            server wireguard.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.network.wireguard.uiPort }} resolve;
-        }
-
-        server {
-            listen {{ .Values.network.webExternal.hostPort }} ssl default_server;
-
-            ssl_certificate /data/certs/shoggoth.crt;
-            ssl_certificate_key /data/certs/shoggoth.key;
-            ssl_protocols TLSv1.2 TLSv1.3;
-            ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
-            ssl_prefer_server_ciphers off;
-
-            add_header Strict-Transport-Security "max-age=31536000" always;
-
-            proxy_read_timeout 30m;
-            proxy_send_timeout 30m;
-            proxy_connect_timeout 60s;
-
-            location = /ca.crt {
-                alias /data/certs/shoggoth-ca.crt;
-                default_type application/x-x509-ca-cert;
-            }
-
-            location = /setup-client.sh {
-                default_type application/x-sh;
-                alias /data/scripts/setup-client.sh;
-            }
-
-            location / {
-                proxy_pass http://wireguard;
-                proxy_set_header Host $host;
-                proxy_set_header X-Real-IP $remote_addr;
-                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                proxy_set_header X-Forwarded-Proto https;
-
-                proxy_buffering off;
-                proxy_http_version 1.1;
-                proxy_set_header Upgrade $http_upgrade;
-                proxy_set_header Connection $connection_upgrade;
-            }
-        }
-    }
----
 apiVersion: v1
 kind: Service
 metadata:
@@ -115,6 +43,21 @@ spec:
       app: web-external
   template:
     metadata:
+      annotations:
+        # Roll the pod when the mounted angie.conf changes. Two of the values
+        # in that file appear nowhere else in this Deployment —
+        # network.wireguard.uiPort (the upstream port, line 39) and
+        # identity.dnsIp (the resolver, line 24) — so changing either left the
+        # pod template byte-identical and Helm started no rollout. The file is
+        # mounted with subPath, so kubelet does not even reproject it onto the
+        # running pod: angie keeps serving the port it parsed at startup and
+        # returns 502 while `helm upgrade --wait` reports success.
+        # Reloader cannot cover this: reloader.yaml passes
+        # --resources-to-ignore=configmaps, so ConfigMap edits are invisible
+        # to it by design. The checksum must cover the whole file, not just
+        # the two values above, or the next value added to angie.conf
+        # reintroduces the same silent no-rollout.
+        checksum/config: {{ include (print $.Template.BasePath "/web-external-config.yaml") . | sha256sum }}
       labels:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: web-external

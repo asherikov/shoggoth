@@ -77,33 +77,32 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-Per-service selectorLabels. Operators and `make start|stop SERVICE=foo` select
-by `app: foo`, so the canonical `app:` label is preserved alongside
-Kubernetes' recommended labels.
-*/}}
-{{- define "shoggoth.serviceSelectorLabels" -}}
-{{- $root := . -}}
-{{- range $service, $cfg := .Values.services }}
-{{- if $cfg.enabled }}
-{{- if eq $service $root.targetService }}
-app: {{ $service }}
-app.kubernetes.io/component: {{ $service }}
-{{- end }}
-{{- end }}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Derive LDAP base DN from identity.domain if not set explicitly.
-Mirrors make/k3s.mk:24: sed 's/\./,dc=/g; s/^/dc=/'.
+LDAP base DN, derived from identity.domain.
   s.local -> dc=s,dc=local
+
+`ldap.baseDn` may only restate that value, never replace it. The osixia
+server bootstraps its suffix from LDAP_DOMAIN, which openldap.yaml sets to
+identity.domain — so the directory that ends up created is always the derived
+DN. Any other baseDn left every DN the chart emits (ADMIN_DN, all LDIF entries,
+the bind DNs in gitea/redmine/openbao/phpldapadmin) pointing at a suffix that
+was never created. That failure was silent: init.sh runs as a postStart hook
+whose command ends in `echo` with only `set -o pipefail`, so its `exit 1` never
+fails the hook, and the readinessProbe gates on a sentinel that the aborted
+script never touches — the pod sat NotReady with an unprovisioned directory.
+
+Rather than reconcile at runtime, refuse to render the disagreement.
 */}}
 {{- define "shoggoth.ldapBaseDn" -}}
-{{- if .Values.ldap.baseDn -}}
-{{- .Values.ldap.baseDn -}}
-{{- else if .Values.identity.domain -}}
-{{- printf "dc=%s" (.Values.identity.domain | replace "." ",dc=") -}}
+{{- $derived := "" -}}
+{{- if .Values.identity.domain -}}
+{{- $derived = printf "dc=%s" (.Values.identity.domain | replace "." ",dc=") -}}
 {{- end -}}
+{{- if .Values.ldap.baseDn -}}
+{{- if ne .Values.ldap.baseDn $derived -}}
+{{- fail (printf "ldap.baseDn (%q) disagrees with identity.domain (%q -> %q). The openldap container bootstraps its suffix from LDAP_DOMAIN=identity.domain, so it would serve %q while every DN this chart emits targets %q and nothing would bind. Set ldap.baseDn to %q or leave it empty." .Values.ldap.baseDn .Values.identity.domain $derived $derived .Values.ldap.baseDn $derived) -}}
+{{- end -}}
+{{- end -}}
+{{- $derived -}}
 {{- end -}}
 
 {{/*

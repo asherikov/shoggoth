@@ -732,6 +732,13 @@ data:
 
     log "all phases complete"
 ---
+# The two ConfigMaps stay under the union: openbao-config is mounted by the
+# StatefulSet and openbao-bootstrap by the Job, so either service needs the
+# union to hold. The workload objects below are gated on `openbao` alone —
+# putting them under the union made `make stop SERVICE=openbao` a no-op while
+# `openbao-bootstrap` remained enabled, because the union kept rendering them.
+{{- end }}
+{{- if (include "shoggoth.isServiceEnabled" (list . "openbao")) }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -950,6 +957,7 @@ spec:
         - name: home
           emptyDir: {}
 ---
+{{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "openbao-bootstrap")) }}
 apiVersion: batch/v1
 kind: Job
@@ -1038,6 +1046,10 @@ spec:
             type: DirectoryOrCreate
 {{- end }}
 ---
+# The openbao-init ServiceAccount is used by the StatefulSet above and by the
+# Job, so this RBAC stays under the union: either workload running without it
+# would fail to write its secrets.
+{{- if or (include "shoggoth.isServiceEnabled" (list . "openbao")) (include "shoggoth.isServiceEnabled" (list . "openbao-bootstrap")) }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:

@@ -1757,7 +1757,7 @@ spec:
         volumeMounts: []
       containers:
       - name: grafana
-        image: grafana/grafana:latest
+        image: grafana/grafana:13.2.4
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0

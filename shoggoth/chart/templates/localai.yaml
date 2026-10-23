@@ -86,7 +86,7 @@ data:
   # LocalAI's `validateGalleryConfigURL` (core/gallery/gallery.go) refuses
   # any `http(s)://` URL whose hostname ends in `.local` — which blocks
   # all in-cluster service DNS. The file is mounted from the
-  # web-internal-html ConfigMap into `/models/` (the trusted root for
+  # localai-model-configs ConfigMap into `/models/` (the trusted root for
   # `file://` URLs, controlled by `MODELS_PATH`); files mounted outside
   # `/models/` trigger `InTrustedRoot` (pkg/utils/path.go) and fail.
   # The `files:` entry downloads the GGUF from HuggingFace into the
@@ -100,6 +100,37 @@ data:
       files:
           - filename: "nomic-embed-text-v1.5.f16.gguf"
             uri: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF/resolve/main/nomic-embed-text-v1.5.f16.gguf"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: localai-model-configs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: localai
+    app.kubernetes.io/component: localai
+data:
+  # The model descriptor preload-models.yaml points at via
+  # `url: file:///models/nomic-embed-text-v1.5.yaml`. It lives here rather
+  # than in web-internal-html because this ConfigMap is mounted as a
+  # required volume below: a ConfigMap owned by another service is deleted
+  # by `make stop SERVICE=<that-service>`, which would leave this pod in
+  # ContainerCreating and take LocalAI (and the litellm routes that proxy
+  # to it) down as a side effect of stopping an unrelated service.
+  nomic-embed-text-v1.5.yaml: |
+    name: "nomic-embed-text-v1.5"
+    description: |
+        Nomic Embed v1.5 embedding model in GGUF format.
+    license: "Apache 2.0"
+    backend: llama-cpp
+    embeddings: true
+    context_size: 2048
+    parameters:
+        model: nomic-embed-text-v1.5.f16.gguf
+    gpu_layers: 99999999
+    options:
+        - gpu
 ---
 apiVersion: v1
 kind: Service
@@ -248,7 +279,7 @@ spec:
           name: localai-preload
       - name: model-configs
         configMap:
-          name: web-internal-html
+          name: localai-model-configs
           items:
             - key: nomic-embed-text-v1.5.yaml
               path: nomic-embed-text-v1.5.yaml

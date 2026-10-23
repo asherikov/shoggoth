@@ -116,6 +116,20 @@ metadata:
     app.kubernetes.io/component: registry
 spec:
   replicas: 1
+  # Recreate, not the default RollingUpdate, because this pod is on the host
+  # network and binds network.registry.hostPort directly. RollingUpdate with
+  # replicas: 1 defaults to maxUnavailable 25% (floors to 0) and maxSurge 25%
+  # (rounds to 1), so any pod-template change starts a second zot first: it
+  # crash-loops on "address already in use", the old ReplicaSet is never scaled
+  # down, and `helm upgrade --wait` blocks until it times out. The overlap is
+  # also destructive -- the new pod's cleanup-sync-staging init container rm -rf's
+  # every .sync directory in the shared data PVC while the old, still-serving
+  # zot is writing into them.
+  #
+  # Matches the other two host-network Deployments (wireguard, web-external);
+  # dns.yaml sets Recreate for the same reason but is not host-networked.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: registry

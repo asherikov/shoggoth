@@ -2,26 +2,14 @@ export KUBECONFIG?=private/kubeconfig
 K3S_TMP_DIR?=.tmp
 K3S_TUNNEL_PID?=${K3S_TMP_DIR}/k3s-tunnel.pid
 
-# Names `make start|stop SERVICE=<x>` accepts, derived from the `app:` labels
-# in the chart. Legacy derived the same list from shoggoth/k3s/*.yaml; Phase 4
-# moved the source of truth to the chart, which is what actually gets applied.
-#
-# The grep is anchored to a real label value on purpose: a loose `app:` matches
-# the prose in every template's `{{- /* ... */}}` header, which then shows up in
-# `make start`'s usage text. Templates are not rendered here, so a service whose
-# gate is false still contributes its label — the list is a superset of what is
-# currently running, exactly as the legacy grep was.
-K3S_CHART_TEMPLATES := $(wildcard shoggoth/chart/templates/*.yaml)
-K3S_APP_LABELS := $(shell grep -hoE '^[[:space:]]+app:[[:space:]]+[a-z0-9][a-z0-9-]*[[:space:]]*$$' $(K3S_CHART_TEMPLATES) 2>/dev/null | sed 's/.*app:[[:space:]]*//' | sort -u | tr '\n' ' ')
-
 K3S_SSH=ssh ${SSH_COMMON_ARGS} -t ${USER}@${HOST_IP}
 K3S_API_PORT?=6443
 K3S_TUNNEL_PORT?=6443
 
 K3S_HOST_PATHS := redmine-plugins:redmine/plugins workflow-scripts:workflow/scripts kestra-flows:workflow/kestra/flows argo:workflow/argo private:private
 
-# Helm chart variables (Phase 4 of docs/helm-migration-plan.md). All shipped
-# here so the chart's timeouts and `--values` plumbing are visible in one place
+# Helm chart variables. All shipped here so the chart's timeouts and
+# `--values` plumbing are visible in one place
 # rather than scattered across what used to be make/chart-helpers.mk. The
 # chart's *location* (SHOGGOTH_CHART_ROOT) is defined in the Makefile instead:
 # make/chore.mk names it in a prerequisite list, and a prerequisite list is
@@ -52,8 +40,8 @@ SHOGGOTH_HELM_TIMEOUT?=10m
 # is short: surface the wedge quickly rather than burning 10 minutes.
 # Override on the command line with
 #   make sync_restart SHOGGOTH_HELM_TIMEOUT_UNINSTALL=5m
-# or hit it head-on with the unblock path documented in
-# docs/helm-migration-parity-check.md (force-patch finalizers to []).
+# or hit it head-on with the unblock path: force-patch the finalizers to []
+# before uninstalling.
 SHOGGOTH_HELM_TIMEOUT_UNINSTALL?=2m
 
 # Passed to every helm invocation. $(SHOGGOTH_CONFIG) is the per-instance
@@ -62,15 +50,15 @@ SHOGGOTH_HELM_TIMEOUT_UNINSTALL?=2m
 # state in the release Secret between calls).
 SHOGGOTH_HELM_VALUES = --values $(SHOGGOTH_CONFIG)
 
-# Values for the offline render targets (`helm_lint`, `chart-validate`). These
-# are just the instance config: both targets only run `helm lint` /
-# `helm template`, which render to a file and never apply anything, so there is
-# nothing here for a throwaway override to protect. A chart/test/values-lint.yaml
-# used to sit here overriding identity.instanceDir "so lint never touches a real
+# Values for the offline render target (`helm_lint`). This is just the
+# instance config: the target only runs `helm lint` / `helm template`, which
+# render to a file and never apply anything, so there is nothing here for a
+# throwaway override to protect. A chart/test/values-lint.yaml used to sit
+# here overriding identity.instanceDir "so lint never touches a real
 # deployment's data" — that rationale was wrong (a hostPath is an inert string
-# until something applies the manifest, and neither target does); the file is
-# gone. What still distinguishes lint output is the release name and namespace
-# each target passes (`shoggoth-lint`/`lint`, `shoggoth-test`/`test`).
+# until something applies the manifest, and the target does not); the file is
+# gone. The release name and namespace it passes (`shoggoth-lint`/`lint`)
+# are what distinguish lint output from a real install.
 SHOGGOTH_HELM_VALUES_LINT = $(SHOGGOTH_HELM_VALUES)
 
 
@@ -152,7 +140,7 @@ tunnel_down:
 
 # maintenance
 # -----
-# Stop all shoggoth services (Phase 4 of docs/helm-migration-plan.md).
+# Stop all shoggoth services.
 #
 # Now `helm uninstall`. The legacy target deleted workloads and ConfigMaps but
 # deliberately preserved Secrets and PVCs, and that contract survives because:
@@ -483,7 +471,7 @@ wipe_openbao: tunnel_up
 	-kubectl delete secret openbao-unseal-key -n ${INSTANCE} --ignore-not-found=true
 	echo "Done. Run 'make sync_restart' to re-deploy."
 
-# Start all shoggoth services (Phase 4 of docs/helm-migration-plan.md).
+# Start all shoggoth services.
 #
 # Replaces the legacy two-pass `envsubst | kubectl apply --server-side`:
 #   Pass 1 (CRDs, server-side)  -> `make crds_apply`, every run.
@@ -577,8 +565,8 @@ up: tunnel_up crds_apply helm_version_gate
 # `--take-ownership` lets Helm label-and-claim pre-existing resources that
 # match a chart resource's (kind, name, namespace) but lack the
 # `app.kubernetes.io/managed-by: Helm` label. Needed for the first
-# `helm upgrade --install` after Phase 4 of docs/helm-migration-plan.md,
-# because the legacy envsubst path that `make up` used to run produced
+# `helm upgrade --install` on a cluster that previously ran the legacy
+# envsubst path, because that path produced
 # SAs / Roles / RoleBindings / Cluster(Role|Binding)s without those
 # labels. Without this flag, the first install against a cluster that
 # already has unmanaged copies of chart-owned resources aborts with
@@ -664,7 +652,7 @@ log: tunnel_up
 	if [ -z "$(SERVICE)" ]; then echo "Usage: make log SERVICE=<app-name> [CONTAINER=<name>]"; exit 1; fi
 	echo "=== $(SERVICE) ==="
 	echo ""
-	kubectl -n shoggoth describe pod -l job-name=$(SERVICE)
+	kubectl -n ${INSTANCE} describe pod -l app=$(SERVICE)
 	echo "--- Status ---"
 	kubectl -n ${INSTANCE} get pod -l app=$(SERVICE) -o wide 2>&1 || true
 	echo ""
@@ -778,31 +766,24 @@ drop_image_tag:
 
 # chart validation
 # -----
-# Offline chart smoke tests. These run helm directly against the chart
-# without touching the cluster, so they have no `tunnel_up` prerequisite
-# and no `INSTANCE` gating. Both targets are operator-driven: there is no
-# CI invocation wired into this repo.
-#
-# `WC?=wc` is the helper used by chart-validate's `wc -l` invocation —
-# defined further down so the validation targets can read the rendered
-# line count without forcing a specific wc implementation.
+# Offline chart smoke test. Runs helm directly against the chart without
+# touching the cluster, so it has no `tunnel_up` prerequisite and no
+# `INSTANCE` gating. It is operator-driven: there is no CI invocation wired
+# into this repo.
 
 # Manual lint entry point. `helm lint` catches Go-template parse errors and
 # malformed YAML; the render that follows catches templates that parse but
 # emit invalid or duplicated YAML. Run this after touching any template.
 #
-# This target no longer verifies the per-service `enabled` gates. It used to
-# render everything twice under chart/test/values-no-services.yaml and diff the
-# survivors against the ungated zz-crd-ready-wait scaffolding, which caught a
-# template whose `isServiceEnabled` wrapper was missing or misspelled. That
-# check is gone along with the values file; nothing here asserts the gates
-# still filter, so a lost gate now ships silently and `make stop SERVICE=<x>`
-# for that service silently does nothing.
+# The per-service `enabled` gates are checked by the toggle sweep at the end
+# of this target, which renders once per `services.<key>` in values.yaml and
+# fails if disabling that key alone removes nothing.
 #
-# Deliberately separate from `chart-validate` (below), which additionally
-# renders and is meant for the end-to-end smoke test. Neither runs in CI —
-# this target exists for the operator, because helm is not installed in
-# every dev container.
+# This used to be joined by a `chart-validate` target distinguished only by
+# release name and namespace, and by dropping this target's duplicate-key
+# check — so it passed on charts this one rejected. It is gone; `helm_lint`
+# is the offline entry point, because helm is not installed in every dev
+# container.
 .PHONY: helm_lint
 helm_lint:
 	mkdir -p ${K3S_TMP_DIR}
@@ -850,23 +831,40 @@ helm_lint:
 		cat ${K3S_TMP_DIR}/shoggoth-lint-dupes.txt; \
 		exit 1; \
 	fi
-
-
-.PHONY: chart-validate
-chart-validate:
-	mkdir -p ${K3S_TMP_DIR}
-	helm lint $(SHOGGOTH_CHART_ROOT) --strict
-	echo "=== helm template render smoke test (defaults) ==="
-	helm template shoggoth-test $(SHOGGOTH_CHART_ROOT) \
-		--namespace test \
-		$(SHOGGOTH_HELM_VALUES_LINT) \
-		> ${K3S_TMP_DIR}/shoggoth-chart-render.yaml
-	echo "  rendered $$($(WC) -l < ${K3S_TMP_DIR}/shoggoth-chart-render.yaml) lines -> ${K3S_TMP_DIR}/shoggoth-chart-render.yaml"
-
-
-# Helper used by chart-validate above; default to whichever wc is available.
-# Defined last so this file remains readable top-to-bottom: variables and
-# targets up top, the per-target wc helper at the bottom alongside the
-# validation target that calls it.
-WC?=wc
+	echo "=== per-service gate check (every services.<key> toggle must remove >=1 resource) ==="
+# A union gate spanning a service's own workloads makes `make stop SERVICE=<x>`
+# a silent no-op: `or (x) (y)` still renders while y is on, so helm reports a
+# successful upgrade and nothing is deleted. openbao hit this — its Service,
+# PVC and StatefulSet sat under `or(openbao, openbao-bootstrap)`, and it was
+# the only one of the 43 keys whose toggle removed nothing. This renders once
+# per key with that key alone disabled and fails if the document count does not
+# drop, which catches the class rather than just that instance.
+	@failed=0; \
+	keys=$$(yq -r '.services | keys | .[]' $(SHOGGOTH_CHART_ROOT)/values.yaml); \
+	if ! helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) --namespace lint $(SHOGGOTH_HELM_VALUES_LINT) \
+		> ${K3S_TMP_DIR}/gate-all.yaml 2> ${K3S_TMP_DIR}/gate-all.err; then \
+		echo "  FAIL: baseline render failed"; \
+		cat ${K3S_TMP_DIR}/gate-all.err; \
+		exit 1; \
+	fi; \
+	base=$$(yq ea -r 'select(.kind != null) | .kind' ${K3S_TMP_DIR}/gate-all.yaml | grep -c .); \
+	for k in $$keys; do \
+		if ! helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) --namespace lint $(SHOGGOTH_HELM_VALUES_LINT) \
+			--set services.$$k.enabled=false \
+			> ${K3S_TMP_DIR}/gate-off.yaml 2> ${K3S_TMP_DIR}/gate-off.err; then \
+			echo "  FAIL: render failed with services.$$k disabled"; \
+			cat ${K3S_TMP_DIR}/gate-off.err; \
+			failed=1; \
+			continue; \
+		fi; \
+		off=$$(yq ea -r 'select(.kind != null) | .kind' ${K3S_TMP_DIR}/gate-off.yaml | grep -c .); \
+		if [ "$$off" -ge "$$base" ]; then \
+			echo "  FAIL: disabling services.$$k removes no resources ($$base -> $$off)"; \
+			echo "        'make stop SERVICE=$$k' would report success and change nothing."; \
+			echo "        Its objects are probably under a union gate with another key."; \
+			failed=1; \
+		fi; \
+	done; \
+	if [ "$$failed" -ne 0 ]; then exit 1; fi; \
+	echo "  OK: all $$(printf '%s\n' $$keys | wc -l) service toggles remove >=1 resource"
 

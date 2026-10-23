@@ -60,7 +60,7 @@ lists the minimum; newer is fine unless called out.
 
 | Tool        | Version   | Notes                                                                                                                                                                              |
 |-------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| k3s         | ≥ 1.34    | Required for the GA features the chart relies on: pod-level `ttlSecondsAfterFinished` (GA 1.29), container-level `restartPolicy` for native sidecar ordering (GA 1.33). Pinned in `shoggoth/shoggoth.nix`. |
+| k3s         | ≥ 1.34    | Required for the GA features the chart relies on: pod-level `ttlSecondsAfterFinished` (GA 1.29), container-level `restartPolicy` for native sidecar ordering (GA 1.33). The chart enforces this itself — `Chart.yaml` sets `kubeVersion: ">=1.34.0-0"`, so `helm install`/`upgrade` refuses an older cluster instead of letting the API server silently prune the field. Pinned in `shoggoth/shoggoth.nix`. |
 | helm        | ≥ 3.17.0  | Required for `--take-ownership`, which `make up` / `make start` / `make stop` / `make restart_service` rely on to adopt resources left unlabelled by the pre-chart envsubst path. The flag does not exist before 3.17.0 — an older helm aborts with `unknown flag: --take-ownership`. `make helm_version_gate` checks this and is a prerequisite of all four targets. |
 | kubectl     | bundled   | Comes with k3s; the operator host uses the same version (transferred via the SSH-tunneled kubeconfig).                                                                              |
 | yq          | mikefarah v4 | The `Makefile` reads every configuration value out of `shoggoth/<instance>.yaml` through yq. The Python `yq` package is a *different* tool with a different CLI — install mikefarah's release (https://github.com/mikefarah/yq). |
@@ -443,13 +443,11 @@ Workload lifecycle is managed by the Helm chart in `shoggoth/chart/`. The
 Makefile targets below are thin wrappers around `helm upgrade --install`,
 `helm uninstall`, and `helm upgrade` with a single toggle flipped. The legacy
 `envsubst | kubectl apply` path that used to back `make up` and `make down` was
-removed in phase 4 of
-[`docs/helm-migration-plan.md`](docs/helm-migration-plan.md); everything applied
-by these targets is owned by the chart release `shoggoth-${INSTANCE}` in
-namespace `${INSTANCE}`.
+replaced by the chart in a nine-phase migration; everything applied by these
+targets is owned by the chart release `shoggoth-${INSTANCE}` in namespace
+`${INSTANCE}`.
 
-Key consequences of the Helm takeover, all covered by tests in
-[`docs/helm-migration-parity-check.md`](docs/helm-migration-parity-check.md):
+Key consequences of the Helm takeover:
 
 - `make down` is `helm uninstall`, but every chart-owned Secret and PVC carries
   `helm.sh/resource-policy: keep`, so data persists. The Namespace itself is
@@ -497,14 +495,56 @@ make ssh
 make sync_restart
 ```
 
+### After `make up`
+
+`INSTANCE` names the Kubernetes namespace and the per-instance config file
+`shoggoth/<instance>.yaml`. It is **not** the Helm release name — `make up`
+derives the release by prefixing `shoggoth-`, so `INSTANCE=foo` produces release
+`shoggoth-foo` in namespace `foo`. Feeding the release name back in as
+`INSTANCE` makes `make` look for a config file that does not exist, which leaves
+every value read from it (`DOMAIN`, ports, token paths) empty rather than
+failing loudly — `make test` then curls an empty hostname and `make purge`
+targets a namespace that was never created.
+
+``` bash
+INSTANCE=shoggoth            # namespace + config file name; release is shoggoth-$INSTANCE
+
+# See what came up:
+kubectl get pods,svc,deployment,statefulset -n $INSTANCE
+
+# Health check suite (registry, DNS, api-gateway routing). Requires VPN connectivity:
+make test INSTANCE=$INSTANCE
+
+# WireGuard web UI:
+DOMAIN=$(yq -r '.identity.domain' shoggoth/$INSTANCE.yaml) && echo https://wireguard.$DOMAIN
+```
+
+Domain and DNS IP are readable straight out of the same config file:
+
+``` bash
+yq -r '.identity.domain, .identity.dnsIp' shoggoth/$INSTANCE.yaml
+```
+
+To remove the release without touching data — every chart-owned Secret and PVC
+carries `helm.sh/resource-policy: keep`, and the Namespace is not part of the
+release manifest, so nothing cascades:
+
+``` bash
+helm uninstall shoggoth-$INSTANCE -n $INSTANCE
+```
+
 Destructive operations live next door:
 
 ``` bash
-make purge                  # delete namespace, host data, remote dir
+make purge INSTANCE=<name>   # delete namespace, host data, remote dir
 make wipe_openbao           # wipe OpenBao raft + unseal-key secret
 make k3s_purge_secrets      # delete every Secret in the namespace
 make drop_image_tag IMAGE=<repo> TAG=<tag>   # evict a registry tag
 ```
+
+`make purge` refuses the default `shoggoth` instance outright, so it always needs
+an explicit `INSTANCE=<name>`. It also reads `INSTANCE` the same way as every
+other target — namespace and config name, not the `shoggoth-`-prefixed release.
 
 Troubleshooting
 ===============
@@ -603,28 +643,18 @@ Helm migration
 
 The deployment story used to be `make up → envsubst | kubectl apply`. It is now
 `make up → helm upgrade --install shoggoth-${INSTANCE} shoggoth/chart --create-namespace ...`.
-Two documents describe the migration and how the chart is kept byte-equivalent
-to the legacy apply path:
-
-- [`docs/helm-migration-plan.md`](docs/helm-migration-plan.md) — the original
-  nine-phase plan (`§12`), with the per-service mapping table (`§7`), the values
-  schema (`§6`), the rollout / parallel-run strategy (`§13`), risks (`§14`),
-  open decisions (`§15`), and the acceptance criteria (`§16`).
-- [`docs/helm-migration-parity-check.md`](docs/helm-migration-parity-check.md) —
-  the operational log: which checks caught which bugs at each phase, which
-  `services.<x>.enabled` toggles were added or removed, and what is still owed
-  (notably a first real `helm lint && make helm_lint` run against the chart,
-  since helm is not installed in this dev container).
 
 Operator notes:
 
 - `make helm_lint` runs `helm lint --strict`, renders the chart **once** with
   `shoggoth/shoggoth.yaml` (which sets no `services:` block, so that render is
-  everything-on), and checks the render for duplicate mapping keys. It does
-  **not** verify the per-service `services.*.enabled` gates: `helm lint` only
-  proves a template parses, so a template that lost its gate ships silently and
-  `make stop SERVICE=<x>` has no effect. Gate coverage is manual. To check one
-  service, render it off and confirm its resources are gone — here `3` becomes
+  everything-on), and checks the render for duplicate mapping keys. It then
+  sweeps the gates: it renders once per `services.<key>` in `values.yaml` with
+  that key alone disabled and fails if any toggle removes nothing, because a
+  union gate spanning a service's own workloads makes `make stop SERVICE=<x>`
+  report success and delete nothing (this is what `openbao` did — it was the
+  one key of the 43 whose toggle removed no resources). To check one service by
+  hand, render it off and confirm its resources are gone — here `3` becomes
   `0`:
 
       helm template shoggoth-gate shoggoth/chart -n lint \
@@ -633,11 +663,11 @@ Operator notes:
         --values shoggoth/shoggoth.yaml --set services.grafana.enabled=false \
         | grep -cE '^[[:space:]]*app:[[:space:]]*grafana[[:space:]]*$'
 
-  Anchor the pattern: `grep 'app: gitea'` also matches `app: gitea-runner`, and
-  two services (`gitea`, `openbao`) currently keep resources in the render with
-  their own `services.<x>.enabled` set to `false`. That check used to run against
-  a `chart/test/values-no-services.yaml`; both that file and the second render
-  are gone, along with the rest of `chart/test/`.
+  Anchor the pattern: `grep 'app: gitea'` also matches `app: gitea-runner`, so
+  check one service against its own label. Every `services.<x>` toggle in
+  `shoggoth/chart/values.yaml` is `enabled: true`, which is why the all-on
+  render is the baseline and an off-render should drop that service's count to
+  `0`.
 - `shoggoth/shoggoth.yaml` is the per-instance configuration and the single
   source of truth. `make up` hands it to Helm with `--values` and the chart
   derives every `SHOGGOTT_*` pod environment variable from it. It is
