@@ -1,10 +1,10 @@
 {{- /*
   templates/openbao.yaml — OpenBao server + its bootstrap Job.
 
-  Emits two `app:` labels, as legacy did: `openbao` (the server StatefulSet)
+  Emits two `app:` labels: `openbao` (the server StatefulSet)
   and `openbao-bootstrap` (the one-shot Job that unseals, configures auth,
   issues certs, and seeds every downstream secret). The Job gate is the union
-  of the two toggles for the same reason as gitea: legacy dispatched both from
+  of the two toggles for the same reason as gitea: both are dispatched from
   this one file, so they cannot be toggled apart.
 
   LITERAL GO-TEMPLATE TEXT — read before editing.
@@ -766,9 +766,8 @@ metadata:
     app.kubernetes.io/component: openbao
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -798,14 +797,7 @@ spec:
       labels:
         app: openbao
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-          - {{ .Values.identity.dnsIp }}
-        searches:
-          - {{ .Release.Namespace }}.svc.cluster.local
-          - svc.cluster.local
-          - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       securityContext:
         runAsUser: 100
         runAsGroup: 1000

@@ -2,8 +2,8 @@
   templates/argo-workflows.yaml — Argo Workflows server + workflow controller.
 
   Emits two `app:` labels, `argo-server` and `argo-workflow-controller`, both
-  driven by the single `services.argo-workflows.enabled` toggle (legacy
-  dispatched both from this one file, so they were never separable).
+  driven by the single `services.argo-workflows.enabled` toggle (both are
+  dispatched from this one file, so they were never separable).
 
   LITERAL GO-TEMPLATE TEXT — do not "clean up" the escapes below.
   The controller ConfigMap documents Argo's own parameter syntax in `#`
@@ -15,8 +15,22 @@
   original bytes. Unescaped, Helm would emit `<no value>` inside the config
   map and the documented example would silently stop working.
 
-  The CRDs themselves are not here — they ship from chart/crds/argo/,
-  populated by `make chart_crds_sync` from the argo-workflows submodule.
+  The CRDs themselves are not here — they are applied straight from the
+  argo-workflows submodule by `make crds_apply`, outside the chart.
+
+  Note on cluster-scoped names: the 3 ClusterRoles and 3 ClusterRoleBindings
+  here are named `{{ include "shoggoth.fullname" . }}-<base>`, NOT bare
+  `<base>`. A cluster-scoped object has no namespace to separate two shoggoth
+  instances on one cluster, so a bare name would make both instances render
+  the SAME ClusterRole. `make up` passes `--take-ownership`, so the second
+  install silently re-labels the first instance's ClusterRole to its own
+  release and rewrites the ClusterRoleBinding's `subjects` list —
+  `rbac/v1.Subjects` is an atomic list with no merge key, so the first
+  instance's ServiceAccount is dropped from it. That is worse here than in
+  otelcol.yaml: the controller binding carries pods/exec, so the primary
+  instance's Argo controller loses the ability to run workflows at all.
+  Bindings are renamed alongside their ClusterRole because
+  `ClusterRoleBinding.roleRef` is immutable server-side.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "argo-workflows")) }}
 ---
@@ -154,7 +168,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: argo-workflow-controller
+  name: {{ include "shoggoth.fullname" . }}-argo-workflow-controller
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
@@ -229,14 +243,14 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: argo-workflow-controller
+  name: {{ include "shoggoth.fullname" . }}-argo-workflow-controller
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: argo-workflow-controller
+  name: {{ include "shoggoth.fullname" . }}-argo-workflow-controller
 subjects:
 - kind: ServiceAccount
   name: argo-workflow-controller
@@ -262,7 +276,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: argo-server-clusterworkflowtemplates-watcher
+  name: {{ include "shoggoth.fullname" . }}-argo-server-clusterworkflowtemplates-watcher
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
@@ -280,14 +294,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: argo-workflow-server
+  name: {{ include "shoggoth.fullname" . }}-argo-workflow-server
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: argo-server-clusterworkflowtemplates-watcher
+  name: {{ include "shoggoth.fullname" . }}-argo-server-clusterworkflowtemplates-watcher
 subjects:
 - kind: ServiceAccount
   name: argo-server
@@ -311,14 +325,15 @@ subjects:
   namespace: {{ .Release.Namespace }}
 ---
 # Required by the wait-bootstrap initContainer in the argo-workflow-controller
-# Deployment, which polls `kubectl get externalsecret` for the four
-# ExternalSecrets workflows reference (gitea-slave-token,
-# ssh-slave-private-key, gitea-runner-token, openbao-unseal-key) before the
-# git-cred sidecar starts reading the corresponding K8s Secrets. Without
-# `get` on the externalsecrets, kubectl 403s and the initContainer silently
-# retries for the full 10m window (the `if … ; then … fi` in wait_for_externalsecret
-# keeps `set -e` from tripping on the forbidden error), so the symptom is a
-# stuck pod, not an immediate crash.
+# Deployment, which waits for the three ExternalSecrets the workflows
+# reference (gitea-slave-token, ssh-slave-private-key, gitea-runner-token)
+# and for the openbao-unseal-key Secret before the git-cred sidecar starts
+# reading the corresponding K8s Secrets. The wait is `kubectl wait`, not a
+# polling loop, so the Role below needs list + watch on the externalsecrets,
+# not just get — see the rule comment under `rules:` for why, and for what a
+# missing grant looks like: the wait cannot complete, it sits at 403 until
+# the timeout, and the `|| { echo "FAIL: …"; exit 1; }` branch then exits
+# the init container non-zero, so the pod never reaches Ready.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -328,10 +343,10 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
 rules:
-# `kubectl wait` does an internal LIST + WATCH, not just GET. The
-# initial LIST establishes the resourceVersion, the subsequent
-# WATCH streams Ready-condition status changes until the condition
-# flips true. Without `list` + `watch` the wait fails with
+# `kubectl wait` does an internal LIST + WATCH, not just GET: the initial
+# LIST establishes the resourceVersion, the subsequent WATCH streams
+# Ready-condition status changes until the condition flips true. Without
+# `list` + `watch` the wait fails with
 # `Failed to watch ... cannot list resource externalsecrets`
 # (reflector.go:200) and the init container sits at 403 for the
 # full 10-minute timeout. Resource-name-scoped so the bound SAs
@@ -481,7 +496,7 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: argo-workflow-controller-namespace-watcher
+  name: {{ include "shoggoth.fullname" . }}-argo-workflow-controller-namespace-watcher
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
@@ -498,14 +513,14 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: argo-workflow-controller-namespace-watcher
+  name: {{ include "shoggoth.fullname" . }}-argo-workflow-controller-namespace-watcher
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: argo-workflow-controller-namespace-watcher
+  name: {{ include "shoggoth.fullname" . }}-argo-workflow-controller-namespace-watcher
 subjects:
 - kind: ServiceAccount
   name: argo-workflow-controller
@@ -532,14 +547,7 @@ spec:
         app: argo-workflow-controller
     spec:
       serviceAccountName: argo-workflow-controller
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
       - name: wait-bootstrap
         image: asherikov/shoggoth_tools:alpine
@@ -1003,15 +1011,7 @@ data:
       # ssh_auth_sock, git_credential_sock).
       podSpecPatch: |
         {
-          "dnsPolicy": "None",
-          "dnsConfig": {
-            "nameservers": ["{{ .Values.identity.dnsIp }}"],
-            "searches": [
-              "{{ .Release.Namespace }}.svc.cluster.local",
-              "svc.cluster.local",
-              "cluster.local"
-            ]
-          },
+          {{- include "shoggoth.podDnsConfigJson" . | nindent 10 }}
           "initContainers": [
             {
               "name": "wait-bootstrap",
@@ -1021,7 +1021,7 @@ data:
                 {"name": "SHOGGOTH_NAMESPACE", "value": "{{ .Release.Namespace }}"}
               ],
               "command": ["bash", "-c"],
-              "args": ["set -euo pipefail\nNS=\"{{ .Release.Namespace }}\"\nTIMEOUT=\"600s\"\n# Wait for the externalsecrets the git-cred sidecar reads via\n# secretKeyRef to be Ready (= the K8s Secret is populated).\n# Without this wait the workflow pod can start before the\n# external-secrets controller has synced, the kubelet sees an\n# empty Secret data field, and SSH_ID_RSA reaches the sidecar as\n# \"\" — bootstrap.sh then fatal()s on the empty-key check and the\n# git-cred container CrashLoopBackOffs while ssh-add -l in the main\n# container returns \"The agent has no identities.\".\n# Mirrors the controller's wait-bootstrap (which protects the\n# argo-workflow-controller Deployment itself) so workflow pods have\n# the same gate. RBAC for the `argo` SA is granted by the\n# `argo-workflow-pod-bootstrap-wait` RoleBinding.\n# Each wait carries the same `services.<x>.enabled` guard as the\n# ExternalSecret it waits for, so `make stop SERVICE=<x>` (which\n# deletes the CR) cannot leave this pod waiting on a resource that\n# is no longer supposed to exist. $waitGitea / $waitSecretStore are\n# hoisted to the top of this document.\n{{ if $waitGitea }}kubectl wait --for=condition=Ready --timeout=\"${TIMEOUT}\" -n \"${NS}\" externalsecret/gitea-slave-token || { echo \"FAIL: externalsecret/gitea-slave-token not Ready after ${TIMEOUT}\"; exit 1; }\necho \"wait-bootstrap: externalsecret/gitea-slave-token Ready\"\n{{ end }}{{ if $waitSecretStore }}kubectl wait --for=condition=Ready --timeout=\"${TIMEOUT}\" -n \"${NS}\" externalsecret/ssh-slave-private-key || { echo \"FAIL: externalsecret/ssh-slave-private-key not Ready after ${TIMEOUT}\"; exit 1; }\necho \"wait-bootstrap: externalsecret/ssh-slave-private-key Ready\"\n{{ end }}"],
+              "args": ["set -euo pipefail\nNS=\"{{ .Release.Namespace }}\"\nTIMEOUT=\"600s\"\n# Wait for the externalsecrets the git-cred sidecar reads via\n# secretKeyRef to be Ready (= the K8s Secret is populated).\n# Without this wait the workflow pod can start before the\n# external-secrets controller has synced, the kubelet sees an\n# empty Secret data field, and SSH_ID_RSA reaches the sidecar as\n# \"\" — bootstrap.sh then fatal()s on the empty-key check and the\n# git-cred container CrashLoopBackOffs while ssh-add -l in the main\n# container returns \"The agent has no identities.\".\n# Mirrors the controller's wait-bootstrap (which protects the\n# argo-workflow-controller Deployment itself) so workflow pods have\n# the same gate. RBAC for the `argo` SA is granted by the\n# `argo-workflow-pod-bootstrap-wait` RoleBinding.\n# Each wait carries the same `services.<x>.enabled` guard as the\n# ExternalSecret it waits for. $waitGitea / $waitSecretStore are\n# hoisted to the top of this document.\n{{ if $waitGitea }}kubectl wait --for=condition=Ready --timeout=\"${TIMEOUT}\" -n \"${NS}\" externalsecret/gitea-slave-token || { echo \"FAIL: externalsecret/gitea-slave-token not Ready after ${TIMEOUT}\"; exit 1; }\necho \"wait-bootstrap: externalsecret/gitea-slave-token Ready\"\n{{ end }}{{ if $waitSecretStore }}kubectl wait --for=condition=Ready --timeout=\"${TIMEOUT}\" -n \"${NS}\" externalsecret/ssh-slave-private-key || { echo \"FAIL: externalsecret/ssh-slave-private-key not Ready after ${TIMEOUT}\"; exit 1; }\necho \"wait-bootstrap: externalsecret/ssh-slave-private-key Ready\"\n{{ end }}"],
               "resources": {
                 "requests": {"memory": "32Mi", "cpu": "50m"},
                 "limits": {"memory": "64Mi", "cpu": "200m"}
@@ -1127,14 +1127,7 @@ spec:
         app: argo-server
     spec:
       serviceAccountName: argo-server
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: argo-server
         image: quay.io/argoproj/argocli:v4.1.5

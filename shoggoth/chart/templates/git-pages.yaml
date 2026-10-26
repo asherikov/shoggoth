@@ -14,9 +14,8 @@ metadata:
     app.kubernetes.io/component: git-pages
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -102,14 +101,7 @@ spec:
         app: git-pages
         app.kubernetes.io/component: git-pages
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []
       containers:
       - name: git-pages

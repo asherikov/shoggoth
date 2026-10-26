@@ -3,21 +3,13 @@
   ED25519 private key used by ``git-cred`` sidecars in slave-term /
   slave-dind / argo-workflow pods into a K8s Secret in the namespace.
 
-  Restores shoggoth/k3s/external-secrets/ssh-slave-private-key.yaml,
-  which the chart migration dropped. The ``wait-bootstrap`` init
-  containers in slave-term.yaml, slave-dind.yaml, and argo-workflows.yaml
-  all poll ``externalsecret/ssh-slave-private-key`` before allowing the
-  pod to start, and the ``SSH_ID_RSA`` env var is sourced from the
-  resulting Secret via ``secretKeyRef``. With the CR gone, those loops
-  never see ``Ready=True``, the pods never leave ``Init:0/2``, and the
-  10-minute init timeout eventually kills the pod.
-
-  The Vault side never regressed: openbao-bootstrap Phase B generates
-  the keypair via ``ssh-keygen`` and seeds
-  ``ssh/slave-private-key`` (and ``ssh/slave-public-key``) on a fresh
-  install, so this only has to project it. Legacy used the same
-  remoteRef, and a legacy install therefore reuses the credential
-  already sitting in Vault rather than rotating it on upgrade.
+  Consumers: the ``wait-bootstrap`` init containers in slave-term.yaml,
+  slave-dind.yaml, and argo-workflows.yaml all poll
+  ``externalsecret/ssh-slave-private-key`` before allowing the pod to
+  start, and the ``SSH_ID_RSA`` env var is sourced from the resulting
+  Secret via ``secretKeyRef``. Without the CR those loops never see
+  ``Ready=True``, the pods stay in ``Init:0/2``, and the 10-minute init
+  timeout kills them.
 
   ``ssh-slave-public-key.yaml`` is the public-key side of the same pair
   and shares the openbao seed. It is gated alongside this one.

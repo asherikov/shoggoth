@@ -66,50 +66,6 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       serviceAccountName: web-external
-      initContainers:
-      - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        command:
-        - bash
-        - -c
-        args:
-        - |
-          set -euo pipefail
-          NS="{{ .Release.Namespace }}"
-          wait_for_secret_key() {
-            local name="$1" key="$2"
-            echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
-            local ok=0
-            for i in $(seq 1 60); do
-              if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
-                echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
-                ok=1
-                break
-              fi
-              sleep 10
-            done
-            if [ "${ok}" != "1" ]; then
-              echo "FAIL: secret/${name}.${key} not populated after 10m"
-              echo "      Hint: openbao-bootstrap Job may have failed to write the Secret; check:"
-              echo "            kubectl logs -n ${NS} -l app=openbao -c openbao-bootstrap"
-              return 1
-            fi
-            return 0
-          }
-          for s in shoggoth-server shoggoth-ca; do
-            k="tls.crt"
-            [ "${s}" = "shoggoth-ca" ] && k="ca.crt"
-            wait_for_secret_key "${s}" "${k}" || exit 1
-          done
-          echo "wait-bootstrap: all K8s Secrets Ready"
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
       containers:
       - name: angie
         image: docker.angie.software/angie:1.11.6
@@ -194,42 +150,4 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: web-external
     app.kubernetes.io/component: web-external
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: web-external-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app: web-external
-    app.kubernetes.io/component: web-external
-rules:
-- apiGroups:
-  - ''
-  resources:
-  - secrets
-  resourceNames:
-  - shoggoth-server
-  - shoggoth-ca
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: web-external-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app: web-external
-    app.kubernetes.io/component: web-external
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: web-external-bootstrap-wait
-subjects:
-- kind: ServiceAccount
-  name: web-external
-  namespace: {{ .Release.Namespace }}
 {{- end }}

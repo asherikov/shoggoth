@@ -2,10 +2,7 @@
   templates/cdash-api-token.yaml — ExternalSecret projecting the CDash
   API token into a K8s Secret.
 
-  Restores shoggoth/k3s/external-secrets/cdash-api-token.yaml, which the
-  chart migration dropped. openbao-bootstrap Phase B seeds
-  ``cdash/api-token`` with a random value on a fresh install, so this
-  only has to project it. The initContainer in cdash.yaml waits on
+  Consumers: the initContainer in cdash.yaml waits on
   ``externalsecret/cdash-api-token``; the resulting Secret is
   referenced via ``secretKeyRef`` in cdash.yaml and web-internal.yaml
   (the latter proxies a webhook to cdash).

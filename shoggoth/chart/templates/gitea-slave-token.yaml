@@ -2,31 +2,18 @@
   templates/gitea-slave-token.yaml — ExternalSecret projecting the slave
   Gitea PAT into a K8s Secret in the namespace.
 
-  Restores shoggoth/k3s/external-secrets/gitea-slave-token.yaml, which the
-  chart migration dropped. The initContainer in slave-term.yaml /
-  slave-dind.yaml / gitea-runner.yaml / argo-workflows.yaml /
-  web-internal.yaml / litellm.yaml all wait on
-  ``externalsecret/gitea-slave-token`` and the ``git-cred`` sidecar
-  mounts the resulting Secret, but the CR that creates it did not. The
-  ``wait-bootstrap`` loops therefore burned their 10-minute timeouts and
-  no Deployment left init until something else created
-  ``Secret/gitea-slave-token`` out-of-band.
+  Consumers: the initContainers in slave-term.yaml / slave-dind.yaml /
+  gitea-runner.yaml / argo-workflows.yaml / web-internal.yaml /
+  litellm.yaml all wait on ``externalsecret/gitea-slave-token`` and the
+  ``git-cred`` sidecar mounts the resulting Secret. The ExternalSecret
+  must exist for those waits to succeed: without it they burn their
+  10-minute timeouts and no Deployment leaves init.
 
-  The Vault side never regressed: openbao-bootstrap Phase B seeds
-  ``gitea/slave-token`` with a random value on a fresh install, so this
-  only has to project it. Legacy used the same remoteRef, and a legacy
-  install therefore reuses the credential already sitting in Vault
-  rather than rotating it on upgrade.
-
-  ``creationPolicy: Orphan`` + ``refreshInterval: 0s`` is load-bearing —
+  ``creationPolicy: Orphan`` + ``refreshInterval: 0s`` is load-bearing:
   the PushSecret at ``gitea-slave-token-push.yaml`` reads this K8s
   Secret and pushes it back to OpenBao, and the script that writes the
   fresh token (``slave-token``) must remain the authority on the Secret
-  value. Without these flags the controller would overwrite the script's
-  write with stale OpenBao data on the next reconcile, the PushSecret
-  would observe no change in K8s, and skip pushing — leaving the
-  OpenBao value stale. See the controller reasoning cited in the
-  legacy template's ``target.creationPolicy`` comment.
+  value.
 
   Gated on ``gitea``: gitea is the upstream identity provider and a
   default-on service; every consumer (slave-dind, slave-term,

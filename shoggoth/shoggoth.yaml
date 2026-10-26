@@ -23,9 +23,7 @@ identity:
   # SHOGGOTT_DNS_IP — the CoreDNS service IP. See chart/templates/dns.yaml.
   dnsIp: 10.43.0.53
   # Release/instance name. Drives the host paths under
-  # /var/lib/rancher/k3s/storage/<instanceDir>/. Normally $(INSTANCE); the
-  # lint config overrides it to a throwaway so `make helm_lint` never touches
-  # a real deployment's data.
+  # /var/lib/rancher/k3s/storage/<instanceDir>/. Normally $(INSTANCE).
   instanceDir: shoggoth
 
 network:

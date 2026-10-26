@@ -2,12 +2,11 @@
   templates/litellm.yaml — LiteLLM proxy + its rendered-config pipeline.
 
   The `litellm-templates` ConfigMap ships the *template* form of config.yaml.
-  `${OLLAMA_CLOUD_TOKEN}` and `${GITEA_SLAVE_TOKEN}` stay literal in both the
-  legacy envsubst path and here: make/k3s.mk restricts envsubst to the
-  $ENV_VARS whitelist, so those two are expanded at *pod* runtime by the
-  render-config initContainer (templates/render-config.yaml) instead. Only the
-  SHOGGOTH_AI_DEFAULT_* vars are deploy-time substitutions, so they become
-  .Values.ai.*.
+  `${OLLAMA_CLOUD_TOKEN}` and `${GITEA_SLAVE_TOKEN}` stay literal:
+  make/k3s.mk restricts envsubst to the $ENV_VARS whitelist, so those two
+  are expanded at *pod* runtime by the render-config initContainer
+  (templates/render-config.yaml) instead. Only the SHOGGOTH_AI_DEFAULT_* vars
+  are deploy-time substitutions, so they become .Values.ai.*.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "litellm")) }}
 apiVersion: v1
@@ -21,9 +20,8 @@ metadata:
     app.kubernetes.io/component: litellm
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -73,94 +71,8 @@ spec:
       annotations:
         secret.reloader.stakater.com/reload: gitea-slave-token,ai-default-token
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
-      - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        command:
-        - bash
-        - -c
-        args:
-        - |
-          set -euo pipefail
-          NS="{{ .Release.Namespace }}"
-                    wait_for_externalsecret() {
-                      local name="$1"
-                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
-                      for i in $(seq 1 60); do
-                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
-                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
-                          return 0
-                        fi
-                        sleep 10
-                      done
-                      echo "FAIL: externalsecret/${name} not Ready after 10m"
-                      echo "      Hint: check status from outside the pod:"
-                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
-                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
-                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
-                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
-                      return 1
-                    }
-          for tok in ai-default-token gitea-slave-token; do
-                    case "${tok}" in
-                      ai-default-token) wait_for_externalsecret ai-default-token || exit 1 ;;
-                      gitea-slave-token) wait_for_externalsecret gitea-slave-token || exit 1 ;;
-                    esac
-          done
-                    # Block until the headroom Service has at least one
-                    # ready endpoint subset (i.e. the headroom pod's
-                    # readinessProbe is passing). Without this the
-                    # litellm pod would race headroom's cold start and
-                    # the first 1-2 minutes of pre_call guardrail calls
-                    # would fail (the proxy is busy downloading
-                    # Kompress-v2-base + the ONNX runtime on a fresh
-                    # PVC). Budget: 5 minutes — on a brand-new cluster
-                    # the Service object appears within seconds; the
-                    # 5-minute ceiling covers a slow image pull.
-                    wait_for_service_endpoints() {
-                      local svc="$1"
-                      local budget_seconds="${2:-300}"
-                      local step_seconds=5
-                      echo "wait-bootstrap: waiting for service/${svc} ready endpoints in namespace ${NS}..."
-                      for i in $(seq 1 $((budget_seconds / step_seconds))); do
-                        if ! kubectl get service "${svc}" -n "${NS}" -o name >/dev/null 2>&1; then
-                          sleep "${step_seconds}"
-                          continue
-                        fi
-                        if kubectl get endpoints "${svc}" -n "${NS}" -o json 2>/dev/null \
-                            | jq -e '.subsets // [] | map(.addresses // []) | add // [] | length > 0' >/dev/null; then
-                          echo "wait-bootstrap: service/${svc} has ready endpoints (after $((i*step_seconds))s)"
-                          return 0
-                        fi
-                        sleep "${step_seconds}"
-                      done
-                      echo "FAIL: service/${svc} has no ready endpoints after ${budget_seconds}s"
-                      echo "      Diagnostics:"
-                      kubectl -n "${NS}" get svc "${svc}" -o yaml 2>&1 | sed 's/^/      svc: /' | head -40
-                      kubectl -n "${NS}" get endpoints "${svc}" -o yaml 2>&1 | sed 's/^/      ep:  /' | head -40
-                      kubectl -n "${NS}" get pods -l app="${svc}" -o wide 2>&1 | sed 's/^/      pod: /' | head -10
-                      return 1
-                    }
-          wait_for_service_endpoints headroom 300 || exit 1
-          echo "wait-bootstrap: all K8s Secrets Ready, headroom reachable"
-
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
-        volumeMounts: []
       - name: render-config
         image: asherikov/shoggoth_tools:alpine
         imagePullPolicy: IfNotPresent
@@ -197,6 +109,67 @@ spec:
         - name: render-script
           mountPath: /tmpl
           readOnly: true
+      - name: wait-bootstrap
+        image: asherikov/shoggoth_tools:alpine
+        imagePullPolicy: IfNotPresent
+        command:
+        - bash
+        - -c
+        args:
+        - |
+          set -euo pipefail
+          NS="{{ .Release.Namespace }}"
+          # The K8s Secrets this pod needs (ai-default-token,
+          # gitea-slave-token) are mounted natively — the render-config
+          # init container resolves both through secretKeyRef, so the
+          # kubelet holds that container until they exist. Only the
+          # headroom Service readiness below has no native equivalent,
+          # so it is the only thing left to poll for.
+          # Block until the headroom Service has at least one
+          # ready endpoint subset (i.e. the headroom pod's
+          # readinessProbe is passing). Without this the
+          # litellm pod would race headroom's cold start and
+          # the first 1-2 minutes of pre_call guardrail calls
+          # would fail (the proxy is busy downloading
+          # Kompress-v2-base + the ONNX runtime on a fresh
+          # PVC). Budget: 5 minutes — on a brand-new cluster
+          # the Service object appears within seconds; the
+          # 5-minute ceiling covers a slow image pull.
+          wait_for_service_endpoints() {
+                      local svc="$1"
+                      local budget_seconds="${2:-300}"
+                      local step_seconds=5
+                      echo "wait-bootstrap: waiting for service/${svc} ready endpoints in namespace ${NS}..."
+                      for i in $(seq 1 $((budget_seconds / step_seconds))); do
+                        if ! kubectl get service "${svc}" -n "${NS}" -o name >/dev/null 2>&1; then
+                          sleep "${step_seconds}"
+                          continue
+                        fi
+                        if kubectl get endpoints "${svc}" -n "${NS}" -o json 2>/dev/null \
+                            | jq -e '.subsets // [] | map(.addresses // []) | add // [] | length > 0' >/dev/null; then
+                          echo "wait-bootstrap: service/${svc} has ready endpoints (after $((i*step_seconds))s)"
+                          return 0
+                        fi
+                        sleep "${step_seconds}"
+                      done
+                      echo "FAIL: service/${svc} has no ready endpoints after ${budget_seconds}s"
+                      echo "      Diagnostics:"
+                      kubectl -n "${NS}" get svc "${svc}" -o yaml 2>&1 | sed 's/^/      svc: /' | head -40
+                      kubectl -n "${NS}" get endpoints "${svc}" -o yaml 2>&1 | sed 's/^/      ep:  /' | head -40
+                      kubectl -n "${NS}" get pods -l app="${svc}" -o wide 2>&1 | sed 's/^/      pod: /' | head -10
+                      return 1
+                    }
+          wait_for_service_endpoints headroom 300 || exit 1
+          echo "wait-bootstrap: headroom reachable"
+
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+        volumeMounts: []
       containers:
       - name: litellm
         image: ghcr.io/berriai/litellm:v1.102.0
@@ -306,34 +279,20 @@ metadata:
     app: litellm
     app.kubernetes.io/component: litellm
 rules:
-- apiGroups:
-  - ''
-  resources:
-  - secrets
-  resourceNames:
-  - ai-default-token
-  - gitea-slave-token
-  verbs:
-  - get
-- apiGroups:
-  - external-secrets.io
-  resources:
-  - externalsecrets
-  resourceNames:
-  - ai-default-token
-  - gitea-slave-token
-  verbs:
-  - get
+# No `secrets` rule and no `externalsecrets` rule: the wait loop used to
+# poll the ExternalSecret CRs (`kubectl get externalsecret <name>` →
+# their Ready condition) before the headroom poll. Those two secrets
+# (ai-default-token, gitea-slave-token) are now resolved by the kubelet
+# itself — render-config declares non-optional `secretKeyRef`s, so the
+# kubelet refuses to start that init container until the Secrets and
+# their keys exist, with no API read and therefore no RBAC needed.
 # `wait_for_service_endpoints` (see the wait-bootstrap init container
 # in this Deployment) polls `kubectl get services/endpoints` to block
 # the main litellm container until the headroom Service has at least
-# one ready endpoint subset. Without these rules the poll 403s on
-# "services is forbidden" / "endpoints is forbidden" and the init
-# container exhausts its 300s budget, surfacing the FAIL log line
-# instead of progressing to the main container. The pods `list` is
-# used only by the same function's diagnostic dump on the failure
-# path (`kubectl get pods -l app=${svc}`) — leaving it in place keeps
-# the diagnostic useful when readiness genuinely fails. Scope is
+# one ready endpoint subset. The pods `list` is used only by the same
+# function's diagnostic dump on the failure path
+# (`kubectl get pods -l app=${svc}`) — leaving it in place keeps the
+# diagnostic useful when readiness genuinely fails. Scope is
 # namespace-local (Role, not ClusterRole) and read-only.
 - apiGroups:
   - ''

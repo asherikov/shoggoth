@@ -347,9 +347,8 @@ metadata:
     app.kubernetes.io/component: web-internal
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -369,9 +368,8 @@ metadata:
     app.kubernetes.io/component: web-internal
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -1651,14 +1649,7 @@ spec:
       annotations:
         secret.reloader.stakater.com/reload: gitea-slave-token,redmine-slave-token,cdash-api-token,argo-webhook-receiver-token
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
       - name: build-plugin
         image: asherikov/shoggoth_tools:alpine
@@ -1680,69 +1671,6 @@ spec:
           readOnly: true
         - name: plugin-data
           mountPath: /data/plugin
-      - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        command:
-        - bash
-        - -c
-        args:
-        - |
-          set -euo pipefail
-          NS="{{ .Release.Namespace }}"
-                    wait_for_externalsecret() {
-                      local name="$1"
-                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
-                      for i in $(seq 1 60); do
-                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
-                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
-                          return 0
-                        fi
-                        sleep 10
-                      done
-                      echo "FAIL: externalsecret/${name} not Ready after 10m"
-                      echo "      Hint: check status from outside the pod:"
-                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
-                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
-                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
-                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
-                      return 1
-                    }
-                    wait_for_k8s_secret() {
-                      local name="$1"
-                      echo "wait-bootstrap: waiting for secret/${name} populated in namespace ${NS}..."
-                      for i in $(seq 1 60); do
-                        if kubectl get secret -n "${NS}" "${name}" -o json 2>/dev/null | jq -e '.data.token // "" | length > 0' >/dev/null 2>&1; then
-                          echo "wait-bootstrap: secret/${name} Ready (after $((i*5))s)"
-                          return 0
-                        fi
-                        sleep 5
-                      done
-                      echo "FAIL: secret/${name} has no .data.token after 5m"
-                      echo "      Hint: confirm the ServiceAccount ${name%-token} exists in ${NS};"
-                      echo "      kubernetes.io/service-account-token Secrets are populated by the"
-                      echo "      token-request controller and stay empty until the SA + RoleBinding"
-                      echo "      + Secret itself are all visible to kube-controller-manager."
-                      return 1
-                    }
-          for tok in gitea-slave-token redmine-slave-token cdash-api-token argo-webhook-receiver-token; do
-                    case "${tok}" in
-                      gitea-slave-token) wait_for_externalsecret gitea-slave-token || exit 1 ;;
-                      redmine-slave-token) wait_for_externalsecret redmine-slave-token || exit 1 ;;
-                      cdash-api-token) wait_for_externalsecret cdash-api-token || exit 1 ;;
-                      argo-webhook-receiver-token) wait_for_k8s_secret argo-webhook-receiver-token || exit 1 ;;
-                    esac
-          done
-          echo "wait-bootstrap: all K8s Secrets Ready"
-
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
-        volumeMounts: []
       - name: render-config
         image: asherikov/shoggoth_tools:alpine
         imagePullPolicy: IfNotPresent
@@ -1897,52 +1825,4 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: web-internal
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: web-internal-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app.kubernetes.io/component: web-internal
-rules:
-- apiGroups:
-  - ''
-  resources:
-  - secrets
-  resourceNames:
-  - gitea-slave-token
-  - redmine-slave-token
-  - cdash-api-token
-  - argo-webhook-receiver-token
-  verbs:
-  - get
-- apiGroups:
-  - external-secrets.io
-  resources:
-  - externalsecrets
-  resourceNames:
-  - gitea-slave-token
-  - redmine-slave-token
-  - cdash-api-token
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: web-internal-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app.kubernetes.io/component: web-internal
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: web-internal-bootstrap-wait
-subjects:
-- kind: ServiceAccount
-  name: web-internal
-  namespace: {{ .Release.Namespace }}
 {{- end }}

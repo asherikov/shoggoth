@@ -2,11 +2,7 @@
   templates/cdash-app-key.yaml — ExternalSecret projecting the CDash
   application shared key into a K8s Secret.
 
-  Restores shoggoth/k3s/external-secrets/cdash-app-key.yaml, which the
-  chart migration dropped. openbao-bootstrap Phase B seeds
-  ``cdash/app-key`` with a random value on a fresh install, so this
-  only has to project it. The resulting Secret is referenced by
-  cdash.yaml as the application shared key.
+  Consumer: cdash.yaml, as the application shared key.
 
   Gated on ``cdash``: the only consumer.
 */}}

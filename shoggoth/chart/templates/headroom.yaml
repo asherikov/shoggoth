@@ -24,9 +24,8 @@ metadata:
     app.kubernetes.io/component: headroom
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -78,14 +77,7 @@ spec:
     spec:
       serviceAccountName: headroom
       automountServiceAccountToken: false
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: headroom
         image: ghcr.io/headroomlabs-ai/headroom:code-nonroot-4630602

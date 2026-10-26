@@ -6,10 +6,16 @@
   kubelet_stats + k8s_cluster receivers and the k8s_attributes processor.
 
   Note on cluster-scoped names: ClusterRole/ClusterRoleBinding are named
-  `otelcol` (no namespace prefix), matching the legacy manifest. Two
-  shoggoth instances on the same cluster therefore collide here. Preserved
-  deliberately for parity — widening to `{{ .Release.Namespace }}-otelcol`
-  is a Phase 4 cleanup, not a parity fix.
+  `{{ include "shoggoth.fullname" . }}-otelcol`, NOT bare `otelcol`. A
+  cluster-scoped object has no namespace to separate two shoggoth instances
+  on one cluster, so a bare name would make both instances render the SAME
+  ClusterRole. `make up` passes `--take-ownership`, so the second install
+  silently re-labels the first instance's ClusterRole to its own release and
+  rewrites the ClusterRoleBinding's `subjects` list — `rbac/v1.Subjects` is
+  an atomic list with no merge key, so the first instance's ServiceAccount is
+  dropped from it and its collector loses every permission in the rules
+  block. The binding has to be renamed too: `ClusterRoleBinding.roleRef` is
+  immutable server-side, so a binding cannot be repointed in place.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "otelcol")) }}
 apiVersion: v1
@@ -363,14 +369,7 @@ spec:
         app: otelcol
         app.kubernetes.io/component: otelcol
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       serviceAccountName: otelcol
       initContainers: []
       containers:
@@ -483,7 +482,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: otelcol
+  name: {{ include "shoggoth.fullname" . }}-otelcol
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: otelcol
@@ -535,7 +534,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: otelcol
+  name: {{ include "shoggoth.fullname" . }}-otelcol
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: otelcol
@@ -543,7 +542,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: otelcol
+  name: {{ include "shoggoth.fullname" . }}-otelcol
 subjects:
 - kind: ServiceAccount
   name: otelcol

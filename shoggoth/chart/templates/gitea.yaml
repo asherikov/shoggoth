@@ -46,9 +46,8 @@ metadata:
     app.kubernetes.io/component: gitea
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -174,75 +173,7 @@ spec:
       annotations:
         secret.reloader.stakater.com/reload: openldap-ldapauth-password,openldap-admin-password
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
-      initContainers:
-      - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        command:
-        - bash
-        - -c
-        args:
-        - |
-          set -euo pipefail
-          NS="{{ .Release.Namespace }}"
-                    wait_for_externalsecret() {
-                      local name="$1"
-                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
-                      for i in $(seq 1 60); do
-                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
-                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
-                          return 0
-                        fi
-                        sleep 10
-                      done
-                      echo "FAIL: externalsecret/${name} not Ready after 10m"
-                      echo "      Hint: check status from outside the pod:"
-                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
-                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
-                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
-                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
-                      return 1
-                    }
-          wait_for_secret_key() {
-            local name="$1" key="$2"
-            echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
-            for i in $(seq 1 60); do
-              if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
-                echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
-                return 0
-              fi
-              sleep 10
-            done
-            echo "FAIL: secret/${name}.${key} not populated after 10m"
-            echo "      Hint: check ExternalSecret status from outside the pod:"
-            echo "            kubectl get externalsecret -n ${NS} <name> -o yaml"
-            echo "      Most common cause: OpenBao unavailable, or SecretStore reference broken."
-            return 1
-          }
-          for pw in openldap-admin-password openldap-ldapauth-password; do
-                    case "${pw}" in
-                      openldap-admin-password) { wait_for_externalsecret openldap-admin-password && wait_for_secret_key openldap-admin-password password; } || exit 1 ;;
-                      openldap-ldapauth-password) { wait_for_externalsecret openldap-ldapauth-password && wait_for_secret_key openldap-ldapauth-password password; } || exit 1 ;;
-                    esac
-          done
-          echo "wait-bootstrap: all K8s Secrets Ready"
-
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
-        volumeMounts: []
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: gitea
         image: gitea/gitea:1.27.3
@@ -384,14 +315,7 @@ spec:
       annotations:
         secret.reloader.stakater.com/reload: gitea-runner-token
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
       - name: render-config
         image: asherikov/shoggoth_tools:alpine
@@ -421,66 +345,6 @@ spec:
         - name: render-script
           mountPath: /tmpl
           readOnly: true
-      - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        command:
-        - bash
-        - -c
-        args:
-        - |
-          set -euo pipefail
-          NS="{{ .Release.Namespace }}"
-
-          wait_for_externalsecret() {
-            local name="$1"
-            echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
-            for i in $(seq 1 60); do
-              if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
-                echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
-                return 0
-              fi
-              sleep 10
-            done
-            echo "FAIL: externalsecret/${name} not Ready after 10m"
-            echo "      Hint: check status from outside the pod:"
-            echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
-            echo "            kubectl describe externalsecret -n ${NS} ${name}"
-            echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
-            echo "      or remote secret missing (Orphan policies require a value in the source store)."
-            return 1
-          }
-
-          wait_for_secret_key() {
-            local name="$1" key="$2"
-            echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
-            for i in $(seq 1 60); do
-              if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
-                echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
-                return 0
-              fi
-              sleep 10
-            done
-            echo "FAIL: secret/${name}.${key} not populated after 10m"
-            echo "      Hint: check ExternalSecret status from outside the pod:"
-            echo "            kubectl get externalsecret -n ${NS} gitea-runner-token -o yaml"
-            echo "      Most common cause: OpenBao unavailable, or SecretStore reference broken."
-            return 1
-          }
-
-          # gitea-runner only needs its registration token; it does not talk to OpenLDAP.
-          # (OpenLDAP Secrets are populated by other consumers' ExternalSecrets.)
-          { wait_for_externalsecret gitea-runner-token && wait_for_secret_key gitea-runner-token token; } || exit 1
-          echo "wait-bootstrap: all K8s Secrets Ready"
-
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
-        volumeMounts: []
       containers:
       - name: runner
         image: gitea/runner:4.1.0
@@ -577,51 +441,6 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: gitea
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: gitea-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app.kubernetes.io/component: gitea
-rules:
-- apiGroups:
-  - ''
-  resources:
-  - secrets
-  resourceNames:
-  - openldap-admin-password
-  - openldap-ldapauth-password
-  verbs:
-  - get
-- apiGroups:
-  - external-secrets.io
-  resources:
-  - externalsecrets
-  resourceNames:
-  - openldap-admin-password
-  - openldap-ldapauth-password
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: gitea-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app.kubernetes.io/component: gitea
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: gitea-bootstrap-wait
-subjects:
-- kind: ServiceAccount
-  name: gitea
-  namespace: {{ .Release.Namespace }}
 {{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}
 ---
@@ -633,53 +452,6 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: gitea
-{{- end }}
----
-{{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: gitea-runner-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app.kubernetes.io/component: gitea
-rules:
-- apiGroups:
-  - ''
-  resources:
-  - secrets
-  resourceNames:
-  - gitea-runner-token
-  verbs:
-  - get
-- apiGroups:
-  - external-secrets.io
-  resources:
-  - externalsecrets
-  resourceNames:
-  - gitea-runner-token
-  verbs:
-  - get
-{{- end }}
----
-{{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: gitea-runner-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app.kubernetes.io/component: gitea
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: gitea-runner-bootstrap-wait
-subjects:
-- kind: ServiceAccount
-  name: gitea-runner
-  namespace: {{ .Release.Namespace }}
 {{- end }}
 ---
 {{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}
@@ -768,7 +540,7 @@ data:
         - /cache
       # default docker bridge network is correct: spawned containers reach
       # the cluster DNS through the daemon (which itself runs with the
-      # dnsPolicy: None + dnsConfig.nameservers block in slave-dind.yaml, so
+      # shoggoth.podDnsConfig DNS block, so
       # git.{{ .Values.identity.domain }} resolves correctly inside spawned containers)
       # and reach the gitea-runner cache server via the cluster Service IP.
       network_mode: bridge

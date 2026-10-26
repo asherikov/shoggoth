@@ -42,11 +42,10 @@ app.kubernetes.io/part-of: shoggoth
 {{/*
 Same labels as shoggoth.labels, but with a dict of per-key overrides merged on
 top. Use this from templates that need a non-default value (e.g.
-app.kubernetes.io/part-of: external-secrets for resources that were
-external-secrets-bundle-owned in legacy shoggoth/k3s/) instead of emitting a
-literal key after the helper — that pattern silently duplicates the
-helper's key in the rendered YAML and breaks `kubeconform -strict` plus
-every YAML 1.2 spec-compliant parser.
+app.kubernetes.io/part-of: external-secrets for resources the upstream ESO
+chart owns) instead of emitting a literal key after the helper — that pattern
+silently duplicates the helper's key in the rendered YAML and breaks
+`kubeconform -strict` plus every YAML 1.2 spec-compliant parser.
 
 Accepted override keys today:
   partOf — replaces `app.kubernetes.io/part-of` (default `shoggoth`)
@@ -128,4 +127,49 @@ hyphenated naming.
 {{- end -}}
 {{- end -}}
 {{- if $enabled -}}1{{- end -}}
+{{- end -}}
+
+{{/*
+Common DNS configuration for pods in the shoggoth namespace.
+
+Every pod that must resolve <service>.<shoggoth-domain> needs the
+namespace's CoreDNS (identity.dnsIp) as its resolver and the namespace
+search domains, so a short name like `gitea` resolves inside the
+namespace and the split-horizon rewrite in dns.yaml applies.
+
+dnsPolicy: None is required, not incidental: under the default
+ClusterFirst the kubelet hands the pod the cluster DNS (10.43.0.10),
+which knows nothing about the <domain> rewrite.
+
+YAML form, for a pod spec:
+  {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
+
+JSON form, for the podSpecPatch in argo-workflows.yaml (a JSON
+document embedded in a YAML block scalar):
+  {{- include "shoggoth.podDnsConfigJson" . | nindent 10 }}
+*/}}
+{{- define "shoggoth.podDnsConfig" -}}
+dnsPolicy: None
+dnsConfig:
+{{ include "shoggoth.dnsConfigJson" . | fromJson | toYaml | indent 2 }}
+{{- end -}}
+
+{{- define "shoggoth.podDnsConfigJson" -}}
+"dnsPolicy": "None",
+"dnsConfig": {{ include "shoggoth.dnsConfigJson" . }},
+{{- end -}}
+
+{{/*
+The dnsConfig object itself, as JSON — the one place the resolver and
+the search list are written down. Both renderings above derive from it,
+so the YAML pod specs and the argo podSpecPatch cannot drift apart.
+*/}}
+{{- define "shoggoth.dnsConfigJson" -}}
+{{- dict
+      "nameservers" (list .Values.identity.dnsIp)
+      "searches" (list
+        (printf "%s.svc.cluster.local" .Release.Namespace)
+        "svc.cluster.local"
+        "cluster.local")
+    | toJson -}}
 {{- end -}}

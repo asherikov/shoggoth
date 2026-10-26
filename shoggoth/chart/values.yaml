@@ -6,10 +6,9 @@
 # SHOGGOTH_CONFIG?=shoggoth/${INSTANCE}.yaml. Values set there layer over this
 # file, and `--set` from make start/stop layers over those.
 #
-# Template comments cite the pre-chart manifest tree as
-# `legacy shoggoth/k3s/<name>.yaml`. That directory was removed once every file
-# in it was superseded here; recover one with
-# `git show e43fd56:shoggoth/k3s/<name>.yaml`.
+# Template comments say only what is specific to the file they open: what it
+# renders, who consumes it, what gate it follows. The shared house rules live
+# in README "Chart template conventions".
 
 # Chart naming. templates/_helpers.tpl dereferences .Values.shoggoth.* in
 # `shoggoth.name` and `shoggoth.fullname`, so this map MUST exist even when
@@ -71,11 +70,11 @@ ldap:
 #
 # Seven services carry a second `app:` label inside another service's template
 # (argo-server, argo-workflow-controller, basic-memory-ui, cdash-db,
-# gitea-runner, openbao-bootstrap, redmine-db). Legacy served each pair from
-# one manifest file, so they had no per-label toggle; Phase 4 gave them one so
-# `make stop SERVICE=redmine-db` has something to switch off.
+# gitea-runner, openbao-bootstrap, redmine-db). Each pair had no per-label
+# toggle, so Phase 4 gave them one — `make stop SERVICE=redmine-db` has
+# something to switch off.
 #
-# Every key here matches the legacy `app:` label verbatim — operators pass
+# Every key here matches the `app:` label verbatim — operators pass
 # `make start|stop SERVICE=<label>` and the value key under .services.* is
 # spelled the same way. Templates do not access keys via the dot path
 # (`services.<key>.enabled`) because Go templates parse `-` as subtraction;

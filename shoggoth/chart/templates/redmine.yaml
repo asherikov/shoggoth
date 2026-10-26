@@ -1,16 +1,32 @@
 {{- /*
-  templates/redmine.yaml — Redmine + its MariaDB backend.
+  templates/redmine.yaml — Redmine (Rails) + its PostgreSQL backend.
 
   Emits two `app:` labels, as legacy did: `redmine` (the web Deployment) and
-  `redmine-db` (the MariaDB StatefulSet). Both have values keys
-  (`services.redmine.enabled` and `services.redmine-db.enabled`), but this
-  template's gate reads only `services.redmine.enabled`. Toggling
-  `SERVICE=redmine-db` alone writes a key no template reads — toggling
-  `SERVICE=redmine` brings both Deployments up or down together.
+  `redmine-db` (the PostgreSQL StatefulSet). The whole file is gated on
+  `services.redmine.enabled`; the redmine-db Service, StatefulSet and
+  ServiceAccount each carry their own `services.redmine-db.enabled` guard,
+  so either workload can be toggled on its own.
 
-  The `redmine-bootstrap` initContainer runs the LDAP bind + admin-password
-  seeding and mints the session secret; `render-config` renders the Rails
-  config from a template. Secrets arrive via ExternalSecrets, never inline.
+  Secrets arrive via ExternalSecrets, never inline, and the pods depend on
+  them natively — no init container waits for them:
+
+    redmine-db-password         secret volume + REDMINE_DB_PASSWORD_FILE
+    redmine-secret-key-base     secret volume + REDMINE_SECRET_KEY_BASE_FILE
+    openldap-ldapauth-password  secretKeyRef -> LDAP_BIND_PASSWORD
+    openldap-admin-password     secretKeyRef -> SHOGGOTH_ADMIN_PASSWORD
+
+  The two `*_FILE` variables are resolved by the image's own entrypoint
+  (`file_env`), which reads the mounted file before it execs `rails server`.
+  The volumes pin the key with a `subPath`, so the kubelet holds the pod in
+  `ContainerCreating` until the Secret exists. redmine-db consumes the same
+  password through `POSTGRES_PASSWORD_FILE`.
+
+  The LDAP auth-source configuration, the admin-password seeding and the
+  slave-token minting run in a `postStart` hook (`/shoggoth/redmine/init.sh`
+  from the `redmine-init` ConfigMap), not in an init container. That hook
+  reads the mounted secret file itself rather than relying on an inherited
+  `SECRET_KEY_BASE`, so the `secret-key-base` volume has to be mounted for
+  the hook as well as for the image entrypoint.
 
   ${SHOGGOTH_ADMIN_PASSWORD}, ${SECRET_KEY_BASE}, ${REDMINE_SECRET_KEY_BASE_FILE},
   ${LDAP_BIND_DN}, ${LDAP_BIND_PASSWORD}, ${LDAP_HOST} and the bare shell vars
@@ -29,9 +45,8 @@ metadata:
     app.kubernetes.io/component: redmine
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -51,9 +66,8 @@ metadata:
     app.kubernetes.io/component: redmine
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -73,9 +87,8 @@ metadata:
     app.kubernetes.io/component: redmine
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -342,60 +355,7 @@ spec:
       labels:
         app: redmine-db
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
-      initContainers:
-      - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        command:
-        - bash
-        - -c
-        args:
-        - |
-          set -euo pipefail
-          NS="{{ .Release.Namespace }}"
-                    wait_for_externalsecret() {
-                      local name="$1"
-                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
-                      for i in $(seq 1 60); do
-                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
-                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
-                          return 0
-                        fi
-                        sleep 10
-                      done
-                      echo "FAIL: externalsecret/${name} not Ready after 10m"
-                      echo "      Hint: check status from outside the pod:"
-                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
-                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
-                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
-                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
-                      return 1
-                    }
-          for pw in redmine-db-password redmine-secret-key-base; do
-            key="password"
-                    case "${pw}" in
-                      redmine-db-password) wait_for_externalsecret redmine-db-password || exit 1 ;;
-                      redmine-secret-key-base) wait_for_externalsecret redmine-secret-key-base || exit 1 ;;
-                    esac
-          done
-          echo "wait-bootstrap: all K8s Secrets Ready"
-
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
-        volumeMounts: []
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: postgres
         image: postgres:18-alpine
@@ -493,87 +453,7 @@ spec:
       annotations:
         secret.reloader.stakater.com/reload: redmine-db-password,redmine-secret-key-base,openldap-ldapauth-password
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
-      initContainers:
-      - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        command:
-        - bash
-        - -c
-        args:
-        - |
-          set -euo pipefail
-          NS="{{ .Release.Namespace }}"
-                    wait_for_externalsecret() {
-                      local name="$1"
-                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
-                      for i in $(seq 1 60); do
-                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
-                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
-                          return 0
-                        fi
-                        sleep 10
-                      done
-                      echo "FAIL: externalsecret/${name} not Ready after 10m"
-                      echo "      Hint: check status from outside the pod:"
-                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
-                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
-                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
-                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
-                      return 1
-                    }
-          wait_for_secret_key() {
-            local name="$1" key="$2"
-            echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
-            local ok=0
-            for i in $(seq 1 60); do
-              if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
-                echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
-                ok=1
-                break
-              fi
-              sleep 10
-            done
-            if [ "${ok}" != "1" ]; then
-              echo "FAIL: secret/${name}.${key} not populated after 10m"
-              echo "      Hint: check ExternalSecret status from outside the pod:"
-              echo "            kubectl get externalsecret -n ${NS} <name> -o yaml"
-              echo "      Most common cause: OpenBao unavailable, or SecretStore reference broken."
-              return 1
-            fi
-            return 0
-          }
-          for pw in redmine-db-password redmine-secret-key-base; do
-                    case "${pw}" in
-                      redmine-db-password) wait_for_externalsecret redmine-db-password || exit 1 ;;
-                      redmine-secret-key-base) wait_for_externalsecret redmine-secret-key-base || exit 1 ;;
-                    esac
-          done
-          for pw in openldap-admin-password openldap-ldapauth-password; do
-                    case "${pw}" in
-                      openldap-admin-password) wait_for_externalsecret openldap-admin-password || exit 1 ;;
-                      openldap-ldapauth-password) wait_for_externalsecret openldap-ldapauth-password || exit 1 ;;
-                    esac
-          done
-          wait_for_secret_key openbao-unseal-key root-token || exit 1
-          echo "wait-bootstrap: all K8s Secrets Ready"
-
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
-        volumeMounts: []
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: redmine
         image: redmine:7.0.1-alpine3.24
@@ -720,56 +600,6 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: redmine
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: redmine-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app.kubernetes.io/component: redmine
-rules:
-- apiGroups:
-  - ''
-  resources:
-  - secrets
-  resourceNames:
-  - redmine-db-password
-  - redmine-secret-key-base
-  - openldap-admin-password
-  - openldap-ldapauth-password
-  - openbao-unseal-key
-  verbs:
-  - get
-- apiGroups:
-  - external-secrets.io
-  resources:
-  - externalsecrets
-  resourceNames:
-  - redmine-db-password
-  - redmine-secret-key-base
-  - openldap-admin-password
-  - openldap-ldapauth-password
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: redmine-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app.kubernetes.io/component: redmine
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: redmine-bootstrap-wait
-subjects:
-- kind: ServiceAccount
-  name: redmine
-  namespace: {{ .Release.Namespace }}
----
 {{- if (include "shoggoth.isServiceEnabled" (list . "redmine-db")) }}
 apiVersion: v1
 kind: ServiceAccount
@@ -779,54 +609,5 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: redmine
-{{- end }}
----
-{{- if (include "shoggoth.isServiceEnabled" (list . "redmine-db")) }}
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: redmine-db-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app.kubernetes.io/component: redmine
-rules:
-- apiGroups:
-  - ''
-  resources:
-  - secrets
-  resourceNames:
-  - redmine-db-password
-  - redmine-secret-key-base
-  verbs:
-  - get
-- apiGroups:
-  - external-secrets.io
-  resources:
-  - externalsecrets
-  resourceNames:
-  - redmine-db-password
-  - redmine-secret-key-base
-  verbs:
-  - get
-{{- end }}
----
-{{- if (include "shoggoth.isServiceEnabled" (list . "redmine-db")) }}
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: redmine-db-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app.kubernetes.io/component: redmine
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: redmine-db-bootstrap-wait
-subjects:
-- kind: ServiceAccount
-  name: redmine-db
-  namespace: {{ .Release.Namespace }}
 {{- end }}
 {{- end }}

@@ -6,8 +6,7 @@
   The script is preserved verbatim except for shell `${SHOGGOTH_DOMAIN}`
   and `${SHOGGOTH_NAMESPACE}` references inside its body, which must be
   replaced with `{{ .Values.identity.domain }}` / `{{ .Release.Namespace }}`
-  for render-time substitution (Helm does not process `${VAR}` placeholders;
-  legacy applied envsubst at deploy time).
+  for render-time substitution (Helm does not process `${VAR}` placeholders).
 
   Gating: git-cred-bootstrap ships whenever any of its consumers
   (slave-dind, slave-term, argo-workflows) is enabled. All three consumer
@@ -19,14 +18,12 @@
   state. Disabling it while a consumer stayed enabled would leave that pod
   unable to start on a missing ConfigMap volume.
 
-  KNOWN, INTENTIONAL DIVERGENCE from the legacy envsubst tree:
-  legacy envsubst expands `${SHOGGOTH_DOMAIN:-<unset>}` and
-  `${SHOGGOTH_DOMAIN:-}` down to a baked `s.local`, which silently turns
-  the "is SHOGGOTH_DOMAIN set?" guard into dead code. Here the script
-  keeps the runtime env read so the guard stays live. Both forms resolve
+  KNOWN, INTENTIONAL DIVERGENCE: the script keeps the runtime env read of
+  `${SHOGGOTH_DOMAIN:-<unset>}` and `${SHOGGOTH_DOMAIN:-}` instead of
+  baking a value in at render time, which would silently turn the
+  "is SHOGGOTH_DOMAIN set?" guard into dead code. Both forms resolve
   to the same string, because the sidecar's Deployment sets
-  SHOGGOTH_DOMAIN from .Values.identity.domain. Every other line of the
-  script is byte-identical to the legacy render.
+  SHOGGOTH_DOMAIN from .Values.identity.domain.
 */}}
 {{- if or (include "shoggoth.isServiceEnabled" (list . "slave-dind")) (include "shoggoth.isServiceEnabled" (list . "slave-term")) (include "shoggoth.isServiceEnabled" (list . "argo-workflows")) }}
 apiVersion: v1

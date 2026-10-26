@@ -530,7 +530,10 @@ follow-up decision.
     `x-headroom-bypass: true`. Headroom Service endpoints are awaited
     by the litellm `wait-bootstrap` init container before the litellm
     pod becomes Ready, so the first request after a cold start does
-    not race headroom's model download.
+    not race headroom's model download. That init container runs after
+    `render-config`, which holds the native `secretKeyRef` dependency on
+    the two Secrets litellm needs — so the poll's budget only starts once
+    they exist.
   - **Image pin:** `ghcr.io/headroomlabs-ai/headroom:code-nonroot-4630602`
     (short-SHA pin to the most recent `code-nonroot` build;
     v0.41.0 / 2026-10-14). Headroom does **not** publish semver
@@ -748,7 +751,7 @@ follow-up decision.
 - **[Gitea Runner](https://docs.gitea.com/runner/)** (selected)
   - Runs jobs as ephemeral kubernetes pods (`kubernetes://` labels) — each workflow run is its own pod, scheduled by the cluster; no DinD socket, no privileged container, no per-registry host bind-mount on the runner
   - Job pod template in `shoggoth/k3s/gitea.yaml` (`gitea-runner-templates` ConfigMap) ships the shared `git-cred-bootstrap` sidecar + `init-git-cred-perms` initContainer from `slave-dind` / `slave-term` so ssh-agent + git-credential-cache are available inside every job pod via `SSH_AUTH_SOCK=/shoggoth/git-cred/ssh_auth_sock`
-  - Job pods get `app.kubernetes.io/managed-by: gitea-runner` and the runner's UUID label so the idle cleanup pass can remove orphans; the runner ServiceAccount holds only the `gitea-runner-bootstrap-wait` Role (`get` on the `gitea-runner-token` secret + externalsecret, used by the `wait-bootstrap` initContainer) — no `pods` / `pods/exec` / `pods/log` verbs, no access to other secrets. The runner reaches its own `gitea-runner-token` via a Secret volume mount, not the Kubernetes API; a runner-pod compromise cannot wipe `ssh-slave-private-key` or `openldap-admin-password`
+  - Job pods get `app.kubernetes.io/managed-by: gitea-runner` and the runner's UUID label so the idle cleanup pass can remove orphans; the runner ServiceAccount holds no Role at all — the `gitea-runner-bootstrap-wait` Role that backed its `wait-bootstrap` initContainer is gone, because the runner reaches its own `gitea-runner-token` through a Secret volume mount and the kubelet resolves that dependency natively. No `pods` / `pods/exec` / `pods/log` verbs, no access to other secrets; a runner-pod compromise cannot wipe `ssh-slave-private-key` or `openldap-admin-password`
   - + eliminates the privileged DinD that the Gitea runner previously required (DinD stays in place for Kestra's Docker task runner)
   - + containerd pulls job images via the existing Zot mirror wiring — first cold pull still fans out to upstream registries (see Zot cons), but the runner pod itself is unaffected
   - + job pods share the same persistent `/cache` as `slave-term` and `slave-dind` (the single `shoggoth-shared-cache` PVC in `shoggoth/k3s/shared-cache.yaml`) — pip wheels, ccache, and `CCWS_CACHE` state survive between runs; actions/cache steps reach the runner's cache server via the headless `gitea-runner` Service in this namespace

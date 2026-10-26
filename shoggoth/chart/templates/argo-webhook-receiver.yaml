@@ -76,7 +76,7 @@ metadata:
     app.kubernetes.io/component: argo-webhook-receiver
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path.
+    # preserves data.
     helm.sh/resource-policy: keep
     kubernetes.io/service-account.name: argo-webhook-receiver
 type: kubernetes.io/service-account-token

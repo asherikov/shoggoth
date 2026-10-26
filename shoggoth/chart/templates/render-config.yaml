@@ -1,8 +1,7 @@
 {{- /*
-  templates/render-config.yaml — generic in-cluster envsubst helper. Embeds the same shell script
-  the legacy form had.
-
-  Used by per-service render-config init containers to envsubst templates:
+  templates/render-config.yaml — generic in-cluster envsubst helper. Embeds
+  the shell script the per-service render-config init containers run to
+  envsubst templates:
     Env:
       RENDER_VARS   envsubst VARS expression (e.g. '${FOO}${BAR}').
                     If empty, substitutes all env vars present in the container.

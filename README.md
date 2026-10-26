@@ -21,6 +21,7 @@
 - [Known issues](#known-issues)
 - [References](#references)
   - [Helm migration](#helm-migration)
+  - [Chart template conventions](#chart-template-conventions)
   - [Agentic coding](#agentic-coding)
 - [TODO](#todo)
   - [Gitea](#gitea)
@@ -61,7 +62,7 @@ lists the minimum; newer is fine unless called out.
 | Tool        | Version   | Notes                                                                                                                                                                              |
 |-------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | k3s         | ≥ 1.34    | Required for the GA features the chart relies on: pod-level `ttlSecondsAfterFinished` (GA 1.29), container-level `restartPolicy` for native sidecar ordering (GA 1.33). The chart enforces this itself — `Chart.yaml` sets `kubeVersion: ">=1.34.0-0"`, so `helm install`/`upgrade` refuses an older cluster instead of letting the API server silently prune the field. Pinned in `shoggoth/shoggoth.nix`. |
-| helm        | ≥ 3.17.0  | Required for `--take-ownership`, which `make up` / `make start` / `make stop` / `make restart_service` rely on to adopt resources left unlabelled by the pre-chart envsubst path. The flag does not exist before 3.17.0 — an older helm aborts with `unknown flag: --take-ownership`. `make helm_version_gate` checks this and is a prerequisite of all four targets. |
+| helm        | ≥ 3.17.0  | Required for `--take-ownership`, which make targets rely on to adopt resources left unlabelled by an earlier non-Helm apply. |
 | kubectl     | bundled   | Comes with k3s; the operator host uses the same version (transferred via the SSH-tunneled kubeconfig).                                                                              |
 | yq          | mikefarah v4 | The `Makefile` reads every configuration value out of `shoggoth/<instance>.yaml` through yq. The Python `yq` package is a *different* tool with a different CLI — install mikefarah's release (https://github.com/mikefarah/yq). |
 | envsubst    | gettext   | Used by `make host_install_nixos` to render `shoggoth.nix` and `ports.nix`. Bundled with most distros; on Alpine it is in the `gettext` package. |
@@ -440,10 +441,7 @@ Server Management
 -----------------
 
 Workload lifecycle is managed by the Helm chart in `shoggoth/chart/`. The
-Makefile targets below are thin wrappers around `helm upgrade --install`,
-`helm uninstall`, and `helm upgrade` with a single toggle flipped. The legacy
-`envsubst | kubectl apply` path that used to back `make up` and `make down` was
-replaced by the chart in a nine-phase migration; everything applied by these
+Makefile targets are thin wrappers around `helm`, everything applied by these
 targets is owned by the chart release `shoggoth-${INSTANCE}` in namespace
 `${INSTANCE}`.
 
@@ -456,8 +454,14 @@ Key consequences of the Helm takeover:
   resources.
 - `make purge` still deletes the namespace and host data; it deliberately does
   **not** run `helm uninstall` first, because the release’s record lives in the
-  namespace being deleted and the cluster-scoped ClusterRoles in
-  `argo-workflows.yaml` / `otelcol.yaml` are shared across instances.
+  namespace being deleted. The cluster-scoped ClusterRoles and
+  ClusterRoleBindings are per-instance (each name carries the release name),
+  so deleting the namespace does not take them with it — `make purge` deletes
+  them explicitly by their `app.kubernetes.io/instance` label.
+- Cluster-scoped RBAC (the `ClusterRole`/`ClusterRoleBinding` pairs in
+  `otelcol.yaml`, `argo-workflows.yaml` and `external-secrets.yaml`) is named
+  `{{ include "shoggoth.fullname" . }}-<base>`, not the bare upstream `<base>`.
+  since cluster-scoped object has no namespace to separate two instances.
 - Per-service on/off goes through `helm upgrade --reuse-values --set
   services.<label>.enabled=<bool>` (Helm 3.13+). The release Secret
   (`sh.helm.release.v1.shoggoth-${INSTANCE}.v<n>`) is the only place the
@@ -468,10 +472,6 @@ Key consequences of the Helm takeover:
 
 ``` bash
 # Start (or upgrade) the chart release for INSTANCE=shoggoth:
-#   helm upgrade --install shoggoth-shoggoth shoggoth/chart \
-#     --namespace shoggoth --create-namespace \
-#     --reuse-values \
-#     --values shoggoth/shoggoth.yaml
 make up
 
 # Stop all services (helm uninstall); PVCs and Secrets preserved:
@@ -481,9 +481,6 @@ make down
 make start  SERVICE=gitea-runner
 make stop   SERVICE=gitea-runner
 make restart_service SERVICE=gitea-runner
-
-# Re-apply the CRDs on their own (`make up` already does this first):
-make crds_apply
 
 # View logs (kubectl + host-side pod-log fallback)
 make log SERVICE=localai
@@ -542,6 +539,14 @@ make k3s_purge_secrets      # delete every Secret in the namespace
 make drop_image_tag IMAGE=<repo> TAG=<tag>   # evict a registry tag
 ```
 
+`make purge` also deletes the instance's cluster-scoped RBAC (the
+`ClusterRole`/`ClusterRoleBinding` pairs), which a namespace deletion does not
+reach — a cluster-scoped object is not garbage-collected with its namespace,
+and its binding would otherwise keep granting the deleted instance's
+ServiceAccount its permissions. It selects them by
+`app.kubernetes.io/instance=shoggoth-<instance>`, so a second instance on the
+same cluster is left alone.
+
 `make purge` refuses the default `shoggoth` instance outright, so it always needs
 an explicit `INSTANCE=<name>`. It also reads `INSTANCE` the same way as every
 other target — namespace and config name, not the `shoggoth-`-prefixed release.
@@ -566,6 +571,27 @@ Troubleshooting
 
 Known issues
 ============
+
+- The External Secrets webhook's `ValidatingWebhookConfiguration`s
+  (`secretstore-validate`, `externalsecret-validate`) are still shared across
+  instances. They are the one remaining cluster-scoped object that two
+  shoggoth instances on one cluster would fight over, and unlike the RBAC
+  they are **not** Helm-managed: the ESO webhook's `register-vwc` init
+  container applies them with `kubectl apply` from a ConfigMap payload
+  (`shoggoth/chart/templates/external-secrets-webhooks.yaml`), so Helm
+  neither renames nor deletes them. The second instance's init container
+  re-applies the same two names with its own `clientConfig.service.namespace`,
+  so the first instance's SecretStore validation is routed to the second
+  instance's webhook service.
+
+  Not fixed here because renaming the VWC is not a local change: ESO's
+  cert-controller watches *every* `ValidatingWebhookConfiguration` in the
+  cluster and reconciles the ones labelled `external-secrets.io/component:
+  webhook`, injecting its own service reference and CA bundle into each. A
+  per-instance VWC name would still be reconciled by the other instance's
+  cert-controller, which is a worse failure than the shared name. Fixing it
+  needs an upstream change (scope the cert-controller's watch, or let the
+  webhook own its VWC name), so it is tracked separately.
 
 - Argo Workflows v4.1.4 webhook dispatch produces duplicate `Workflow` CRDs from
   a single webhook delivery. `argo-server` wraps the per-binding
@@ -604,23 +630,27 @@ Known issues
   workflow count exceeds the delivery count, the doubling is on the argo side.
 
 - `kubectl` jsonpath extraction broken for several common forms in Alpine’s
-  `kubectl` 1.32 (the version packaged in `tools` and used by every
-  `wait-bootstrap` init container). The forms `{.data.tls.crt}` (dot notation
-  for keys with dots), `{.data["X"]}` (double-quoted bracket form for any key),
-  and bare `jsonpath='{.data[K]}'` inside a YAML literal block scalar (bash
-  strips the inner quotes via word-splitting, leaving `{.data[K]}` with an
-  unquoted key) either crash or silently return empty. Symptom: `wait-bootstrap`
-  polls 60 times × 10 s and then `FAIL`s even though the Secret is populated.
+  `kubectl` 1.32 (the version packaged in `tools` and used by the
+  `wait-bootstrap` init containers that remain). The forms `{.data.tls.crt}`
+  (dot notation for keys with dots), `{.data["X"]}` (double-quoted bracket
+  form for any key), and bare `jsonpath='{.data[K]}'` inside a YAML literal
+  block scalar (bash strips the inner quotes via word-splitting, leaving
+  `{.data[K]}` with an unquoted key) either crash or silently return empty.
+  Symptom: a `wait-bootstrap` polls 60 times × 10 s and then `FAIL`s even
+  though the Secret is populated.
 
-  Convention: all `wait-bootstrap` loops must read Secret data keys via `jq`:
+  Convention: read Secret data keys via `jq`, never via
+  `kubectl get secret ... -o jsonpath=...`:
 
   ``` bash
   kubectl get secret X -n N -o json 2>/dev/null \
       | jq -e --arg k KEY '(.data[$k] // "") | length > 0' >/dev/null 2>&1
   ```
 
-  Do not reintroduce `kubectl get secret ... -o jsonpath=...` in any new
-  `wait-bootstrap` loop. To diagnose a similar failure without restarting a
+  Most containers do not read Secret data at all any more — see
+  “Secret dependencies are native” below: the kubelet resolves the key.
+  The rule above applies to the few scripts that still have to look at a
+  Secret themselves. To diagnose a similar failure without restarting a
   deployment, run `make log SERVICE=<name>` (init-container states, container
   logs and recent events) and `make k3s_check_secret SECRET=<name>` (whether a
   Secret exists and which of its data keys are populated). If a
@@ -638,63 +668,21 @@ References
 - <https://gitea.com/gitea/awesome-gitea>
 - <https://github.com/trueforge-org/truecharts>
 
-Helm migration
---------------
-
-The deployment story used to be `make up → envsubst | kubectl apply`. It is now
-`make up → helm upgrade --install shoggoth-${INSTANCE} shoggoth/chart --create-namespace ...`.
+Helm
+----
 
 Operator notes:
 
-- `make helm_lint` runs `helm lint --strict`, renders the chart **once** with
-  `shoggoth/shoggoth.yaml` (which sets no `services:` block, so that render is
-  everything-on), and checks the render for duplicate mapping keys. It then
-  sweeps the gates: it renders once per `services.<key>` in `values.yaml` with
-  that key alone disabled and fails if any toggle removes nothing, because a
-  union gate spanning a service's own workloads makes `make stop SERVICE=<x>`
-  report success and delete nothing (this is what `openbao` did — it was the
-  one key of the 43 whose toggle removed no resources). To check one service by
-  hand, render it off and confirm its resources are gone — here `3` becomes
-  `0`:
-
-      helm template shoggoth-gate shoggoth/chart -n lint \
-        --values shoggoth/shoggoth.yaml | grep -cE '^[[:space:]]*app:[[:space:]]*grafana[[:space:]]*$'
-      helm template shoggoth-gate shoggoth/chart -n lint \
-        --values shoggoth/shoggoth.yaml --set services.grafana.enabled=false \
-        | grep -cE '^[[:space:]]*app:[[:space:]]*grafana[[:space:]]*$'
-
-  Anchor the pattern: `grep 'app: gitea'` also matches `app: gitea-runner`, so
-  check one service against its own label. Every `services.<x>` toggle in
-  `shoggoth/chart/values.yaml` is `enabled: true`, which is why the all-on
-  render is the baseline and an off-render should drop that service's count to
-  `0`.
+- `make helm_lint` is the umbrella for the chart checks, which live in
+  `make/lint.mk`; each check is also a target of its own.
 - `shoggoth/shoggoth.yaml` is the per-instance configuration and the single
   source of truth. `make up` hands it to Helm with `--values` and the chart
   derives every `SHOGGOTT_*` pod environment variable from it. It is
   hand-maintained, not generated: nothing is passed with `--set`, and the
-  Makefile reads values out of this one file (`SHOGGOTH_CFG` in `Makefile`) rather
-  than defining them separately. `shoggoth/chart/values.yaml` documents every
-  key; anything omitted here falls back to that default. Requires `yq`
-  (mikefarah v4 — the Python `yq` package is a different tool).
-- `shoggoth/<instance>.env` (the old `KEY=VALUE` form) now serves only
-  `make host_install_nixos`, which renders `shoggoth.nix` / `ports.nix` with
-  envsubst. That is the one deliberate exception to "no variable injection":
-  those are NixOS host files, not Helm input.
-- `shoggoth/private/services-<instance>.yaml` does not exist; there is no
-  per-service toggle file to keep separate from config. `make start` /
-  `make stop` carry the current set of toggles inside the release Secret
-  via `helm upgrade --reuse-values --set services.<label>.enabled=<bool>`.
-  Hand-edit `shoggoth/<instance>.yaml` is still the source of truth for the
-  per-instance config (`identity.domain`, ports, etc.) and is passed via
-  `--values` on every helm call — `make up` does both the install and the
-  initial config overlay.
-- `shoggoth/k3s/` — the pre-chart envsubst manifest tree — has been **removed**.
-  Every file in it was superseded by `shoggoth/chart/templates/<name>.yaml` and
-  carried a `# DEPRECATED:` header. `scripts/parity_check.py`, which diffed each
-  template against its legacy counterpart, was removed with it: its entire value
-  was that fixed baseline, so it had nothing left to compare against. Recover a
-  file with `git show e43fd56:shoggoth/k3s/<name>.yaml`. Template comments cite
-  that tree as `legacy shoggoth/k3s/<name>.yaml` so the provenance survives.
+  Makefile reads values out of this one file (`SHOGGOTH_CFG` in `Makefile`).
+  `shoggoth/chart/values.yaml` documents every key; anything omitted here falls
+  back to that default. Requires `yq` (mikefarah v4 — the Python `yq` package
+  is a different tool).
 - `make crds_apply` applies the CRDs straight from their upstream sources with
   `kubectl apply --server-side`: the Argo submodule's per-CRD files and the
   External Secrets bundle. There is no vendored copy and no generator — see
@@ -706,6 +694,134 @@ Operator notes:
   surfaces as a helm parse error rather than a quieter half-rendered
   Service. Service on/off state lives in the release Secret, set via
   `make start` / `make stop` — there is no per-service toggle file.
+
+Chart template conventions
+---------------------------
+
+`shoggoth/chart/templates/*.yaml` follows a small set of house rules. They
+are stated once, here; a template header keeps only what is specific to its
+own file and does not restate them.
+
+**Headers.** Every template opens with a Helm comment block (`{{- /* … */}}`)
+naming what the file renders. The block says only what is specific to that
+file — what it renders, who consumes it, what gate it follows — and never
+narrates where the file came from. The rules below live here instead.
+
+**Service gates.** A template renders only when its service is enabled:
+
+    {{- if (include "shoggoth.isServiceEnabled" (list . "<key>")) }} … {{- end }}
+
+`<key>` is an entry in the `services` map of `shoggoth/chart/values.yaml`;
+`make start|stop SERVICE=<label>` flips it with
+`helm upgrade --reuse-values --set services.<label>.enabled=<bool>`, so the
+gate decides what a toggle deletes. `shoggoth.isServiceEnabled` looks the key
+up in that map, so an unknown key renders nothing and the gate is always
+false. Two rules follow:
+
+- Gate on the identity that *consumes* the object, not on the service that
+  produced it. A gate naming a key nobody consumes makes `make stop
+  SERVICE=<x>` delete the object for no consumer's benefit — the `bringup`
+  identity dropped in chart 0.2.0 was gated on `maintenance-secret-writer`,
+  a key that named a different identity entirely.
+- A gate spanning several consumers' workloads must not be a union of them:
+  `make stop SERVICE=<x>` then reports success and deletes nothing, which is
+  what `make helm_lint_gates` sweeps for.
+
+**Credentials.** `templates/<name>.yaml` projects one credential out of
+OpenBao into a K8s Secret; `templates/<name>-push.yaml` mirrors it back. The
+shape is fixed:
+
+- read side — `secretStoreRef: shoggoth-openbao` (the read-scoped
+  SecretStore); write side — `secretStoreRefs: shoggoth-openbao-write`
+  (`secret-store-write.yaml`). A read token cannot push.
+- `target.name` is the K8s Secret's name; `data[].remoteRef.key` is the
+  OpenBao path. The remoteRef path is stable across the chart migration, so
+  an install that predates the chart reuses the credential already sitting in
+  OpenBao instead of rotating it.
+- `target.creationPolicy` is `Owner` unless another writer owns the value.
+  `Orphan` + `refreshInterval: 0s` is the pairing for a credential that a
+  script writes straight into the K8s Secret (`slave-token`, the runner
+  registration): ESO must not adopt or overwrite it, and the paired
+  PushSecret is the only writer that goes *out* to OpenBao. Without those
+  flags the controller overwrites the script's write with stale OpenBao
+  data on the next reconcile, and the PushSecret sees no change in K8s and
+  skips pushing — leaving the OpenBao value stale.
+- openbao-bootstrap Phase B seeds the OpenBao path with a random value on a
+  fresh install, so the ExternalSecret only has to project it. A credential
+  whose value comes from a file (`.shoggoth.private/…`) is mirrored into
+  OpenBao by the same phase instead, and the file stays authoritative.
+
+**Secret dependencies are native.** A pod that needs a Kubernetes Secret
+declares it the way Kubernetes is meant to: a non-optional
+`env.valueFrom.secretKeyRef`, or a `secret` volume whose `items:` /
+`subPath:` pins the key it consumes. The kubelet then refuses to start that
+container until the Secret *and* the key exist, and retries with backoff —
+no init container, no API poll, no RBAC.
+
+Two caveats when declaring one:
+
+- `optional: true` opts out of the guarantee: the container starts with an
+  empty value, and a consumer that treats an empty credential as fatal
+  (`git-cred-bootstrap.sh` does) CrashLoopBackOffs instead of waiting. Use it
+  only where the consumer genuinely tolerates absence.
+- The kubelet enforces *existence*, not *non-emptiness*. ESO writes a Secret
+  in a single API call with the data already applied, so a key that exists
+  has its value; a producer that writes a Secret in two steps would need
+  something more.
+
+**What still waits.** Two dependencies have no native equivalent and keep a
+`wait-bootstrap` init container plus their `*-bootstrap-wait` Role:
+
+- litellm waits for the `headroom` Service to have a ready endpoint. No
+  Kubernetes object expresses “the endpoints of this Service are ready”, so
+  the poll stays; the Role grants `services` / `endpoints` `get` and `pods`
+  `list` (the latter only for the failure-path diagnostics). The init
+  containers are ordered so that `render-config` — which carries the native
+  `secretKeyRef` dependency on `ai-default-token` and `gitea-slave-token` —
+  runs first, so the poll’s 300 s budget only starts once those Secrets
+  exist.
+- the Argo workflow `podSpecPatch` waits for two ExternalSecrets to reach
+  Ready before the workflow pod starts. `kubectl wait` is the only mechanism
+  that blocks on a CR condition, and it is an internal LIST + WATCH: the LIST
+  establishes the resourceVersion and the WATCH streams the condition change,
+  so a wait that grants only `get` sits at 403 until its timeout. A wait that
+  uses `kubectl wait` therefore needs `list` and `watch` on the
+  externalsecrets it waits for, on top of `get`.
+
+Each wait carries the same `services.<x>.enabled` guard as the object it
+waits for, so `make stop SERVICE=<x>` — which flips the toggle and deletes
+the workloads the chart owns for that service — cannot leave a pod waiting
+on a resource that is no longer supposed to exist.
+
+**Labels.** `shoggoth.labels` and `shoggoth.selectorLabels` set the standard
+label set. `shoggoth.labelsWithMap` overrides individual keys — the
+`part-of=external-secrets` on the ESO-owned objects — so the rendered YAML
+cannot contain duplicate keys; emitting the key literally after the helper
+duplicates it and breaks `kubeconform -strict`. The helper's own doc block
+in `templates/_helpers.tpl` lists the accepted override keys.
+
+**Pod DNS.** A pod that must resolve `<service>.<shoggoth-domain>` needs
+the namespace's CoreDNS as its resolver and the namespace search domains,
+so a short name like `gitea` resolves inside the namespace and the
+split-horizon rewrite in `templates/dns.yaml` applies. `dnsPolicy: None`
+is required, not incidental: under the default `ClusterFirst` the kubelet
+hands the pod the cluster DNS (10.43.0.10), which knows nothing about the
+`<domain>` rewrite.
+
+Both forms come from one helper, so the resolver and the search list are
+written down exactly once:
+
+    {{- include "shoggoth.podDnsConfig" . | nindent 6 }}       # pod spec
+    {{- include "shoggoth.podDnsConfigJson" . | nindent 10 }}  # podSpecPatch
+
+The JSON form is for `argo-workflows.yaml`, whose `podSpecPatch` is a JSON
+document embedded in a YAML block scalar. Do not hand-write a
+`dnsPolicy` / `dnsConfig` block instead: the search list is what keeps a
+pod's resolution in step with the namespace's, and two copies of it drift.
+Two pods deliberately opt out and keep `dnsPolicy: ClusterFirstWithHostNet`
+— `registry` and `web-external`, both `hostNetwork: true`, which resolve
+through the host's resolver rather than the namespace's.
+
 
 Agentic coding
 --------------

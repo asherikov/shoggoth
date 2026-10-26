@@ -41,14 +41,7 @@ spec:
         app: mcp-gitea
         app.kubernetes.io/component: mcp-gitea
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []
       containers:
       - name: mcp-gitea

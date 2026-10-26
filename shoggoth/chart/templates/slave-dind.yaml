@@ -89,51 +89,8 @@ spec:
       annotations:
         secret.reloader.stakater.com/reload: gitea-slave-token,ssh-slave-private-key
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
-      - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: SHOGGOTH_NAMESPACE
-          value: {{ .Release.Namespace }}
-        command:
-        - bash
-        - -c
-        args:
-        - |
-          set -euo pipefail
-          NS="{{ .Release.Namespace }}"
-          wait_for_externalsecret() {
-            local name="$1"
-            echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
-            for i in $(seq 1 60); do
-              if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
-                echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
-                return 0
-              fi
-              sleep 10
-            done
-            echo "FAIL: externalsecret/${name} not Ready after 10m"
-            return 1
-          }
-          wait_for_externalsecret gitea-slave-token || exit 1
-          wait_for_externalsecret ssh-slave-private-key || exit 1
-          echo "wait-bootstrap: all K8s Secrets Ready"
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
       - name: init-git-cred-perms
         image: asherikov/shoggoth_tools:alpine
         imagePullPolicy: IfNotPresent
@@ -180,13 +137,11 @@ spec:
             secretKeyRef:
               name: ssh-slave-private-key
               key: ssh-id-rsa
-              optional: true
         - name: GITEA_SLAVE_TOKEN
           valueFrom:
             secretKeyRef:
               name: gitea-slave-token
               key: token
-              optional: true
         volumeMounts:
         - name: git-cred
           mountPath: /shoggoth/git-cred
@@ -349,58 +304,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: slave-dind-secret-bootstrap
-subjects:
-- kind: ServiceAccount
-  name: slave-dind
-  namespace: {{ .Release.Namespace }}
----
-# Required by the wait-bootstrap initContainer in this Deployment, which
-# polls `kubectl get externalsecret` for the gitea-slave-token and
-# ssh-slave-private-key ExternalSecrets before the git-cred sidecar starts
-# reading the corresponding K8s Secrets — without `get` on the externalsecrets
-# and secrets, the kubectl call 403s and the initContainer times out after 10m.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: slave-dind-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app: slave-dind
-    app.kubernetes.io/component: slave-dind
-rules:
-- apiGroups:
-  - ''
-  resources:
-  - secrets
-  resourceNames:
-  - gitea-slave-token
-  - ssh-slave-private-key
-  verbs:
-  - get
-- apiGroups:
-  - external-secrets.io
-  resources:
-  - externalsecrets
-  resourceNames:
-  - gitea-slave-token
-  - ssh-slave-private-key
-  verbs:
-  - get
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: slave-dind-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app: slave-dind
-    app.kubernetes.io/component: slave-dind
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: slave-dind-bootstrap-wait
 subjects:
 - kind: ServiceAccount
   name: slave-dind

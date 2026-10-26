@@ -50,17 +50,6 @@ SHOGGOTH_HELM_TIMEOUT_UNINSTALL?=2m
 # state in the release Secret between calls).
 SHOGGOTH_HELM_VALUES = --values $(SHOGGOTH_CONFIG)
 
-# Values for the offline render target (`helm_lint`). This is just the
-# instance config: the target only runs `helm lint` / `helm template`, which
-# render to a file and never apply anything, so there is nothing here for a
-# throwaway override to protect. A chart/test/values-lint.yaml used to sit
-# here overriding identity.instanceDir "so lint never touches a real
-# deployment's data" — that rationale was wrong (a hostPath is an inert string
-# until something applies the manifest, and the target does not); the file is
-# gone. The release name and namespace it passes (`shoggoth-lint`/`lint`)
-# are what distinguish lint output from a real install.
-SHOGGOTH_HELM_VALUES_LINT = $(SHOGGOTH_HELM_VALUES)
-
 
 # installation
 # -----
@@ -142,16 +131,16 @@ tunnel_down:
 # -----
 # Stop all shoggoth services.
 #
-# Now `helm uninstall`. The legacy target deleted workloads and ConfigMaps but
-# deliberately preserved Secrets and PVCs, and that contract survives because:
+# Now `helm uninstall`. It deletes workloads and ConfigMaps but deliberately
+# preserves Secrets and PVCs, and that contract survives because:
 #   - every PVC and every chart-owned Secret carries
 #     `helm.sh/resource-policy: keep`, so Helm skips them;
 #   - Secrets the External Secrets operator materialises at runtime are not in
 #     the release manifest at all, so uninstall never sees them;
 #   - the namespace is not in the release manifest (--create-namespace), so
 #     uninstalling does not cascade-delete the namespace and take them anyway.
-# What is left behind is exactly what legacy `down` left behind, plus the
-# cluster-scoped CRDs (which legacy also left).
+# What is left behind is exactly what `make down` leaves behind, plus the
+# cluster-scoped CRDs (which are not part of the release manifest).
 #
 # Finalizer-wedge fallback. `helm uninstall --wait` blocks until every chart
 # resource is gone; chart CRs (ExternalSecret, PushSecret, Argo Workflow,
@@ -369,10 +358,21 @@ crds_apply: tunnel_up
 # Deliberately does NOT run `helm uninstall` first, unlike `make down`. The
 # release's own record lives in the namespace, so deleting the namespace
 # removes it anyway — and `helm uninstall` would additionally delete the
-# cluster-scoped ClusterRoles/ClusterRoleBindings in argo-workflows.yaml and
-# otelcol.yaml. Those carry upstream names rather than per-instance names, so a
-# second instance on the same cluster is using the same objects. Legacy `purge`
-# left them alone; so does this.
+# cluster-scoped ClusterRoles/ClusterRoleBindings in argo-workflows.yaml,
+# external-secrets.yaml and otelcol.yaml. This target deletes them
+# explicitly instead (see below).
+#
+# The cluster-scoped RBAC is now PER-INSTANCE (each name is prefixed with
+# the release name — see shoggoth/chart/templates/otelcol.yaml), so the
+# namespace deletion no longer takes them with it. They have to be deleted
+# explicitly, or they leak: a cluster-scoped object is not garbage-collected
+# with its namespace, and its ClusterRoleBinding would keep granting the
+# (now-deleted) instance's ServiceAccount its permissions.
+#
+# The selector is `app.kubernetes.io/instance=<release>`, which the chart
+# stamps on every cluster-scoped object it renders (the release name is
+# `shoggoth-$(INSTANCE)`, so this matches exactly one instance's RBAC and
+# leaves a second instance on the same cluster alone).
 purge: tunnel_up
 	if [ "${INSTANCE}" = "shoggoth" ]; then \
 		echo "ERROR: Refusing to purge the default 'shoggoth' instance."; \
@@ -382,6 +382,9 @@ purge: tunnel_up
 	echo "=== Purging shoggoth instance '${INSTANCE}' (namespace, PVCs, host data) ==="
 	echo "Deleting namespace ${INSTANCE} (all workloads, secrets, PVCs)..."
 	-kubectl delete namespace ${INSTANCE} --ignore-not-found=true --timeout=120s
+	echo "Deleting cluster-scoped RBAC for release shoggoth-$(INSTANCE)..."
+	-kubectl delete clusterrole,clusterrolebinding \
+		-l app.kubernetes.io/instance=shoggoth-$(INSTANCE) --ignore-not-found=true
 	echo "Removing hostPath data..."
 	-${K3S_SSH} 'sudo rm -rf /var/lib/rancher/k3s/storage/${INSTANCE}'
 	echo "Removing remote deployment directory..."
@@ -473,15 +476,15 @@ wipe_openbao: tunnel_up
 
 # Start all shoggoth services.
 #
-# Replaces the legacy two-pass `envsubst | kubectl apply --server-side`:
+# Two passes, one after the other:
 #   Pass 1 (CRDs, server-side)  -> `make crds_apply`, every run.
 #   Pass 2 (everything else)    -> `helm upgrade --install`.
 #
-# Pass 1 is no longer conditional on install-vs-upgrade. It used to be, because
-# Helm installs a chart's crds/ on `helm install` and never on `helm upgrade`,
-# so the upgrade half of legacy Pass 1 needed its own target. The CRDs no longer
-# live in the chart at all (they are too large — see crds_apply), so this is
-# now simply the first thing `up` does. It must stay ahead of the helm call:
+# Pass 1 is not conditional on install-vs-upgrade. It cannot be: Helm installs
+# a chart's crds/ on `helm install` and never on `helm upgrade`, so the
+# upgrade path needs its own target. The CRDs do not live in the chart at all
+# (they are too large — see crds_apply), so this is simply the first thing
+# `up` does. It must stay ahead of the helm call:
 # the templates render ExternalSecret and Workflow objects that the API server
 # would reject if their CRDs were not Established yet.
 #
@@ -491,11 +494,11 @@ wipe_openbao: tunnel_up
 # Secret in it — turning `make down` into `make purge`. See
 # shoggoth/chart/templates/external-secrets.yaml.
 #
-# WAIT=1 blocks until every workload is Ready. Legacy `make up` did not wait
-# (it returned as soon as the apply was accepted), and waiting by default would
+# WAIT=1 blocks until every workload is Ready. It is off by default, because
+# waiting by default would
 # turn a service that legitimately takes minutes to become ready — OpenBao
 # waiting on an unseal, Gitea waiting on host keys — into a failed command.
-up: tunnel_up crds_apply helm_version_gate
+up: tunnel_up crds_apply
 	if ! printf '%s' "${INSTANCE}" | grep -qE '^[a-z0-9][a-z0-9-]*[a-z0-9]$$|^[a-z0-9]$$'; then \
 		echo "ERROR: INSTANCE must be lowercase alphanumeric with hyphens (RFC 1123), got: '${INSTANCE}'"; exit 1; \
 	fi
@@ -523,8 +526,8 @@ up: tunnel_up crds_apply helm_version_gate
 # PodSecurity baseline is incompatible with the chart — multiple Deployments
 # (slave-dind, wireguard, localai, openbao-bootstrap, dind) use hostPath
 # volumes + privileged containers + hostNetwork + capabilities that
-# violate `baseline` by design. The legacy chart's `templates/00-namespace.yaml`
-# applied `enforce=baseline`, which made every Deployment's pods
+# violate `baseline` by design. A namespace labelled `enforce=baseline`
+# makes every Deployment's pods
 # `FailedCreate` with `forbidden: violates PodSecurity "baseline:latest"`.
 # Strip the enforce label (and any audit/warn labels) from the namespace
 # so the cluster-default policy applies. `kubectl label ... key-` removes
@@ -544,7 +547,7 @@ up: tunnel_up crds_apply helm_version_gate
 # toggle.
 #
 # SERVICE=<x> is the only identifier: the values key under .services.* is
-# spelled exactly like the legacy `app:` label (e.g. `gitea-runner`), so no
+# spelled exactly like the `app:` label (e.g. `gitea-runner`), so no
 # translation, table, or shim variable is needed. There is no per-service row
 # in this makefile.
 #
@@ -565,10 +568,9 @@ up: tunnel_up crds_apply helm_version_gate
 # `--take-ownership` lets Helm label-and-claim pre-existing resources that
 # match a chart resource's (kind, name, namespace) but lack the
 # `app.kubernetes.io/managed-by: Helm` label. Needed for the first
-# `helm upgrade --install` on a cluster that previously ran the legacy
-# envsubst path, because that path produced
-# SAs / Roles / RoleBindings / Cluster(Role|Binding)s without those
-# labels. Without this flag, the first install against a cluster that
+# `helm upgrade --install` on a cluster that was applied outside Helm
+# (which produced SAs / Roles / RoleBindings / Cluster(Role|Binding)s
+# without those labels). Without this flag, the first install against a cluster that
 # already has unmanaged copies of chart-owned resources aborts with
 # `invalid ownership metadata`. After adoption the labels are correct,
 # so the flag is idempotent for subsequent installs.
@@ -584,50 +586,19 @@ SHOGGOTH_HELM_INSTALL_BASE = helm upgrade --install shoggoth-$(INSTANCE) $(SHOGG
 	$(SHOGGOTH_HELM_VALUES)
 
 
-# Minimum Helm binary version. `helm upgrade` gained --take-ownership in
-# 3.17.0; every target that reaches the cluster through
-# SHOGGOTT_HELM_INSTALL_BASE passes that flag, so an older helm aborts with
-# "unknown flag: --take-ownership" and takes the whole per-service surface
-# (up / start / stop / restart_service) down with it. Checked by
-# `helm_version_gate`, which is a prerequisite of all four.
-SHOGGOTH_HELM_MIN_VERSION?=3.17.0
-
-# Version gate. Helm prints its own version as `v3.17.0+g<sha>`; strip the
-# leading v and the build metadata, then compare with `sort -V`, whose first
-# line is the smaller of the two. Equal means "at or above the floor".
-# A missing helm yields an empty string, which sorts first and fails the
-# comparison, so "helm not installed" lands in the same error path.
-.PHONY: helm_version_gate
-helm_version_gate:
-	@v=$$(helm version --short 2>/dev/null | sed 's/^v//; s/+.*//'); \
-	if [ -z "$$v" ]; then \
-	    echo "ERROR: 'helm version' produced no output — helm is not installed or not on PATH."; \
-	    echo "       'make up' / 'make start' / 'make stop' need helm >= $(SHOGGOTH_HELM_MIN_VERSION)."; \
-	    exit 1; \
-	fi; \
-	lowest=$$(printf '%s\n%s\n' "$(SHOGGOTH_HELM_MIN_VERSION)" "$$v" | sort -V | head -1); \
-	if [ "$$lowest" != "$(SHOGGOTH_HELM_MIN_VERSION)" ]; then \
-	    echo "ERROR: helm $$v is older than the required $(SHOGGOTH_HELM_MIN_VERSION)."; \
-	    echo "       --take-ownership (used by up/start/stop/restart_service to adopt the"; \
-	    echo "       pre-chart resources) landed in helm 3.17.0; older versions abort with"; \
-	    echo "       'unknown flag: --take-ownership'. Check 'helm version' on this host."; \
-	    exit 1; \
-	fi
-
 # Start a single service via Helm. Passes `--set services.<label>.enabled=true`
 # to flip the toggle; the rest of the values are reused from the prior
 # release. Re-running on an already-started service re-renders the same
 # manifests; `helm upgrade --wait` returns once they're Ready.
 #
 # tunnel_up is a prerequisite: helm upgrade with --wait talks to the API
-# through the SSH tunnel, the same way `make up` does. helm_version_gate is
-# the other one, because this recipe passes --take-ownership (Helm 3.17.0+).
+# through the SSH tunnel, the same way `make up` does.
 #
 # No kubectl wait here: `--wait --timeout $(SHOGGOTH_HELM_TIMEOUT)` on the helm
 # invocation already waits for every Deployment/StatefulSet to be Ready
 # before this recipe returns.
 .PHONY: start
-start: tunnel_up helm_version_gate
+start: tunnel_up
 	$(SHOGGOTH_HELM_INSTALL_BASE) --set services.${SERVICE}.enabled=true --wait --timeout $(SHOGGOTH_HELM_TIMEOUT)
 
 
@@ -635,7 +606,7 @@ start: tunnel_up helm_version_gate
 # the toggle; helm upgrade then deletes the resources the chart owns for that
 # service. No PVC is ever deleted: they carry helm.sh/resource-policy: keep.
 .PHONY: stop
-stop: tunnel_up helm_version_gate
+stop: tunnel_up
 	$(SHOGGOTH_HELM_INSTALL_BASE) --set services.${SERVICE}.enabled=false --wait --timeout $(SHOGGOTH_HELM_TIMEOUT)
 
 
@@ -762,109 +733,3 @@ drop_image_tag:
 	esac; \
 	rm -f "$${RESP_FILE}"
 	echo "Done. Next pull of ${IMAGE}:${TAG} will re-sync from upstream."
-
-
-# chart validation
-# -----
-# Offline chart smoke test. Runs helm directly against the chart without
-# touching the cluster, so it has no `tunnel_up` prerequisite and no
-# `INSTANCE` gating. It is operator-driven: there is no CI invocation wired
-# into this repo.
-
-# Manual lint entry point. `helm lint` catches Go-template parse errors and
-# malformed YAML; the render that follows catches templates that parse but
-# emit invalid or duplicated YAML. Run this after touching any template.
-#
-# The per-service `enabled` gates are checked by the toggle sweep at the end
-# of this target, which renders once per `services.<key>` in values.yaml and
-# fails if disabling that key alone removes nothing.
-#
-# This used to be joined by a `chart-validate` target distinguished only by
-# release name and namespace, and by dropping this target's duplicate-key
-# check — so it passed on charts this one rejected. It is gone; `helm_lint`
-# is the offline entry point, because helm is not installed in every dev
-# container.
-.PHONY: helm_lint
-helm_lint:
-	mkdir -p ${K3S_TMP_DIR}
-	echo "=== helm lint --strict ==="
-	helm lint $(SHOGGOTH_CHART_ROOT) --strict
-	echo "=== helm template parse check (all services enabled, overrides supplied) ==="
-	helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) \
-		--namespace lint \
-		$(SHOGGOTH_HELM_VALUES_LINT) \
-		> ${K3S_TMP_DIR}/shoggoth-lint-render.yaml \
-		&& echo "  OK: rendered $$(wc -l < ${K3S_TMP_DIR}/shoggoth-lint-render.yaml) lines -> ${K3S_TMP_DIR}/shoggoth-lint-render.yaml" \
-		|| { echo "FAIL: helm template failed"; exit 1; }
-	echo "=== rendered-YAML duplicate-key check ==="
-# Regression guard for the duplicate-label-key bug fixed in
-# argo-webhook-receiver, maintenance-secret-writer, sandbox-spawner,
-# external-secrets-webhooks, and reloader — every template was emitting
-# `app.kubernetes.io/part-of: shoggoth` literally after invoking
-# `shoggoth.labels`, producing invalid YAML 1.2 (duplicate mapping keys)
-# that breaks kubeconform -strict and any strict YAML 1.2 parser.
-#
-# Three things keep this guard honest about what it is checking:
-#   * The config enables key-duplicates and NOTHING else. `extends: default`
-#     would drag in every default rule, so an unrelated `colons` violation
-#     (too many spaces after a colon) exits non-zero and used to be reported
-#     here as a duplicate-key regression.
-#   * yamllint is located first. A missing binary returns 127, which would
-#     otherwise print the duplicate-keys FAIL and blame the chart for a
-#     missing linter.
-#   * The FAIL block prints yamllint's own output and does not assert a cause
-#     beyond the rule name, so whatever it reports can be read directly.
-	if ! command -v yamllint >/dev/null 2>&1; then \
-		echo "  FAIL: yamllint is not installed; the duplicate-key check did not run."; \
-		echo "        pip install yamllint (or apt install yamllint) and re-run."; \
-		exit 1; \
-	fi; \
-	if yamllint -d '{rules: {key-duplicates: enable}}' \
-		${K3S_TMP_DIR}/shoggoth-lint-render.yaml > ${K3S_TMP_DIR}/shoggoth-lint-dupes.txt 2>&1; then \
-		echo "  OK: no duplicate mapping keys in $$(wc -l < ${K3S_TMP_DIR}/shoggoth-lint-render.yaml)-line rendered manifest"; \
-	else \
-		echo "  FAIL: rendered manifest has duplicate mapping keys"; \
-		echo "        (yamllint key-duplicates violations, see $(K3S_TMP_DIR)/shoggoth-lint-dupes.txt)"; \
-		echo "        Helm templates must not emit literal labels/annotations that"; \
-		echo "        the shoggoth.labels helper already produces — use shoggoth.labelsWithMap"; \
-		echo "        if a per-template override is needed."; \
-		cat ${K3S_TMP_DIR}/shoggoth-lint-dupes.txt; \
-		exit 1; \
-	fi
-	echo "=== per-service gate check (every services.<key> toggle must remove >=1 resource) ==="
-# A union gate spanning a service's own workloads makes `make stop SERVICE=<x>`
-# a silent no-op: `or (x) (y)` still renders while y is on, so helm reports a
-# successful upgrade and nothing is deleted. openbao hit this — its Service,
-# PVC and StatefulSet sat under `or(openbao, openbao-bootstrap)`, and it was
-# the only one of the 43 keys whose toggle removed nothing. This renders once
-# per key with that key alone disabled and fails if the document count does not
-# drop, which catches the class rather than just that instance.
-	@failed=0; \
-	keys=$$(yq -r '.services | keys | .[]' $(SHOGGOTH_CHART_ROOT)/values.yaml); \
-	if ! helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) --namespace lint $(SHOGGOTH_HELM_VALUES_LINT) \
-		> ${K3S_TMP_DIR}/gate-all.yaml 2> ${K3S_TMP_DIR}/gate-all.err; then \
-		echo "  FAIL: baseline render failed"; \
-		cat ${K3S_TMP_DIR}/gate-all.err; \
-		exit 1; \
-	fi; \
-	base=$$(yq ea -r 'select(.kind != null) | .kind' ${K3S_TMP_DIR}/gate-all.yaml | grep -c .); \
-	for k in $$keys; do \
-		if ! helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) --namespace lint $(SHOGGOTH_HELM_VALUES_LINT) \
-			--set services.$$k.enabled=false \
-			> ${K3S_TMP_DIR}/gate-off.yaml 2> ${K3S_TMP_DIR}/gate-off.err; then \
-			echo "  FAIL: render failed with services.$$k disabled"; \
-			cat ${K3S_TMP_DIR}/gate-off.err; \
-			failed=1; \
-			continue; \
-		fi; \
-		off=$$(yq ea -r 'select(.kind != null) | .kind' ${K3S_TMP_DIR}/gate-off.yaml | grep -c .); \
-		if [ "$$off" -ge "$$base" ]; then \
-			echo "  FAIL: disabling services.$$k removes no resources ($$base -> $$off)"; \
-			echo "        'make stop SERVICE=$$k' would report success and change nothing."; \
-			echo "        Its objects are probably under a union gate with another key."; \
-			failed=1; \
-		fi; \
-	done; \
-	if [ "$$failed" -ne 0 ]; then exit 1; fi; \
-	echo "  OK: all $$(printf '%s\n' $$keys | wc -l) service toggles remove >=1 resource"
-

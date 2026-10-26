@@ -32,10 +32,9 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: crd-ready-wait
 rules:
-# `kubectl wait` does an internal LIST + WATCH, not just GET: the initial
-# LIST establishes the resourceVersion, the WATCH streams condition changes.
-# Without list + watch the wait fails with "cannot list resource
-# customresourcedefinitions" — the same trap as the wait-bootstrap Role in
+# `kubectl wait` does an internal LIST + WATCH, not just GET — without
+# list + watch the wait fails with "cannot list resource
+# customresourcedefinitions". Same trap as the wait-bootstrap Role in
 # argo-workflows.yaml.
 - apiGroups: ["apiextensions.k8s.io"]
   resources: ["customresourcedefinitions"]

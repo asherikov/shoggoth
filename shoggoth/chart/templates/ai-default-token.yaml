@@ -3,9 +3,8 @@
   shoggoth-wide AI default token (litellm, localai, headroom) into a
   K8s Secret.
 
-  Restores shoggoth/k3s/external-secrets/ai-default-token.yaml, which
-  the chart migration dropped. The initContainer in litellm.yaml waits
-  on ``externalsecret/ai-default-token``; the resulting Secret is
+  Consumers: the litellm ``wait-bootstrap`` init container waits on
+  ``externalsecret/ai-default-token``; the resulting Secret is
   referenced by ``secretKeyRef`` in litellm.yaml and (transitively) by
   every AI consumer routing through it.
 

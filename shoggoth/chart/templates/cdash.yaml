@@ -21,9 +21,8 @@ metadata:
     app.kubernetes.io/component: cdash
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -44,9 +43,8 @@ metadata:
     app.kubernetes.io/component: cdash
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -273,69 +271,7 @@ spec:
         app: cdash-db
         app.kubernetes.io/component: cdash
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
-      initContainers:
-      - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        command:
-        - bash
-        - -c
-        args:
-        - |
-          set -euo pipefail
-          NS="{{ .Release.Namespace }}"
-                    wait_for_externalsecret() {
-                      local name="$1"
-                      echo "wait-bootstrap: waiting for externalsecret/${name} Ready in namespace ${NS}..."
-                      for i in $(seq 1 60); do
-                        if kubectl get externalsecret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e '.status.conditions // [] | map(select(.type=="Ready" and .status=="True")) | length > 0' >/dev/null 2>&1; then
-                          echo "wait-bootstrap: externalsecret/${name} Ready (after $((i*10))s)"
-                          return 0
-                        fi
-                        sleep 10
-                      done
-                      echo "FAIL: externalsecret/${name} not Ready after 10m"
-                      echo "      Hint: check status from outside the pod:"
-                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
-                      echo "            kubectl describe externalsecret -n ${NS} ${name}"
-                      echo "      Most common causes: OpenBao unavailable, SecretStore reference broken,"
-                      echo "      or remote secret missing (Orphan policies require a value in the source store)."
-                      return 1
-                    }
-                    wait_for_secret_key() {
-                      local name="$1" key="$2"
-                      echo "wait-bootstrap: waiting for secret/${name}.${key} in namespace ${NS}..."
-                      for i in $(seq 1 60); do
-                        if kubectl get secret "${name}" -n "${NS}" -o json 2>/dev/null | jq -e --arg k "${key}" '(.data[$k] // "") | length > 0' >/dev/null 2>&1; then
-                          echo "wait-bootstrap: secret/${name}.${key} populated (after $((i*10))s)"
-                          return 0
-                        fi
-                        sleep 10
-                      done
-                      echo "FAIL: secret/${name}.${key} not populated after 10m"
-                      echo "      Hint: check ExternalSecret status from outside the pod:"
-                      echo "            kubectl get externalsecret -n ${NS} ${name} -o yaml"
-                      echo "      Most common cause: OpenBao unavailable, or SecretStore reference broken."
-                      return 1
-                    }
-          { wait_for_externalsecret cdash-db-password && wait_for_secret_key cdash-db-password password; } || exit 1
-          echo "wait-bootstrap: all K8s Secrets Ready"
-
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: postgres
         image: postgres:18-alpine
@@ -437,14 +373,7 @@ spec:
       annotations:
         secret.reloader.stakater.com/reload: cdash-db-password
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
       - name: wait-bringup
         image: asherikov/shoggoth_tools:alpine
@@ -577,54 +506,5 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: cdash-db
     app.kubernetes.io/component: cdash
-{{- end }}
----
-{{- if (include "shoggoth.isServiceEnabled" (list . "cdash-db")) }}
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: cdash-db-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app: cdash-db
-    app.kubernetes.io/component: cdash
-rules:
-- apiGroups:
-  - ''
-  resources:
-  - secrets
-  resourceNames:
-  - cdash-db-password
-  verbs:
-  - get
-- apiGroups:
-  - external-secrets.io
-  resources:
-  - externalsecrets
-  resourceNames:
-  - cdash-db-password
-  verbs:
-  - get
-{{- end }}
----
-{{- if (include "shoggoth.isServiceEnabled" (list . "cdash-db")) }}
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: cdash-db-bootstrap-wait
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app: cdash-db
-    app.kubernetes.io/component: cdash
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: cdash-db-bootstrap-wait
-subjects:
-- kind: ServiceAccount
-  name: cdash-db
-  namespace: {{ .Release.Namespace }}
 {{- end }}
 {{- end }}

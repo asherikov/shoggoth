@@ -3,7 +3,7 @@
   (apt-cacher-ng). PVC + Service + ConfigMap + Deployment.
 
   ghcr.io/sameersbn/apt-cacher-ng is the upstream image; this chart
-  pins it to the same tag as the legacy file.
+  pins it to a fixed tag.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "apt-cache")) }}
 apiVersion: v1
@@ -17,9 +17,8 @@ metadata:
     app.kubernetes.io/component: apt-cache
   annotations:
     # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data, matching the legacy envsubst path. Reinstall adopts
-    # it: shoggoth.labels survives uninstall, so Helm's ownership check
-    # still passes.
+    # preserves data. Reinstall adopts it: shoggoth.labels survives
+    # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
 spec:
   accessModes:
@@ -80,14 +79,7 @@ spec:
         app: apt-cache
         app.kubernetes.io/component: apt-cache
     spec:
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []
       containers:
       - name: apt-cache

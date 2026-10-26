@@ -2,11 +2,8 @@
   templates/ca-passphrase.yaml — ExternalSecret projecting the OpenLDAP
   private-CA passphrase into a K8s Secret.
 
-  Restores shoggoth/k3s/external-secrets/ca-passphrase.yaml, which the
-  chart migration dropped. openbao-bootstrap Phase B seeds
-  ``ca/passphrase`` with a random value on a fresh install, so this
-  only has to project it. The initContainer in openldap.yaml waits on
-  ``externalsecret/ca-passphrase`` and the resulting Secret is mounted
+  Consumers: the initContainer in openldap.yaml waits on
+  ``externalsecret/ca-passphrase``; the resulting Secret is mounted
   into the openldap pod to unlock the private CA key during TLS
   certificate generation.
 

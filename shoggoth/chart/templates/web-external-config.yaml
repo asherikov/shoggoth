@@ -6,8 +6,8 @@
   `include (print $.Template.BasePath "/web-external-config.yaml") . | sha256sum`.
   A Deployment cannot checksum the file that defines it: `include` on the
   containing template re-enters it and the render recurses until Helm errors
-  out. Both files must therefore carry the same service gate, or disabling the
-  service leaves this ConfigMap behind.
+  out. Both files must therefore carry the same service gate — see README
+  "Chart template conventions".
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "web-external")) }}
 apiVersion: v1

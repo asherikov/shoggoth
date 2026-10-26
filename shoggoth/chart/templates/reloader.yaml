@@ -1,6 +1,6 @@
 {{- /*
   templates/reloader.yaml — Stakater Reloader for ExternalSecrets
-  (ConfigMap / Secret change-driven restarts). Replaces
+  (ConfigMap / Secret change-driven restarts).
 
   Used by ESO to drive pod-restart events on secret/configmap data
   changes without reload-state from a custom controller.
@@ -12,9 +12,7 @@ metadata:
   name: reloader
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- /* Legacy part-of=external-secrets (not shoggoth); override goes
-         through shoggoth.labelsWithMap so no duplicate keys in the
-         rendered YAML. */ -}}
+    {{- /* part-of=external-secrets (not shoggoth) — see shoggoth.labelsWithMap. */ -}}
     {{- include "shoggoth.labelsWithMap" (list . (dict "partOf" "external-secrets")) | nindent 4 }}
     app: reloader
 ---
@@ -107,14 +105,7 @@ spec:
     spec:
       serviceAccountName: reloader
       automountServiceAccountToken: true
-      dnsPolicy: None
-      dnsConfig:
-        nameservers:
-        - {{ .Values.identity.dnsIp }}
-        searches:
-        - {{ .Release.Namespace }}.svc.cluster.local
-        - svc.cluster.local
-        - cluster.local
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: reloader
         image: ghcr.io/stakater/reloader:v1.4.22

@@ -2,13 +2,10 @@
   templates/ssh-slave-public-key.yaml — ExternalSecret projecting the
   ED25519 public half of the slave keypair into a K8s Secret.
 
-  Restores shoggott/k3s/external-secrets/ssh-slave-public-key.yaml,
-  which the chart migration dropped. The same openbao-bootstrap Phase B
-  keypair generation also seeds OpenBao at ``ssh/slave-public-key``,
-  so this only has to project it. Used by the workflow scripts and the
-  gitea-deploy-key registration flow; without it the public half stays
-  in OpenBao only, and any consumer that needs to verify or register
-  it (e.g., dispatch.py publish-time checks) reads from K8s first.
+  Used by the workflow scripts and the gitea-deploy-key registration
+  flow; without it the public half stays in OpenBao only, and any
+  consumer that needs to verify or register it (e.g., dispatch.py
+  publish-time checks) reads from K8s first.
 
   Gated on ``secret-store`` for the same multi-consumer reason as
   ``ssh-slave-private-key.yaml``: the key has no single dominant
