@@ -2,9 +2,19 @@
   templates/argo-webhook-receiver.yaml — minimal SA + RBAC for delivering
   gitea/redmine webhook events to argo-server via web-internal.
 
-  Why a separate Role (not argo-workflow-executor): the v4 event controller
-  reads workfloweventbindings; the executor Role is missing that permission.
-  See the upstream controller code paths that drove this split.
+  Why a separate Role (not argo-workflow-server): this Role authorises the
+  CALLER, and argo-workflow-server authorises argo-server itself. The
+  bearer token web-internal injects on the webhook POST is validated
+  against the API server by argo's gatekeeper, and the caller's own
+  permissions decide what the request may do; argo-server's event_server
+  separately reads workfloweventbindings and submits the selected Workflow
+  with argo-server's ServiceAccount.
+
+  The rules mirror upstream's own `submit-workflow-template` Role: read the
+  bindings, read the template, create the workflow. The write verbs on
+  workfloweventbindings live in argo-workflow-server, which is bound to
+  argo-server alone — the workflow pods that run this repo's code get no
+  write verb on any argoproj.io resource.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "argo-webhook-receiver")) }}
 apiVersion: v1
@@ -75,9 +85,30 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-webhook-receiver
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
-    # preserves data.
-    helm.sh/resource-policy: keep
+    # NOT `helm.sh/resource-policy: keep`, and deliberately so.
+    #
+    # A legacy ServiceAccount token is bound to the ServiceAccount's UID
+    # (pkg/serviceaccount/claims.go puts the SA's UID in the `svcacct.uid`
+    # claim) and to this Secret's own UID, and the API server rejects it
+    # once the two no longer match: "service account UID (...) does not
+    # match claim (...)" (the claims validator).
+    #
+    # `helm uninstall` deletes ServiceAccount/argo-webhook-receiver — it
+    # carries no keep annotation — so the next install creates it with a NEW
+    # UID. And the token controller only fills a Secret that has no token
+    # data (`needsToken := len(tokenData) == 0`,
+    # pkg/controller/serviceaccount/tokens_controller.go), so a Secret that
+    # SURVIVED the uninstall would keep the token it was minted with and
+    # stay dead for good. Nothing else reclaims it either: the token
+    # Secret carries no ownerReference, and the legacy token cleaner only
+    # touches auto-generated tokens — this one is Helm-created and the
+    # ServiceAccount does not reference it.
+    #
+    # Letting Helm delete it is what makes the reinstall work: the Secret
+    # is created empty, the token controller fills it for the new
+    # ServiceAccount, and web-internal's ARGO_WEBHOOK_TOKEN is valid again.
+    # The cost is the Secret's brief absence between the down and the up —
+    # the same window in which the whole release is gone.
     kubernetes.io/service-account.name: argo-webhook-receiver
 type: kubernetes.io/service-account-token
 {{- end }}

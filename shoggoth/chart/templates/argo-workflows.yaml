@@ -58,6 +58,47 @@ metadata:
         ServiceAccount used by Argo Workflows to spawn workflow pods and to
         read shoggoth secrets (git-rev0 token, OpenBao root token, SSH key).
 ---
+# The Role for the ServiceAccounts that run REPOSITORY-CONTROLLED code:
+# `argo` (every workflow pod — workflowDefaults sets serviceAccountName:
+# argo), `shoggoth-sandbox-spawner` (the command-handler dispatch step) and
+# `shoggoth-maintenance-secret-writer` (the maintenance steps). What runs
+# in those pods is this repo's own code (shoggoth/workflow/scripts, the
+# slave:noble image), so their permissions are an attack surface, not a
+# convenience.
+#
+# This Role therefore carries NO write verb on any argoproj.io resource
+# except workflowtaskresults. The rule that used to sit here granted
+# create/update/patch/delete on workflows, workflowtemplates,
+# workfloweventbindings and cronworkflows, under a comment calling
+# workfloweventbindings "a benign read". That grant turned a workflow step
+# into a cluster-admin:
+#
+#   1. the step writes a WorkflowTemplate whose pod spec sets
+#      serviceAccountName: argo-workflow-controller;
+#   2. the step writes a Workflow (or CronWorkflow) referencing it;
+#   3. the controller spawns that pod under its OWN ServiceAccount, whose
+#      ClusterRole grants pods/exec cluster-wide — so the step can exec
+#      into any pod in the cluster.
+#
+# The grant also made the gitea PR-update and redmine task-processor
+# WorkflowEventBindings deletable from a workflow pod. Those bindings are
+# created only by the apply-workflows init container at controller pod
+# start, so a delete does not self-heal: both webhook triggers stay dead
+# until the controller POD is recreated (a liveness-probe restart does not
+# re-run init containers).
+#
+# The read side of that grant belongs to argo-server, the component that
+# actually needs it: its event_server LISTs workfloweventbindings in-cluster
+# with its own ServiceAccount. It now lives in the argo-workflow-server
+# Role below, which is bound to argo-server and to nothing else.
+#
+# workflowtaskresults: create + patch is the one argoproj.io write that
+# stays: it is what the Argo executor (argoexec) inside every workflow pod
+# needs to report a step's outputs, and it is upstream's own "Recommended
+# minimum permissions for the emissary executor" (Role `executor` in
+# argo-workflows/manifests/quick-start-minimal.yaml). It cannot make the
+# controller run anything — a WorkflowTaskResult only carries outputs for a
+# workflow that is already running.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -110,35 +151,10 @@ rules:
 - apiGroups:
   - argoproj.io
   resources:
-  - workflows
-  - workflows/finalizers
   - workflowtaskresults
-  - workflowtemplates
-  - workflowtemplates/finalizers
-  # workfloweventbindings: argo-server's event_server
-  # (server/event/event_server.go) does an in-cluster LIST on the
-  # WorkflowEventBinding matching the discriminator in
-  # /api/v1/events/{ns}/{discriminator}, using its OWN SA
-  # (argo-server) — not the caller's bearer token. The bearer token
-  # injected by web-internal
-  # only authenticates the HTTP request through argo's gatekeeper;
-  # the kube API call is still made by argo-server. Without this
-  # grant, gitea/redmine webhook delivery 403s with
-  # "User system:serviceaccount:shoggoth:argo-server cannot list
-  # resource workfloweventbindings". The argo SA (workflow pods)
-  # inherits the same Role, but workfloweventbindings is a benign
-  # read — equivalent to reading workflowtemplates (already granted).
-  - workfloweventbindings
-  - cronworkflows
-  - cronworkflows/finalizers
   verbs:
   - create
-  - get
-  - list
-  - watch
-  - update
   - patch
-  - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -307,10 +323,109 @@ subjects:
   name: argo-server
   namespace: {{ .Release.Namespace }}
 ---
+# argo-server's namespace-scoped permissions on the argoproj.io resources it
+# manages. It is the only component that needs the write verbs: its
+# event_server LISTs workfloweventbindings in-cluster (server/event/
+# event_server.go) and submits the Workflow a binding selects, both with its
+# OWN ServiceAccount — not the caller's bearer token. The bearer token
+# web-internal injects only authenticates the HTTP request through argo's
+# gatekeeper; the kube API calls behind it are made by argo-server.
+#
+# Without the workfloweventbindings grant, gitea/redmine webhook delivery
+# 403s with "User system:serviceaccount:shoggoth:argo-server cannot list
+# resource workfloweventbindings".
+#
+# The write verbs are safe HERE and only here: argo-server runs the
+# upstream quay.io/argoproj/argocli image with a chart-owned config, so it
+# is not repository-controlled the way the workflow pods are. The same
+# verbs on the argo-workflow-executor Role were a cluster-admin path out
+# of any workflow step — see the comment on that Role.
+#
+# The rule set mirrors upstream's argo-server role (argo-workflows/
+# manifests/quick-start-minimal.yaml), which grants the same verbs on the
+# same resources. The cluster-scoped half of argo-server's needs is the
+# separate argo-server-clusterworkflowtemplates-watcher ClusterRole above.
+#
+# This RoleBinding is named argo-workflow-server rather than keeping the
+# old argo-workflow-executor-server name because RoleBinding.roleRef is
+# immutable server-side: Helm cannot patch a roleRef, it can only create
+# and delete. Renaming the binding makes the change a delete + create,
+# which Helm does. Keeping the name and changing only the roleRef would
+# make every `make up` fail with "field is immutable".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argo-workflow-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: argo-workflows
+rules:
+- apiGroups:
+  - argoproj.io
+  resources:
+  - workflows
+  - workflows/finalizers
+  - workflowtemplates
+  - workflowtemplates/finalizers
+  - workflowtaskresults
+  - workflowtaskresults/finalizers
+  - cronworkflows
+  - cronworkflows/finalizers
+  - workfloweventbindings
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+  - update
+  - patch
+  - delete
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  - pods/log
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ''
+  resources:
+  - secrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  - openbao-unseal-key
+  - gitea-runner-token
+  - gitea-server-token
+  verbs:
+  - get
+- apiGroups:
+  - ''
+  resources:
+  - configmaps
+  resourceNames:
+  - argo-workflow-controller-configmap
+  verbs:
+  - get
+- apiGroups:
+  - external-secrets.io
+  resources:
+  - externalsecrets
+  resourceNames:
+  - gitea-slave-token
+  - ssh-slave-private-key
+  - openbao-unseal-key
+  - gitea-runner-token
+  verbs:
+  - get
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: argo-workflow-executor-server
+  name: argo-workflow-server
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
@@ -318,7 +433,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: argo-workflow-executor
+  name: argo-workflow-server
 subjects:
 - kind: ServiceAccount
   name: argo-server
@@ -538,6 +653,18 @@ metadata:
     app: argo-workflow-controller
 spec:
   replicas: 1
+  # The wait-bootstrap init container below has a 600s budget: ONE
+  # `kubectl wait` over the set of ExternalSecrets it needs, plus the
+  # openbao-unseal-key Secret waited on concurrently. This deadline has to
+  # sit above that budget. The API server defaults an unset
+  # progressDeadlineSeconds to 600s — exactly the init container's budget —
+  # so the controller would mark the rollout ProgressDeadlineExceeded in the
+  # same second the wait was allowed to succeed. 900s = the 600s budget
+  # plus 300s for scheduling, the image pull and the follow-on init
+  # container. The timeout path only sets the Deployment's Progressing
+  # condition (it does not delete the pod), so a slow ESO sync shows up as a
+  # failed rollout rather than a killed pod.
+  progressDeadlineSeconds: 900
   selector:
     matchLabels:
       app: argo-workflow-controller
@@ -570,43 +697,76 @@ spec:
           # k8s_put_secret, so wait on the Secret's
           # data.root-token key instead. Same pattern as the redmine service.
           #
-          # Each wait is gated on the SAME `services.<x>.enabled` flag that
-          # gates the resource it waits for. The ExternalSecrets are
-          # conditional (gitea-runner-token.yaml is wrapped in its own
+          # kubectl wait uses one process per resource and an internal watch;
+          # the previous polling loop (`kubectl get -o json | jq`) re-forked
+          # kubectl + jq every 10s and was OOMing at 128Mi.
+          #
+          # The three ExternalSecrets are waited for in ONE `kubectl wait`
+          # call, not one call per secret. kubectl builds a single timeout
+          # context for the whole invocation and shares it across every
+          # resource it visits — `ctx, cancel :=
+          # watchtools.ContextWithOptionalTimeout(context.Background(), o.Timeout)`
+          # once in RunWait, then `o.ConditionFn(ctx, info, o)` per resource
+          # — so --timeout is a budget for the SET, not a budget per
+          # resource. Three separate calls therefore meant three separate
+          # 600s budgets, up to 1800s in this init container, while the
+          # Deployment's progressDeadlineSeconds is 600s (the API server's
+          # default for an unset field). A slow ESO sync then made the
+          # controller report ProgressDeadlineExceeded on a rollout that was
+          # merely slow. One call, one 600s budget.
+          #
+          # Each secret is still gated on the SAME `services.<x>.enabled`
+          # flag that gates the resource it waits for. The ExternalSecrets
+          # are conditional (gitea-runner-token.yaml is wrapped in its own
           # `isServiceEnabled "gitea-runner"`), so `make stop SERVICE=<x>`
           # deletes the CR and an ungated wait would then burn its full
           # timeout, exit 1, and CrashLoopBackOff this controller — taking
           # the whole Argo subsystem down with a symptom that points at a
           # toggle nobody was looking at.
-          #
-          # kubectl wait uses one process per resource and an internal watch;
-          # the previous polling loop (`kubectl get -o json | jq`) re-forked
-          # kubectl + jq every 10s and was OOMing at 128Mi.
+          ES=()
 {{- if (include "shoggoth.isServiceEnabled" (list . "gitea")) }}
-          kubectl wait --for=condition=Ready --timeout="${TIMEOUT}" \
-              -n "${NS}" externalsecret/gitea-slave-token \
-              || { echo "FAIL: externalsecret/gitea-slave-token not Ready after ${TIMEOUT}"; exit 1; }
-          echo "wait-bootstrap: externalsecret/gitea-slave-token Ready"
+          ES+=("externalsecret/gitea-slave-token")
 {{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "secret-store")) }}
-          kubectl wait --for=condition=Ready --timeout="${TIMEOUT}" \
-              -n "${NS}" externalsecret/ssh-slave-private-key \
-              || { echo "FAIL: externalsecret/ssh-slave-private-key not Ready after ${TIMEOUT}"; exit 1; }
-          echo "wait-bootstrap: externalsecret/ssh-slave-private-key Ready"
+          ES+=("externalsecret/ssh-slave-private-key")
 {{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}
-          kubectl wait --for=condition=Ready --timeout="${TIMEOUT}" \
-              -n "${NS}" externalsecret/gitea-runner-token \
-              || { echo "FAIL: externalsecret/gitea-runner-token not Ready after ${TIMEOUT}"; exit 1; }
-          echo "wait-bootstrap: externalsecret/gitea-runner-token Ready"
+          ES+=("externalsecret/gitea-runner-token")
 {{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "openbao")) }}
+          # openbao-unseal-key cannot join the wait below: it is a Secret
+          # with a jsonpath condition, not `condition=Ready`, so it needs
+          # its own `kubectl wait`. It runs in the BACKGROUND rather than
+          # after the ExternalSecret wait, so this init container's total
+          # budget stays at one TIMEOUT instead of two. The failure is
+          # reported with the same diagnostic as before.
           kubectl wait --for=jsonpath='{.data.root-token}' --timeout="${TIMEOUT}" \
-              -n "${NS}" secret/openbao-unseal-key \
-              || { echo "FAIL: secret/openbao-unseal-key.root-token not populated after ${TIMEOUT}"; \
-                   echo "      openbao init/unseal is the writer; check:"; \
-                   echo "      kubectl logs -n ${NS} deploy/openbao --no-color | tail -n 200"; \
-                   exit 1; }
+              -n "${NS}" secret/openbao-unseal-key &
+          openbao_pid=$!
+{{- end }}
+          if [ ${#ES[@]} -gt 0 ]; then
+              if ! kubectl wait --for=condition=Ready --timeout="${TIMEOUT}" \
+                      -n "${NS}" "${ES[@]}"; then
+                  echo "FAIL: ExternalSecrets not Ready after ${TIMEOUT}: ${ES[*]}" >&2
+                  # The per-secret READY column and the last-sync error are
+                  # what say WHICH secret is stuck and WHY; kubectl's own
+                  # timeout error does not.
+                  kubectl -n "${NS}" get externalsecret 2>&1 | sed 's/^/      /' >&2
+                  echo "      the external-secrets controller is the writer; check:" >&2
+                  echo "      kubectl logs -n ${NS} deploy/external-secrets --no-color | tail -n 200" >&2
+                  exit 1
+              fi
+              echo "wait-bootstrap: ExternalSecrets Ready: ${ES[*]}"
+          fi
+{{- if (include "shoggoth.isServiceEnabled" (list . "openbao")) }}
+          openbao_rc=0
+          wait "${openbao_pid}" || openbao_rc=$?
+          if [ "${openbao_rc}" -ne 0 ]; then
+              echo "FAIL: secret/openbao-unseal-key.root-token not populated after ${TIMEOUT}" >&2
+              echo "      openbao init/unseal is the writer; check:" >&2
+              echo "      kubectl logs -n ${NS} deploy/openbao --no-color | tail -n 200" >&2
+              exit 1
+          fi
           echo "wait-bootstrap: secret/openbao-unseal-key.root-token populated"
 {{- else }}
           echo "wait-bootstrap: services.openbao disabled — skipping secret/openbao-unseal-key"

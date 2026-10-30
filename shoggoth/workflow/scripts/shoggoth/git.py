@@ -473,6 +473,14 @@ class WsHandler:
         """Build the ``wshandler -r <repo_dir> <args>`` command list."""
         return ["wshandler", "-r", self.repo_dir] + list(args)
 
+    def run(self, args, **kwargs):
+        """Run an arbitrary ``wshandler`` command in the workspace.
+
+        The workspace's own commands (``update``, ``scrape``, ...) are
+        passed through as they are; ``kwargs`` go to ``subprocess.run``.
+        """
+        return run(self._cmd(args), **kwargs)
+
     def status(self, quiet=False):
         args = ["-q", "status"] if quiet else ["status"]
         return run(self._cmd(args))

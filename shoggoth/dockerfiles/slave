@@ -29,12 +29,36 @@ RUN \
         openssh-server \
         ttyd
 
-RUN mkdir -p /run/sshd /home/ccws/.ssh \
-    && { printf 'HostKey /etc/ssh/ssh_host_ed25519_key\n'; \
-         printf 'PidFile /run/sshd.pid\n'; \
+RUN mkdir -p /home/ccws/.ssh \
+    && { printf '# The sandbox runs this daemon unprivileged: as the ccws\n'; \
+         printf '# user, on an unprivileged port, with a host key and a pid\n'; \
+         printf '# file in the account'\''s own directory. An unprivileged\n'; \
+         printf '# sshd cannot read a root-owned host key, cannot write into\n'; \
+         printf '# /run and cannot bind a port below 1024.\n'; \
+         printf '#\n'; \
+         printf '# No Port directive: the port comes from the launcher\n'; \
+         printf '# (sandbox.py passes it as ``-o Port=...``), because\n'; \
+         printf '# OpenSSH collects Port directives into a list and would\n'; \
+         printf '# try to bind the same port twice.\n'; \
+         printf '#\n'; \
+         printf '# An unprivileged daemon cannot write the system login\n'; \
+         printf '# records (utmp/wtmp/lastlog), so sshd logs "Attempt\n'; \
+         printf '# to write login records by non-root user (aborting)" on\n'; \
+         printf '# every login. That is expected: a sandbox has no\n'; \
+         printf '# system login records to keep.\n'; \
+         printf '#\n'; \
+         printf '# The launcher passes the host key and the pid file on the\n'; \
+         printf '# command line too (-o HostKey=..., -o PidFile=...): the\n'; \
+         printf '# image and the mounted launcher are versioned separately,\n'; \
+         printf '# and a config naming a host key the unprivileged daemon\n'; \
+         printf '# cannot read leaves sshd with none at all ("no hostkeys\n'; \
+         printf '# available -- exiting"). The values below are the defaults\n'; \
+         printf '# the launcher repeats.\n'; \
+         printf 'HostKey /home/ccws/.ssh/ssh_host_ed25519_key\n'; \
+         printf 'PidFile /home/ccws/.ssh/sshd.pid\n'; \
          printf 'PermitRootLogin no\n'; \
          printf 'PasswordAuthentication yes\n'; \
-         printf 'PermitEmptyPasswords yes\n'; \
+         printf 'PermitEmptyPasswords no\n'; \
          printf 'KbdInteractiveAuthentication no\n'; \
          printf 'PubkeyAuthentication no\n'; \
          printf 'ChallengeResponseAuthentication no\n'; \
@@ -49,6 +73,26 @@ RUN mkdir -p /run/sshd /home/ccws/.ssh \
        } > /etc/ssh/sshd_config \
     && chown -R ccws /home/ccws/.ssh \
     && chmod 0700 /home/ccws/.ssh
+
+# The PAM service for the sandbox's SSH server. The stock Ubuntu
+# service runs modules that write to root-owned files (pam_motd
+# writes /run/motd.dynamic, pam_lastlog writes /var/log/lastlog,
+# pam_loginuid writes /proc/self/loginuid), and an unprivileged
+# daemon can only log a warning for each of them on every login.
+# This service keeps what works unprivileged: pam_unix for the
+# authentication, the account check and the session setup (it
+# verifies the password through the setuid-root unix_chkpwd helper,
+# so the daemon never reads /etc/shadow itself), and pam_env for
+# the locale environment.
+RUN { printf '# PAM service for the sandbox SSH server -- see the\n'; \
+       printf '# unprivileged-daemon note above.\n'; \
+       printf 'auth       required   pam_unix.so\n'; \
+       printf 'account    required   pam_unix.so\n'; \
+       printf 'session    required   pam_unix.so\n'; \
+       printf 'session    optional   pam_env.so\n'; \
+       printf 'password   required   pam_unix.so\n'; \
+     } > /etc/pam.d/sshd \
+    && chmod 0644 /etc/pam.d/sshd
 
 RUN printf 'Acquire::http::Proxy "http://apt-cache";\nAcquire::https::Proxy "false";\n' > /etc/apt/apt.conf.d/00-shoggoth-apt-cache
 

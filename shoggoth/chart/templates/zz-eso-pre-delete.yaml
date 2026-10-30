@@ -1,0 +1,300 @@
+{{- /*
+  zz-eso-pre-delete.yaml — a PRE-DELETE hook that removes this release's
+  External Secrets CRs while the ESO controller is still running.
+
+  WHY THIS EXISTS
+  Helm deletes a release's resources in `releaseutil.UninstallOrder`, and
+  `lessByKind` puts every kind that is NOT in Helm's order list — i.e. every
+  custom resource — LAST ("unknown kind is last"). The ESO controller is a
+  Deployment (a known kind), so Helm asks it to disappear BEFORE it asks the
+  ExternalSecret CRs to disappear.
+
+  Every ExternalSecret carries the finalizer
+  `externalsecrets.external-secrets.io/externalsecret-cleanup`, and the only
+  actor that removes it is the ESO controller, in its delete branch
+  (external-secrets v2.11.0, pkg/controllers/externalsecret):
+  `cleanupManagedSecrets()` then `RemoveFinalizer` + patch. The chart sets no
+  `spec.target.deletionPolicy`, so the CRD default `Retain` applies and
+  `cleanupManagedSecrets` is a no-op — the finalizer removal needs the
+  controller, but it does NOT need OpenBao or any other provider.
+
+  So on every uninstall the controller gets its SIGTERM at roughly the same
+  moment the 19 ExternalSecret deletes arrive, controller-runtime cancels the
+  manager context, and the finalizers are never removed. The CRs stay
+  Terminating forever, and Helm's `WaitForDelete` (helm >= 3.17 polls every
+  deleted object until it is NotFound, under the --timeout context) blocks
+  for the whole timeout:
+
+      Error: uninstallation completed with 1 error(s): context deadline exceeded
+
+  The count is 1 because the DELETEs all succeeded — only the wait timed
+  out. `make down` then recovers through `force-helm-cleanup`
+  (make/k3s.mk), which patches the finalizers away by force.
+
+  This hook makes the controller do the cleanup the way it is meant to: it
+  runs BEFORE Helm deletes anything, so the ESO controller (and OpenBao) are
+  still up. The CRs are deleted, the controller drains its own finalizers,
+  and the uninstall then has no custom resource left to wait for.
+
+  A PRE-DELETE hook is the only hook kind that can do this: Helm runs
+  pre-delete hooks after the release is marked uninstalling but before it
+  deletes any resource.
+
+  The hook is best-effort BY CONSTRUCTION and MUST NEVER FAIL THE
+  UNINSTALL. A failing pre-delete hook aborts `helm uninstall` entirely,
+  which would turn a cosmetic problem into a broken `make down`. So:
+    - the script ends in an unconditional `exit 0`;
+    - it runs without `errexit` and checks every step explicitly;
+    - if the controller does not drain the finalizers within the budget
+      (it is unhealthy, or the service was toggled off with
+      `make stop SERVICE=external-secrets`), the hook clears the
+      finalizers itself — the objects are already terminating, so this only
+      completes a delete that was requested anyway;
+    - if even that fails, it says so and exits 0, leaving `make down`'s
+      `force-helm-cleanup` fallback as the backstop.
+
+  SCOPE: only the CRs of THIS release, selected by
+  `app.kubernetes.io/instance=<release name>` — the label
+  `shoggoth.selectorLabels` stamps on every chart-rendered object
+  (app.kubernetes.io/instance is .Release.Name, whatever the name
+  overrides do). A second instance in the same namespace is untouched.
+
+  The PushSecrets are included for symmetry, not because they need it: their
+  `spec.deletionPolicy` defaults to `None`, so the PushSecret controller
+  never adds `pushsecret.externalsecrets.io/finalizer` and they delete
+  instantly. The Argo kinds are NOT included: the chart renders no Argo CR
+  (they are written at runtime by the controller, outside the release
+  manifest), and Helm does not wait for objects it did not create.
+
+  ONE INSTALLATION IS REQUIRED BEFORE THIS HELPS. Helm runs the hooks
+  stored in the RELEASE record, not the ones in the chart on disk. A release
+  installed before this template existed carries no pre-delete hook, so its
+  uninstall still wedges; the hook takes effect from the next
+  `helm upgrade --install` (`make up`) onwards.
+
+  The RBAC trio below is part of the hook, not an ordinary resource: Helm
+  applies hook resources before the rest of the release, so a Job that needs
+  a ServiceAccount and a RoleBinding cannot have them as ordinary resources
+  — they would not exist yet when the hook runs. They carry a LOWER weight
+  than the Job (-10 vs -5) so the binding is in place before the Job's pod
+  makes its first API call. A namespaced Role is enough and is used on
+  purpose: ExternalSecret and PushSecret are namespaced, so no
+  cluster-scoped permission is needed for a namespaced Role to authorize
+  them.
+
+  The trio is deleted when the hook finishes, on success and on failure:
+  hook resources are not part of the release manifest, so `helm uninstall`
+  does not reclaim them, and a Role left behind by a failed uninstall would
+  outlive the release. The Job itself is kept on failure (no `hook-failed`
+  in its policy) because its pod logs are the only place this hook's
+  diagnostics are printed, and its ttlSecondsAfterFinished reaps it ten
+  minutes later.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-eso-pre-delete
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eso-pre-delete
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-eso-pre-delete
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eso-pre-delete
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+rules:
+# `delete` for the teardown itself, `list`/`watch` for the poll that waits
+# for the objects to disappear, `patch` for the finalizer scrub that runs
+# when the controller does not drain them.
+#
+# `kubectl delete <kind> -l <selector>` is a LIST followed by one DELETE per
+# object, not a deletecollection, so it needs `delete` and not
+# `deletecollection`.
+- apiGroups: ["external-secrets.io"]
+  resources: ["externalsecrets", "pushsecrets"]
+  verbs: ["get", "list", "watch", "delete", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-eso-pre-delete
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eso-pre-delete
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "shoggoth.fullname" . }}-eso-pre-delete
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "shoggoth.fullname" . }}-eso-pre-delete
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-eso-pre-delete-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: eso-pre-delete
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "-5"
+    # No `hook-failed` here, unlike the RBAC trio above: this Job's pod log
+    # is the only place this hook's diagnostics are printed, so a failed Job
+    # is kept for inspection and reaped by ttlSecondsAfterFinished instead.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    # ...and this annotation is what makes Helm print that log itself.
+    "helm.sh/hook-output-log-policy": hook-failed
+spec:
+  # The script itself always exits 0, so a Job failure is an infrastructure
+  # problem — the image did not pull, the pod did not schedule — and one
+  # retry is worth its seconds there. It is not worth more: a second
+  # attempt cannot make a broken controller drain its finalizers, and every
+  # attempt costs budget inside Helm's own hook deadline (the uninstall
+  # --timeout).
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  # Backstop for the pod itself. It has to stay below the uninstall
+  # --timeout, because Helm aborts the uninstall when a hook outlives it.
+  activeDeadlineSeconds: 90
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.labels" . | nindent 8 }}
+        app.kubernetes.io/component: eso-pre-delete
+    spec:
+      serviceAccountName: {{ include "shoggoth.fullname" . }}-eso-pre-delete
+      restartPolicy: Never
+      {{- with .Values.image.registries }}
+      imagePullSecrets:
+      {{- range . }}
+        - name: {{ . }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: teardown
+          # Same tools image as every other kubectl-using container in this
+          # chart. It must NOT be registry.k8s.io/*: that registry is not in
+          # the k3s mirror list (shoggoth/shoggoth.nix) and the cluster is
+          # offline-first, so such a pod never pulls and the Job dies with
+          # BackoffLimitExceeded — which fails the whole release.
+          image: asherikov/shoggoth_tools:alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KUBECTL_NAMESPACE
+              value: {{ .Release.Namespace }}
+            # The release name: the instance label that scopes the teardown
+            # to this release's own CRs.
+            - name: RELEASE_NAME
+              value: {{ .Release.Name }}
+            # How long to wait for the controller to drain the finalizers.
+            # A healthy controller needs a couple of seconds for 19 CRs;
+            # this budget only has to be long enough to see that happen.
+            # It must stay well below the uninstall --timeout, because Helm
+            # aborts the uninstall when a hook outlives that deadline.
+            - name: DRAIN_TIMEOUT_SECONDS
+              value: "20"
+          # No `-e`: the script checks every step itself and MUST exit 0 —
+          # a failing pre-delete hook aborts the uninstall.
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -uo pipefail
+
+              NS="${KUBECTL_NAMESPACE:?}"
+              REL="${RELEASE_NAME:?}"
+              DRAIN="${DRAIN_TIMEOUT_SECONDS:?}"
+              SEL="app.kubernetes.io/instance=${REL}"
+
+              log() { echo "[eso-pre-delete] $*"; }
+
+              # The CRDs live outside the chart (make crds_apply applies
+              # them), so a missing CRD is a normal state here: the count is
+              # zero and the hook has nothing to do. The error is swallowed
+              # on purpose — a teardown hook must not fail on it.
+              count() {
+                local n
+                n=$(kubectl get "$1" -n "${NS}" -l "${SEL}" --no-headers -o name 2>/dev/null \
+                    | wc -l | tr -d '[:space:]')
+                printf '%s' "${n:-0}"
+              }
+
+              remaining() {
+                local total=0 kind
+                for kind in externalsecret pushsecret; do
+                  total=$(( total + $(count "${kind}") ))
+                done
+                printf '%s' "${total}"
+              }
+
+              log "namespace=${NS} release=${REL}: deleting the ESO CRs of this release"
+              for kind in externalsecret pushsecret; do
+                # --wait=false: issue the deletes and move on. The objects
+                # stay Terminating until their finalizer is gone, which is
+                # what the poll below waits for.
+                if ! out=$(kubectl delete "${kind}" -n "${NS}" -l "${SEL}" \
+                        --ignore-not-found=true --wait=false 2>&1); then
+                  log "WARN: could not request the deletion of ${kind}: ${out}"
+                fi
+              done
+
+              deadline=$(( SECONDS + DRAIN ))
+              while [ "${SECONDS}" -lt "${deadline}" ]; do
+                [ "$(remaining)" -eq 0 ] && break
+                sleep 2
+              done
+
+              left=$(remaining)
+              if [ "${left}" -eq 0 ]; then
+                log "all ESO CRs are gone — helm uninstall --wait has nothing to block on"
+                exit 0
+              fi
+
+              # The controller is not draining the finalizers: it is
+              # unhealthy, or it was never there (the service was toggled
+              # off with `make stop SERVICE=external-secrets`). Clear them
+              # so the objects can complete the delete Helm already asked
+              # for. Only the `metadata.finalizers` field is touched, and
+              # only on objects of this release.
+              log "WARN: ${left} ESO CR(s) still hold their finalizer after ${DRAIN}s — clearing them"
+              for kind in externalsecret pushsecret; do
+                objs=$(kubectl get "${kind}" -n "${NS}" -l "${SEL}" -o name 2>/dev/null)
+                for obj in ${objs}; do
+                  if ! kubectl patch "${obj}" -n "${NS}" --type=merge \
+                          -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1; then
+                    log "WARN: could not clear the finalizer of ${obj}"
+                  fi
+                done
+              done
+
+              for _ in $(seq 1 10); do
+                [ "$(remaining)" -eq 0 ] && break
+                sleep 1
+              done
+              left=$(remaining)
+              if [ "${left}" -ne 0 ]; then
+                log "WARN: ${left} ESO CR(s) are still terminating — helm uninstall --wait will time out on them,"
+                log "      and 'make down' clears them itself (make/k3s.mk: force-helm-cleanup)."
+              fi
+              exit 0

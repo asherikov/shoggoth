@@ -1,13 +1,14 @@
 """Module split out of shoggoth.py; see package __init__."""
-import json
 import os
 import re
 import shutil
 import sys
 import uuid
 
-from .git import Git, WsHandler
-from .util import die, log, normalize_for_branch, run
+from .git import Git
+from .project import ProjectResolver, repo_type
+from .util import die, log, normalize_for_branch
+from .workspace import REPO_TYPE_WORKSPACE, materialize
 from .state import params
 
 class Shoggoth:
@@ -74,104 +75,33 @@ class Shoggoth:
             sys.exit(0)
 
     def identify_project_repo(self, redmine, gitea):
-        normalized = normalize_for_branch(self.project)
-        log(f"identify_project_repo: normalized={normalized}")
-        proj = redmine.match_project(normalized)
-        if not proj:
+        resolver = ProjectResolver(gitea, redmine, self.domain)
+        self.project_repo, self.clone_url = resolver.repo_for_project(
+            self.project)
+        if not self.project_repo:
             die(f"could not find redmine project for '{self.project}'")
-        project_id = proj.get("id")
-        log(f"identify_project_repo: redmine project_id={project_id}")
-
-        project_repo = redmine.get_project_repo(project_id, self.domain)
-
-        if project_repo:
-            self.project_repo = project_repo
-            self.clone_url = f"ssh://git@git.{self.domain}/{project_repo}.git"
-            log(f"identify_project_repo: project_repo={project_repo} clone_url={self.clone_url}")
-            return
-
-        log("identify_project_repo: no homepage repo, searching gitea")
-        self.clone_url, self.project_repo = gitea.find_repo(self.project)
-        log(f"identify_project_repo: found repo={self.project_repo} clone_url={self.clone_url}")
+        log(f"identify_project_repo: project_repo={self.project_repo} "
+            f"clone_url={self.clone_url}")
 
     def load_manifest(self, gitea):
-        shoggoth_json = gitea.get_file(self.project_repo, "shoggoth.json")
-        if shoggoth_json is not None:
-            try:
-                data = json.loads(shoggoth_json)
-            except json.JSONDecodeError:
-                die(f"invalid JSON in shoggoth.json for {self.project_repo}")
-            config_type = data.get("type", "")
-            if config_type in ("standalone", "ccws"):
-                self.type = config_type
-            elif config_type != "":
-                die(f"unsupported checkout type '{config_type}' in shoggoth.json for {self.project_repo}")
-
-        if self.type is None:
-            repos_file = gitea.get_file(self.project_repo, ".repos")
-            if repos_file is not None:
-                self.type = "ccws"
-            else:
-                self.type = "standalone"
-
+        self.type = repo_type(gitea, self.project_repo)
         log(f"load_manifest: type={self.type}")
 
     def checkout(self):
         workspace_dir = params.workspace_src
-        os.makedirs(workspace_dir, exist_ok=True)
-
-        log(f"checkout: type={self.type} branch={self.working_branch} url={self.clone_url} dest={workspace_dir}")
-
-        g = Git()
-        if self.working_branch:
-            result = g.clone(self.clone_url, workspace_dir,
-                              branch=self.working_branch, check=False)
-            if result.returncode != 0 and self.type == "ccws":
-                log(f"checkout: branch {self.working_branch} not found, cloning default branch")
-                result = g.clone(self.clone_url, workspace_dir, check=False)
-        else:
-            result = g.clone(self.clone_url, workspace_dir, check=False)
-
-        if result.returncode != 0:
-            die(f"git clone failed for {self.clone_url}: {result.stderr}")
-
-        if self.type == "ccws":
-            org_re = self.github_org.replace(".", r"\.")
-            wsh_args = ["-s", f"s|https://github.com/{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
-                        "-s", f"s|git@github.com:{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
-                        "-s", f"s|ssh://git@github.com:{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
-                        "-s", f"s|git+ssh://git@github.com/{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
-                        "-p", "shallow"]
-            if self.working_branch:
-                wsh_args += ["-P", self.working_branch]
-            wsh_args.append("update")
-            ws_handler = WsHandler(workspace_dir)
-            ws_handler.run(wsh_args)
-
-            log("checkout: post-update repository list:")
-            ws_handler.status(quiet=True)
-
-            apt_update = run(["sudo", "-S", "apt", "update"], check=False, input="ccws\n")
-            if apt_update.stdout:
-                print(apt_update.stdout, file=sys.stderr, flush=True)
-            if apt_update.stderr:
-                print(apt_update.stderr, file=sys.stderr, flush=True)
-            if apt_update.returncode != 0:
-                die(f"apt update failed with exit code "
-                    f"{apt_update.returncode}: "
-                    f"{(apt_update.stderr or '').strip()[-500:]}")
-
-            dep_install = run(["make", "dep_install"], cwd="/ccws",
-                              input="ccws\n", check=False)
-            if dep_install.stdout:
-                print(dep_install.stdout, file=sys.stderr, flush=True)
-            if dep_install.stderr:
-                print(dep_install.stderr, file=sys.stderr, flush=True)
-            if dep_install.returncode != 0:
-                die(f"make dep_install failed with exit code "
-                    f"{dep_install.returncode}: "
-                    f"{(dep_install.stderr or '').strip()[-500:]}")
-
+        org_re = self.github_org.replace(".", r"\.")
+        url_rewrites = [
+            f"s|https://github.com/{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
+            f"s|git@github.com:{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
+            f"s|ssh://git@github.com/{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
+            f"s|git+ssh://git@github.com/{org_re}|ssh://git@git.{self.domain}/{org_re}|g",
+        ]
+        materialize(self.clone_url, workspace_dir, repo_type=self.type,
+                    branch=self.working_branch, url_rewrites=url_rewrites,
+                    prefer_version=(self.working_branch
+                                    if self.type == REPO_TYPE_WORKSPACE
+                                    else None),
+                    label="checkout")
         self.repo_dir = workspace_dir
 
     def _unshallow(self, repo_dir):

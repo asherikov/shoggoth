@@ -34,6 +34,32 @@ metadata:
 spec:
   selector:
     app: slave-term
+  # publishNotReadyAddresses keeps the terminal reachable when the
+  # git-cred sidecar is not ready.
+  #
+  # The Pod Ready condition is the AND of every container's readiness,
+  # and a native sidecar's readiness counts: KEP-753 says "Readiness
+  # probes of sidecars will contribute to determine the whole Pod
+  # readiness". The git-cred sidecar's probe tests
+  # /shoggoth/git-cred/ready — a flag for the sidecar's OWN bootstrap
+  # (ssh-agent + git-credential-cache), not for the pod's serving role.
+  # Without this setting, a git-cred that cannot finish bootstrapping
+  # (ssh-keyscan against a gitea-ssh that is not up yet) would take the
+  # whole pod out of Endpoints, and the terminal — whose ttyd is healthy
+  # — would refuse connections, with no way in to diagnose the git-cred
+  # failure.
+  #
+  # The `term` container already encodes the intended behaviour: it waits
+  # for the flag, and on timeout says "proceeding anyway (git/ssh will
+  # fail until sidecar catches up)". This setting is what makes that
+  # fallback real — the endpoint stays programmed, so the terminal comes
+  # up and the user can wait for (or fix) git-cred.
+  #
+  # The cost is that the endpoint is programmed from the moment the pod
+  # has an IP, so a client arriving before ttyd is listening gets a
+  # connection refused instead of a 503. The terminal is not up yet
+  # either way; only the error changes.
+  publishNotReadyAddresses: true
   ports:
   - name: http
     port: 80
@@ -151,12 +177,25 @@ spec:
         # `kubectl apply` rejects it with "field not declared in schema",
         # and even if accepted, the kubelet would not honour it. The
         # `term` entrypoint waits inline for the sidecar's ready flag
-        # instead (see `command:` below). The readinessProbe is purely
-        # diagnostic (kubectl describe pod, Events). failureThreshold 60
-        # is 2× the 30 s sidecar bootstrap budget to cover a freshly-
-        # started gitea-ssh pod. The probe checks the consumer-facing
-        # ready flag the sidecar touch()es after ssh-agent + credential-
-        # cache are both alive (with a 3 s grace — see
+        # instead (see `command:` below).
+        #
+        # The readinessProbe is NOT purely diagnostic, whatever the
+        # comment used to say: a native sidecar's readiness counts
+        # towards the Pod Ready condition (KEP-753 — "Readiness probes of
+        # sidecars will contribute to determine the whole Pod
+        # readiness"), so this probe does decide whether the pod is
+        # Ready. What it must not decide is whether the pod is
+        # REACHABLE — that is the Service's business, and the Service
+        # publishes not-ready addresses (see the Service above), so a
+        # git-cred that has not finished bootstrapping leaves the pod
+        # NotReady without taking the terminal's endpoint with it. The
+        # probe still reports itself through the pod's Ready condition,
+        # `kubectl describe pod`, Events and the Deployment's Available
+        # condition (`kubectl rollout status`).
+        # failureThreshold 60 is 2× the 30 s sidecar bootstrap budget to
+        # cover a freshly-started gitea-ssh pod. The probe checks the
+        # consumer-facing ready flag the sidecar touch()es after ssh-agent
+        # + credential-cache are both alive (with a 3 s grace — see
         # templates/git-cred-bootstrap.yaml "Ready flag").
         restartPolicy: Always
         readinessProbe:
@@ -217,6 +256,15 @@ spec:
           # ssh_auth_sock, git_credential_sock) matches what workflow
           # main containers do via _wait_for_git_cred in
           # shoggoth.py.
+          #
+          # This poll is the gate for the terminal; the sidecar's
+          # readinessProbe is not. That probe reports the sidecar's own
+          # bootstrap state, and a native sidecar's readiness feeds the
+          # Pod Ready condition, so letting it decide the endpoint
+          # would make an unbootstrapped git-cred take the whole
+          # terminal offline. The Service publishes not-ready addresses
+          # so this fallback is actually reachable: a terminal without
+          # git/ssh, but a terminal.
           ready_flag="/shoggoth/git-cred/ready"
           i=0
           while [ "$i" -lt 60 ]; do
@@ -232,12 +280,34 @@ spec:
 
           # User exit is expected behavior, not a fault. ttyd --once exits
           # when the browser WebSocket closes; tmux's session also ends.
-          # Force exit 0 so kubelet restarts the container without
-          # CrashLoopBackOff (any non-zero exit triggers exponential
-          # backoff: 10s, 20s, 40s, 80s, 160s, 300s). With this wrapper
-          # the pod is back to Ready in ~1s after the WebSocket closes.
-          exec ttyd --max-clients 1 --port 80 --writable -t disableReconnect=true --once tmux -u new-session bash || true
-          exit 0
+          #
+          # `exec` replaces this shell, so ttyd IS the container's PID 1
+          # and ttyd's exit status IS the container's exit status.
+          # Nothing may follow this line for the same reason: the
+          # `|| true` and the trailing `exit 0` that used to sit here
+          # were unreachable in both directions — on success the shell
+          # is already gone, and on failure (ttyd missing) the
+          # non-interactive shell exits 127 before it consults the `||`
+          # list. Neither ever forced an exit code, so the "force exit
+          # 0 to avoid CrashLoopBackOff" rationale behind them was
+          # false.
+          #
+          # The exit status is already the one the normal path wants:
+          # ttyd --once exits 0 when the client disconnects (upstream
+          # ttyd exits 0 from its once-mode teardown), so the kubelet
+          # restarts the container without the CrashLoopBackOff
+          # backoff (10s, 20s, 40s, 80s, 160s, 300s) that a non-zero
+          # exit triggers. A non-zero ttyd exit — ttyd missing, or
+          # unable to bind port 80 — is a real failure and is left to
+          # fail.
+          #
+          # The Pod's Ready condition lags the container: the
+          # readinessProbe below has initialDelaySeconds 30, counted
+          # from the container's start, so after a restart the pod is
+          # Ready ~30s later, not immediately. The Service publishes
+          # not-ready addresses, so a reconnect during that window
+          # still reaches ttyd.
+          exec ttyd --max-clients 1 --port 80 --writable -t disableReconnect=true --once tmux -u new-session bash
         ports:
         - containerPort: 80
           name: http

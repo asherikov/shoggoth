@@ -1,0 +1,104 @@
+{{- /*
+  templates/namespace.yaml — the release Namespace.
+
+  The chart owns the Namespace OBJECT; it does not own the Namespace's
+  EXISTENCE. `make up` creates the namespace with kubectl before it calls
+  helm, and it has to: Helm stores the release record — a Secret — in the
+  release namespace BEFORE it applies any manifest (pkg/action/install.go,
+  Helm v3.19.0: i.cfg.Releases.Create(rel) runs before performInstallCtx).
+  A Namespace object inside the chart is applied during performInstallCtx,
+  i.e. too late — without an existing namespace the release record's
+  create fails with "namespaces not found" and the install aborts before
+  a single chart resource is applied.
+
+  --create-namespace ALONE IS NOT ENOUGH FOR THIS CHART, and this file
+  is the reason. The manifest contains a Namespace object, and Helm's
+  install path creates the namespace itself (--create-namespace) only
+  AFTER its install-time ownership check (pkg/action/install.go: the
+  requireAdoption/existingResourceConflict check precedes the
+  `if i.CreateNamespace` block). Two consequences:
+    * with --create-namespace alone, nothing exists at the ownership
+      check, so Helm takes the create path for the whole manifest and
+      POSTs this Namespace object into the namespace it just created:
+      `namespaces "shoggoth" already exists`;
+    * with the namespace created beforehand, this object IS an existing
+      resource at the ownership check, so Helm takes the update path and
+      does not create it a second time.
+  So the namespace has to exist BEFORE the helm call, and it has to be
+  adopted: `make up` creates it with kubectl and passes --take-ownership
+  (the kubectl-created namespace carries no Helm ownership metadata, so
+  without adoption the same check refuses the manifest with "invalid
+  ownership metadata"). The two are a pair — neither works without the
+  other.
+
+  What the chart does own is the namespace's metadata, so it is declared
+  here instead of being left to whatever the cluster happened to create —
+  including the PodSecurity profile, which `make up` used to strip with
+  `kubectl label namespace ... key-` AFTER the install, by which time the
+  first Deployments had already been rejected.
+
+  `helm.sh/resource-policy: keep` is load-bearing. Without it, `helm
+  uninstall` (make down) would delete the Namespace, and deleting a
+  namespace cascades to every PVC and Secret in it — turning `make down`
+  into `make purge` and destroying the data `make down` exists to
+  preserve. Helm's filterManifestsToKeep honours the annotation on every
+  resource kind, cluster-scoped ones included, so the Namespace survives
+  the uninstall. `make purge` deletes it explicitly by name.
+
+  The name is .Release.Namespace, not a values key: the namespace the
+  release lives in IS the namespace this object names. A values key would
+  be a second source of truth that can disagree with --namespace, and the
+  two would have to be kept in sync by hand.
+
+  Helm applies resources sorted by kind (releaseutil.InstallOrder:
+  PriorityClass, Namespace, NetworkPolicy, ...), so this object is applied
+  before every workload in the chart — on install and on upgrade alike.
+
+  That ordering does not mean the METADATA lands. On the first install
+  the namespace was created outside the release — by the kubectl call in
+  `make up`, or by --create-namespace — so the reconciliation Helm
+  computes for a resource that is new to the release leaves the live
+  object alone. The PodSecurity profile is therefore applied by the
+  pre-install hook (zz-namespace-podsecurity.yaml) as well as declared
+  here: the hook is what makes the profile effective rather than merely
+  declared.
+
+  A reinstall needs --take-ownership for the same reason. The namespace
+  survives the uninstall (resource-policy: keep) and it survives it
+  WITHOUT Helm's ownership metadata: the live namespace never receives
+  the chart's labels on the first install, because the patch Helm
+  computes for a resource that is new to the release is the three-way
+  merge of the previous release's manifest against the new one, and for
+  a new resource that delta is empty. Adoption is what makes the
+  reinstall work, not leftover metadata.
+*/}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  annotations:
+    # Kept across `helm uninstall` so `make down` stops workloads but
+    # preserves the namespace — and with it the PVCs and Secrets that
+    # `make down` is required to preserve. Deleting the namespace would
+    # cascade to all of them.
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    # PodSecurity: the chart's workloads use hostPath volumes, privileged
+    # containers, hostNetwork and capabilities that violate the `baseline`
+    # profile by design — a namespace labelled `enforce=baseline` makes
+    # every Deployment's pods `FailedCreate` with `forbidden: violates
+    # PodSecurity "baseline:latest"`.
+    #
+    # Kubernetes' PodSecurity admission defaults an unlabelled namespace to
+    # `privileged`, so naming the profile here pins the requirement instead
+    # of relying on that default. It is not a values key: the privileged
+    # Deployments (slave-dind, wireguard, localai, openbao-bootstrap, dind)
+    # are baked into the templates, so any stricter profile breaks the
+    # install outright rather than degrading gracefully.
+    #
+    # The profile comes from _helpers.tpl (shoggoth.podSecurityLabels) —
+    # the same source the hook that ENFORCES it reads
+    # (zz-namespace-podsecurity.yaml). Declaring it here and applying it
+    # there must not be able to drift apart.
+    {{- include "shoggoth.podSecurityLabels" . | nindent 4 }}

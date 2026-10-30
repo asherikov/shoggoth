@@ -1,19 +1,8 @@
 JOBS?=4
 INSTANCE?=shoggoth
-# Per-instance configuration. This YAML file is the source of truth: `make up`
-# hands it to Helm with --values, and the chart derives every SHOGGOTT_* pod
-# environment variable from it. Nothing is injected with --set, and no value
-# below is defined twice -- they are read out of this one file.
 SHOGGOTH_CONFIG?=shoggoth/${INSTANCE}.yaml
-# Chart root. Defined here, above `-include make/*.mk`, rather than in
-# make/k3s.mk next to the rest of the Helm plumbing: a rule's prerequisite list
-# is expanded while the makefile is read, and `make/*.mk` is included
-# alphabetically, so chore.mk is parsed before k3s.mk. A variable chore.mk
-# names in a prerequisite is therefore still undefined at that point. Recipes
-# have no such constraint — they expand when they run.
 SHOGGOTH_CHART_ROOT?=$(CURDIR)/shoggoth/chart
-# Reads one value from $(SHOGGOTH_CONFIG). For composing URLs and hostnames inside
-# recipes; never for handing a value to another tool as a CLI argument.
+
 SHOGGOTH_CFG = $(shell yq -r '$(1)' $(SHOGGOTH_CONFIG) 2>/dev/null)
 DOMAIN?=$(call SHOGGOTH_CFG,.identity.domain)
 WEB_EXT_PORT?=$(call SHOGGOTH_CFG,.network.webExternal.hostPort)
@@ -21,12 +10,7 @@ WG_PORT?=$(call SHOGGOTH_CFG,.network.wireguard.udpPort)
 DNS_IP?=$(call SHOGGOTH_CFG,.identity.dnsIp)
 REGISTRY_PORT?=$(call SHOGGOTH_CFG,.network.registry.hostPort)
 WG_UI_PORT?=$(call SHOGGOTH_CFG,.network.wireguard.uiPort)
-# No Make variable exists for .identity.githubOrg, .ai.*, .gitea.serverTokenFileRef
-# or the LDAP base DN. The chart reads those from $(SHOGGOTH_CONFIG) at render
-# time, and `make host_install_nixos` -- the only recipe needing a value outside
-# Helm -- consumes exactly the six above. A Make-level copy would be a second
-# definition of one value, which is what the SHOGGOTT_CONFIG comment above
-# forbids.
+
 HOST?=host.${DOMAIN}
 HOST_IP?=$(shell getent hosts ${HOST} | cut -f 1 -d ' ')
 GITEA_TOKEN?=$(shell cat shoggoth/private/gitea-server-token.txt)
@@ -56,56 +40,10 @@ sync:
 	done; \
 	${K3S_SSH} "sh -c \"cd ${REMOTE_PATH}/${INSTANCE}/shoggoth && sudo bash -c '$$cmds'\""
 
-# sync_restart — stop the running release, refresh on-disk artefacts, install fresh.
-#
-# Each sub-step is intentionally wrapped so a failure halts the sequence rather
-# than letting the next step paint over an inconsistent cluster state. The
-# original recipe ran ``${MAKE} down_if_running`` without checking its exit;
-# that swallowed ``helm uninstall --wait``-timeouts and let `make up` reinstall
-# the chart on top of a half-deleted release, which is what wedged this cluster
-# after the chart started shipping per-instance ExternalSecret/PushSecret
-# resources (the ESO controller holds their finalizers). halt-on-failure here
-# is one half of the fix; the FORCE=1 path inside `make down` is the other.
-#
-# `sync_restart` propagates ``FORCE=1`` to ``down_if_running`` because the
-# intent of "restart from a clean state" already implies tolerating the
-# finalizer-wedge fallback; without that, the recipe would still leave the
-# cluster stuck at the helm uninstall timeout in the common case the chart has
-# freshly acquired ESO CRs. Operators who want the strict path can run
-# `make down_if_running` directly.
 sync_restart: tunnel_up
-	echo "=== sync_restart: step 1/3 — down_if_running (FORCE=1 propagated) ==="
-	${MAKE} down_if_running FORCE=1 || { \
-	    echo "FAIL: make down_if_running exited $$? — sync_restart halted."; \
-	    echo "      Even with FORCE=1 force-cleanup, helm uninstall did not complete."; \
-	    echo "      Likely cause: a CR has a finalizer outside the seven kinds"; \
-	    echo "      force-helm-cleanup scrubs (externalsecret, pushsecret, workflow,"; \
-	    echo "      workflowtemplate, cronworkflow, clusterworkflowtemplate, workflowtaskset)."; \
-	    echo "      Run these diagnostics to find it:"; \
-	    echo "        kubectl api-resources --namespaced=false | head"; \
-	    echo "        kubectl get <kind> -n $${INSTANCE:-shoggoth} -o json \\"; \
-	    echo "          | jq -r '.items[] | select(.metadata.finalizers != null) \\"; \
-	    echo "              | \"\\(.kind)/\\(.metadata.name)  finalizers=\\(.metadata.finalizers)\"' | head"; \
-	    echo "      Then patch the listed finalizers to [] and retry:"; \
-	    echo "        make down FORCE=1   # falls through to force-helm-cleanup"; \
-	    echo "      Destructive last resort: 'make purge' then 'make up'."; \
-	    exit 1; \
-	}
-	echo "=== sync_restart: step 2/3 — sync ==="
-	${MAKE} sync || { \
-	    echo "FAIL: make sync exited $$? — sync_restart halted after uninstall."; \
-	    echo "      The release IS uninstalled at this point; a partial rsync left"; \
-	    echo "      the host's repo tree older than the dev container's. Run 'make sync'"; \
-	    echo "      by hand, then 'make up'."; \
-	    exit 1; \
-	}
-	echo "=== sync_restart: step 3/3 — up ==="
-	${MAKE} up || { \
-	    echo "FAIL: make up exited $$? — sync_restart halted after sync."; \
-	    echo "      Repo tree on host is current but no release is installed. Run 'make up'"; \
-	    echo "      by hand to install, or 'make status' to inspect cluster state."; \
-	    exit 1; \
-	}
+	${MAKE} down
+	${MAKE} sync
+	${MAKE} up
 
 mount:
 	mkdir -p mountpoint
@@ -125,7 +63,7 @@ ssh_exec:
 
 shutdown:
 	-${MAKE} out
-	${MAKE} down_if_running
+	! $(SHOGGOTH_HELM_STATUS) >/dev/null 2>&1 || ${MAKE} down
 	${MAKE} ssh_exec CMD='exec su -l -c "shutdown -P now"'
 
 hosts:

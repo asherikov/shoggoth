@@ -1,23 +1,4 @@
-# make/lint.mk — offline chart validation.
-#
-# Split out of make/k3s.mk. `helm_lint` used to be a single target running
-# five unrelated checks inside one long shell block, so a failure said which
-# line tripped without saying which check it belonged to. Each check is its
-# own target here and can be run on its own.
-#
-# No check wraps a command in `if`, `&&` or `||`, and none prints a verdict
-# of its own. The exit status of the tool that did the work is the verdict
-# and that tool's own output is the report: `diff` prints the names that
-# differ, `join` prints the rows it could not pair, `yamllint` prints the
-# duplicated keys, `helm` prints the template error. The command make
-# echoes before running it is the whole diagnosis.
-#
-# The renders are file targets, so one render is shared by every check that
-# reads it, and a chart edit invalidates them.
-#
-# `make/*.mk` is included alphabetically, so this file is parsed after
-# make/k3s.mk — that is where K3S_TMP_DIR and SHOGGOTH_HELM_VALUES come
-# from.
+# offline chart validation.
 
 .PHONY: helm_lint helm_lint_chart helm_lint_render helm_lint_dupes \
         helm_lint_gates helm_lint_collision helm_lint_roledef

@@ -216,6 +216,44 @@ data:
         log "OpenBao KV ${path} metadata PUT (HTTP ${code})"
     }
 
+    # Is the token stored in a K8s Secret still a token THIS OpenBao
+    # accepts?
+    #
+    # The argument is the base64 form kubectl prints for
+    # ``.data.token``: a Secret's data field is base64 on the wire, so
+    # it is decoded here before the value is used as a credential.
+    #
+    # ``auth/token/lookup-self`` is the right question to ask -- it is
+    # the call the external-secrets Vault client makes when it
+    # authenticates, so a 200 here means the controller gets in too. A
+    # token whose OpenBao was re-initialised (a fresh ``sys/init``, or
+    # ``make wipe_openbao``) is not in the new instance's token store
+    # and answers 403 -- exactly the state in which the ESO controller
+    # reports "unable to validate store" while OpenBao itself is
+    # healthy and the credential is still sitting in the Secret.
+    #
+    # The token's own policy (shoggoth-eso-read / shoggoth-eso-write)
+    # does not grant lookup-self, but the ``default`` policy does and it
+    # is attached to every token minted here: ``no_parent`` detaches the
+    # parent, it does not drop the default policy.
+    bao_token_usable() {
+        local stored="$1" raw code
+        # The decode must SUCCEED, not merely produce something: base64 -d
+        # emits the bytes it managed to decode before it hits the invalid
+        # input, so a failed decode would otherwise leave a truncated
+        # "token" behind and the lookup below would be asked about it.
+        if ! raw=$(printf '%s' "${stored}" | base64 -d 2>/dev/null); then
+            return 1
+        fi
+        if [ -z "${raw}" ]; then
+            return 1
+        fi
+        code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+            -H "X-Vault-Token: ${raw}" \
+            "${OPENBAO_ADDR}/v1/auth/token/lookup-self" 2>/dev/null) || code="000"
+        [ "${code}" = "200" ]
+    }
+
     # === Phase A: idempotent init + unseal ===
     phase "Phase A: waiting for OpenBao at ${OPENBAO_ADDR}"
     until code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null) \
@@ -497,6 +535,17 @@ data:
     log "Phase B.5: shoggoth-eso-read policy applied (HTTP ${code})"
 
     ESO_READ_TOKEN_B64="$(kubectl get secret -n "${NAMESPACE}" shoggoth-openbao-eso-read-token -o jsonpath='{.data.token}' 2>/dev/null || true)"
+    # A Secret outliving the OpenBao that minted its token is the one
+    # failure mode here that used to have no self-healing path: the
+    # token is still in the Secret, OpenBao is healthy, and the ESO
+    # controller cannot authenticate ("unable to validate store"), so
+    # every ExternalSecret of the release stops being projected until
+    # somebody deletes the Secret by hand. Validating the stored token
+    # against THIS OpenBao turns that into a re-mint.
+    if [ -n "${ESO_READ_TOKEN_B64}" ] && ! bao_token_usable "${ESO_READ_TOKEN_B64}"; then
+        log "Phase B.5: the stored shoggoth-openbao-eso-read-token is not valid in this OpenBao — re-minting"
+        ESO_READ_TOKEN_B64=""
+    fi
     if [ -z "${ESO_READ_TOKEN_B64}" ]; then
         log "Phase B.5: minting shoggoth-eso-read token"
         ESO_READ_TOKEN_RESP=/tmp/bao-eso-read-token.json
@@ -521,7 +570,7 @@ data:
         k8s_put_secret shoggoth-openbao-eso-read-token "${ESO_READ_PAYLOAD}"
         log "Phase B.5: shoggoth-openbao-eso-read-token K8s Secret written"
     else
-        log "Phase B.5: shoggoth-openbao-eso-read-token already present — skipping token mint"
+        log "Phase B.5: shoggoth-openbao-eso-read-token already present and valid — keeping it"
     fi
 
     # === Phase B.5: shoggoth-eso-write policy + token for PushSecret writes ===
@@ -569,12 +618,19 @@ data:
     fi
     log "Phase B.5: shoggoth-eso-write policy applied (HTTP ${code})"
 
-    # Idempotency: skip token mint if the K8s Secret already has a token.
-    # We do NOT verify the token is still valid (no live OpenBao API call to
-    # /v1/auth/token/lookup-self from this init — keep bootstrap offline).
-    # Token rotation is documented as: delete shoggoth-openbao-eso-write-token
-    # K8s Secret and re-run openbao init.
+    # Idempotency: keep the token in the K8s Secret if it is still a
+    # token THIS OpenBao accepts. The check is a live lookup-self call
+    # (see bao_token_usable): the Secret can hold a token that the
+    # instance does not know any more — a re-initialised OpenBao has a
+    # fresh token store — and the PushSecret controller then fails every
+    # write with a 403 that reads like a policy problem. Re-minting the
+    # dead token is the self-healing path that used to require deleting
+    # the Secret by hand.
     ESO_WRITE_TOKEN_B64="$(kubectl get secret -n "${NAMESPACE}" shoggoth-openbao-eso-write-token -o jsonpath='{.data.token}' 2>/dev/null || true)"
+    if [ -n "${ESO_WRITE_TOKEN_B64}" ] && ! bao_token_usable "${ESO_WRITE_TOKEN_B64}"; then
+        log "Phase B.5: the stored shoggoth-openbao-eso-write-token is not valid in this OpenBao — re-minting"
+        ESO_WRITE_TOKEN_B64=""
+    fi
     if [ -z "${ESO_WRITE_TOKEN_B64}" ]; then
         log "Phase B.5: minting shoggoth-eso-write token"
         ESO_WRITE_TOKEN_RESP=/tmp/bao-eso-write-token.json
@@ -599,7 +655,7 @@ data:
         k8s_put_secret shoggoth-openbao-eso-write-token "${ESO_WRITE_PAYLOAD}"
         log "Phase B.5: shoggoth-openbao-eso-write-token K8s Secret written"
     else
-        log "Phase B.5: shoggoth-openbao-eso-write-token already present — skipping token mint"
+        log "Phase B.5: shoggoth-openbao-eso-write-token already present and valid — keeping it"
     fi
 
     # === Phase D: TLS certificate generation ===

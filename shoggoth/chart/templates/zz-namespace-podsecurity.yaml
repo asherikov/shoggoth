@@ -1,0 +1,251 @@
+{{- /*
+  zz-namespace-podsecurity.yaml — a PRE-INSTALL / PRE-UPGRADE hook that
+  puts the release namespace's PodSecurity profile in place.
+
+  WHY THIS EXISTS
+  The chart's workloads use hostPath volumes, privileged containers,
+  hostNetwork and capabilities that violate the `baseline` profile by
+  design (slave-dind, wireguard, localai, openbao-bootstrap, dind). A
+  namespace labelled `enforce=baseline` makes every one of those pods
+  `FailedCreate` with `forbidden: violates PodSecurity "baseline:latest"`
+  — and Helm reports "Install complete", because nothing failed: the pods
+  were simply never admitted.
+
+  `make up` labelled the namespace with kubectl before calling Helm,
+  because declaring the profile in templates/namespace.yaml was not
+  enough: Helm reconciles a Namespace like any other object, and for a
+  namespace that is new to the release (the FIRST install — the namespace
+  is created outside the release, by `make up`'s kubectl call or by
+  --create-namespace, so it carries none of the release's ownership
+  metadata) the reconciliation it computes leaves the live object alone.
+  The chart declares the profile; this hook is what puts it there.
+
+  WHY A HOOK AND NOT A PLAIN CHART RESOURCE
+  The profile has to be in place BEFORE the workloads that need it are
+  created, and Helm applies a release's resources in one pass: the
+  Namespace object is applied in the same pass as the Deployments that
+  require the profile. A pre-install hook runs before that pass, which
+  is the only ordering that works.
+
+  Pre-UPGRADE as well, because the profile is a property of the
+  namespace and not of the release: an upgrade does not change it, but a
+  namespace whose labels were stripped by hand would otherwise keep the
+  wrong profile for every workload of the release. The hook is idempotent
+  and cheap — one short-lived pod per Helm operation — and it makes the
+  profile self-healing.
+
+  A FAILING HOOK ABORTS THE INSTALL, AND THAT IS THE POINT
+  The opposite of the pre-delete hook (zz-eso-pre-delete.yaml), which
+  must never fail the uninstall: a pre-install hook fails BEFORE a
+  single workload of the release exists, so aborting the install leaves
+  nothing behind to clean up. And the failure it reports is the honest
+  one: "the namespace could not be set to the profile this chart
+  requires" instead of "Install complete" followed by a namespace full
+  of pods that will never start.
+
+  THE HOOK'S OWN POD IS ADMITTED UNDER THE PROFILE THAT IS IN PLACE
+  WHEN IT RUNS — the profile it is about to set, not the one it sets.
+  A namespace that has never been labelled defaults to `privileged` (the
+  Kubernetes default for an unlabelled namespace), so a fresh install is
+  fine. A namespace left at `restricted` by something else would reject
+  the hook pod, so the pod below is written to satisfy `restricted`:
+  runAsNonRoot, seccompProfile RuntimeDefault, all capabilities dropped,
+  no privilege escalation, a read-only root filesystem. Nothing in it
+  needs more than that.
+
+  The RBAC trio below is part of the hook, not an ordinary resource: Helm
+  applies hook resources before the rest of the release, so a Job that
+  needs a ServiceAccount and a ClusterRoleBinding cannot have them as
+  ordinary resources — they would not exist yet when the hook runs. They
+  carry a LOWER weight than the Job (-10 vs -5) so the binding is in
+  place before the Job's pod makes its first API call.
+
+  The ClusterRole is cluster-scoped because namespaces are: a namespaced
+  Role cannot authorize a namespace at all — the same reason
+  zz-crd-ready-wait.yaml needs a ClusterRole for the CRDs. The grant is
+  deliberately narrow — `get` and `patch` on namespaces, nothing else —
+  because a namespace patch is a cluster-wide write: this pod can relabel
+  any namespace in the cluster while it runs. The pod is short-lived
+  (it deletes itself with the hook) and the RBAC trio is deleted with it.
+
+  The trio is deleted when the hook finishes, on success and on failure:
+  hook resources are not part of the release manifest, so `helm uninstall`
+  does not reclaim them, and a ClusterRole left behind by a failed install
+  would outlive the release. The Job itself is kept on failure (no
+  `hook-failed` in its policy) because its pod log is where the failure
+  is explained, and its ttlSecondsAfterFinished reaps it ten minutes
+  later.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-namespace-podsecurity
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: namespace-podsecurity
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-namespace-podsecurity
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: namespace-podsecurity
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+rules:
+# `patch` is what `kubectl label` issues; `get` is the read it does
+# first. Nothing else: this pod has no business reading or changing
+# anything but the label keys of a namespace.
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-namespace-podsecurity
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: namespace-podsecurity
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "shoggoth.fullname" . }}-namespace-podsecurity
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "shoggoth.fullname" . }}-namespace-podsecurity
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-namespace-podsecurity-{{ .Release.Revision }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: namespace-podsecurity
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    # No `hook-failed` here, unlike the RBAC trio above: this Job's pod log
+    # is where the failure is explained, so a failed Job is kept for
+    # inspection and reaped by ttlSecondsAfterFinished instead.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    # ...and this annotation is what makes Helm print that log itself.
+    "helm.sh/hook-output-log-policy": hook-failed
+spec:
+  # One attempt is enough: the labelling is a single API call against a
+  # namespace that exists (Helm creates it before the hooks run). A retry
+  # only helps if the API server was briefly unavailable, and a second
+  # attempt costs another pod start inside Helm's hook deadline.
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  # Backstop for the pod itself. It has to stay below the install/upgrade
+  # --timeout, because Helm aborts the operation when a hook outlives it.
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.labels" . | nindent 8 }}
+        app.kubernetes.io/component: namespace-podsecurity
+    spec:
+      serviceAccountName: {{ include "shoggoth.fullname" . }}-namespace-podsecurity
+      restartPolicy: Never
+      # The pod runs under whatever profile the namespace carries RIGHT
+      # NOW — the one this hook is about to change. It therefore has to
+      # satisfy `restricted`, which is the strictest profile PodSecurity
+      # defines: no root, no privilege escalation, no capabilities, the
+      # default seccomp profile, and a read-only root filesystem.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        # The kubelet creates an emptyDir 0750 root-owned, so the non-root
+        # user above could not write to it; fsGroup is what makes the
+        # scratch directory below usable by this pod (the kubelet chowns
+        # the volume to the group and grants it group write).
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.image.registries }}
+      imagePullSecrets:
+      {{- range . }}
+        - name: {{ . }}
+      {{- end }}
+      {{- end }}
+      containers:
+        - name: label
+          # Same tools image as every other kubectl-using container in this
+          # chart. It must NOT be registry.k8s.io/*: that registry is not in
+          # the k3s mirror list (shoggoth/shoggoth.nix) and the cluster is
+          # offline-first, so such a pod never pulls and the Job dies with
+          # BackoffLimitExceeded — which fails the whole install.
+          image: asherikov/shoggoth_tools:alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # kubectl writes its discovery cache under $HOME, and the root
+            # filesystem is read-only, so HOME points at the writable
+            # emptyDir below.
+            - name: HOME
+              value: /tmp
+            - name: KUBECTL_NAMESPACE
+              value: {{ .Release.Namespace }}
+            # The profile itself, from the chart's single source
+            # (_helpers.tpl: shoggoth.podSecurityProfile) — the same value
+            # templates/namespace.yaml declares.
+            - name: POD_SECURITY_PROFILE
+              value: {{ include "shoggoth.podSecurityProfile" . | quote }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              set -euo pipefail
+
+              : "${KUBECTL_NAMESPACE:?}"
+              : "${POD_SECURITY_PROFILE:?}"
+
+              echo "[namespace-podsecurity] labelling namespace ${KUBECTL_NAMESPACE} with the PodSecurity profile '${POD_SECURITY_PROFILE}'"
+
+              # One API call, all three labels: a namespace's labels are
+              # patched atomically, so the profile is never half-applied.
+              kubectl label namespace "${KUBECTL_NAMESPACE}" \
+                  "pod-security.kubernetes.io/enforce=${POD_SECURITY_PROFILE}" \
+                  "pod-security.kubernetes.io/warn=${POD_SECURITY_PROFILE}" \
+                  "pod-security.kubernetes.io/audit=${POD_SECURITY_PROFILE}" \
+                  --overwrite
+
+              # Read it back: the label call returning is not the same as
+              # the profile being in place, and the release's workloads
+              # depend on the difference.
+              got=$(kubectl get namespace "${KUBECTL_NAMESPACE}" \
+                    -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}' 2>/dev/null || true)
+              if [ "${got}" != "${POD_SECURITY_PROFILE}" ]; then
+                  echo "FAIL: the namespace enforces '${got:-<nothing>}', expected '${POD_SECURITY_PROFILE}'" >&2
+                  echo "      The workloads of this release use hostPath, privileged containers" >&2
+                  echo "      and hostNetwork, and every one of their pods would be rejected." >&2
+                  exit 1
+              fi
+              echo "[namespace-podsecurity] namespace ${KUBECTL_NAMESPACE} enforces '${got}'"
+      volumes:
+        - name: tmp
+          emptyDir: {}

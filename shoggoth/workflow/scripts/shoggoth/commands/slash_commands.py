@@ -99,8 +99,7 @@ SUPPORTED_COMMANDS = (
         handler="dispatcher",
         description="Spawn a per-PR sandbox pod (ttyd + sshd "
                     "terminals exposed at "
-                    "/sandbox/<id>/; press Enter at the SSH "
-                    "password prompt). Auto-destroys when the "
+                    "/sandbox/<id>/). Auto-destroys when the "
                     "terminal session closes; multiple "
                     "sandboxes can run concurrently",
     ),

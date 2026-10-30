@@ -1,16 +1,56 @@
 {{- /*
   zz-crd-ready-wait.yaml — Waits for CRDs to become Established before any
-  service template that depends on them is interpreted.
+  resource that depends on them is created.
 
-  Replaces the inline `kubectl wait --for=condition=Established customresourcedefinition ...`
-  loop in make/k3s.mk:248-255 with a helm hook-driven Job. Re-runs on every
-  upgrade via the post-upgrade hook.
+  A PRE-INSTALL / PRE-UPGRADE hook, and it has to be one. It used to be a
+  post-install hook, which made it useless for the case it exists for: Helm
+  creates the release's resources BEFORE a post-install hook runs, so on a
+  cluster without the CRDs the install already died on the first CR
+  ("no matches for kind \"ExternalSecret\" in version \"external-secrets.io\"")
+  and a failed install never runs its post-install hooks — the Job's own
+  "run 'make crds_apply'" diagnostic could not fire on exactly the case it
+  was written for. As a pre-install hook the Job runs FIRST, fails loudly
+  with that diagnostic, and the release never reaches the CRs.
 
-  The CRDs themselves are NOT in the chart — they live in shoggoth/crds/ and
-  are applied by `make crds_apply` before Helm runs, because a chart's crds/
-  tree is embedded in the release Secret (see make/k3s.mk crds_apply, where
-  the byte-budget math lives). This hook is the safety net for a `helm upgrade`
-  run outside `make up`.
+  It cannot promise to run before a template is "interpreted" — Helm renders
+  every template into the release manifest before it executes any hook, so
+  the only guarantee a hook can give is about resources being CREATED. That
+  is what this one gives.
+
+  The wait is not a `kubectl wait` on named CRDs: the chart owns none of
+  them, so it waits for every CRD in the groups the chart depends on. The
+  chart creates no argoproj.io objects of its own (the Argo CRs are written
+  at runtime by the controller's apply-workflows init container), but the
+  Argo controller IS deployed by this chart and needs its CRDs, so that
+  group stays in the list.
+
+  The CRDs themselves are NOT in the chart — they live in the upstream
+  submodules (shoggoth/argo-workflows/manifests/base/crds/full/ and
+  shoggoth/external-secrets/deploy/crds/bundle.yaml) and are applied by
+  `make crds_apply` before Helm runs, because a chart's crds/ tree is
+  embedded in the release Secret (see make/k3s.mk crds_apply, where the
+  byte-budget math lives). This hook is the safety net for a
+  `helm upgrade --install` run outside `make up`.
+
+  The RBAC trio below is part of the hook, not an ordinary resource. Helm
+  applies hook resources before the rest of the release, so a Job that needs
+  a ServiceAccount and a ClusterRoleBinding cannot have them as ordinary
+  resources: they would not exist yet when the hook runs. They carry a
+  LOWER weight than the Job (-10 vs -5) so the binding is in place before
+  the Job's pod makes its first API call. At an equal weight Helm's kind
+  order happens to put them first (ServiceAccount -> ClusterRole ->
+  ClusterRoleBinding -> Job), but the Job's pod can still be admitted and
+  start before the binding exists, and the script deliberately does not
+  swallow a 403.
+
+  The trio is deleted when the hook finishes, on success and on failure:
+  hook resources are not part of the release manifest, so `helm uninstall`
+  does not reclaim them, and a cluster-scoped ClusterRole left behind by a
+  failed install would outlive the release. The Job itself is kept on
+  failure (no `hook-failed` in its policy) because its pod logs are the
+  only place the "run 'make crds_apply'" text appears — Helm prints no pod
+  output for a failed hook — and its ttlSecondsAfterFinished reaps it ten
+  minutes later.
 
   Cluster-scoped RBAC: CRDs are not namespaced, so this needs a ClusterRole.
   A namespaced Role cannot authorize them at all.
@@ -23,6 +63,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: crd-ready-wait
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -31,6 +75,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: crd-ready-wait
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
 rules:
 # `kubectl wait` does an internal LIST + WATCH, not just GET — without
 # list + watch the wait fails with "cannot list resource
@@ -47,6 +95,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: crd-ready-wait
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded,hook-failed
 subjects:
   - kind: ServiceAccount
     name: {{ include "shoggoth.fullname" . }}-crd-ready-wait
@@ -65,11 +117,27 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: crd-ready-wait
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": pre-install,pre-upgrade
     "helm.sh/hook-weight": "-5"
+    # No `hook-failed` here, unlike the RBAC trio above: this Job's pod log
+    # is the only place the "run 'make crds_apply'" diagnostic is printed —
+    # Helm prints no pod output for a failed hook — so a failed Job is kept
+    # for inspection and reaped by ttlSecondsAfterFinished instead.
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    # ...and this annotation is what makes Helm print that log itself.
+    # `helm.sh/hook-output-log-policy: hook-failed` asks Helm to stream the
+    # hook pod's container log to stderr when the hook fails — a failed Job,
+    # or Helm's own --timeout expiring while the Job is still running.
+    "helm.sh/hook-output-log-policy": "hook-failed"
 spec:
-  backoffLimit: 3
+  # One retry, not three. Every attempt costs the full WAIT_TIMEOUT (120s),
+  # and Helm's watch on this Job has one deadline (--timeout, 10m by
+  # default): four attempts of 120s plus the backoff in between land on it,
+  # so a CRD that never becomes Established ends as Helm's generic "timed
+  # out waiting for the condition" instead of this hook's own diagnostic.
+  # Two attempts still absorb a slow API server and still fail — loudly,
+  # and in time — before Helm's deadline.
+  backoffLimit: 1
   ttlSecondsAfterFinished: 600
   template:
     metadata:

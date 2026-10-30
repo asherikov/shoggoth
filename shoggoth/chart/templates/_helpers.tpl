@@ -173,3 +173,36 @@ so the YAML pod specs and the argo podSpecPatch cannot drift apart.
         "cluster.local")
     | toJson -}}
 {{- end -}}
+
+{{/*
+The PodSecurity profile of the release namespace, as a single word.
+
+The chart's workloads use hostPath volumes, privileged containers,
+hostNetwork and capabilities that violate the `baseline` profile by
+design (slave-dind, wireguard, localai, openbao-bootstrap, dind). A
+namespace labelled `enforce=baseline` makes every one of those pods
+`FailedCreate` with `forbidden: violates PodSecurity "baseline:latest"`.
+
+It is not a values key: the privileged Deployments are baked into the
+templates, so any stricter profile breaks the install outright rather
+than degrading gracefully.
+
+ONE source, THREE renderings, so the declaration and the enforcement
+cannot drift:
+  - shoggoth.podSecurityProfile — the word itself, and what the
+    pre-install hook (zz-namespace-podsecurity.yaml) passes to kubectl;
+  - shoggoth.podSecurityLabels — the three label lines, for the
+    Namespace object in templates/namespace.yaml.
+The hook applies the labels with kubectl because a Namespace that is new
+to the release (the first install: the namespace is created outside the
+release — by `make up`'s kubectl call, or by --create-namespace) is not
+reliably reconciled with the profile Helm computes for it — see the hook's
+header.
+*/}}
+{{- define "shoggoth.podSecurityProfile" -}}privileged{{- end -}}
+
+{{- define "shoggoth.podSecurityLabels" -}}
+pod-security.kubernetes.io/enforce: {{ include "shoggoth.podSecurityProfile" . }}
+pod-security.kubernetes.io/warn: {{ include "shoggoth.podSecurityProfile" . }}
+pod-security.kubernetes.io/audit: {{ include "shoggoth.podSecurityProfile" . }}
+{{- end -}}

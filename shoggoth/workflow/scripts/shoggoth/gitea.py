@@ -128,31 +128,6 @@ class Gitea(HttpApiClient):
     def get_pr_branch(self):
         return self._payload.get("pull_request", {}).get("head", {}).get("ref", "")
 
-    def get_pr_head_repo_full_name(self):
-        """Repo the PR's head branch lives in.
-
-        For fork PRs this is the contributor's fork
-        (``contributor/myrepo``); for same-repo PRs it
-        matches ``get_repo_full_name()`` and is the
-        upstream. The sandbox ``ttyd`` subcommand (in
-        ``shoggoth/workflow/scripts/sandbox.py``)
-        uses this (not ``get_repo_full_name()``) when
-        building the ``git clone`` URL because the head
-        branch is physically hosted in the head repo --
-        cloning from the base repo with
-        ``--branch <head-branch>`` returns "Remote branch
-        not found in upstream origin" for every fork PR.
-        Falls back to the base repo when ``head.repo`` is
-        missing/null (a deleted fork) so the user gets a
-        clear "Remote branch not found" from git rather
-        than a NullPointer-style crash in the dispatcher.
-        """
-        head_repo = self._payload.get(
-            "pull_request", {}).get("head", {}).get("repo")
-        if head_repo and head_repo.get("full_name"):
-            return head_repo["full_name"]
-        return self.get_repo_full_name()
-
     def has_review(self):
         # Gitea's PullRequestPayload struct serialises the `Review *ReviewPayload`
         # field WITHOUT `omitempty` (modules/structs/hook.go in gitea/gitea),

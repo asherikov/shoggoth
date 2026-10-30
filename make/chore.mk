@@ -109,7 +109,7 @@ CLUSTERVIZ_CONFIG := make/kube-diagrams.yaml
 define clusterviz_run
 	set -e; mkdir -p .tmp/clusterviz; \
 	KIND_RE='^($(subst $(space),|,$(2)))$$'; \
-	N=$$(helm template shoggoth-clusterviz $(SHOGGOTH_CHART_ROOT) --namespace $(INSTANCE) $(SHOGGOTH_HELM_VALUES) \
+	N=$$(helm template shoggoth-clusterviz $(SHOGGOTH_CHART_ROOT) $(SHOGGOTH_HELM_COMMON_ARGS) \
 		| yq ea -r "select(.kind != null and (.kind | test(\"$$KIND_RE\"))) | .kind" \
 		| grep -v '^---$$' | wc -l); \
 	if [ "$$N" -eq 0 ]; then \
@@ -117,7 +117,7 @@ define clusterviz_run
 		exit 1; \
 	fi; \
 	echo "  $$N manifests for view '$1'"; \
-	helm template shoggoth-clusterviz $(SHOGGOTH_CHART_ROOT) --namespace $(INSTANCE) $(SHOGGOTH_HELM_VALUES) \
+	helm template shoggoth-clusterviz $(SHOGGOTH_CHART_ROOT) $(SHOGGOTH_HELM_COMMON_ARGS) \
 		| yq ea "select(.kind != null and (.kind | test(\"$$KIND_RE\")))" \
 		| kube-diagrams -c ${CLUSTERVIZ_CONFIG} -o .tmp/clusterviz/$1.dot -f dot - \
 		|| { echo "FAIL: kube-diagrams failed for '$1'"; exit 1; }

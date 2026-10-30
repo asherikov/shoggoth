@@ -9,28 +9,30 @@ import time
 
 from ..util import die, log, run
 from .base import CommandBase
+from ..project import ProjectResolver
 from ..state import params
+from ..workspace import REPO_TYPE_WORKSPACE
 from . import slash_commands
 
 
 # ----- sandbox runtime -----------------------------------------------
 # The four sandbox-pod lifecycle scripts (init: wait-bootstrap +
-# init-git-cred-perms; main: ttyd; sidecar: cleanup) used to live
+# init-git-cred-perms; main: sandbox; sidecar: cleanup) used to live
 # as inline shell constants in this module. They are now a single
 # Python module at ``shoggoth/workflow/scripts/sandbox.py``
-# (subcommands: ``wait-bootstrap``, ``init-perms``, ``ttyd``,
+# (subcommands: ``wait-bootstrap``, ``init-perms``, ``sandbox``,
 # ``cleanup``), mounted into the sandbox pod at
 # ``/shoggoth/workflow-scripts/`` via a hostPath volume (the
 # ``workflow-scripts:workflow/scripts`` K3S_HOST_PATHS entry in
 # the Makefile rsyncs the repo's ``workflow/scripts/`` to the
 # cluster node). Each container invokes python3 with the
-# subcommand and (for the ttyd subcommand) the user-controlled
+# subcommand and (for the sandbox subcommand) the user-controlled
 # ``--repo`` and ``--branch`` values as separate argv items
 # -- so the pre-fix shell-injection RCE (the branch name
 # interpolated via Python ``.format()`` into a double-quoted
 # shell arg, reachable from any Gitea user with write access on
 # the base repo) is closed by construction: there is no shell
-# any more. The slave image (used by the ttyd container) bakes
+# any more. The slave image (used by the sandbox container) bakes
 # the workflow scripts in at a different path for historical
 # reasons; the hostPath mount is the authoritative copy. The
 # tools image (used by the init containers and the cleanup
@@ -407,8 +409,10 @@ class DispatchCommand(CommandBase):
 
         Triggered by a ``/sandbox`` PR comment. The dispatcher
         creates a unique ``sandbox-<id>`` Pod (git-cred sidecar +
-        ttyd container + init container that clones the PR's
-        repo) and a matching ``sandbox-<id>`` Service. The URL
+        sandbox container, which materializes the project's ccws
+        workspace, checks the PR's head ref out in it and then runs
+        the web terminal and the SSH server in it) and a
+        matching ``sandbox-<id>`` Service. The URL
         is posted as a PR comment so the requesting user can
         open the sandbox in a browser.
 
@@ -418,7 +422,8 @@ class DispatchCommand(CommandBase):
             ``sandbox-<id>.${SHOGGOTH_DOMAIN}`` against
             the host's DNS (an external CoreDNS rewrite maps the
             user-facing suffix to the in-cluster Service) -> kube-proxy
-            DNATs to the pod's port 80 -> ttyd WebSocket
+            DNATs the Service's port 80 to the container's
+            unprivileged ttyd port -> ttyd WebSocket
             on the pod. No nginx hop.
           * User closes the browser -> ttyd ``--once`` exits.
           * Main container exits 0; pod's ``restartPolicy:
@@ -445,6 +450,21 @@ class DispatchCommand(CommandBase):
         The handler exits 0 with ``should_run_worker=false`` --
         the dispatcher is the entire sandbox lifecycle.
         """
+        # The ``worker`` step of the command-handler DAG is gated on
+        # this output parameter, so the file has to exist on EVERY
+        # exit path -- including the failure paths, which end in
+        # ``die()`` (SystemExit, which the ``except Exception``
+        # clause inside does not catch). Without it the Argo
+        # executor logs "cannot save parameter, does not exist" for
+        # /tmp/dispatch-should-run-worker, and the workflow's
+        # parameter resolution fails even though the dispatcher did
+        # its job (and reported the failure).
+        try:
+            self._handle_sandbox_inner()
+        finally:
+            self._emit_output("should_run_worker", "false")
+
+    def _handle_sandbox_inner(self):
         log("dispatch: sandbox: launching per-request sandbox pod")
         try:
             sandbox_id = self._sandbox_id()
@@ -455,59 +475,59 @@ class DispatchCommand(CommandBase):
             # PR (Gitea posts PR comments under the base
             # repo, not the head).
             repo_full_name = self.gitea.get_repo_full_name()
-            # git-clone repo (head) -- the ``ttyd`` subcommand
-            # of ``shoggoth/workflow/scripts/sandbox.py``
-            # receives this as ``--repo`` and the branch as
-            # ``--branch`` (separate argv items; no shell
-            # interpolation, so the branch name cannot
-            # inject shell metacharacters). For fork PRs
-            # the head branch is physically hosted in the
-            # contributor's fork
-            # (``contributor/myrepo``), so cloning from
-            # the base repo with ``--branch <head-branch>``
-            # fails with "Remote branch not found in upstream
-            # origin" -- the pre-fix code used
-            # branch is physically hosted in the contributor's
-            # fork (``contributor/myrepo``), so cloning from
-            # the base repo with ``--branch <head-branch>``
-            # fails with "Remote branch not found in upstream
-            # origin" -- the pre-fix code used
-            # ``get_repo_full_name()`` here, which returns
-            # the base repo, and the sandbox pod's ttyd
-            # container hit the failure on its 90 s startup
-            # ``git-clone not ready`` timeout. Use
-            # ``get_pr_head_repo_full_name()`` (falls back
-            # to the base repo for same-repo PRs and for
-            # the rare deleted-fork case where Gitea
-            # serialises ``head.repo`` as null).
-            head_repo_full_name = (
-                self.gitea.get_pr_head_repo_full_name())
             pr_number = self.gitea.get_pr_number()
             pr_branch = self.gitea.get_pr_branch()
+            # The project repository -- the one that carries the
+            # workspace layout -- is resolved the way the PR-comment
+            # and the Redmine-task worker resolve it, so the sandbox
+            # materializes the same workspace they do. The project's
+            # repository, not the PR's head repository: the project
+            # carries the layout, and the PR's head ref is checked
+            # out on top of it (the sandbox used to clone the head
+            # repository, which for a fork PR is the contributor's
+            # fork and carries no workspace at all).
+            resolver = ProjectResolver(self.gitea, self.redmine,
+                                       params.shoggoth_domain)
+            project_repo, _ = resolver.repo_for_branch(
+                pr_branch, repo_full_name)
+            if not project_repo:
+                # No Redmine project matched the branch: fall back to
+                # the PR's own repository, which is what the sandbox
+                # cloned before.
+                project_repo = repo_full_name
+            repo_type = resolver.repo_type(project_repo)
+            # The PR's head ref is checked out in the repository it
+            # belongs to: the project itself for a plain repository,
+            # the sub-repository it touches for a workspace.
+            sub_repo = self._sandbox_sub_repo(repo_full_name, pr_number,
+                                              repo_type)
             log(f"dispatch: sandbox: id={sandbox_id} "
                 f"repo={repo_full_name} "
-                f"head_repo={head_repo_full_name} "
-                f"pr={pr_number} branch={pr_branch}")
+                f"project_repo={project_repo} "
+                f"type={repo_type} "
+                f"pr={pr_number} branch={pr_branch} "
+                f"sub_repo={sub_repo or '-'}")
 
-            # No per-sandbox credential is generated or
-            # passed: the slave image (shoggoth/dockerfiles/slave)
-            # bakes a no-password sshd_config
-            # (``PermitEmptyPasswords yes`` + the ccws
-            # account's shadow hash cleared via
-            # ``passwd -d ccws`` at build time) and a
-            # rewritten ``/etc/pam.d/sshd`` that uses
-            # ``pam_unix.so nullok`` (the default Ubuntu
-            # ``nullok_secure`` blocks empty passwords
-            # on remote ttys). The user just runs
-            # ``ssh ccws@<sandbox-host>`` and presses
-            # Enter at the password prompt. Anyone who
-            # can reach the per-sandbox Service (cluster
-            # + the external DNS rewrite) can log in --
-            # the same blast-radius as the existing ttyd
-            # web terminal, which is also reachable by
-            # anyone with the PR comment URL.
+            # No per-sandbox credential is generated: the
+            # slave image (shoggoth/dockerfiles/slave) sets
+            # the ccws account's password, and the PR comment
+            # does not carry it -- a PR comment is no place for
+            # a credential. The sandbox's SSH daemon runs
+            # unprivileged, so it cannot read /etc/shadow
+            # itself -- PAM verifies the password through the
+            # setuid-root unix_chkpwd helper -- and it accepts a
+            # password and nothing else (no public key
+            # authentication).
+            #
+            # Anyone who can reach the per-sandbox Service
+            # (cluster + the external DNS rewrite) and knows
+            # the password can log in -- the same
+            # blast-radius as the existing ttyd web terminal,
+            # which is also reachable by anyone with the PR
+            # comment URL.
             self._apply_sandbox_pod(
-                sandbox_id, head_repo_full_name, pr_branch)
+                sandbox_id, project_repo, repo_type, pr_branch,
+                pr_number, sub_repo)
             self._apply_sandbox_service(sandbox_id)
             # Snapshot the pod state immediately after apply,
             # BEFORE the wait starts. If the pod fails and the
@@ -558,7 +578,7 @@ class DispatchCommand(CommandBase):
             # inherits from BaseException, not Exception).
             # The exception carries the diagnostic blob
             # the wait built (``kubectl describe pod`` +
-            # per-container ``kubectl logs`` + pre-wait
+            # per-container ``kubectl logs`` + the last live
             # snapshot fallback). Per the user's sandbox
             # error-feedback contract: the PR comment is a
             # short, plain pointer (no diagnostic blob,
@@ -636,7 +656,6 @@ class DispatchCommand(CommandBase):
             # signal that ``argo-server`` translates to a
             # Failed workflow status in the UI.
             die(f"sandbox: bringup failed: {e}")
-        self._emit_output("should_run_worker", "false")
 
     # ----- sandbox helpers -------------------------------------------
 
@@ -649,6 +668,58 @@ class DispatchCommand(CommandBase):
     # we still need room for the ``sandbox-`` prefix.
     SANDBOX_ID_LEN = 12
     SANDBOX_NAME_PREFIX = "sandbox-"
+
+    # The name of the pod's main container. It runs the whole
+    # sandbox -- the workspace materialization, the SSH server and
+    # the web terminal -- in one process tree, and the cleanup
+    # sidecar watches it by name (the name is handed to the sidecar
+    # through the environment, so the two cannot drift apart).
+    SANDBOX_CONTAINER_NAME = "sandbox"
+
+    # The web terminal's port inside the container. The terminal
+    # runs as the unprivileged ccws user, and a process that dropped
+    # to a non-root uid has no capabilities left, so it cannot bind
+    # a port below 1024. The Service maps the user-facing port 80
+    # onto this one, so the user still reaches the terminal on
+    # port 80.
+    SANDBOX_TTYD_PORT = 8080
+
+    # The SSH server's port inside the container. Same reasoning as
+    # the web terminal's: the daemon runs as the unprivileged ccws
+    # user and therefore has no capabilities left, so it cannot
+    # bind 22. The Service maps the user-facing port 22 onto this
+    # one, so the user's ``ssh ccws@<sandbox-host>`` is unchanged.
+    #
+    # This must match the port the slave image's sshd_config binds
+    # (shoggoth/dockerfiles/slave); sandbox.py passes it to the
+    # daemon as ``-o Port=...``, so the image's value is only the
+    # default.
+    SANDBOX_SSHD_PORT = 2222
+
+    # The dispatcher's budget for the sandbox pod to become Ready.
+    #
+    # It has to cover the whole cold-start chain: the image pull,
+    # the init containers, the git-cred sidecar's bootstrap, and the
+    # sandbox container's workspace materialization (the project
+    # clone + the workspace's sub-repository clones).
+    #
+    # It also has to stay BELOW the sandbox pod's own lifetimes --
+    # CLEANUP_NOT_READY_BUDGET_S (1200 s) in
+    # shoggoth/workflow/scripts/sandbox.py -- so the
+    # pod is still alive when the wait gives up and the post-wait
+    # probes can read its state.
+    SANDBOX_READY_TIMEOUT_S = 900
+    # How often the wait re-checks the pod and refreshes the
+    # diagnostic snapshot.
+    #
+    # The snapshot is the dispatcher's only source of truth about a
+    # pod that the cleanup sidecar deleted while the dispatcher was
+    # still waiting for it. A snapshot taken only before the wait
+    # starts describes the pod two seconds after it was created --
+    # long before any of the failures that actually break the
+    # sandbox (the materialization, the PR ref checkout, the
+    # image pull) have happened -- so it explains nothing.
+    SANDBOX_WAIT_POLL_S = 30
 
     def _sandbox_id(self):
         """Generate a unique sandbox identifier."""
@@ -686,8 +757,9 @@ class DispatchCommand(CommandBase):
         (removed because direct Service access works for
         the k3s-network case) -- the URL is the
         Service's ClusterIP via the external DNS
-        rewrite, the kube-proxy DNATs to the pod's port
-        80, and ttyd's WebSocket upgrade travels
+        rewrite, the kube-proxy DNATs the Service's port 80
+        to the container's ttyd port, and ttyd's WebSocket
+        upgrade travels
         end-to-end without an nginx hop in the middle.
         """
         return (
@@ -699,17 +771,16 @@ class DispatchCommand(CommandBase):
         """Build the PR comment body for a successful sandbox.
 
         Includes the ttyd web URL and the SSH access
-        details. No password is shown -- the slave image
-        bakes a no-password sshd_config
-        (``PermitEmptyPasswords yes`` + ``passwd -d
-        ccws`` at build time) and a rewritten
-        ``/etc/pam.d/sshd`` that uses ``pam_unix.so
-        nullok``, so the user just runs the SSH command
-        and presses Enter at the password prompt. The
-        comment deliberately does NOT include the
+        details. The comment deliberately does NOT carry the
+        account's password: a PR comment is no place for a
+        credential, and the password is the image's (the slave
+        image sets the ccws account's password), so it does not
+        have to travel with every sandbox.
+
+        The comment deliberately does NOT include the
         sandbox id's host key fingerprint (the user
         will see a "host key changed" warning on first
-        connect -- acceptable for the per-cluster
+        connect -- acceptable for the per-sandbox
         host-key model).
         """
         host = f"sandbox-{sandbox_id}.{params.shoggoth_domain}"
@@ -717,12 +788,32 @@ class DispatchCommand(CommandBase):
             f"Sandbox ready.\n\n"
             f"**Web terminal (ttyd):** {sandbox_url}\n\n"
             f"**SSH:** `ssh -o "
-            f"StrictHostKeyChecking=accept-new ccws@{host}`\n\n"
-            f"Press Enter when prompted for a password "
-            f"(the ccws account has no password).\n"
+            f"StrictHostKeyChecking=accept-new ccws@{host}`\n"
         )
 
-    def _apply_sandbox_pod(self, sandbox_id, repo_full_name, branch):
+    def _sandbox_sub_repo(self, pr_repo, pr_number, repo_type):
+        """The workspace sub-repository the PR touches, if any.
+
+        A PR against a ccws workspace targets one of the workspace's
+        sub-repositories, and the PR's file paths name it. Mirrors the
+        worker's ``_resolve_review_repo_dir``: a PR that touches
+        exactly one sub-repository is scoped to it, a PR that touches
+        several is scoped to the workspace itself.
+        """
+        if repo_type != REPO_TYPE_WORKSPACE:
+            return ""
+        files = self.gitea.get_pr_files(pr_repo, pr_number) or []
+        prefixes = {f["path"].split("/", 1)[0]
+                    for f in files if "/" in f.get("path", "")}
+        if len(prefixes) == 1:
+            return next(iter(prefixes))
+        if len(prefixes) > 1:
+            log(f"dispatch: sandbox: PR touches {len(prefixes)} "
+                f"sub-repos, checking out at the workspace level")
+        return ""
+
+    def _apply_sandbox_pod(self, sandbox_id, project_repo, repo_type,
+                           pr_branch, pr_number, sub_repo):
         """kubectl-apply the sandbox Pod manifest.
 
         Pod layout:
@@ -731,14 +822,26 @@ class DispatchCommand(CommandBase):
             worker pod / slave-term Deployment; populates
             ``/shoggoth/git-cred`` with ssh-keyscan,
             ssh-agent, and git-credential-cache.
-          * ``git-clone`` init container -- uses the ready
-            git-cred sidecar to ``git clone`` the PR's repo at
-            the right branch into ``/repo``.
-          * ``ttyd`` container -- runs ``ttyd --once tmux new-session bash``
-            on port 80. The existing slave-term pattern
-            (``|| true; exit 0``) ensures the exit is
-            non-error so kubelet doesn't enter
-            CrashLoopBackOff.
+          * ``sandbox`` container -- the sandbox itself: it
+            materializes the project's ccws workspace (through
+            the ``sandbox`` subcommand of
+            ``shoggoth/workflow/scripts/sandbox.py``: a plain
+            repository goes into a subdirectory of the source
+            space, a ccws workspace takes the source space over
+            and its listed sub-repositories land in
+            subdirectories of it), checks the PR's head ref out
+            in the repository it belongs to, and then runs the
+            two servers side by side: ``sshd`` (as root) and
+            ``ttyd --once tmux new-session bash`` (as the
+            unprivileged ``ccws`` user, on the unprivileged
+            container port the Service maps the user-facing
+            port 80 onto). It supervises them: the first one to
+            exit ends the sandbox and the other is stopped with
+            it. ttyd --once exits 0 when the browser disconnects,
+            so the user's closing the tab ends the sandbox the
+            same way it did before. The pod's ``restartPolicy:
+            Never`` means there is no CrashLoopBackOff to avoid
+            in the first place.
 
         ``restartPolicy: Never`` + the ``cleanup`` sidecar is
         the cleanup contract (the pre-fix
@@ -824,7 +927,8 @@ class DispatchCommand(CommandBase):
                         "args": [SANDBOX_PATH, "wait-bootstrap"],
                         "volumeMounts": [
                             {"name": "workflow-scripts",
-                             "mountPath": "/shoggoth/workflow-scripts"},
+                             "mountPath": "/shoggoth/workflow-scripts",
+                             "readOnly": True},
                         ],
                         "resources": {
                             "requests": {"memory": "32Mi", "cpu": "50m"},
@@ -841,62 +945,32 @@ class DispatchCommand(CommandBase):
                             {"name": "git-cred",
                              "mountPath": "/shoggoth/git-cred"},
                             {"name": "workflow-scripts",
-                             "mountPath": "/shoggoth/workflow-scripts"},
+                             "mountPath": "/shoggoth/workflow-scripts",
+                             "readOnly": True},
                         ],
                         "resources": {
                             "requests": {"memory": "16Mi", "cpu": "10m"},
                             "limits": {"memory": "32Mi", "cpu": "50m"},
                         },
                     },
-                    {
-                        # OpenSSH's privilege-separation chroot.
-                        # The sshd container runs with
-                        # readOnlyRootFilesystem, so it cannot
-                        # create /run/sshd itself -- sandbox.py's
-                        # defensive `os.makedirs` raises EROFS and
-                        # the container dies before sshd ever
-                        # starts. Mounting an emptyDir over
-                        # /run/sshd gives sshd a writable path
-                        # without relaxing readOnlyRootFilesystem.
-                        # kubelet creates emptyDirs mode 0777 and
-                        # sshd refuses a group/world-writable
-                        # privsep dir, so the perms are fixed here
-                        # (the same emptyDir mounted at a staging
-                        # path, since chmod must target the
-                        # volume, not the mount point).
-                        # Runs as root -- chown needs CAP_CHOWN.
-                        "name": "init-sshd-run",
-                        "image": "asherikov/shoggoth_tools:alpine",
-                        "imagePullPolicy": "IfNotPresent",
-                        "securityContext": {"runAsUser": 0},
-                        "command": ["/bin/sh", "-c"],
-                        "args": ["set -eu\nchown root:root /shoggoth/sshd-run\nchmod 0755 /shoggoth/sshd-run"],
-                        "volumeMounts": [
-                            {"name": "sshd-run",
-                             "mountPath": "/shoggoth/sshd-run"},
-                        ],
-                        "resources": {
-                            "requests": {"memory": "16Mi", "cpu": "10m"},
-                            "limits": {"memory": "32Mi", "cpu": "50m"},
-                        },
-                    },
-                    # The pre-fix design had a ``git-clone``
-                    # init container here. That container
-                    # was waiting on the ``git-cred`` sidecar's
-                    # ready flag, but init containers run
-                    # BEFORE all regular containers (including
-                    # sidecars) -- so the sidecar couldn't
-                    # start until the init container finished,
-                    # and the init container couldn't finish
-                    # until the sidecar's ready flag was set.
-                    # The 90s ``git-cred not ready`` timeout
-                    # was the visible failure mode. The clone
-                    # is now inlined into the ``ttyd``
-                    # container's startup (the ``ttyd``
+                    # The pre-fix design had a ``git-clone`` init
+                    # container here. That container was waiting on
+                    # the ``git-cred`` sidecar's ready flag, but
+                    # init containers run BEFORE all regular
+                    # containers (including sidecars) -- so the
+                    # sidecar couldn't start until the init
+                    # container finished, and the init container
+                    # couldn't finish until the sidecar's ready flag
+                    # was set. The 90s ``git-cred not ready``
+                    # timeout was the visible failure mode. The
+                    # clone is now inlined into the ``sandbox``
+                    # container's startup (the ``sandbox``
                     # subcommand of
-                    # ``shoggoth/workflow/scripts/sandbox.py``)
-                    # so it waits inline for the sidecar after
-                    # both containers are running.
+                    # ``shoggoth/workflow/scripts/sandbox.py``), so
+                    # it waits inline for the sidecar. That is where
+                    # the workspace materialization happens too -- it
+                    # needs the sidecar's credentials for the same
+                    # reason the clone did.
                 ],
                 "containers": [
                     {
@@ -952,7 +1026,33 @@ class DispatchCommand(CommandBase):
                         },
                     },
                     {
-                        "name": "ttyd",
+                        # The sandbox itself: one container running
+                        # both servers.
+                        #
+                        # It used to be two containers -- a ``ttyd``
+                        # one and an ``sshd`` one -- in the same
+                        # pod, split because sshd was the root
+                        # process of the pod (it bound the
+                        # privileged port 22 and did OpenSSH's
+                        # privilege separation), while the web
+                        # terminal had to be the unprivileged
+                        # ``ccws`` user. The split cost a shared
+                        # volume and a pair of flag files to agree
+                        # on when the workspace was ready, and --
+                        # because pod Ready is a conjunction over
+                        # every container -- a dead container took
+                        # the pod out of Ready, which made the
+                        # *surviving* one unreachable too.
+                        #
+                        # One container runs the whole sequence
+                        # (materialize, then serve), with no
+                        # handshake at all.
+                        #
+                        # The container runs as the unprivileged
+                        # ``ccws`` user, and so do the workspace,
+                        # the web terminal and the SSH session:
+                        # nothing in the sandbox needs root.
+                        "name": self.SANDBOX_CONTAINER_NAME,
                         "image": f"registry.{domain}/slave:noble",
                         "imagePullPolicy": "IfNotPresent",
                         "env": [
@@ -966,6 +1066,16 @@ class DispatchCommand(CommandBase):
                              "value": f"http://git.{domain}"},
                             {"name": "REDMINE_SERVER",
                              "value": f"http://redmine.{domain}"},
+                            # A git clone that cannot authenticate
+                            # must fail, not wait: without this
+                            # git tries to prompt for a
+                            # username/password, and a prompt
+                            # nobody can answer burns the
+                            # dispatcher's wait budget instead
+                            # of reporting the credential
+                            # failure.
+                            {"name": "GIT_TERMINAL_PROMPT",
+                             "value": "0"},
                             # Wired only when params.shoggoth_dns_ip
                             # is set (i.e. the pod's dnsConfig
                             # carries the custom CoreDNS at
@@ -974,40 +1084,87 @@ class DispatchCommand(CommandBase):
                             # *.${SHOGGOTH_NAMESPACE}.svc.cluster.local).
                             # sandbox.py's _clone_url
                             # switches from the in-cluster short
-                            # form `git.${SHOGGOTH_NAMESPACE}` to
-                            # the user-facing
-                            # `git.${SHOGGOTH_DOMAIN}` only when
-                            # this is set -- the user-facing form
-                            # matches the credential cache key the
+                            # form http://git.${SHOGGOTH_NAMESPACE} to
+                            # the user-facing form
+                            # http://git.${SHOGGOTH_DOMAIN}
+                            # only when this is set -- the user-facing
+                            # form matches the credential cache key the
                             # git-cred sidecar populates
                             # (`host=git.${SHOGGOTH_DOMAIN}`).
                             *([{"name": "SHOGGOTH_DNS_IP",
                                 "value": params.shoggoth_dns_ip}]
                               if params.shoggoth_dns_ip else []),
+                            # The workspace's repository list names
+                            # GitHub URLs; the git-cred sidecar's
+                            # credential cache is keyed on the
+                            # in-cluster HTTP host, so the list's
+                            # URLs are rewritten to that host.
+                            {"name": "SHOGGOTH_GITHUB_ORG",
+                             "value": params.shoggoth_github_org},
+                            # The web terminal's port inside the
+                            # container. The terminal runs as the
+                            # unprivileged ccws user, and a process
+                            # that dropped to a non-root uid has no
+                            # capabilities left, so it cannot bind
+                            # a port below 1024: the Service maps the
+                            # user-facing port 80 onto this one.
+                            {"name": "SANDBOX_TTYD_PORT",
+                             "value": str(self.SANDBOX_TTYD_PORT)},
+                            # The SSH server's port inside the
+                            # container, for the same reason: the
+                            # daemon runs as the unprivileged ccws
+                            # user, so it cannot bind 22. The
+                            # Service maps the user-facing port 22
+                            # onto this one.
+                            {"name": "SANDBOX_SSHD_PORT",
+                             "value": str(self.SANDBOX_SSHD_PORT)},
+                            # The account the sandbox's processes
+                            # run as. The image's own default, but
+                            # stated here so the pod spec does not
+                            # depend on it.
+                            {"name": "HOME",
+                             "value": "/home/ccws"},
+                            {"name": "USER",
+                             "value": "ccws"},
+                            {"name": "LOGNAME",
+                             "value": "ccws"},
                         ],
                         "command": ["/usr/bin/python3"],
                         "args": [
-                            SANDBOX_PATH, "ttyd",
-                            "--repo", repo_full_name,
-                            "--branch", branch,
+                            SANDBOX_PATH, "sandbox",
+                            "--repo", project_repo,
+                            "--type", repo_type,
+                            "--branch", pr_branch,
+                            "--pr", str(pr_number or ""),
+                        ] + ([ "--subrepo", sub_repo] if sub_repo
+                             else []),
+                        "ports": [
+                            {"containerPort": self.SANDBOX_TTYD_PORT,
+                             "name": "http"},
+                            {"containerPort": self.SANDBOX_SSHD_PORT,
+                             "name": "ssh",
+                             "protocol": "TCP"},
                         ],
-                        "ports": [{"containerPort": 80, "name": "http"}],
                         "resources": {
-                            "requests": {"memory": "256Mi",
-                                         "cpu": "200m"},
+                            "requests": {"memory": "320Mi",
+                                         "cpu": "250m"},
                             "limits": {"memory": "1Gi", "cpu": "1"},
                         },
                         "readinessProbe": {
-                            "httpGet": {"path": "/", "port": 80},
+                            "httpGet": {"path": "/",
+                                        "port": self.SANDBOX_TTYD_PORT},
                             "initialDelaySeconds": 5,
                             "periodSeconds": 5,
                             "failureThreshold": 12,
                         },
-                        # ``initialDelaySeconds: 120`` covers
-                        # the worst-case startup: 90 s for the
-                        # git-cred ready flag + 10-60 s for
-                        # the git clone + a few seconds for
-                        # ttyd to bind port 80. The pre-fix
+                        # ``initialDelaySeconds: 900`` covers the
+                        # worst-case startup: 90 s for the
+                        # git-cred ready flag + the clone and
+                        # the workspace materialization (a ccws
+                        # workspace clones its listed
+                        # sub-repositories, which is minutes, not
+                        # seconds) + a few seconds for ttyd to
+                        # bind its port. The pre-fix
                         # value of 30 s was too tight -- on a
                         # slow clone the kubelet's liveness
                         # probe started failing before ttyd
@@ -1023,271 +1180,121 @@ class DispatchCommand(CommandBase):
                         # cleanup sidecar (which has its own
                         # not-ready watchdog) sees the
                         # termination signal sooner.
+                        #
+                        # The value tracks the dispatcher's
+                        # SANDBOX_READY_TIMEOUT_S (900 s): the
+                        # kubelet must not kill a ttyd that is
+                        # still materializing while the
+                        # dispatcher is still waiting for the
+                        # pod to become Ready.
                         "livenessProbe": {
-                            "httpGet": {"path": "/", "port": 80},
-                            "initialDelaySeconds": 120,
+                            "httpGet": {"path": "/",
+                                        "port": self.SANDBOX_TTYD_PORT},
+                            "initialDelaySeconds": 900,
                             "periodSeconds": 10,
                             "failureThreshold": 3,
                         },
-                        "volumeMounts": [
-                            {"name": "git-cred",
-                             "mountPath": "/shoggoth/git-cred"},
-                            {"name": "repo",
-                             "mountPath": "/repo"},
-                            {"name": "sandbox-state",
-                             "mountPath": "/shoggoth/sandbox-state"},
-                            {"name": "workflow-scripts",
-                             "mountPath": "/shoggoth/workflow-scripts"},
-                        ],
-                    },
-                    {
-                        # SSH sidecar. Parallel sibling of the
-                        # ``ttyd`` container in the same pod
-                        # (both are regular ``containers:``
-                        # entries, started by the kubelet at
-                        # the same time, sharing the
-                        # ``repo`` / ``sandbox-state`` /
-                        # ``git-cred`` emptyDirs).
-                        #
-                        # The container:
-                        #   1. waits for the git-cred ready flag
-                        #      (so SSH users can run ``git
-                        #      push`` from the sandbox),
-                        #   2. waits for the repo-ready flag the
-                        #      ttyd container touch()es after
-                        #      the git clone (so the user
-                        #      doesn't land in an empty /repo),
-                        #   3. execs sshd in the foreground.
-                        #
-                        # No per-sandbox credential is needed
-                        # here -- the slave image bakes a
-                        # no-password sshd_config
-                        # (``PermitEmptyPasswords yes``) and
-                        # a cleared ccws account (built
-                        # ``passwd -d ccws``), so any
-                        # network-reachable user can log in
-                        # as ccws by pressing Enter. The args
-                        # list is fixed (no per-sandbox
-                        # values), keeping the manifest
-                        # diff-friendly across sandbox
-                        # invocations.
-                        #
-                        # ``runAsUser: 0`` is required so sshd
-                        # can bind port 22 (the slave
-                        # image's sshd_config does not set a
-                        # non-privileged port). ``AllowUsers
-                        # ccws`` in the slave image's
-                        # sshd_config locks the accepted
-                        # user. ``readOnlyRootFilesystem:
-                        # true`` is safe -- the sandbox.py
-                        # ``sshd`` subcommand does not write
-                        # to any mutable path (the previous
-                        # chpasswd step was removed when the
-                        # credential model was simplified).
-                        "name": "sshd",
-                        "image":
-                            f"registry.{domain}/slave:noble",
-                        "imagePullPolicy": "IfNotPresent",
-                        "command": ["/usr/bin/python3"],
-                        "args": [
-                            SANDBOX_PATH, "sshd",
-                        ],
-                        "env": [
-                            {"name": "SHOGGOTH_DOMAIN",
-                             "value": domain},
-                            {"name": "SHOGGOTH_NAMESPACE",
-                             "value": namespace},
-                        ],
-                        "ports": [{"containerPort": 22,
-                                   "name": "ssh",
-                                   "protocol": "TCP"}],
                         "securityContext": {
-                            # sshd needs root to bind 22 on
-                            # Linux; the slave image's
-                            # sshd_config does not set a
-                            # non-privileged port. The
-                            # ``readOnlyRootFilesystem: true``
-                            # is the strict default -- the
-                            # sandbox.py ``sshd`` subcommand
-                            # does not write to ``/etc/shadow``
-                            # or any other mutable path
-                            # (the per-sandbox password /
-                            # authorized_keys flow was
-                            # removed when the credential
-                            # model was simplified to
-                            # "no password, just press
-                            # Enter" -- see the slave
-                            # Dockerfile for the rationale).
-                            # sshd needs ``CAP_NET_BIND_SERVICE``
-                            # to bind 22 (the Linux kernel's
-                            # bind(2) on a privileged port
-                            # checks the capability, NOT the
-                            # UID -- root without the cap is
-                            # functionally identical to a
-                            # non-root user for ports < 1024).
-                            # ``capabilities.drop: [ALL]``
-                            # strips every cap, so the bind
-                            # would EACCES without an explicit
-                            # ``add: [NET_BIND_SERVICE]``.
-                            # Project precedent: the
-                            # workflow controller uses the same
-                            # ``drop: [ALL]`` + ``add:
-                            # [NET_BIND_SERVICE]`` shape for
-                            # containers binding privileged
-                            # ports. All other hardening (cap
-                            # drop, seccomp,
-                            # no-priv-escalation) stays in
-                            # place.
-                            "runAsUser": 0,
-                            "allowPrivilegeEscalation": False,
-                            "readOnlyRootFilesystem": True,
+                            # The container runs as the unprivileged
+                            # ccws user and needs no capability at
+                            # all: the SSH server is unprivileged
+                            # too, so it binds an unprivileged port
+                            # (SANDBOX_SSHD_PORT) and has no
+                            # privileges to switch to another
+                            # account -- which is what limits the
+                            # sandbox to the ccws account. The web
+                            # terminal has been unprivileged all
+                            # along for the same reason.
+                            #
+                            # Nothing in the sandbox needs a
+                            # privilege of its own: the workspace is
+                            # materialized as ccws (git refuses to
+                            # work on a repository owned by somebody
+                            # else), the SSH host key and pid file
+                            # live in the account's own directory.
+                            #
+                            # ``allowPrivilegeEscalation: true`` is
+                            # the one exception, and it is PAM's:
+                            # the daemon runs as ccws and cannot read
+                            # /etc/shadow itself, so the password is
+                            # verified through the setuid-root
+                            # ``unix_chkpwd`` helper. ``false`` puts
+                            # the container into no_new_privs, and
+                            # no_new_privs makes the kernel ignore
+                            # the helper's setuid bit -- the helper
+                            # then runs as ccws, cannot read
+                            # /etc/shadow, and EVERY password is
+                            # refused ("Permission denied, please try
+                            # again").
+                            #
+                            # The escalation stays inside the
+                            # container: every capability is dropped
+                            # (a setuid binary reaches uid 0 with an
+                            # empty capability set), and the only
+                            # mounts are the read-only workflow
+                            # scripts and the git-cred emptyDir.
+                            #
+                            # ``readOnlyRootFilesystem: false``: the
+                            # container writes the shell's startup
+                            # file into the account's home
+                            # (/home/ccws/.bashrc), the SSH host key
+                            # and the daemon's pid file next to it,
+                            # and the materialized workspace into
+                            # /ccws/workspace -- all of which live
+                            # in the image's own filesystem, so
+                            # there is nothing to mount.
+                            "runAsUser": 1000,
+                            "allowPrivilegeEscalation": True,
+                            "readOnlyRootFilesystem": False,
                             "capabilities": {
+                                # Nothing is added back. The seven
+                                # capabilities the root sshd needed
+                                # (NET_BIND_SERVICE, DAC_OVERRIDE,
+                                # SYS_CHROOT, SETUID, SETGID, CHOWN,
+                                # AUDIT_WRITE) were all there for
+                                # the root daemon: binding 22,
+                                # reading /etc/shadow, OpenSSH's
+                                # privilege separation (chroot into
+                                # /run/sshd, then setuid to ccws),
+                                # and the PTY's chown and audit
+                                # writes. An unprivileged daemon has
+                                # none of that work to do, and
+                                # ``drop: [ALL]`` with no ``add``
+                                # leaves the container with an
+                                # empty capability set.
                                 "drop": ["ALL"],
-                                # ``DAC_OVERRIDE`` is required, not
-                                # optional hardening. ``drop: [ALL]``
-                                # strips it, and without it uid 0 is
-                                # subject to *normal* permission
-                                # checks -- root gets no automatic
-                                # bypass. Two things break without
-                                # it:
-                                #   1. sandbox.py's ``_wait_for_git_cred``
-                                #      polls /shoggoth/git-cred/ready,
-                                #      but that emptyDir is 0700 owned
-                                #      by uid 1000 (set by the
-                                #      init-git-cred-perms init
-                                #      container, because
-                                #      git credential-cache refuses
-                                #      a looser directory). The wait
-                                #      can never succeed, so sshd
-                                #      exits 1 after TTYD_READY_TIMEOUT_S.
-                                #   2. sshd itself needs it to read
-                                #      /etc/shadow (0640 root:shadow)
-                                #      for PAM auth.
-                                # Consequence of (1) beyond sshd:
-                                # pod Ready is a conjunction over all
-                                # containers, and sshd has no
-                                # readinessProbe, so a dead sshd means
-                                # the pod never goes Ready, the
-                                # Service keeps the pod IP in
-                                # notReadyAddresses, and *ttyd becomes
-                                # unreachable too* even though it is
-                                # serving happily. The sandbox looks
-                                # alive in `kubectl get pod` and is
-                                # dead for the user.
-                            #
-                            # Verified on k3s v1.35.8: a uid-0
-                            # container with CapEff 0x400 (this cap
-                            # set) cannot stat a 0700 uid-1000 dir;
-                            # the same container with CapEff 0x402
-                            # (+DAC_OVERRIDE) can.
-                            #
-                            # ``SYS_CHROOT`` + ``SETUID`` + ``SETGID``
-                            # are OpenSSH privilege separation:
-                            # privsep chroots the unprivileged monitor
-                            # into /run/sshd and then drops root ->
-                            # ccws. Each missing cap is its own preauth
-                            # connection reset, in this order:
-                            #   without SYS_CHROOT:
-                            #     chroot("/run/sshd"): Operation not
-                            #     permitted [preauth]
-                            #   with SYS_CHROOT, without SETGID:
-                            #     setgroups: Operation not permitted
-                            #     [preauth]
-                            # Only with all three does the connection
-                            # reach PAM authentication. (NET_BIND_SERVICE
-                            # alone -- the old set -- never got past
-                            # the git-cred wait, so this was masked.)
-                            #
-                            # Verified on k3s v1.35.8 by connecting to
-                            # a probe sshd per cap set and reading the
-                            # preauth failure out of the container log.
-                            #
-                            # ``CHOWN`` and ``AUDIT_WRITE`` are
-                            # required for the *interactive session*
-                            # (not for reaching PAM auth). Without
-                            # them, `mm_answer_pty` fails and the
-                            # client gets "Connection to ... closed
-                            # by remote host" immediately after a
-                            # successful password prompt:
-                            #   without CHOWN:
-                            #     chown(/dev/pts/N, <uid>, 5)
-                            #     failed: Operation not permitted
-                            #   without AUDIT_WRITE (CHOWN present):
-                            #     linux_audit_write_entry failed:
-                            #     Operation not permitted
-                            # Both abort the session teardown before
-                            # the shell starts, so the user never gets
-                            # a prompt while `kubectl get pod` still
-                            # shows sshd running. Neither is a
-                            # privilege-escalation risk here: CHOWN
-                            # only applies to the fresh PTY sshd
-                            # creates for this login, and AUDIT_WRITE
-                            # is a log-write capability (the
-                            # audit-*CONTROL* caps, which actually
-                            # allow reconfiguration, stay dropped).
-                            #
-                            # Only these seven are re-added;
-                            # everything else stays dropped (and
-                            # seccomp, no-priv-escalation,
-                            # readOnlyRootFilesystem remain in place).
-                            "add": ["NET_BIND_SERVICE", "DAC_OVERRIDE",
-                                    "SYS_CHROOT", "SETUID", "SETGID",
-                                    "CHOWN", "AUDIT_WRITE"],
                             },
                             "seccompProfile":
                                 {"type": "RuntimeDefault"},
                         },
-                        "resources": {
-                            "requests": {"memory": "64Mi",
-                                         "cpu": "50m"},
-                            "limits": {"memory": "128Mi",
-                                       "cpu": "200m"},
-                        },
-                        # The kubelet's ``httpGet`` /
-                        # ``tcpSocket`` / ``exec`` probes
-                        # all require a port the kubelet can
-                        # hit; the dispatcher's
-                        # ``_wait_sandbox_ready`` blocks on
-                        # the ttyd container's readinessProbe,
-                        # which is sufficient for the user-
-                        # facing Ready signal. sshd does not
-                        # expose a health endpoint, so a probe
-                        # here is omitted and the
-                        # ``cleanup`` sidecar's not-ready
-                        # watchdog (``CLEANUP_NOT_READY_BUDGET_S``
-                        # in sandbox.py) is the de-facto
-                        # liveness check for the whole pod.
-                        # Without a probe, a hung sshd (e.g.
-                        # crashed during a config reload)
-                        # would not be restarted by the
-                        # kubelet -- but the pod's
-                        # ``restartPolicy: Never`` means the
-                        # whole pod goes away once the ttyd
-                        # container exits, so a per-container
-                        # restart buys us nothing here.
+                        # No source-space volume: the workspace is
+                        # materialized into the image's own
+                        # /ccws/workspace/src, exactly like the
+                        # worker pod does. The volume only existed
+                        # because the ttyd container materialized
+                        # the workspace and the sshd container
+                        # served the user's session out of it -- two
+                        # containers, one filesystem. With both
+                        # servers in this container there is nothing
+                        # to share, and the image's /ccws/workspace
+                        # is already owned by ccws, so the
+                        # unprivileged materialization can create
+                        # src/ in it.
                         "volumeMounts": [
                             {"name": "git-cred",
                              "mountPath": "/shoggoth/git-cred"},
-                            {"name": "repo",
-                             "mountPath": "/repo"},
-                            {"name": "sandbox-state",
-                             "mountPath": "/shoggoth/sandbox-state"},
                             {"name": "workflow-scripts",
-                             "mountPath": "/shoggoth/workflow-scripts"},
-                            # Writable privilege-separation chroot
-                            # (chowned root:root 0755 by the
-                            # init-sshd-run init container).
-                            # readOnlyRootFilesystem means /run
-                            # itself cannot be written.
-                            {"name": "sshd-run",
-                             "mountPath": "/run/sshd"},
+                             "mountPath": "/shoggoth/workflow-scripts",
+                             "readOnly": True},
                         ],
                     },
                     {
                         # Cleanup sidecar. Polls for
                         # ``status.phase`` to reach Succeeded
-                        # or Failed (which happens after ttyd
-                        # exits because the pod's
+                        # or Failed (which happens after the
+                        # sandbox container exits -- the user
+                        # closed the browser, or one of the
+                        # servers died -- because the pod's
                         # ``restartPolicy: Never`` stops the
                         # pod) and ``kubectl delete pod`` with
                         # ``--grace-period=0`` to remove the
@@ -1323,10 +1330,25 @@ class DispatchCommand(CommandBase):
                                  "fieldRef": {
                                      "fieldPath":
                                          "metadata.name"}}},
+                            # The name of the container the sidecar
+                            # watches. Passed in rather than
+                            # hard-coded in the script, so the two
+                            # cannot drift apart.
+                            {"name": "SANDBOX_CONTAINER",
+                             "value": self.SANDBOX_CONTAINER_NAME},
+                            # The dispatcher's pod-ready budget.
+                            # The cleanup sidecar derives its
+                            # not-ready watchdog from it, so a
+                            # merely-slow sandbox is not reaped
+                            # while the dispatcher is still
+                            # waiting for it.
+                            {"name": "SHOGGOTH_READY_TIMEOUT_S",
+                             "value": str(self.SANDBOX_READY_TIMEOUT_S)},
                         ],
                         "volumeMounts": [
                             {"name": "workflow-scripts",
-                             "mountPath": "/shoggoth/workflow-scripts"},
+                             "mountPath": "/shoggoth/workflow-scripts",
+                             "readOnly": True},
                         ],
                         "resources": {
                             "requests": {"memory": "16Mi",
@@ -1343,17 +1365,6 @@ class DispatchCommand(CommandBase):
                          "name": "git-cred-bootstrap",
                          "defaultMode": 493,
                      }},
-                    {"name": "sshd-run", "emptyDir": {}},
-                    {"name": "repo", "emptyDir": {}},
-                    # Shared between the ttyd and sshd
-                    # containers; the ttyd container
-                    # touch()es /shoggoth/sandbox-state/repo-ready
-                    # after the git clone, the sshd
-                    # container polls for it. Lives in a
-                    # separate emptyDir from /repo so a
-                    # ``rm -rf /repo/.ready`` by the user
-                    # can't break the readiness signal.
-                    {"name": "sandbox-state", "emptyDir": {}},
                     # HostPath of the cluster-node's workflow-
                     # scripts directory. The Makefile's
                     # `workflow-scripts:workflow/scripts`
@@ -1367,7 +1378,7 @@ class DispatchCommand(CommandBase):
                     # sidecar use the tools image which has no
                     # workflow scripts baked in; this is the
                     # only way those containers can invoke
-                    # SANDBOX_PATH. The ttyd container
+                    # SANDBOX_PATH. The sandbox container
                     # uses the slave image which bakes the
                     # scripts in at a different historical
                     # path; the mount is still added for
@@ -1416,7 +1427,15 @@ class DispatchCommand(CommandBase):
             "spec": {
                 "selector": {"sandbox-id": sandbox_id},
                 "ports": [
-                    {"name": "http", "port": 80, "targetPort": 80},
+                    # The web terminal listens on an unprivileged
+                    # port inside the container (it runs as the
+                    # unprivileged ccws user, and a process that
+                    # dropped to a non-root uid has no capabilities
+                    # left, so it cannot bind a port below 1024).
+                    # The user still reaches it on port 80 -- this
+                    # is the port the Service publishes.
+                    {"name": "http", "port": 80,
+                     "targetPort": self.SANDBOX_TTYD_PORT},
                     # sshd is exposed on the same Service
                     # (and therefore the same user-facing
                     # hostname ``sandbox-<id>.${SHOGGOTH_DOMAIN}``)
@@ -1426,21 +1445,18 @@ class DispatchCommand(CommandBase):
                     # ``ssh`` port name matches the
                     # container's named port in
                     # ``_apply_sandbox_pod`` so kube-proxy
-                    # DNATs correctly. Per-sandbox port
-                    # (targetPort 22) is required because
-                    # the slave image's sshd_config binds
-                    # 22 (no Port directive override);
-                    # changing it would require baking a
-                    # new slave image and rebuilding every
-                    # sandbox. The Service port is also 22
-                    # (cluster-local) so clients on the
-                    # cluster network reach sshd on its
-                    # native port. The user-facing
-                    # ``ssh`` command omits ``-p 22``
-                    # because sshd listens on the default
-                    # SSH port.
+                    # DNATs correctly. The Service publishes
+                    # the standard SSH port 22 and points it
+                    # at the port the daemon binds inside the
+                    # container (SANDBOX_SSHD_PORT): the daemon
+                    # runs as the unprivileged ccws user, so it
+                    # has no capabilities left and cannot bind
+                    # 22 itself. The user-facing ``ssh``
+                    # command omits ``-p`` because the Service
+                    # publishes 22.
                     {"name": "ssh", "port": 22,
-                     "targetPort": 22, "protocol": "TCP"},
+                     "targetPort": self.SANDBOX_SSHD_PORT,
+                     "protocol": "TCP"},
                 ],
                 "type": "ClusterIP",
             },
@@ -1509,23 +1525,29 @@ class DispatchCommand(CommandBase):
     def _wait_sandbox_ready(self, sandbox_id, pre_wait_state=None):
         """Block until the sandbox pod is Ready (or fail loud).
 
-        Budget 120 s: covers the slowest observed path
-        (image pull + git-cred bootstrap + git clone of a
-        typical PR-sized repo). ``kubectl wait`` returns
-        non-zero on timeout, which surfaces as a failure
-        comment via the outer ``try/except`` in
-        ``_handle_sandbox``.
+        Budget ``SANDBOX_READY_TIMEOUT_S`` (900 s): covers the
+        slowest observed path (image pull + git-cred bootstrap + the
+        workspace materialization -- a ccws workspace clones its
+        listed sub-repositories).
+
+        The wait runs in ``SANDBOX_WAIT_POLL_S`` (30 s) slices and
+        refreshes the diagnostic snapshot after every slice, instead
+        of blocking in a single ``kubectl wait``. That matters
+        because the sandbox pod's own ``cleanup`` sidecar deletes
+        the pod as soon as it decides the sandbox is dead -- and a
+        pod deleted mid-wait leaves the dispatcher with nothing left
+        to describe. The pre-fix version took one snapshot two
+        seconds after ``kubectl apply`` and one probe after the wait
+        expired, so a pod deleted in between produced a diagnostic
+        describing the pod's second of life: the init container's
+        "all K8s Secrets Ready" and nothing else. The live snapshot
+        chain keeps the pod's state as of its last moments.
 
         ``pre_wait_state`` is an optional ``(describe,
         per_container_logs)`` tuple captured by the caller
-        BEFORE the wait starts (see ``_handle_sandbox``).
-        When the post-wait probes return empty (the pod was
-        deleted during the wait window by the cleanup
-        sidecar), the pre-wait snapshot is used as a fallback
-        -- it's not as fresh as a post-wait snapshot but it's
-        strictly better than the "pod was deleted before logs
-        could be fetched" message that hid the real failure
-        reason before.
+        BEFORE the wait starts (see ``_handle_sandbox``). It seeds
+        the snapshot chain, and it is what the diagnostic falls
+        back to when every live probe comes back empty.
 
         Diagnostic output on timeout:
 
@@ -1550,7 +1572,8 @@ class DispatchCommand(CommandBase):
              surfaced them, and the dispatcher surfaces
              whichever it can -- a partially-deleted pod
              may still have ``git-cred`` logs reachable
-             after ``ttyd`` is gone, and ``describe`` is
+             after the sandbox container is gone, and
+             ``describe`` is
              guaranteed reachable for any pod that exists
              or existed during the wait.
           3. The best ``kubectl logs --all-containers``
@@ -1559,150 +1582,194 @@ class DispatchCommand(CommandBase):
 
         If every probe fails (the cleanup sidecar deleted
         the pod during the wait window), the dispatcher
-        surfaces the pre-wait snapshot (if available) or a
+        surfaces the last live snapshot (if available) or a
         "pod was deleted" message so the user has
         *something* concrete to debug against.
         """
         namespace = params.shoggoth_namespace
         pod_name = self._sandbox_name(sandbox_id)
-        result = run(
-            ["kubectl", "wait", "--for=condition=Ready",
-             f"pod/{pod_name}", "-n", namespace, "--timeout=120s"],
+        deadline = time.time() + self.SANDBOX_READY_TIMEOUT_S
+        # The freshest snapshot of the pod the dispatcher has.
+        # Seeded with the pre-wait snapshot and refreshed after
+        # every poll slice.
+        snapshot = pre_wait_state
+        gone = False
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            slice_s = int(min(self.SANDBOX_WAIT_POLL_S, remaining))
+            slice_started = time.time()
+            result = run(
+                ["kubectl", "wait", "--for=condition=Ready",
+                 f"pod/{pod_name}", "-n", namespace,
+                 f"--timeout={slice_s}s"],
+                check=False)
+            if result.returncode == 0:
+                return
+            stderr = (result.stderr or "").strip()
+            # Refresh the snapshot while the pod is still around:
+            # the cleanup sidecar can delete it at any moment, and
+            # the snapshot is the only record of what the pod
+            # looked like when it died.
+            fresh = self._snapshot_sandbox_pod(sandbox_id, settle_s=0)
+            if fresh and (fresh[0] or fresh[1]):
+                snapshot = fresh
+            if "not found" in stderr.lower():
+                # The pod is gone. Waiting longer cannot help --
+                # the cleanup sidecar deleted it.
+                gone = True
+                break
+            log(f"sandbox: pod not Ready yet "
+                f"({int(deadline - time.time())}s of the budget "
+                f"left): {stderr}", file=sys.stderr)
+            # ``kubectl wait`` blocks for the whole slice unless the
+            # pod reaches the condition (or disappears) first. A
+            # call that returns early -- an API error, say -- must
+            # not turn this loop into a hot spin against the API
+            # server, so the remainder of the slice is slept off.
+            spent = time.time() - slice_started
+            if spent < slice_s - 1:
+                time.sleep(slice_s - spent - 1)
+        log(f"sandbox: pod did not become Ready: "
+            f"{'pod was deleted during the wait window' if gone else 'wait budget exhausted'}",
+            file=sys.stderr)
+        # 1. ``kubectl describe pod`` -- best single
+        #    source of truth for why a pod failed to
+        #    become Ready. Includes container exit
+        #    reasons, Events (image-pull failures,
+        #    BackOff), and init-container status.
+        describe_result = run(
+            ["kubectl", "describe", "pod", pod_name,
+             "-n", namespace],
             check=False)
-        if result.returncode != 0:
-            log(f"sandbox: pod did not become Ready: "
-                f"{result.stderr.strip()}",
-                file=sys.stderr)
-            # 1. ``kubectl describe pod`` -- best single
-            #    source of truth for why a pod failed to
-            #    become Ready. Includes container exit
-            #    reasons, Events (image-pull failures,
-            #    BackOff), and init-container status.
-            describe_result = run(
-                ["kubectl", "describe", "pod", pod_name,
-                 "-n", namespace],
+        describe_tail = (
+            describe_result.stdout[-3000:]
+            if describe_result.returncode == 0
+            and describe_result.stdout else "")
+        # 2. ``kubectl logs`` per individual container
+        #    -- surfaces stdout/stderr even if the pod
+        #    is being deleted (one container might
+        #    still be reachable while another isn't).
+        log_chunks = []
+        containers_to_log = (
+            self._pod_containers_to_log(
+                describe_result.stdout))
+        for container_name in containers_to_log:
+            c_log = run(
+                ["kubectl", "logs", "-n", namespace,
+                 pod_name, "-c", container_name,
+                 "--tail=50"],
                 check=False)
-            describe_tail = (
-                describe_result.stdout[-3000:]
-                if describe_result.returncode == 0
-                and describe_result.stdout else "")
-            # 2. ``kubectl logs`` per individual container
-            #    -- surfaces stdout/stderr even if the pod
-            #    is being deleted (one container might
-            #    still be reachable while another isn't).
-            log_chunks = []
-            containers_to_log = (
-                self._pod_containers_to_log(
-                    describe_result.stdout))
-            for container_name in containers_to_log:
-                c_log = run(
-                    ["kubectl", "logs", "-n", namespace,
-                     pod_name, "-c", container_name,
-                     "--tail=50"],
-                    check=False)
-                if c_log.returncode == 0 and c_log.stdout:
-                    log_chunks.append(
-                        f"=== {container_name} ===\n"
-                        + c_log.stdout.rstrip())
-            # 3. ``kubectl logs --all-containers`` -- the
-            #    pre-fix probe. Kept for back-compat with
-            #    the workflow-logs-viewer pattern (the
-            #    Argo UI groups per-container logs by
-            #    container name, but the dispatcher
-            #    surfaces a combined fallback when
-            #    per-container probes are empty).
-            all_log_result = run(
-                ["kubectl", "logs", "-n", namespace, pod_name,
-                 "--tail=50", "--all-containers"],
-                check=False)
-            all_log_tail = (
-                all_log_result.stdout[-2000:]
-                if all_log_result.returncode == 0
-                and all_log_result.stdout else "")
-            # Compose the diagnostic blob the user will
-            # see in the PR failure comment and in the
-            # Argo log.
-            diag_parts = []
-            if describe_tail:
+            if c_log.returncode == 0 and c_log.stdout:
+                log_chunks.append(
+                    f"=== {container_name} ===\n"
+                    + c_log.stdout.rstrip())
+        # 3. ``kubectl logs --all-containers`` -- the
+        #    pre-fix probe. Kept for back-compat with
+        #    the workflow-logs-viewer pattern (the
+        #    Argo UI groups per-container logs by
+        #    container name, but the dispatcher
+        #    surfaces a combined fallback when
+        #    per-container probes are empty).
+        all_log_result = run(
+            ["kubectl", "logs", "-n", namespace, pod_name,
+             "--tail=50", "--all-containers"],
+            check=False)
+        all_log_tail = (
+            all_log_result.stdout[-2000:]
+            if all_log_result.returncode == 0
+            and all_log_result.stdout else "")
+        # Compose the diagnostic blob the user will
+        # see in the PR failure comment and in the
+        # Argo log.
+        diag_parts = []
+        if describe_tail:
+            diag_parts.append(
+                "=== kubectl describe pod (post-wait) ===\n"
+                + describe_tail)
+        if log_chunks:
+            diag_parts.append(
+                "=== per-container logs (post-wait) ===\n"
+                + "\n\n".join(log_chunks))
+        if all_log_tail and not log_chunks:
+            # Only show the combined tail when the
+            # per-container probes came back empty (no
+            # duplication with #2 above).
+            diag_parts.append(
+                "=== kubectl logs --all-containers (post-wait) ===\n"
+                + all_log_tail)
+        # If the post-wait probes are empty (the
+        # cleanup sidecar beat the dispatcher to the
+        # post-mortem), fall back to the last live
+        # snapshot. That snapshot is taken at most
+        # SANDBOX_WAIT_POLL_S (30 s) before the pod
+        # disappeared, so it carries the failure that
+        # killed it -- the materialization error, the
+        # PR-ref checkout error, the image-pull error.
+        # The pre-wait snapshot (taken two seconds
+        # after `kubectl apply`) is the seed of that
+        # chain and is only reached if no live snapshot
+        # ever produced anything.
+        if not diag_parts and snapshot is not None:
+            snap_describe, snap_logs = snapshot
+            diag_parts.append(
+                "Pod was deleted during the wait window "
+                "(cleanup sidecar beat the dispatcher's "
+                "post-wait diagnostic). Falling back to "
+                "the last live snapshot, taken while the "
+                "pod was still there.")
+            if snap_describe:
                 diag_parts.append(
-                    "=== kubectl describe pod (post-wait) ===\n"
-                    + describe_tail)
-            if log_chunks:
+                    "=== kubectl describe pod (last live snapshot) ===\n"
+                    + snap_describe[-3000:])
+            if snap_logs:
                 diag_parts.append(
-                    "=== per-container logs (post-wait) ===\n"
-                    + "\n\n".join(log_chunks))
-            if all_log_tail and not log_chunks:
-                # Only show the combined tail when the
-                # per-container probes came back empty (no
-                # duplication with #2 above).
-                diag_parts.append(
-                    "=== kubectl logs --all-containers (post-wait) ===\n"
-                    + all_log_tail)
-            # If the post-wait probes are empty (the
-            # cleanup sidecar beat the dispatcher to the
-            # post-mortem), fall back to the pre-wait
-            # snapshot the caller captured before the
-            # wait started. This is strictly better than
-            # the "pod was deleted" message because the
-            # user gets to see WHY the pod was failing at
-            # the start of the wait -- the most common
-            # failure modes (init-container errors,
-            # image-pull failures, ssh-keyscan timeouts)
-            # all surface in the early lifecycle.
-            if not diag_parts and pre_wait_state is not None:
-                pre_describe, pre_logs = pre_wait_state
-                diag_parts.append(
-                    "Pod was deleted during the wait window "
-                    "(cleanup sidecar beat the dispatcher's "
-                    "post-wait diagnostic). Falling back to "
-                    "the pre-wait snapshot captured "
-                    "immediately after `kubectl apply pod`.")
-                if pre_describe:
-                    diag_parts.append(
-                        "=== kubectl describe pod (pre-wait) ===\n"
-                        + pre_describe[-3000:])
-                if pre_logs:
-                    diag_parts.append(
-                        "=== per-container logs (pre-wait) ===\n"
-                        + "\n\n".join(pre_logs))
-            if not diag_parts:
-                # Last resort -- neither the post-wait nor
-                # the pre-wait probes yielded anything. The
-                # user knows to look at the Argo logs for
-                # the dispatcher's earlier kubectl
-                # invocations.
-                diag_parts.append(
-                    "pod was deleted before logs could be "
-                    "fetched (cleanup sidecar beat the "
-                    "dispatcher; check the Argo log for "
-                    "the ``kubectl describe pod`` output "
-                    "above for the failure reason)")
-            diag = "\n\n".join(diag_parts)
-            # Raise the exception (NOT die() -- see
-            # ``_SandboxPodNotReadyError`` docstring). The
-            # outer ``except Exception`` in
-            # ``_handle_sandbox`` catches this, emits the
-            # full diagnostic to the dispatcher's stdout
-            # (Argo captures it in the workflow log), posts
-            # a short plain pointer as a PR comment, and
-            # re-dies. A pre-fix ``die()`` here raised
-            # SystemExit, which is a BaseException (not
-            # Exception) and propagated straight through
-            # the except block -- the diagnostic was
-            # never written anywhere and the user never
-            # saw the failure on the PR.
-            raise _SandboxPodNotReadyError(sandbox_id, diag)
+                    "=== per-container logs (last live snapshot) ===\n"
+                    + "\n\n".join(snap_logs))
+        if not diag_parts:
+            # Last resort -- neither the post-wait nor
+            # the live probes yielded anything. The
+            # user knows to look at the Argo logs for
+            # the dispatcher's earlier kubectl
+            # invocations.
+            diag_parts.append(
+                "pod was deleted before logs could be "
+                "fetched (cleanup sidecar beat the "
+                "dispatcher; check the Argo log for "
+                "the ``kubectl describe pod`` output "
+                "above for the failure reason)")
+        diag = "\n\n".join(diag_parts)
+        # Raise the exception (NOT die() -- see
+        # ``_SandboxPodNotReadyError`` docstring). The
+        # outer ``except Exception`` in
+        # ``_handle_sandbox`` catches this, emits the
+        # full diagnostic to the dispatcher's stdout
+        # (Argo captures it in the workflow log), posts
+        # a short plain pointer as a PR comment, and
+        # re-dies. A pre-fix ``die()`` here raised
+        # SystemExit, which is a BaseException (not
+        # Exception) and propagated straight through
+        # the except block -- the diagnostic was
+        # never written anywhere and the user never
+        # saw the failure on the PR.
+        raise _SandboxPodNotReadyError(sandbox_id, diag)
 
-    def _snapshot_sandbox_pod(self, sandbox_id):
+    def _snapshot_sandbox_pod(self, sandbox_id, settle_s=2):
         """Capture pod state for the diagnostic fallback chain.
 
         Called by ``_handle_sandbox`` after ``kubectl apply
         pod`` and before ``_wait_sandbox_ready`` so that even
-        if the cleanup sidecar deletes the pod during the 120 s
-        wait window, the dispatcher has a snapshot of the pod's
+        if the cleanup sidecar deletes the pod during the wait
+        window, the dispatcher has a snapshot of the pod's
         early lifecycle -- the point where the most common
         failure modes (init-container errors, image-pull
         failures, ssh-keyscan timeouts) actually surface.
+
+        It is called again after every poll slice of
+        ``_wait_sandbox_ready`` (with ``settle_s=0``), so the
+        dispatcher keeps a fresh view of a pod that the cleanup
+        sidecar may delete at any moment.
 
         The snapshot is just ``(describe_stdout,
         per_container_logs)`` -- the same shape
@@ -1722,8 +1789,13 @@ class DispatchCommand(CommandBase):
         # has the pod immediately but the kubelet takes a
         # moment to populate ``status.containerStatuses``.
         # Wait briefly so the snapshot has meaningful data
-        # rather than an empty ``status:`` block.
-        time.sleep(2)
+        # rather than an empty ``status:`` block. The
+        # in-wait snapshots pass ``settle_s=0``: the pod has
+        # been running for minutes by then, and the sleep
+        # would only widen the window in which the cleanup
+        # sidecar can delete the pod.
+        if settle_s:
+            time.sleep(settle_s)
         describe_result = run(
             ["kubectl", "describe", "pod", pod_name,
              "-n", namespace],
