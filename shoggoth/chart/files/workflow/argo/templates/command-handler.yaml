@@ -3,8 +3,7 @@
 # redmine-task-processor; gitea-ci-failure intentionally unregistered)
 # via WorkflowEventBinding.
 #
-# Equivalent to kestra's main_shoggoth_command-handler.yml:
-# single-flight, one shoggoth.py invocation per webhook. v2 splits the
+# Single-flight, one shoggoth.py invocation per webhook. v2 splits the
 # single pod into a two-step DAG:
 #
 #   1. ``dispatch`` step — runs in a ``shoggoth_tools:alpine`` pod
@@ -53,13 +52,14 @@
 #             dispatches them to the dedicated handlers. The
 #             dispatch template passes this into both pods:
 #             dispatch sets ``SHOGGOTH_ORIGINAL_COMMAND`` (the
-#             dispatcher reads it from the env; dispatch.py is
-#             invoked with no positional), worker sets
+#             dispatcher takes it as argv[1]), worker sets
 #             ``SHOGGOTH_COMMAND`` (its ``args.command`` is the
 #             original command, identical to the pre-split
 #             single-pod behaviour).
-#   task_id:  optional argv[2] for the worker. Used by ``task``
-#             (numeric Redmine issue ID), empty for the rest.
+#   task_id:  optional argv[2] for the worker and argv[2] for
+#             the dispatcher (argv[1] is the command). Used by
+#             ``task`` (numeric Redmine issue ID), empty for the
+#             rest.
 #   payload:  raw JSON string from the webhook body.
 #
 # Service-account split:
@@ -79,13 +79,10 @@
 # whole workflow. The mutex lives on the ``worker-step``
 # template (see its ``synchronization.mutexes`` block below)
 # so the dispatcher's validation step can run in parallel
-# for multiple webhooks. Same observable effect on the
-# in-pod work as the deleted Kestra subflow's
-# ``concurrency: { limit: 1, behavior: QUEUE }`` and the
-# same reason: two simultaneous
-# ``git push origin<branch>`` calls would race on the
-# same ref and the second would overwrite the first's
-# commits. ``/sandbox`` commands skip the worker step via
+# for multiple webhooks. The reason for the gate: two
+# simultaneous ``git push origin<branch>`` calls would
+# race on the same ref and the second would overwrite the
+# first's commits. ``/sandbox`` commands skip the worker step via
 # the dispatcher's ``should_run_worker=false`` output, so
 # the worker mutex is irrelevant for sandboxes.
 apiVersion: argoproj.io/v1alpha1
@@ -167,10 +164,7 @@ spec:
   #     ``shoggoth.py pr-update`` / ``shoggoth.py task`` force-
   #     pushes the PR branch); the slave pod is the only place
   #     that holds the in-memory work, so the mutex belongs on
-  #     it. The Kestra flow that this replaced used
-  #     ``concurrency: { limit: 1, behavior: QUEUE }`` for the
-  #     same reason -- the per-step mutex is the Argo
-  #     equivalent. Sandbox commands never reach the worker
+  #     it. Sandbox commands never reach the worker
   #     step (the dispatcher's ``should_run_worker=false`` output
   #     makes the worker's ``when:`` clause skip the pod), so
   #     the worker mutex does not gate them.
@@ -260,19 +254,23 @@ spec:
     # because the shoggoth package is on ``sys.path`` — see
     # the script's leading ``sys.path.insert``).
     #
-    # Forward ``command`` / ``task_id`` / ``payload`` as env
-    # vars (``SHOGGOTH_ORIGINAL_COMMAND`` /
-    # ``SHOGGOTH_TASK_ID`` / ``GITEA_PAYLOAD``) rather than
-    # argv so a value containing shell metacharacters
-    # (e.g. ``pr-update; touch /tmp/pwned; #``) cannot
-    # execute arbitrary commands inside the workflow pod —
-    # exec with ``"${VAR}"`` passes each value as a single
-    # argv element to the inner python invocation, and the
-    # dispatcher's argparse (none, in this case) sees them
-    # cleanly. The dispatcher reads the original command
-    # from ``SHOGGOTH_ORIGINAL_COMMAND`` set from
+    # ``command`` / ``task_id`` are forwarded as env vars
+    # (``SHOGGOTH_ORIGINAL_COMMAND`` / ``SHOGGOTH_TASK_ID``) and
+    # then passed to the script as command-line arguments.
+    # ``payload`` stays an env var (``GITEA_PAYLOAD``) — it is a
+    # whole JSON document the script parses itself, never an
+    # argv element. The env-var indirection survives shell
+    # metacharacters in every value (e.g.
+    # ``pr-update; touch /tmp/pwned; #``): the exec uses quoted
+    # ``"${VAR}"`` expansion, which passes each value as a single
+    # argv element instead of interpolating it into bash source.
+    # The script takes no input from the environment for either
+    # value — ``dispatch.py`` declares both as positionals, so
+    # ``args.original_command`` / ``args.task_id`` are the only
+    # sources. ``original_command`` comes from
     # ``{{inputs.parameters.command}}`` (the binding-supplied
-    # original command).
+    # original command) and ``task_id`` from
+    # ``{{inputs.parameters.task_id}}``.
     inputs:
       parameters:
       - name: command
@@ -300,7 +298,7 @@ spec:
       - -lc
       args:
       - |
-        exec /shoggoth/workflow/scripts/dispatch.py 2>&1
+        exec /shoggoth/workflow/scripts/dispatch.py "${SHOGGOTH_ORIGINAL_COMMAND}" "${SHOGGOTH_TASK_ID}" 2>&1
       env:
       - name: SHOGGOTH_ORIGINAL_COMMAND
         value: "{{inputs.parameters.command}}"
@@ -308,10 +306,6 @@ spec:
         value: "{{inputs.parameters.task_id}}"
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
-      - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: "http/protobuf"
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "2000"
       - name: GITEA_PAYLOAD
         value: "{{inputs.parameters.payload}}"
       - name: SHOGGOTH_DOMAIN
@@ -327,15 +321,10 @@ spec:
       # worker uses — see worker-step env below.
       - name: GITEA_SERVER_URL
         value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/gitea"
-      # Gitea SSH host override — the slave image's
-      # default ``git`` is the local pod hostname, not
-      # the ingress. Without this, the dispatcher's
-      # git-cred sidecar would keyscan ``git`` (which
-      # doesn't resolve) and the sandbox pod's
-      # ``git-clone`` init container would fail on
-      # the missing keyscan output.
-      - name: GITEA_INSTANCE_SSH_HOST
-        value: "git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      # No GITEA_INSTANCE_SSH_HOST here — nothing reads it. The SSH host
+      # that is wired is GITEA_SSH_HOST (slave-term.yaml:224), and the
+      # git-cred-bootstrap sidecar keyscans both git.<domain> and the bare
+      # service (git-cred-bootstrap.yaml:72).
       - name: REDMINE_SERVER
         value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/redmine"
       # Namespace for the sandbox pod/service the
@@ -427,30 +416,17 @@ spec:
         value: "{{inputs.parameters.command}}"
       - name: SHOGGOTH_TASK_ID
         value: "{{inputs.parameters.task_id}}"
-      - name: OTEL_EXPORTER_OTLP_ENDPOINT
-        value: "http://otelcol:4318"
-      - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: "http/protobuf"
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "2000"
-      - name: OPENAI_API_KEY
-        value: "litellm"
-      - name: OPENAI_BASE_URL
-        value: "http://litellm.{{workflow.parameters.SHOGGOTH_DOMAIN}}/v1/"
-      - name: OPENAI_MODEL
-        value: "shoggoth-default"
-      - name: BM_MCP_URL
-        value: "http://litellm.{{workflow.parameters.SHOGGOTH_DOMAIN}}/mcp"
-      - name: CCACHE_REMOTE_STORAGE
-        value: "http://build-cache.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
-      - name: CCACHE_REMOTE_ONLY
-        value: "true"
+      # Not re-wired here: OTEL_EXPORTER_OTLP_*, OPENAI_*, BM_MCP_URL,
+      # CCACHE_* and SHOGGOTH_SLAVE_USER are baked into the
+      # registry.{{workflow.parameters.SHOGGOTH_DOMAIN}}/slave image
+      # (see dockerfiles/slave), and this pod carries the CoreDNS
+      # resolver that makes those short service names resolve. The
+      # dispatch-step above does set the OTEL trio because it runs the
+      # shoggoth_tools image, which has no such ENV block.
       - name: GITEA_SERVER_URL
         value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/gitea"
       - name: GITEA_SERVER_TOKEN
         value: "gateway"
-      - name: GITEA_INSTANCE_SSH_HOST
-        value: "git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: REDMINE_SERVER
         value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/redmine"
       - name: SHOGGOTH_DOMAIN
@@ -459,8 +435,6 @@ spec:
         value: "{{workflow.parameters.SHOGGOTH_GITHUB_ORG}}"
       - name: SHOGGOTH_NAMESPACE
         value: "{{workflow.parameters.SHOGGOTH_NAMESPACE}}"
-      - name: SHOGGOTH_SLAVE_USER
-        value: "slave"
       - name: GITEA_PAYLOAD
         value: "{{inputs.parameters.payload}}"
       - name: SHOGGOTH_ARGO_RUN_URL

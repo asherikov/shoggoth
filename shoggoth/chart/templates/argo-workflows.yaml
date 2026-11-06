@@ -41,9 +41,9 @@
 # VPN-only; see alternatives.md "Workflow/orchestration engine" for the
 # trade-off).
 #
-# Replaces kestra.yaml (workflows only). slave-dind.yaml remains
-# for gitea-runner DinD (gitea.yaml mounts it as the dockerd socket
-# for Action Runner job pods).
+# This file carries workflows only. slave-dind.yaml remains for the
+# gitea-runner DinD (gitea.yaml mounts it as the dockerd socket for
+# Action Runner job pods).
 #
 apiVersion: v1
 kind: ServiceAccount
@@ -782,18 +782,31 @@ spec:
             cpu: 500m
       - name: apply-workflows
         # Apply WorkflowTemplate and WorkflowEventBinding CRDs from the
-        # host-mounted directory. The 'make sync' target rsyncs
-        # shoggoth/workflow/argo/ to /var/lib/rancher/k3s/storage/${INSTANCE}/argo/
-        # before the controller pod starts.
+        # chart's own files/ tree. shoggoth/chart/files/workflow/argo/ is
+        # the source (templates/ and bindings/), carried into this pod by
+        # the argo-workflow-templates / argo-workflow-bindings ConfigMaps
+        # below and mounted at /workflow/argo/templates and
+        # /workflow/argo/bindings. No `make sync` step and no host
+        # directory: the packaged chart is self-contained, and an edit to
+        # a workflow file invalidates the lint render through
+        # CHART_SOURCES (make/lint.mk) like any other template edit.
+        #
+        # The files are mounted VERBATIM (render=false in the helper):
+        # they carry Argo's own parameter syntax — the double-braced
+        # workflow.parameters / inputs / steps references Argo
+        # interpolates at submit time — which Helm must never evaluate.
+        # Do not add Helm's literal-brace escape to them: .Files.Get does
+        # not render, so the escape text itself would land in the
+        # ConfigMap and from there in the cluster.
         #
         # On every controller restart this init container hard-resets the
         # shoggoth-argo WorkflowTemplate / WorkflowEventBinding CRDs from
-        # the host-mounted directory: delete (force, no grace period) ->
+        # that directory: delete (force, no grace period) ->
         # wait for absence -> apply fresh. This is a delete+apply, not
         # `kubectl apply` alone, because `kubectl apply` uses a 3-way
         # merge against last-applied-configuration and can fail to remove
-        # fields when the on-disk and on-cluster specs diverge across many
-        # sync_restart cycles. A retry loop with verification (the final
+        # fields when the packaged and on-cluster specs diverge across many
+        # upgrade cycles. A retry loop with verification (the final
         # API-server snapshot must match the on-disk sha256) prevents
         # partial failure modes where the init container exits 0 but the
         # cluster is still stale. If verification still fails, the pod
@@ -822,7 +835,7 @@ spec:
           bindings=( "${SRC}/bindings"/*.{yaml,yml} )
           shopt -u nullglob
           if [ "${#templates[@]}" -eq 0 ] || [ "${#bindings[@]}" -eq 0 ]; then
-            echo "FAIL: ${SRC}/templates or ${SRC}/bindings has no .yaml files (run 'make sync' to populate)"
+            echo "FAIL: ${SRC}/templates or ${SRC}/bindings has no .yaml files (the argo-workflow-templates / argo-workflow-bindings ConfigMap is empty — the chart package should carry shoggoth/chart/files/workflow/argo/)"
             exit 1
           fi
 
@@ -859,23 +872,75 @@ spec:
             return 1
           }
 
+          # Trailing listings are diagnostics only. The reset above is what
+          # correctness depends on, and it carries its own retry loop; these
+          # two exist to put the on-cluster object names in the pod log. A
+          # transient API-server blip here — `dial tcp 10.43.0.1:443: i/o
+          # timeout`, the same one that cost three delete attempts in the
+          # run that motivated this — must not turn a successful reset into
+          # Init:Error, so they are retried and then reported, never fatal.
+          list_kind() {
+            local kind="$1"
+            local attempt=1
+            while [ "${attempt}" -le 3 ]; do
+              if kubectl get "${kind}" -n "${NS}" --no-headers \
+                    -o custom-columns=NAME:.metadata.name; then
+                return 0
+              fi
+              attempt=$((attempt + 1))
+              sleep 2
+            done
+            echo "  (${kind} listing failed; the reset above is what correctness depends on)"
+            return 0
+          }
+
           reset_kind workflowtemplate "${SRC}/templates/"
           reset_kind workfloweventbinding "${SRC}/bindings/"
 
           # Verification: the live cluster spec must contain no DAG task
-          # that has BOTH `continueOn` and `depends` set. The previous
-          # error message ("templates.<name> cannot use 'continueOn'
-          # when using 'depends'") fires whenever argo-server validates
-          # a WorkflowTemplate that contains such a task. We re-grep the
-          # cluster API-server snapshot for the offending pair; if any
-          # task still has both, fail the init container so the pod
-          # doesn't come up with a stale spec. (kubectl itself doesn't
-          # enforce this rule — only argo-server's submit-time validator
-          # does — so it's the cluster state that has to be clean.)
+          # that has BOTH `continueOn` and `depends` set. argo-server's
+          # submit-time validator rejects such a WorkflowTemplate with
+          # "templates.<name> cannot use 'continueOn' when using
+          # 'depends'", so a stale copy on the cluster fails every submit
+          # that touches it. We re-read the cluster API-server snapshot
+          # for the offending pair; if any task still has both, fail the
+          # init container so the pod doesn't come up with a stale spec.
+          # (kubectl itself doesn't enforce this rule — only argo-server's
+          # submit-time validator does — so it's the cluster state that
+          # has to be clean.)
+          #
+          # Readability is established BEFORE judgement, and kept separate
+          # from it. Piping kubectl straight into python conflated the two:
+          # a transport failure left python with empty stdin, its
+          # JSONDecodeError was indistinguishable from a verdict, and the
+          # failure below then claimed the cluster HAS offending tasks
+          # while listing none. The offending names also went to python's
+          # stderr, which the shell's command substitution never captures,
+          # so even a genuine hit printed an empty list.
           echo "apply-workflows: verifying no task has both continueOn and depends..."
           set +e
-          bad=$(kubectl get workflowtemplate -n "${NS}" -l "${LABEL}" -o json 2>/dev/null \
-              | python3 -c '
+          snapshot=""
+          attempt=1
+          while [ "${attempt}" -le 5 ]; do
+            if snapshot=$(kubectl get workflowtemplate -n "${NS}" \
+                  -l "${LABEL}" -o json 2>/dev/null); then
+              break
+            fi
+            echo "apply-workflows: workflowtemplate snapshot failed (attempt ${attempt}/5)" >&2
+            snapshot=""
+            attempt=$((attempt + 1))
+            sleep 3
+          done
+          if [ -z "${snapshot}" ]; then
+            echo "FAIL: could not read WorkflowTemplates from the API server" >&2
+            echo "      after 5 attempts — the continueOn/depends rule is" >&2
+            echo "      UNVERIFIED, not violated. Same dial tcp 10.43.0.1:443" >&2
+            echo "      i/o timeout class that cost the reset attempts above." >&2
+            echo "      The reset itself succeeded and the pod restarts on its" >&2
+            echo "      own, so check the API server, not the templates." >&2
+            exit 1
+          fi
+          bad=$(printf '%s' "${snapshot}" | python3 -c '
           import json
           import sys
           data = json.load(sys.stdin)
@@ -884,24 +949,27 @@ spec:
               for t in wt.get("spec", {}).get("templates", []):
                   for task in t.get("dag", {}).get("tasks", []):
                       if task.get("continueOn") is not None and "depends" in task:
-                          sys.stderr.write("    " + wt_name + "/" + task.get("name", "?") + "\n")
+                          sys.stdout.write("    " + wt_name + "/" + task.get("name", "?") + "\n")
                           sys.exit(1)
           ')
           verify_rc=$?
           set -e
-          if [ "$verify_rc" -ne 0 ]; then
+          if [ "${verify_rc}" -ne 0 ]; then
             echo "FAIL: cluster still has WorkflowTemplate tasks with both continueOn and depends:"
             echo "$bad"
             exit 1
           fi
 
           echo "apply-workflows: WorkflowTemplate CRDs:"
-          kubectl get workflowtemplate -n "${NS}" --no-headers -o custom-columns=NAME:.metadata.name
+          list_kind workflowtemplate
           echo "apply-workflows: WorkflowEventBinding CRDs:"
-          kubectl get workfloweventbinding -n "${NS}" --no-headers -o custom-columns=NAME:.metadata.name
+          list_kind workfloweventbinding
         volumeMounts:
-        - name: workflow-argo
-          mountPath: /workflow/argo
+        - name: workflow-templates
+          mountPath: /workflow/argo/templates
+          readOnly: true
+        - name: workflow-bindings
+          mountPath: /workflow/argo/bindings
           readOnly: true
         resources:
           requests:
@@ -973,10 +1041,20 @@ spec:
             drop:
             - ALL
       volumes:
-      - name: workflow-argo
-        hostPath:
-          path: /var/lib/rancher/k3s/storage/{{ .Values.identity.instanceDir }}/argo
-          type: Directory
+      # The workflow sources ride inside the chart (files/workflow/argo/)
+      # rather than on a host directory: a packaged chart then carries
+      # everything the apply-workflows init container needs, with no
+      # `make sync` prerequisite and no host state that can drift from
+      # git. Two volumes, not one, so the projected layout still presents
+      # /workflow/argo/templates and /workflow/argo/bindings as separate
+      # directories — the init container applies each kind from its own
+      # directory.
+      - name: workflow-templates
+        configMap:
+          name: argo-workflow-templates
+      - name: workflow-bindings
+        configMap:
+          name: argo-workflow-bindings
 {{- end }}
 ---
 # Workflow parameter values used by WorkflowTemplate spec.arguments.parameters
@@ -1071,7 +1149,7 @@ data:
       # `make up`'s envsubst pass (make/k3s.mk), so what lands in
       # the cluster is the literal domain, namespace, etc. The four
       # parameters cover every `${SHOGGOTH_*}` reference in
-      # shoggoth/workflow/argo/templates/*.yaml (image references,
+      # shoggoth/chart/files/workflow/argo/templates/*.yaml (image references,
       # env values, URL fragments, and hostPath volumes).
       arguments:
         parameters:
@@ -1425,34 +1503,48 @@ spec:
 ---
 # Argo Events sensor-equivalent is not used: the workflow-controller's
 # /api/v1/events/{namespace}/{discriminator} endpoint is hit directly by
-# webhook deliveries from Gitea and Redmine. The WorkflowEventBinding CRDs
-# are loaded from /workflow/argo/bindings/ via the entrypoint ConfigMap.
+# webhook deliveries from Gitea and Redmine.
+#
+# The workflow sources themselves live in
+# shoggoth/chart/files/workflow/argo/{templates,bindings}/ and reach the
+# cluster through the two ConfigMaps below. The apply-workflows init
+# container in the argo-workflow-controller Deployment mounts them at
+# /workflow/argo/{templates,bindings} and hard-resets the CRs (delete ->
+# wait -> apply -> verify) on every controller pod start, after
+# wait-bootstrap confirms the required ExternalSecrets are Ready. Two
+# ConfigMaps, not one, so each kind is applied from its own directory.
+#
+# VERBATIM (render=false): these files carry Argo's own parameter syntax
+# (the double-braced workflow.parameters / inputs / steps references Argo
+# interpolates at submit time), which Helm must never evaluate. The files
+# must NOT carry Helm's literal-brace escape — .Files.Get does not render,
+# and the escape text itself would land in the ConfigMap and from there in
+# the cluster.
+#
+# The CRs are applied by kubectl, so Helm does not own them: `helm
+# uninstall` removes these ConfigMaps but leaves the WorkflowTemplates and
+# WorkflowEventBindings on the cluster. The controller's hard reset
+# re-creates them from the mounted files on the next pod start, so a
+# re-install converges.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: argo-bindings
+  name: argo-workflow-templates
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
 data:
-  # placeholder — the `apply-workflows` init container in the
-  # argo-workflow-controller Deployment (see lines above) runs
-  # `kubectl apply -f /workflow/argo/templates -f /workflow/argo/bindings`
-  # on every pod start, after `wait-bootstrap` confirms the required
-  # ExternalSecrets are Ready. The host directory backing /workflow/argo
-  # is /var/lib/rancher/k3s/storage/{{ .Values.identity.instanceDir }}/argo, which
-  # `make sync` populates from shoggoth/workflow/argo/.
-  README: |
-    WorkflowEventBinding CRDs are applied at controller startup by the
-    `apply-workflows` init container in the same Deployment. The
-    init container runs:
-      kubectl apply -n {{ .Release.Namespace }} \
-        -f /workflow/argo/templates \
-        -f /workflow/argo/bindings \
-        --prune -l app.kubernetes.io/part-of=shoggoth-argo
-    No separate Job / bringup pod exists — the init container IS the
-    apply path. The host directory is
-    /var/lib/rancher/k3s/storage/{{ .Values.identity.instanceDir }}/argo
-    (synced by `make sync` from shoggoth/workflow/argo/).
+  {{- include "shoggoth.filesData" (list . "files/workflow/argo/templates/*" false) | nindent 2 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argo-workflow-bindings
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: argo-workflows
+data:
+  {{- include "shoggoth.filesData" (list . "files/workflow/argo/bindings/*" false) | nindent 2 }}
 {{- end }}

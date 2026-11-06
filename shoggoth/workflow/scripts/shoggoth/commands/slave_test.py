@@ -40,12 +40,12 @@ class SlaveTest:
         # git-cred-bootstrap populates the credential cache for
         # `host=git.${DOMAIN}`, so a clone through the gateway at
         # `host=api.${DOMAIN}` would have no matching credential and git
-        # would fail. Falls back to
-        # `gitea_url` if the template doesn't set GITEA_GIT_URL (legacy
-        # setups that put the gateway URL in GITEA_SERVER_URL and never
-        # clone over HTTPS in this script).
-        self.git_url = (params.gitea_git_url
-                        or self.gitea_url).rstrip("/")
+        # would fail. The slave-test template always sets it
+        # (slave-test.yaml, GITEA_GIT_URL); there is deliberately no
+        # fallback to gitea_url, which is the one URL this check cannot
+        # use — `_check_git_http` dies with a clear message instead of
+        # surfacing the failure as a git credential error.
+        self.git_url = (params.gitea_git_url or "").rstrip("/")
         self.ssh_host = params.gitea_ssh_host
         self.ssh_port = params.gitea_ssh_port
         self.checks = {
@@ -110,11 +110,10 @@ class SlaveTest:
         # `/api/v1/user/repos` — the slave token's scopes (write:repository,
         # write:issue, read:user) cover this endpoint, and the resulting
         # repo lives in the slave namespace where the git-http/git-ssh
-        # checks expect it. The previous /admin/users/{u}/repos path
-        # required a site-admin token; the slave-test template sets
-        # GITEA_ADMIN_TOKEN: "gateway" (the web-internal API gateway
-        # replaces the Authorization header with the real slave token),
-        # so the admin path was 401/403 on every first run.
+        # checks expect it. The admin path (`/admin/users/{u}/repos`) is
+        # not an option here: it needs a site-admin token, and this
+        # container has neither kubectl nor a wired token env var — the
+        # web-internal gateway only substitutes the *slave* token.
         created = HttpApiClient.http_post_json(f"{self.gitea_url}/api/v1/user/repos",
                                  {"name": self.SCRATCH_REPO, "private": True, "auto_init": False},
                                  headers=headers)
@@ -190,6 +189,15 @@ class SlaveTest:
             log(f"[{label}]:   {line}")
 
     def _check_git_http(self):
+        # Guarded here rather than in __init__ so the checks that don't
+        # touch git (redmine-api, mcp, telemetry, ...) still run when
+        # GITEA_GIT_URL is absent — same pattern as the gitea_url guard
+        # in _ensure_scratch_repo / _check_gitea_api. No fallback to
+        # gitea_url: the gateway URL has no credential-cache entry, so
+        # a clone through it fails inside git with a credential error
+        # instead of naming the missing variable.
+        if not self.git_url:
+            die("GITEA_GIT_URL is required")
         # Validate the git-cred sidecar's credential cache daemon
         # (/shoggoth/git-cred/git_credential_sock). The slave image's
         # `git config --system credential.helper 'cache --socket=...'`
@@ -213,9 +221,8 @@ class SlaveTest:
         # the slave token here — pass a dummy "gateway" string for
         # _ensure_scratch_repo (which uses it to build the
         # Authorization header), and the gateway replaces it on the
-        # way to Gitea. This is the user-visible win: git-http no
-        # longer depends on either the GITEA_ADMIN_TOKEN env var or
-        # the OpenBao gitea/slave-token round-trip.
+        # way to Gitea. This is the user-visible win: git-http needs
+        # neither a site-admin token nor a slave token of its own.
         log(f"[git-http]: HTTP API via gateway {self.gitea_url} "
             f"(auth injected by gateway); git via direct URL "
             f"{self.git_url} with image-baked credential helper")

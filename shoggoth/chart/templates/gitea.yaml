@@ -480,18 +480,19 @@ data:
       envs:
         RUNNER_TOOL_CACHE: /toolcache
         GITEA_SSH_HOST: git.{{ .Values.identity.domain }}
-        # GITEA_SERVER_URL was previously baked into the slave image's ENV
-        # block as `http://api/gitea`; that broke every workflow step that
-        # calls the Gitea API because Angie has `server_name api.${DOMAIN}`
-        # (not `server_name api`) so Host=`api` fell through to the
-        # default_server 404. Defined here — direct service form, matching
-        # the pattern `main_shoggoth_maintenance.yml` already uses — so
-        # spawned job containers that import shoggoth.py can build
-        # `api_url` without raising
-        # KeyError. Auth on direct calls still needs `GITEA_SLAVE_TOKEN`;
-        # the runner container doesn't have that env wired today, so
-        # workflows that hit gitea API today either succeed without auth
-        # (public endpoints) or set their own token in step env.
+        # GITEA_SERVER_URL is the direct service form, not the gateway
+        # path. Baking `http://api/gitea` into the slave image's ENV block
+        # broke every workflow step that calls the Gitea API: Angie has
+        # `server_name api.${DOMAIN}` (not `server_name api`), so
+        # Host=`api` fell through to the default_server 404. The direct
+        # form matches what the argo maintenance template wires
+        # (chart/files/workflow/argo/templates/maintenance.yaml), so spawned job
+        # containers that import shoggoth.py can build `api_url` without
+        # raising KeyError. Auth on direct calls still needs
+        # `GITEA_SLAVE_TOKEN`; the runner container doesn't have that env
+        # wired today, so workflows that hit the gitea API either succeed
+        # without auth (public endpoints) or set their own token in step
+        # env.
         GITEA_SERVER_URL: "http://git.{{ .Values.identity.domain }}"
       timeout: 3h
       shutdown_timeout: 0s

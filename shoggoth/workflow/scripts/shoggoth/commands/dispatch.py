@@ -2,7 +2,6 @@
 """Module split out of shoggoth.py; see package __init__."""
 import hashlib
 import json
-import os
 import secrets as _secrets
 import sys
 import time
@@ -32,12 +31,10 @@ from . import slash_commands
 # interpolated via Python ``.format()`` into a double-quoted
 # shell arg, reachable from any Gitea user with write access on
 # the base repo) is closed by construction: there is no shell
-# any more. The slave image (used by the sandbox container) bakes
-# the workflow scripts in at a different path for historical
-# reasons; the hostPath mount is the authoritative copy. The
-# tools image (used by the init containers and the cleanup
-# sidecar) has no workflow scripts at all, so the hostPath
-# mount is the only way those containers can invoke this module.
+# any more. Neither image carries the workflow scripts
+# (dockerfiles/slave and dockerfiles/tools have no COPY/ADD
+# for them), so the hostPath mount is the only way any
+# container -- init, main, or sidecar -- reaches this module.
 SANDBOX_PATH = "/shoggoth/workflow-scripts/sandbox.py"
 
 
@@ -138,14 +135,17 @@ class DispatchCommand(CommandBase):
         self.gitea = gitea
         self.redmine = redmine
         # The original command (pr-update, task, ci-failure,
-        # sandbox) is passed via the SHOGGOTH_ORIGINAL_COMMAND
-        # env var by the dispatch template's `dispatch` task.
-        self.original_command = os.environ.get(
-            "SHOGGOTH_ORIGINAL_COMMAND", "")
+        # sandbox) arrives as dispatch.py's first positional
+        # argument. An empty value is an input error rather than
+        # a no-op: the template always supplies it, so an empty
+        # one means the binding misconfigured the ``command``
+        # parameter, and silently falling through to the
+        # ``unknown command`` branch below would report a
+        # misleading ``original_command=''``.
+        self.original_command = args.original_command
         if not self.original_command:
-            die("dispatch: SHOGGOTH_ORIGINAL_COMMAND env var is "
-                 "required (the dispatch template's `dispatch` "
-                 "task sets it from inputs.parameters.command)")
+            die("dispatch: original command is required (the dispatch "
+                 "template's `dispatch` task passes it as argv[1])")
         # The Gitea payload is needed for every command except
         # ``task`` (which reads the Redmine task ID via CLI
         # instead -- see ``cli.py`` -- and never inspects the
@@ -299,8 +299,7 @@ class DispatchCommand(CommandBase):
         dispatcher's slash-command surface exactly:
 
           * ``"/sandbox"`` -> ``"sandbox"`` (exact match; no
-            trailing args, mirroring the previous dedicated
-            binding's contract).
+            trailing args, same contract as ``"/help"``).
           * ``"/help"`` -> ``"help"`` (exact match; same
             contract).
           * Anything else (other comments, reviews,
@@ -1374,16 +1373,12 @@ class DispatchCommand(CommandBase):
                     # on the cluster node at `make sync` time,
                     # so the same absolute path is visible to
                     # every container in the pod after sync.
-                    # The init containers and the cleanup
-                    # sidecar use the tools image which has no
-                    # workflow scripts baked in; this is the
-                    # only way those containers can invoke
-                    # SANDBOX_PATH. The sandbox container
-                    # uses the slave image which bakes the
-                    # scripts in at a different historical
-                    # path; the mount is still added for
-                    # symmetry and to make this module the
-                    # authoritative copy of the lifecycle.
+                    # Neither image bakes the workflow scripts
+                    # in (dockerfiles/slave and
+                    # dockerfiles/tools carry no COPY/ADD for
+                    # them), so this mount is the only way any
+                    # container -- init, main, or sidecar --
+                    # reaches SANDBOX_PATH.
                     {"name": "workflow-scripts",
                      "hostPath": {
                          "path": f"/var/lib/rancher/k3s/storage/"
@@ -1577,8 +1572,9 @@ class DispatchCommand(CommandBase):
              guaranteed reachable for any pod that exists
              or existed during the wait.
           3. The best ``kubectl logs --all-containers``
-             tail (kept for back-compat with the existing
-             workflow-logs-viewer pattern).
+             tail -- contributed only when the per-container
+             probes come back empty, so it never duplicates
+             (2).
 
         If every probe fails (the cleanup sidecar deleted
         the pod during the wait window), the dispatcher
@@ -1666,12 +1662,12 @@ class DispatchCommand(CommandBase):
                     f"=== {container_name} ===\n"
                     + c_log.stdout.rstrip())
         # 3. ``kubectl logs --all-containers`` -- the
-        #    pre-fix probe. Kept for back-compat with
-        #    the workflow-logs-viewer pattern (the
-        #    Argo UI groups per-container logs by
-        #    container name, but the dispatcher
-        #    surfaces a combined fallback when
-        #    per-container probes are empty).
+        #    last-resort probe, contributed only when the
+        #    per-container probes above came back empty
+        #    (gated below, so it never duplicates #2).
+        #    It reaches containers the parsed name list
+        #    missed -- e.g. one that terminated between
+        #    the ``describe`` and the log fetch.
         all_log_result = run(
             ["kubectl", "logs", "-n", namespace, pod_name,
              "--tail=50", "--all-containers"],

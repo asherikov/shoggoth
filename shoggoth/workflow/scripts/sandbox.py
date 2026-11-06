@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """sandbox — Python entrypoints for the sandbox pod's containers.
 
-Replaces the four inline shell scripts that previously lived as
-module-level constants (SANDBOX_WAIT_BOOTSTRAP_SCRIPT,
-SANDBOX_INIT_GITCRED_PERMS_SCRIPT, SANDBOX_TTYD_SCRIPT,
-SANDBOX_CLEANUP_SCRIPT) in shoggoth/workflow/scripts/shoggoth/commands/dispatch.py.
+Owns the whole sandbox-pod lifecycle as one module with four
+subcommands, one per container in the pod:
 
 Subcommands
 -----------
@@ -56,15 +54,10 @@ host (the workflow-scripts:workflow/scripts entry in K3S_HOST_PATHS
 in the Makefile rsyncs ./workflow/scripts/ to
 /var/lib/rancher/k3s/storage/${INSTANCE}/workflow-scripts/ on the
 cluster node), so the same absolute path is visible to every
-container in the pod after `make sync`. The init containers and
-the cleanup sidecar use the tools image (alpine) which doesn't
-bake the workflow scripts in; the hostPath mount is how they
-access this module. The sandbox container uses the slave image
-(noble) which bakes the workflow scripts in at a different path
-(/shoggoth/workflow/scripts/) for historical reasons; the
-hostPath mount is still added to the sandbox container for symmetry
-and to make this file the authoritative copy of the lifecycle
-logic.
+container in the pod after `make sync`. Neither image bakes the
+workflow scripts in (dockerfiles/slave and dockerfiles/tools carry
+no COPY/ADD for them), so this mount is the only way any container
+-- init, main, or sidecar -- reaches this module.
 """
 import argparse
 import json
@@ -179,7 +172,7 @@ SANDBOX_BASHRC_MARKER = "# ccws sandbox: start in the materialized workspace"
 # were dead code (referenced only by one log line) and have been
 # removed.
 
-# Cleanup budgets (matching SANDBOX_CLEANUP_SCRIPT):
+# Cleanup budgets (see ``cleanup`` below):
 #   MAX_LIFETIME  hard cap so a script bug in the detection logic
 #                 can't leak the pod past the workflow's
 #                 activeDeadlineSeconds (14400 s = 4 h).
@@ -250,10 +243,9 @@ def run(args, **kwargs):
 def wait_bootstrap():
     """Init container: poll for externalsecret Ready state.
 
-    Replaces SANDBOX_WAIT_BOOTSTRAP_SCRIPT. The original used
-    `kubectl get ... -o json | jq -e '...' >/dev/null 2>&1` in a
-    bash for-loop; the Python version reads the JSON directly
-    and is the same code path with no jq subprocess invocations.
+    Reads the JSON directly rather than shelling out to
+    `kubectl get ... -o json | jq -e '...'` in a bash for-loop, so there
+    is no jq subprocess per poll.
     """
     namespace = os.environ["SHOGGOTH_NAMESPACE"]
     for secret_name in WAIT_BOOTSTRAP_SECRETS:
@@ -288,7 +280,7 @@ def wait_bootstrap():
 def init_perms():
     """Init container: chown+chmod the git-cred emptyDir.
 
-    Replaces SANDBOX_INIT_GITCRED_PERMS_SCRIPT. The git-cred
+    The git-cred
     sidecar runs as uid 1000 (securityContext.runAsUser) and
     needs to chmod the mountpoint to 0700 so git-credential-cache
     accepts the directory (it refuses any mode looser than 0700
@@ -896,11 +888,8 @@ def cleanup():
     the user closing the browser, which ends ttyd and with it the
     sandbox.
 
-    Replaces SANDBOX_CLEANUP_SCRIPT. The shell version used
-    `kubectl get -o json` + `printf | python3 -c` invocations
-    (four subprocesses per poll) + `awk`/`jq` for state
-    extraction; the Python version is one subprocess per
-    poll with the state extraction in-process.
+    One `kubectl get -o json` subprocess per poll, with the state
+    extraction done in-process.
     """
     namespace = os.environ["SHOGGOTH_NAMESPACE"]
     pod_name = os.environ["SHOGGOTH_POD_NAME"]

@@ -12,7 +12,7 @@ from .workspace import REPO_TYPE_WORKSPACE, materialize
 from .state import params
 
 class Shoggoth:
-    def __init__(self, redmine, gitea, args):
+    def __init__(self, redmine, gitea, args, task_id=None):
         self.project = None
         self.domain = params.shoggoth_domain
         self.github_org = params.shoggoth_github_org
@@ -25,19 +25,19 @@ class Shoggoth:
         self.task_subject = None
         self.gitea = gitea
 
-        self.identify_project(redmine, gitea, args)
+        self.identify_project(redmine, gitea, args, task_id)
         self.identify_project_repo(redmine, gitea)
         self.load_manifest(gitea)
 
-    def identify_project(self, redmine, gitea, args):
+    def identify_project(self, redmine, gitea, args, task_id):
         log(f"identify_project: command={args.command}")
         if args.command == "task":
-            task = redmine.get_issue(args.task_id)
+            task = redmine.get_issue(task_id)
             self._check_task_actionable(task, redmine)
             self.task_subject = task.get("subject", "")
             task_project = task.get("project", {}).get("name", "")
             if not task_project:
-                die(f"task #{args.task_id} has no project assigned")
+                die(f"task #{task_id} has no project assigned")
             self.project = normalize_for_branch(task_project)
             log(f"identify_project: project={self.project} subject={self.task_subject}")
             return

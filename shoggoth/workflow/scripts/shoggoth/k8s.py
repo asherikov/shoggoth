@@ -28,8 +28,7 @@ class K8s:
         agree without restating the convention at each call site.
         Returns ``None`` when the Secret is absent, the data key is
         missing, or ``kubectl`` is unavailable (e.g. the ``slave:noble``
-        image used by ``slave-test``). Same contract the legacy
-        ``OpenBao.get_value`` had.
+        image used by ``slave-test``).
         """
         if kv_path not in secrets_store.K8S_PATHS:
             die(f"K8s.read_secret: unknown kv path {kv_path!r} "

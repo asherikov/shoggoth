@@ -18,10 +18,8 @@ metadata:
     app.kubernetes.io/component: slave-term
 ---
 # The /cache persistent storage is shared across all CI consumers
-# (gitea-runner job pods and slave-term; the Kestra migration removed
-# the Kestra Docker task runner path that previously consumed this PVC
-# via slave-dind's DinD). See templates/shared-cache.yaml for the
-# single PVC definition.
+# (gitea-runner job pods and slave-term). See templates/shared-cache.yaml
+# for the single PVC definition.
 apiVersion: v1
 kind: Service
 metadata:

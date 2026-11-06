@@ -190,9 +190,8 @@ class HttpApiClient:
         Returns ``{}`` on an empty body and re-raises on HTTP/URL/OS
         errors and on JSONDecodeError after logging the canonical
         ``HTTP <method> <url>`` warning via ``_http_warn``. Shared by
-        ``patch`` and ``put_json`` which both want a parsed body (or
-        raise) and were previously duplicated line-for-line apart
-        from the verb.
+        ``patch`` and ``put_json``, which both want a parsed body (or
+        raise).
         """
         url, hdrs = self._resolve(path, headers)
         req = self._json_request(method, url, payload, hdrs)

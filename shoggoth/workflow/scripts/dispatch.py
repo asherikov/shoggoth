@@ -3,7 +3,7 @@
 
 Standalone CLI binary invoked by the ``dispatch`` step of the
 ``command-handler`` Argo WorkflowTemplate (see
-``shoggoth/workflow/argo/templates/command-handler.yaml``).
+``shoggoth/chart/files/workflow/argo/templates/command-handler.yaml``).
 The dispatcher runs in a ``shoggoth_tools:alpine`` pod with
 kubectl and validates the inbound webhook event before deciding
 whether the worker step (``shoggoth.py <command>`` in a separate
@@ -19,13 +19,15 @@ for the per-command validation / output-emission logic.
 Contract with the dispatch template:
 
   * The original command (``pr-update`` / ``task`` /
-    ``ci-failure`` / ``sandbox``) is read from the
-    ``SHOGGOTH_ORIGINAL_COMMAND`` env var, which the dispatch
-    template's ``dispatch`` task sets from
-    ``inputs.parameters.command``.
-  * ``SHOGGOTH_TASK_ID`` carries the optional Redmine issue ID
-    (set from ``inputs.parameters.task_id``; empty for the
-    non-task commands).
+    ``ci-failure`` / ``sandbox``) arrives as the first
+    command-line argument. The dispatch template execs
+    ``dispatch.py "${SHOGGOTH_ORIGINAL_COMMAND}"
+    "${SHOGGOTH_TASK_ID}"``, so a value containing shell
+    metacharacters still arrives as a single argv element rather
+    than being interpolated into bash source.
+  * The optional Redmine issue ID arrives as the second
+    command-line argument; it is empty for the non-task
+    commands, which never read it.
   * ``GITEA_PAYLOAD`` carries the raw webhook JSON (set from
     ``inputs.parameters.payload``; empty for ``task`` /
     ``sandbox`` which are Gitea-agnostic).
@@ -50,6 +52,14 @@ Exit codes:
   * 1 — dispatcher error (missing env var, output-write
     failure, unknown command). The argo workflow is marked
     Failed.
+  * 2 — malformed invocation. argparse rejects a missing
+    ``original_command``, an unknown flag, or an unexpected
+    extra positional, and exits 2 before any env var is read
+    or output file written, so the argo workflow is marked
+    Failed with no ``should_run_worker`` output at all.
+  * 0 — ``-h`` / ``--help``. argparse prints the usage and
+    exits 0 before the ``Gitea`` / ``Redmine`` constructors
+    run, so no ``/tmp/dispatch-*`` output file is written.
 """
 import argparse
 import os
@@ -69,18 +79,31 @@ from shoggoth.redmine import Redmine  # noqa: E402
 
 
 def main():
-    # The dispatcher's ``args`` is a structural placeholder for
-    # the ``DispatchCommand.__init__`` signature — no positional
-    # command is parsed from argv because the original command
-    # is in ``SHOGGOTH_ORIGINAL_COMMAND``. The namespace only
-    # carries the attributes ``_handle_task`` reads
-    # (``task_id``); every other handler ignores ``args``. The
-    # ``command`` attribute is set to the literal
-    # ``"dispatch"`` so any future logging / debugging helper
-    # that prints ``args.command`` shows the actual subcommand.
+    # Both dispatcher inputs are positionals. The dispatch template
+    # execs ``dispatch.py "${SHOGGOTH_ORIGINAL_COMMAND}"
+    # "${SHOGGOTH_TASK_ID}"`` — the env vars exist only so the
+    # Go-template values never land in bash source — so a value
+    # containing shell metacharacters still arrives as a single
+    # argv element. The ``command`` attribute is set to the
+    # literal ``"dispatch"`` so any future logging / debugging
+    # helper that prints ``args.command`` shows the actual
+    # subcommand.
+    parser = argparse.ArgumentParser(
+        prog="dispatch.py",
+        description="Shoggoth dispatcher: validate an inbound webhook "
+                    "event and decide whether the command-handler worker "
+                    "step should run.")
+    parser.add_argument("original_command",
+                        help="The webhook's original command (`pr-update` / "
+                             "`task` / `ci-failure` / `sandbox`)")
+    parser.add_argument("task_id", nargs="?", default=None,
+                        help="Redmine task ID (used by the `task` command)")
+    parsed = parser.parse_args()
+
     args = argparse.Namespace(
         command="dispatch",
-        task_id=os.environ.get("SHOGGOTH_TASK_ID", ""),
+        original_command=parsed.original_command,
+        task_id=parsed.task_id,
     )
 
     # ``read_tokens=False`` skips the Gitea/Redmine ``kubectl

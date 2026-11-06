@@ -2,15 +2,17 @@
   templates/cdash-api-token.yaml — ExternalSecret projecting the CDash
   API token into a K8s Secret.
 
-  Consumers: the initContainer in cdash.yaml waits on
-  ``externalsecret/cdash-api-token``; the resulting Secret is
-  referenced via ``secretKeyRef`` in cdash.yaml and web-internal.yaml
-  (the latter proxies a webhook to cdash).
+  Consumers: web-internal.yaml, which proxies a webhook to cdash and
+  reads the token via ``secretKeyRef``.
 
-  ``creationPolicy: Orphan``: the cdash container overwrites the Secret
-  during its own first-run setup if the API token it generated differs
-  from the bootstrap-time seed; letting ESO overwrite that write would
-  cause an unnecessary churn loop.
+  ``creationPolicy: Orphan`` + ``refreshInterval: 0s``: the cdash
+  container's ``init.sh`` is the authority on this Secret's value — it
+  mints a fresh token and writes it to Secret/cdash-api-token through the
+  Kubernetes API. ESO seeds the Secret once from OpenBao's bootstrap
+  value and then stays out of the way: Orphan stops it overwriting the
+  pod's write, and 0s stops it re-reading OpenBao on a timer and racing
+  the next one. cdash-api-token-push.yaml carries the value the other
+  way, pod -> OpenBao.
 
   Gated on ``cdash``: the only consumer.
 */}}
@@ -35,5 +37,5 @@ spec:
       remoteRef:
         key: cdash/api-token
         property: value
-  refreshInterval: 5m
+  refreshInterval: 0s
 {{- end }}

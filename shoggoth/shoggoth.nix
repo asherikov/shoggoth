@@ -66,7 +66,46 @@ in {
   services.k3s = {
     enable = true;
     role = "server";
-    extraFlags = "--disable=traefik --disable=servicelb";
+    # Loopback only: the API server binds and advertises 127.0.0.1, and
+    # clients reach it through the SSH tunnel (make/k3s.mk `tunnel_up`
+    # forwards local 6443 to 127.0.0.1:6443 on the host). Nothing on the LAN
+    # needs the API server, so the comment below has been the intent all
+    # along — until now the listener was 0.0.0.0.
+    #
+    # Both address flags are required, and neither is sufficient alone:
+    #
+    #   --advertise-address is what the apiserver's endpoint reconciler
+    #   writes into the `kubernetes` service's Endpoints and EndpointSlice,
+    #   and therefore what kube-proxy DNATs pod traffic to. Left unset, k3s
+    #   derives it from its own node-IP detection and caches the result on
+    #   disk, so an address from a previous network survives every reboot.
+    #   That is exactly how 192.168.1.111 came to be an endpoint while the
+    #   host had moved to 10.218.136.26.
+    #
+    #   --kube-apiserver-arg=bind-address is what the process listens on.
+    #   Without it the apiserver keeps serving on every interface while
+    #   advertising only loopback: the endpoints become truthful but the
+    #   host stays exposed.
+    #
+    # Consequence that must be handled with it: with 127.0.0.1 as the only
+    # endpoint, a pod's connection to the ClusterIP 10.43.0.1:443 is DNAT'd
+    # to 127.0.0.1:6443 and arrives on the pod-facing bridge. The kernel
+    # discards that as a martian destination unless route_localnet is set
+    # on the receiving interface — see the sysctl block at the bottom of
+    # this file. Getting this wrong takes the API server away from every
+    # in-cluster client (ESO, reloader, the argo controller, every
+    # validating webhook) while leaving the SSH tunnel working, which is
+    # the same blind spot as the original outage.
+    #
+    # --tls-san makes the serving certificate valid for the address clients
+    # actually dial, so the tunnel does not need -k.
+    extraFlags = [
+      "--disable=traefik"
+      "--disable=servicelb"
+      "--advertise-address=127.0.0.1"
+      "--kube-apiserver-arg=bind-address=127.0.0.1"
+      "--tls-san=127.0.0.1"
+    ];
   };
 
   environment.systemPackages = with pkgs; [
@@ -92,4 +131,45 @@ in {
   networking.firewall.extraCommands = ''
     iptables -w -A FORWARD -i wg0 -o cni0 -j ACCEPT
   '';
+
+  # Companion to --advertise-address=127.0.0.1 above. Pods reach the API
+  # server through the `kubernetes` ClusterIP (10.43.0.1:443), which
+  # kube-proxy DNATs to the endpoint address. With loopback as the only
+  # endpoint the post-DNAT packet has a loopback destination while arriving
+  # on the pod-facing bridge, and the kernel drops it as a martian
+  # destination unless route_localnet is enabled on the receiving interface.
+  #
+  # Set in three places because the kernel combines the `all`, the
+  # `default` (the template a new interface is created from) and the
+  # per-device value, and the combining rule differs per setting. cni0 is
+  # created by k3s at runtime, so no static sysctl key can name it; the
+  # oneshot applies the value to the interfaces k3s actually creates and is
+  # bound to k3s.service via partOf, so a recreated bridge is covered too.
+  boot.kernel.sysctl = {
+    "net.ipv4.conf.all.route_localnet" = 1;
+    "net.ipv4.conf.default.route_localnet" = 1;
+  };
+
+  systemd.services.k3s-route-localnet = {
+    description = "Enable route_localnet on k3s pod-facing interfaces";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "k3s.service" ];
+    partOf = [ "k3s.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = toString (pkgs.writeShellScript "k3s-route-localnet" ''
+        set -u
+        for iface in cni0 flannel.1; do
+          if [ -e "/sys/class/net/$iface" ]; then
+            if echo 1 > "/proc/sys/net/ipv4/conf/$iface/route_localnet" 2>/dev/null; then
+              echo "route_localnet enabled on $iface"
+            else
+              echo "route_localnet: could not write $iface" >&2
+            fi
+          fi
+        done
+      '');
+    };
+  };
 }

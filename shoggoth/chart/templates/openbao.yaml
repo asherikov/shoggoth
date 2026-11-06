@@ -109,6 +109,16 @@ data:
         local attempt code method
         for attempt in 1 2 3 4 5; do
             method="PUT"
+            # Truncate the response file per request. curl opens the -o file
+            # only when the first response byte arrives, so a request that died
+            # in the connect phase leaves the PREVIOUS request's body on disk —
+            # and the failure path below would then print that body under this
+            # request's method and code. That is exactly how a 404 belonging to
+            # the PUT ended up logged under the POST that never got an answer,
+            # reading as if the create had failed because the Secret was
+            # missing. With the file cleared first, an empty file means "no
+            # response", not "no body yet".
+            : > /tmp/k8s-bootstrap-resp.json
             code=$(curl -sS --max-time 15 --cacert "$(k8s_ca)" \
                 -o /tmp/k8s-bootstrap-resp.json \
                 -w '%{http_code}' \
@@ -119,6 +129,7 @@ data:
                 "${K8S_API}/api/v1/namespaces/${NAMESPACE}/secrets/${name}" 2>/tmp/k8s-bootstrap-err.txt) || code="000"
             if [ "${code}" = "404" ]; then
                 method="POST"
+                : > /tmp/k8s-bootstrap-resp.json
                 code=$(curl -sS --max-time 15 --cacert "$(k8s_ca)" \
                     -o /tmp/k8s-bootstrap-resp.json \
                     -w '%{http_code}' \
@@ -136,13 +147,24 @@ data:
             body="$(head -c 400 /tmp/k8s-bootstrap-resp.json 2>/dev/null || echo 'no body')"
             curl_err="$(head -c 200 /tmp/k8s-bootstrap-err.txt 2>/dev/null | tr '\n' ' ')"
             log "k8s ${method} secret/${name} HTTP ${code} (attempt ${attempt}/5)"
-            [ -n "${body}" ]    && log "  body:    ${body}"
+            # HTTP 000 is not a response: curl never got a status line, so
+            # there is no body to attribute and the file is empty by
+            # construction. Printing anything there would invent one, so say
+            # what happened and let curlerr carry the reason.
+            if [ "${code}" = "000" ]; then
+                log "  no HTTP response received (transport failure; see curlerr)"
+            else
+                [ -n "${body}" ]    && log "  body:    ${body}"
+            fi
             [ -n "${curl_err}" ] && log "  curlerr: ${curl_err}"
             if [ "${attempt}" -lt 5 ]; then
                 sleep $((attempt * 2))
             fi
         done
-        log "k8s put/create secret/${name} FAILED after 5 attempts; last body: $(head -c 400 /tmp/k8s-bootstrap-resp.json 2>/dev/null || echo 'no body')"
+        log "k8s put/create secret/${name} FAILED after 5 attempts; last attempt: ${method} HTTP ${code}"
+        if [ "${code}" != "000" ] && [ -s /tmp/k8s-bootstrap-resp.json ]; then
+            log "  last body: $(head -c 400 /tmp/k8s-bootstrap-resp.json)"
+        fi
         return 1
     }
 
@@ -365,6 +387,39 @@ data:
         bao_put_value "ai/default-token" "$(openssl rand -base64 32 | tr -d '\n')"
         SEEDED=$((SEEDED + 1))
     fi
+    # APP_KEY is the one seeded value that is not a bare random string:
+    # Laravel strips a literal ``base64:`` prefix from it and
+    # base64-decodes the rest into the 32-byte AES key
+    # (Illuminate\Encryption\Encrypter::getKey). Without the prefix the
+    # whole string is the key, which is not 32 bytes and every
+    # encrypt/decrypt fails at runtime. Seeded outside the loop below so
+    # the prefix is applied on the create path AND on the migrate path:
+    # the loop skips any path that already exists, so a value written
+    # before the prefix was required would stay unprefixed forever.
+    if app_key=$(bao_get_value "cdash/app-key" 2>/dev/null) && [ -n "${app_key}" ]; then
+        SKIPPED=$((SKIPPED + 1))
+        case "${app_key}" in
+            base64:*) ;;
+            *)
+                # A value is only migratable when its remainder really is
+                # base64-of-32-bytes. The pre-Helm bootstrap wrote a raw
+                # 32-character alphanumeric key (its own renderer applied the
+                # prefix at render time), and 32 base64-alphabet characters
+                # decode cleanly to 24 bytes — prefixing that produces a key
+                # Laravel rejects outright. Only a remainder that decodes to
+                # exactly 32 bytes needs the prefix added.
+                if [ "$(printf '%s' "${app_key}" | base64 -d 2>/dev/null | wc -c)" -eq 32 ]; then
+                    bao_put_value "cdash/app-key" "base64:${app_key}"
+                    log "migrated cdash/app-key to the base64-prefixed form Laravel requires"
+                else
+                    log "cdash/app-key is already a 32-byte raw key; leaving it unprefixed"
+                fi
+                ;;
+        esac
+    else
+        bao_put_value "cdash/app-key" "base64:$(openssl rand -base64 32 | tr -d '\n')"
+        SEEDED=$((SEEDED + 1))
+    fi
     for path in \
         redmine/db-password \
         cdash/db-password \
@@ -373,7 +428,7 @@ data:
         openldap/config-admin-password \
         openldap/ldapauth-password \
         openldap/slave-password \
-        cdash/app-key \
+        cdash/api-token \
         ca/passphrase \
         wireguard/admin-password \
         grafana/admin-password \
@@ -442,10 +497,11 @@ data:
     # the data write, and the self-assert only fires AFTER a
     # successful write. The bootstrap must set the marker; the
     # redmine pod overwriting the data value later is fine, the
-    # metadata is preserved. The marker write is idempotent
-    # (kv-v2 ``POST /v1/secret/metadata`` overwrites the field),
-    # so re-running this phase is safe.
-    for path in gitea/slave-token gitea/runner-token redmine/slave-token; do
+    # metadata is preserved. ``cdash/api-token`` is the same
+    # case, written by the cdash pod's ``init.sh``. The marker
+    # write is idempotent (kv-v2 ``POST /v1/secret/metadata``
+    # overwrites the field), so re-running this phase is safe.
+    for path in gitea/slave-token gitea/runner-token redmine/slave-token cdash/api-token; do
         if bao_get_value "$path" >/dev/null 2>&1; then
             bao_put_metadata "$path"
         fi
@@ -580,37 +636,48 @@ data:
     # the namespace can pivot to OpenBao writes at any path. Fix: dedicated
     # write-scoped policy covering exactly the path(s) PushSecret needs.
     #
-    # OpenBao kv-v2 reads the metadata path before the data path on writes:
-    # the controller does ``GET /v1/secret/metadata/<path>`` to check current
-    # state, then ``POST /v1/secret/data/<path>`` to push the new value. The
-    # metadata path is a separate ACL surface; without an explicit grant, the
-    # first request 403s and the controller records
-    # ``set secret failed: could not write remote ref token to target
-    # secretstore shoggoth-openbao-write: cannot read secret data from Vault:
-    # Error making API request`` (URL=GET .../v1/secret/metadata/<path>,
-    # Code=403, "permission denied"). The read policy (``shoggoth-eso-read``)
-    # doesn't need metadata access because ExternalSecret's flow only reads
-    # ``secret/data/<path>``.
+    # The path list below is a hard-coded enumeration, not a wildcard. It has
+    # to name every ``remoteRef.remoteKey`` any PushSecret in this release
+    # pushes to, on BOTH surfaces — ``secret/data/<path>`` and
+    # ``secret/metadata/<path>``. ``cdash/api-token`` was in neither when
+    # cdash-api-token-push.yaml was added, and the symptom was a 403 on that
+    # one path while the other three PushSecrets — sharing this same token and
+    # this same SecretStore — stayed Ready. Adding a PushSecret means adding
+    # two lines here; nothing checks that they were added.
     #
-    # After the data write succeeds, the client also writes the metadata to
-    # self-assert the ``managed-by: external-secrets`` marker on first push
-    # (see ``providers/v1/vault/client_push.go``: ``c.logical.WriteWithContext
-    # (ctx, metaPath, label)``). The metadata path therefore needs both
-    # ``read`` (for the pre-push check) AND ``create,update`` (for the
-    # post-data write). Without ``create,update`` the post-data write 403s
-    # and the controller records
-    # ``set secret failed: ... Error making API request. URL: PUT
-    # http://openbao:80/v1/secret/metadata/<path> Code: 403. permission
-    # denied`` even though the data write succeeded — the controller
-    # considers the whole push failed because the metadata write is part
-    # of the same call sequence.
+    # What the external-secrets Vault client (v2.11.0,
+    # ``providers/v1/vault/client_push.go``) actually does, in order:
+    #
+    #   1. ``GET /v1/secret/data/<path>`` — unconditional, and the FIRST
+    #      request of every push whether or not the remote secret exists. It
+    #      is not a not-found probe: the code tolerates only a
+    #      ``NoSecretError``, so any other error — a 403 among them — aborts
+    #      the push right there, before the metadata is ever touched. A
+    #      missing ``read`` on the data path therefore surfaces as
+    #      ``set secret failed: could not write remote ref token to target
+    #      secretstore shoggoth-openbao-write: cannot read secret data from
+    #      Vault: Error making API request`` with URL=GET
+    #      .../v1/secret/data/<path>, Code=403, "permission denied".
+    #   2. ``GET /v1/secret/metadata/<path>`` — only when step 1 found the
+    #      secret, to read ``custom_metadata.managed-by`` and refuse the push
+    #      when the marker is absent.
+    #   3. ``POST /v1/secret/metadata/<path>`` — KV v2 only, self-asserting the
+    #      ``managed-by: external-secrets`` marker. Note the order: this runs
+    #      BEFORE the data write, not after it.
+    #   4. ``POST /v1/secret/data/<path>`` — the push itself.
+    #
+    # Hence the capability set per path: ``read`` on data (step 1), ``read``
+    # on metadata (step 2), and ``create,update`` on metadata (step 3) and on
+    # data (step 4). The read policy (``shoggoth-eso-read``) needs none of the
+    # metadata grants, because ExternalSecret's flow only ever reads
+    # ``secret/data/<path>``.
     phase "Phase B.5: provisioning shoggoth-eso-write policy + token"
     ESO_WRITE_POLICY_BODY=/tmp/bao-eso-write-acl.json
     if ! code=$(curl -sS --max-time 10 -o "${ESO_WRITE_POLICY_BODY}" -w '%{http_code}' \
         -X POST "${OPENBAO_ADDR}/v1/sys/policies/acl/shoggoth-eso-write" \
         -H "X-Vault-Token: ${ROOT_TOKEN}" \
         -H "Content-Type: application/json" \
-        -d '{"policy":"path \"secret/data/gitea/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/data/gitea/runner-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/data/redmine/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/metadata/gitea/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/metadata/gitea/runner-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/metadata/redmine/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }"}' 2>/tmp/bao-eso-write-acl-err.txt); then
+        -d '{"policy":"path \"secret/data/gitea/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/data/gitea/runner-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/data/redmine/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/data/cdash/api-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/metadata/gitea/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/metadata/gitea/runner-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/metadata/redmine/slave-token\" { capabilities = [\"create\",\"update\",\"read\"] }\npath \"secret/metadata/cdash/api-token\" { capabilities = [\"create\",\"update\",\"read\"] }"}' 2>/tmp/bao-eso-write-acl-err.txt); then
         die "POST /v1/sys/policies/acl/shoggoth-eso-write: curl failed (rc=${code}); err=$(cat /tmp/bao-eso-write-acl-err.txt)"
     fi
     if [ "${code}" != "200" ] && [ "${code}" != "204" ]; then

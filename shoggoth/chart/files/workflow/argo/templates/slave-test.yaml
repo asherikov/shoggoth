@@ -1,7 +1,7 @@
 ---
-# slave-test — equivalent to kestra's main_shoggoth_slave-verify.yml.
+# slave-test — end-to-end verification of the services the slave depends on.
 #
-# Eight allowFailure-style checks (gitea-api, redmine-api, git-http, git-ssh,
+# Eight checks (gitea-api, redmine-api, git-http, git-ssh,
 # embeddings, mcp, telemetry, pip-cache) followed by a final "assert all
 # passed" step. Originally seven ran in parallel with only git-ssh waiting
 # on git-http (they share the scratch repo — first writer wins, second's
@@ -16,7 +16,7 @@
 # (bump parallelism) re-enables concurrency if the resource budget ever
 # grows. Each check's `depends:` uses task-result notation
 # `(X.Succeeded || X.Failed || X.Errored)` so a failing upstream check does
-# not skip its dependents — matching kestra's allowFailure: true.
+# not skip its dependents.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -112,7 +112,7 @@ spec:
       parameters:
       - name: check_name
     # R1-8: a failing check is recorded as Failed but does not skip
-    # dependents (matches Kestra allowFailure: true).
+    # dependents.
     #
     # The seven "dependency-free" parallel checks (gitea-api, redmine-api,
     # git-http, embeddings, mcp-servers, telemetry, pip-cache) have NO
@@ -127,8 +127,7 @@ spec:
     # that they have no direct dependents in the DAG other than
     # `assert-all-passed`, whose `depends:` uses task-result notation
     # `(X.Succeeded || X.Failed || X.Errored)` so it runs regardless of
-    # the upstream task's outcome. Net effect is the same as Kestra's
-    # `allowFailure: true`: a failed check does not skip
+    # the upstream task's outcome: a failed check does not skip
     # `assert-all-passed`, which reports the failure via its non-zero
     # exit at workflow end.
     #
@@ -157,12 +156,10 @@ spec:
         printf '%d' "$rc" > /tmp/check-exit-code
         exit $rc
       env:
-      - name: OTEL_EXPORTER_OTLP_ENDPOINT
-        value: "http://otelcol:4318"
-      - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: "http/protobuf"
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "2000"
+      # OTEL_EXPORTER_OTLP_* is not re-wired here: the slave image
+      # bakes the endpoint/protocol/timeout (see dockerfiles/slave), and
+      # this pod carries the CoreDNS resolver that makes the short
+      # `otelcol` name resolve.
       - name: SHOGGOTH_CHECK_NAME
         value: "{{inputs.parameters.check_name}}"
       - name: GITEA_SERVER_URL

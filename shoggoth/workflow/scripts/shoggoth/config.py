@@ -88,9 +88,10 @@ class Parameters:
 
         LDAP DNs are assembled from SHOGGOTH_DOMAIN by replacing dots
         with ``,dc=`` separators (``example.org`` -> ``dc=example,dc=org``)
-        and prefixing with the conventional `ou=people`. Pulled out as
-        a helper because ``ldap-sync`` callers previously hand-rolled
-        the same string.
+        and prefixing with the conventional `ou=people`. Centralised
+        here so the ``ldap-sync`` callers and the one-off callers of
+        this method share one construction instead of restating the
+        string.
         """
         if not self.shoggoth_domain:
             die("SHOGGOTH_DOMAIN is required for LDAP DN construction")

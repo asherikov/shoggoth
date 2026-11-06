@@ -1,13 +1,11 @@
 ---
-# github-mirror-sync — equivalent to kestra's main_shoggoth_github-mirror-sync.yml.
+# github-mirror-sync — mirrors GitHub repositories into the local Gitea.
 # Invoked manually via `argo submit` from a developer shell.
 #
-# Replaces the old concurrency:limit:1 / behavior:CANCEL with Argo's
-# SynchronizationType. Note the semantic difference: Kestra's
-# `behavior: CANCEL` cancelled the running execution when a new one
-# arrived; Argo's `synchronization.mutex` queues the new submission
-# in Pending until the holder completes. This is intentional — the
-# maintainer prefers the holder to finish rather than be aborted.
+# Single-flight via a synchronization mutex: a new submission queues in
+# Pending until the holder completes rather than aborting the running
+# sync. This is intentional — the maintainer prefers the holder to
+# finish rather than be aborted.
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
@@ -57,10 +55,6 @@ spec:
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
-      - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: "http/protobuf"
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "2000"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_DOMAIN

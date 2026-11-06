@@ -1,0 +1,45 @@
+{{- /*
+  templates/cdash-api-token-push.yaml — PushSecret synchronizing the
+  K8s ``Secret/cdash-api-token`` *back* into OpenBao at
+  ``cdash/api-token``.
+
+  Paired with ``cdash-api-token.yaml``: the cdash container's postStart
+  hook (``init.sh`` in cdash.yaml) mints a fresh token and writes it to
+  the K8s Secret through the Kubernetes API, and this PushSecret mirrors
+  it to OpenBao. The corresponding ``ExternalSecret`` uses
+  ``creationPolicy: Orphan`` + ``refreshInterval: 0s`` so it does not race
+  the script's write.
+
+  This is the same shape as redmine-slave-token-push.yaml, and for the
+  same reason: the pod never needs an OpenBao credential. It writes only
+  the K8s Secret, and the ESO controller — which already holds the
+  write-scoped token — does the OpenBao side.
+
+  Gated on ``secret-store-write``: the PushSecret itself requires the
+  write SecretStore to be enabled.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "secret-store-write")) }}
+apiVersion: external-secrets.io/v1alpha1
+kind: PushSecret
+metadata:
+  name: cdash-api-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cdash-api-token
+spec:
+  secretStoreRefs:
+    - name: shoggoth-openbao-write
+      kind: SecretStore
+  selector:
+    secret:
+      name: cdash-api-token
+  data:
+    - match:
+        secretKey: token
+        remoteRef:
+          remoteKey: cdash/api-token
+          property: value
+  refreshInterval: 5m
+  updatePolicy: Replace
+{{- end }}

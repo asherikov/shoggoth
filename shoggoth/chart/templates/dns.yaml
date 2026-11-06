@@ -34,6 +34,12 @@ data:
         errors
         ready
 
+        # Answer AAAA (IPv6) queries with empty NOERROR — shoggoth is
+        # IPv4-only, so clients fall back to A instead of trying IPv6.
+        template ANY AAAA {
+            rcode NOERROR
+        }
+
         hosts /etc/coredns/blacklist/blocklist.hosts {
             ttl 60
             no_reverse

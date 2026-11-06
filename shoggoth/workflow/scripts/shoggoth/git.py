@@ -112,8 +112,8 @@ class Git:
         [--tags]``.
 
         With the defaults — ``unshallow=False``, ``ref=None``,
-        ``tags=False`` — the call reduces to ``git fetch origin``,
-        the historical invocation. ``_unshallow`` passes
+        ``tags=False`` — the call reduces to the plain
+        ``git fetch origin``. ``_unshallow`` passes
         ``unshallow=True`` (which adds ``--unshallow``) and the
         tagging flows pass ``tags=True`` (which adds ``--tags``).
         """
@@ -450,10 +450,9 @@ class GitCredentials:
 
         allow_list = [
             "SSH_AUTH_SOCK",
-            "GITEA_SERVER_URL", "GITEA_GIT_URL", "GITEA_INSTANCE_SSH_HOST",
+            "GITEA_SERVER_URL", "GITEA_GIT_URL",
             "REDMINE_SERVER",
             "SHOGGOTH_DOMAIN", "SHOGGOTH_NAMESPACE", "SHOGGOTH_GITHUB_ORG",
-            "OPENBAO_ADDR",
             "OTEL_EXPORTER_OTLP_ENDPOINT",
             "ARGO_WEBHOOK_TOKEN",
         ]

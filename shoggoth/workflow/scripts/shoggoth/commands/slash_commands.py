@@ -5,11 +5,12 @@ owns the canonical list of slash commands and the ``/help`` message
 renderer (``format_help_text()``). The worker does NOT consult this
 catalog: it implements handlers for the worker-owned commands directly
 (``/review``, ``/squash``, ``/rebase``, ``/drop``, ``/do``) and
-treats every other command name as a silent no-op. This keeps the
-worker free of catalog imports (no round-trip dependency on
-``SUPPORTED_COMMANDS`` or ``format_help_text``) and removes the
-historical defense-in-depth ``_slash_help`` fallback that mirrored
-the dispatcher's catalog post.
+treats every other command name as a silent no-op. Keeping the worker
+free of catalog imports (no round-trip dependency on
+``SUPPORTED_COMMANDS`` or ``format_help_text``) means a
+dispatcher-owned command that still reaches the worker -- e.g. during
+a dispatcher-code rollout window -- no-ops there instead of
+double-posting.
 
 Handler field
 -------------
