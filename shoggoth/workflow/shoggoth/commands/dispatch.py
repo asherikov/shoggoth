@@ -18,12 +18,12 @@ from . import slash_commands
 # The four sandbox-pod lifecycle scripts (init: wait-bootstrap +
 # init-git-cred-perms; main: sandbox; sidecar: cleanup) used to live
 # as inline shell constants in this module. They are now a single
-# Python module at ``shoggoth/workflow/scripts/sandbox.py``
+# Python module at ``shoggoth/workflow/sandbox.py``
 # (subcommands: ``wait-bootstrap``, ``init-perms``, ``sandbox``,
 # ``cleanup``), mounted into the sandbox pod at
 # ``/shoggoth/workflow-scripts/`` via a hostPath volume (the
-# ``workflow-scripts:workflow/scripts`` K3S_HOST_PATHS entry in
-# the Makefile rsyncs the repo's ``workflow/scripts/`` to the
+# ``workflow-scripts:workflow`` K3S_HOST_PATHS entry in
+# the Makefile rsyncs the repo's ``workflow/`` to the
 # cluster node). Each container invokes python3 with the
 # subcommand and (for the sandbox subcommand) the user-controlled
 # ``--repo`` and ``--branch`` values as separate argv items
@@ -323,7 +323,7 @@ class DispatchCommand(CommandBase):
 
         Triggered by a ``/help`` PR comment. The dispatcher
         is the SOLE owner of the catalog (see
-        ``shoggoth/workflow/scripts/shoggoth/commands/slash_commands.py``
+        ``shoggoth/workflow/shoggoth/commands/slash_commands.py``
         -- ``SUPPORTED_COMMANDS`` and ``format_help_text()``).
         The pr-update worker does NOT have a ``_slash_help``
         handler, so a ``/help`` body that reaches the worker
@@ -428,7 +428,7 @@ class DispatchCommand(CommandBase):
           * Main container exits 0; pod's ``restartPolicy:
             Never`` keeps it from restarting.
           * The ``cleanup`` sidecar (the ``cleanup`` subcommand
-            of ``shoggoth/workflow/scripts/sandbox.py``,
+            of ``shoggoth/workflow/sandbox.py``,
             invoked via ``SANDBOX_PATH``) sees the
             pod's ``status.phase`` transition to a terminal
             state and runs ``kubectl delete pod
@@ -704,7 +704,7 @@ class DispatchCommand(CommandBase):
     #
     # It also has to stay BELOW the sandbox pod's own lifetimes --
     # CLEANUP_NOT_READY_BUDGET_S (1200 s) in
-    # shoggoth/workflow/scripts/sandbox.py -- so the
+    # shoggoth/workflow/sandbox.py -- so the
     # pod is still alive when the wait gives up and the post-wait
     # probes can read its state.
     SANDBOX_READY_TIMEOUT_S = 900
@@ -824,7 +824,7 @@ class DispatchCommand(CommandBase):
           * ``sandbox`` container -- the sandbox itself: it
             materializes the project's ccws workspace (through
             the ``sandbox`` subcommand of
-            ``shoggoth/workflow/scripts/sandbox.py``: a plain
+            ``shoggoth/workflow/sandbox.py``: a plain
             repository goes into a subdirectory of the source
             space, a ccws workspace takes the source space over
             and its listed sub-repositories land in
@@ -909,7 +909,7 @@ class DispatchCommand(CommandBase):
                 # ``status.phase == Succeeded|Failed`` and
                 # ``kubectl delete pod`` once it sees the
                 # terminal phase. See
-                # ``shoggoth/workflow/scripts/sandbox.py``
+                # ``shoggoth/workflow/sandbox.py``
                 # (the ``cleanup`` subcommand) for the script
                 # body and the rationale for using a sidecar
                 # instead of a CronJob / external watcher.
@@ -965,7 +965,7 @@ class DispatchCommand(CommandBase):
                     # clone is now inlined into the ``sandbox``
                     # container's startup (the ``sandbox``
                     # subcommand of
-                    # ``shoggoth/workflow/scripts/sandbox.py``), so
+                    # ``shoggoth/workflow/sandbox.py``), so
                     # it waits inline for the sidecar. That is where
                     # the workspace materialization happens too -- it
                     # needs the sidecar's credentials for the same
@@ -1366,9 +1366,9 @@ class DispatchCommand(CommandBase):
                      }},
                     # HostPath of the cluster-node's workflow-
                     # scripts directory. The Makefile's
-                    # `workflow-scripts:workflow/scripts`
+                    # `workflow-scripts:workflow`
                     # K3S_HOST_PATHS entry rsyncs the repo's
-                    # `workflow/scripts/` to
+                    # `workflow/` to
                     # `/var/lib/rancher/k3s/storage/${INSTANCE}/workflow-scripts/`
                     # on the cluster node at `make sync` time,
                     # so the same absolute path is visible to

@@ -133,6 +133,12 @@ configurable domain, set to `s.local` by default.
     <https://github.com/tsl0922/ttyd> + tmux + Qwen Code. Separate Deployment
     that shares the git-cred-bootstrap sidecar with `slave-dind.`
   - `cdash.` — CDash test result dashboard <https://github.com/Kitware/CDash>.
+  - `it-tools.` — collection of online tools for developers
+    <https://github.com/sharevb/it-tools>: timezone, date, ical and
+    geo-coordinates converters among them.
+  - `fusion.` — self-hosted RSS feed reader
+    <https://github.com/0x2E/fusion>, a single container with a local
+    database; no authentication (reachable only through VPN).
 - Project management:
   - `redmine.` — Redmine project management server <https://www.redmine.org/>.
 - LLM and coding agents:
@@ -419,7 +425,7 @@ firefox http://redmine.s.local
 # Default credentials: admin / admin (change on first login)
 ```
 
-Install plugins by cloning them into the `shoggoth/redmine/plugins` directory
+Install plugins by cloning them into the `shoggoth/data/redmine/plugins` directory
 and restarting the service.
 
 ### Redmine MCP Server (AI Agent Integration)
@@ -706,7 +712,7 @@ Known issues
   dispatch’s Create call (keeping retry on Watch/List operations only). In the
   meantime, the doubling is accepted. If the noise becomes problematic, a
   post-creation dedup pass can be added to the maintenance DAG
-  (`shoggoth/chart/files/workflow/argo/templates/maintenance.yaml`) that finds duplicate
+  (`shoggoth/chart/files/argo/templates/maintenance.yaml`) that finds duplicate
   workflows by `workflowEventBinding` label and sub-second `creationTimestamp`
   deltas and deletes all but the oldest — this is not implemented because the
   duplicates are inert (each is a normal Failed workflow, not a corrupted one).

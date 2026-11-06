@@ -165,32 +165,45 @@ def update_workspace(root, url_rewrites=None, prefer_version=None,
 def apply_pr_ref(repo_dir, ref, pr_number=None, label="checkout"):
     """Check the PR's head ref out in ``repo_dir``.
 
-    The ref is fetched from the repository's own origin: the branch
-    first, then the platform's ``pull/<n>/head`` ref, which is where a
-    fork's PR branch is reachable from the base repository. The result
-    is checked out as a local ``pr-<n>`` branch, so the user can commit
-    on it in the sandbox terminal.
+    The head is fetched from the repository's own origin into
+    ``refs/remotes/origin/<branch>`` -- where an ordinary fetch of
+    that branch would put it -- and checked out under the branch's
+    own name. The sandbox terminal (and every commit and push made
+    in it) therefore speaks the PR's actual branch name, the same
+    name the worker checks out and pushes: a synthetic ``pr-<n>``
+    branch would make ``git push`` create a ``pr-<n>`` branch on the
+    remote instead of updating the PR's branch.
+
+    The platform's ``pull/<n>/head`` ref is preferred when the PR
+    number is known: it is the PR's head by definition, and for a
+    fork PR it is the only way the base repository can reach the
+    head at all. It also disambiguates a fork PR whose head branch
+    shares a name with a branch the base repository carries -- a
+    fork's ``main`` PR must not resolve to the base's ``main``. The
+    branch name itself is the fallback, for remotes that do not
+    serve pull refs.
     """
     safe = re.sub(r"[^A-Za-z0-9_./-]", "-", ref or "")
     if not safe or safe.startswith("-") or ".." in safe:
         die(f"{label}: refusing unsafe ref {ref!r}")
-    if pr_number:
-        local_ref = f"refs/remotes/origin/pr-{pr_number}"
-    else:
-        local_ref = f"refs/remotes/origin/{safe}"
+    local_ref = f"refs/remotes/origin/{safe}"
     g = Git(repo_dir)
-    result = g.fetch(remote="origin", ref=ref, local_ref=local_ref,
-                     check=False)
-    if result.returncode != 0 and pr_number:
-        log(f"{label}: origin/{ref} not found, "
-            f"trying pull/{pr_number}/head")
+    if pr_number:
         result = g.fetch(remote="origin", ref=f"pull/{pr_number}/head",
                          local_ref=local_ref, check=False)
+        if result.returncode != 0:
+            log(f"{label}: pull/{pr_number}/head not found, "
+                f"trying origin/{ref}")
+            result = g.fetch(remote="origin", ref=ref, local_ref=local_ref,
+                             check=False)
+    else:
+        result = g.fetch(remote="origin", ref=ref, local_ref=local_ref,
+                         check=False)
     if result.returncode != 0:
         die(f"{label}: cannot fetch the PR's head ref {ref!r}: "
             f"{result.stderr}")
 
-    branch = f"pr-{pr_number}" if pr_number else safe
+    branch = safe
     checkout = g.raw(
         "-c", "advice.detachedHead=false", "checkout",
         "-B", branch, local_ref, check=False)

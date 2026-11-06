@@ -25,8 +25,8 @@
   group stays in the list.
 
   The CRDs themselves are NOT in the chart — they live in the upstream
-  submodules (shoggoth/argo-workflows/manifests/base/crds/full/ and
-  shoggoth/external-secrets/deploy/crds/bundle.yaml) and are applied by
+  submodules (shoggoth/crd/argo-workflows/manifests/base/crds/full/ and
+  shoggoth/crd/external-secrets/deploy/crds/bundle.yaml) and are applied by
   `make crds_apply` before Helm runs, because a chart's crds/ tree is
   embedded in the release Secret (see make/k3s.mk crds_apply, where the
   byte-budget math lives). This hook is the safety net for a

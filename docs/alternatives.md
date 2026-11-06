@@ -714,7 +714,7 @@ follow-up decision.
   it just bills them at a lower rate). Orthogonal to compression —
   Headroom and llmtrim both preserve cache hits
 - **Per-agent `compress(messages)` SDK calls in
-  `shoggoth/workflow/scripts/shoggoth/agent.py`** — would work
+  `shoggoth/workflow/shoggoth/agent.py`** — would work
   for the one agent that lives in that file, but every other
   consumer (LiteLLM-routed MCP servers, ad-hoc operator sessions,
   any future code agent) is bypassed. The sidecar shape is the
@@ -1340,7 +1340,7 @@ k8s-compatible and would transition cleanly.
 
 Tools that produce static or interactive diagrams of the shoggoth stack
 from the manifests in `shoggoth/k3s/*.yaml` (and the Argo CRD submodule
-in `shoggoth/argo-workflows/manifests/base/crds/full/`). The choice is
+in `shoggoth/crd/argo-workflows/manifests/base/crds/full/`). The choice is
 between two operating modes:
 
 - **Offline (manifest files only)** — read YAML, no cluster access needed.
@@ -1681,9 +1681,9 @@ in the docs/ tree.
 ### Notes
 
 - The Argo CRD submodule
-  (`shoggoth/argo-workflows/manifests/base/crds/full/argoproj.io_*.yaml`)
+  (`shoggoth/crd/argo-workflows/manifests/base/crds/full/argoproj.io_*.yaml`)
   is rsync'd to the host by `make sync` (see
-  `shoggoth/argo-workflows/manifests/base/crds/full/`). Any chosen
+  `shoggoth/crd/argo-workflows/manifests/base/crds/full/`). Any chosen
   tool needs to scan both `shoggoth/k3s/*.yaml` and the CRD submodule
   to graph Argo `Workflow` / `WorkflowTemplate` / `EventBus` /
   `EventSource` / `Sensor` objects.

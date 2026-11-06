@@ -62,7 +62,7 @@ metadata:
 # `argo` (every workflow pod — workflowDefaults sets serviceAccountName:
 # argo), `shoggoth-sandbox-spawner` (the command-handler dispatch step) and
 # `shoggoth-maintenance-secret-writer` (the maintenance steps). What runs
-# in those pods is this repo's own code (shoggoth/workflow/scripts, the
+# in those pods is this repo's own code (shoggoth/workflow, the
 # slave:noble image), so their permissions are an attack surface, not a
 # convenience.
 #
@@ -782,7 +782,7 @@ spec:
             cpu: 500m
       - name: apply-workflows
         # Apply WorkflowTemplate and WorkflowEventBinding CRDs from the
-        # chart's own files/ tree. shoggoth/chart/files/workflow/argo/ is
+        # chart's own files/ tree. shoggoth/chart/files/argo/ is
         # the source (templates/ and bindings/), carried into this pod by
         # the argo-workflow-templates / argo-workflow-bindings ConfigMaps
         # below and mounted at /workflow/argo/templates and
@@ -835,7 +835,7 @@ spec:
           bindings=( "${SRC}/bindings"/*.{yaml,yml} )
           shopt -u nullglob
           if [ "${#templates[@]}" -eq 0 ] || [ "${#bindings[@]}" -eq 0 ]; then
-            echo "FAIL: ${SRC}/templates or ${SRC}/bindings has no .yaml files (the argo-workflow-templates / argo-workflow-bindings ConfigMap is empty — the chart package should carry shoggoth/chart/files/workflow/argo/)"
+            echo "FAIL: ${SRC}/templates or ${SRC}/bindings has no .yaml files (the argo-workflow-templates / argo-workflow-bindings ConfigMap is empty — the chart package should carry shoggoth/chart/files/argo/)"
             exit 1
           fi
 
@@ -1041,7 +1041,7 @@ spec:
             drop:
             - ALL
       volumes:
-      # The workflow sources ride inside the chart (files/workflow/argo/)
+      # The workflow sources ride inside the chart (files/argo/)
       # rather than on a host directory: a packaged chart then carries
       # everything the apply-workflows init container needs, with no
       # `make sync` prerequisite and no host state that can drift from
@@ -1149,7 +1149,7 @@ data:
       # `make up`'s envsubst pass (make/k3s.mk), so what lands in
       # the cluster is the literal domain, namespace, etc. The four
       # parameters cover every `${SHOGGOTH_*}` reference in
-      # shoggoth/chart/files/workflow/argo/templates/*.yaml (image references,
+      # shoggoth/chart/files/argo/templates/*.yaml (image references,
       # env values, URL fragments, and hostPath volumes).
       arguments:
         parameters:
@@ -1506,7 +1506,7 @@ spec:
 # webhook deliveries from Gitea and Redmine.
 #
 # The workflow sources themselves live in
-# shoggoth/chart/files/workflow/argo/{templates,bindings}/ and reach the
+# shoggoth/chart/files/argo/{templates,bindings}/ and reach the
 # cluster through the two ConfigMaps below. The apply-workflows init
 # container in the argo-workflow-controller Deployment mounts them at
 # /workflow/argo/{templates,bindings} and hard-resets the CRs (delete ->
@@ -1535,7 +1535,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
 data:
-  {{- include "shoggoth.filesData" (list . "files/workflow/argo/templates/*" false) | nindent 2 }}
+  {{- include "shoggoth.filesData" (list . "files/argo/templates/*" false) | nindent 2 }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1546,5 +1546,5 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
 data:
-  {{- include "shoggoth.filesData" (list . "files/workflow/argo/bindings/*" false) | nindent 2 }}
+  {{- include "shoggoth.filesData" (list . "files/argo/bindings/*" false) | nindent 2 }}
 {{- end }}

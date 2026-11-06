@@ -30,7 +30,7 @@ sync:
 	rsync -e "ssh ${SSH_COMMON_ARGS}" -rl shoggoth ${USER}@${HOST_IP}:${REMOTE_PATH}/${INSTANCE} || true
 	K3S_DIR="${INSTANCE}"; \
 	cmds="mkdir -p /var/lib/rancher/k3s/storage/$${K3S_DIR}/coredns-blacklists"; \
-	cmds="$$cmds && cp ./dns/hosts-blacklist/hosts /var/lib/rancher/k3s/storage/$${K3S_DIR}/coredns-blacklists/blocklist.hosts"; \
+	cmds="$$cmds && cp ./data/dns/hosts-blacklist/hosts /var/lib/rancher/k3s/storage/$${K3S_DIR}/coredns-blacklists/blocklist.hosts"; \
 	cmds="$$cmds && mkdir -p /var/lib/rancher/k3s/storage/$${K3S_DIR}/scripts"; \
 	cmds="$$cmds && cp ./setup-client.sh /var/lib/rancher/k3s/storage/$${K3S_DIR}/scripts/setup-client.sh"; \
 	for entry in ${K3S_HOST_PATHS}; do \

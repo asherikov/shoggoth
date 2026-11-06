@@ -486,7 +486,7 @@ data:
         # `server_name api.${DOMAIN}` (not `server_name api`), so
         # Host=`api` fell through to the default_server 404. The direct
         # form matches what the argo maintenance template wires
-        # (chart/files/workflow/argo/templates/maintenance.yaml), so spawned job
+        # (chart/files/argo/templates/maintenance.yaml), so spawned job
         # containers that import shoggoth.py can build `api_url` without
         # raising KeyError. Auth on direct calls still needs
         # `GITEA_SLAVE_TOKEN`; the runner container doesn't have that env
