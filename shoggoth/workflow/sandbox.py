@@ -50,8 +50,8 @@ out of Ready but the container itself.
 Mounting
 --------
 The sandbox pod's spec mounts /shoggoth/workflow-scripts from the
-host (the workflow-scripts:workflow/scripts entry in K3S_HOST_PATHS
-in the Makefile rsyncs ./workflow/scripts/ to
+host (the workflow-scripts:workflow entry in K3S_HOST_PATHS
+in the Makefile rsyncs ./workflow/ to
 /var/lib/rancher/k3s/storage/${INSTANCE}/workflow-scripts/ on the
 cluster node), so the same absolute path is visible to every
 container in the pod after `make sync`. Neither image bakes the

@@ -3,7 +3,7 @@
   Gitea server bootstrap token into a K8s Secret.
 
   Consumers: the maintenance job in
-  ``workflow/scripts/shoggoth/commands/dispatch.py`` and the gitea
+  ``workflow/shoggoth/commands/dispatch.py`` and the gitea
   bootstrap pod read this token via ``secretKeyRef`` to authenticate
   ``git push`` webhooks and the api-token bootstrap calls.
 

@@ -58,7 +58,7 @@ class SetupArgoWebhooks(GiteaCommand):
             # (active by default once registered). To re-enable
             # CI-failure dispatch in the future, add the
             # WorkflowEventBinding under
-            # shoggoth/chart/files/workflow/argo/bindings/ and re-introduce the
+            # shoggoth/chart/files/argo/bindings/ and re-introduce the
             # entry below — with the maintainer understanding that
             # every workflow_run: failure event will spawn a
             # command-handler pod.

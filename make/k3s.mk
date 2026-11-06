@@ -9,7 +9,7 @@ K3S_TUNNEL_PORT?=6443
 # Host directories `make sync` populates under
 # /var/lib/rancher/k3s/storage/${INSTANCE}/. Everything here is state or
 # content the chart cannot carry.
-K3S_HOST_PATHS := redmine-plugins:redmine/plugins workflow-scripts:workflow/scripts private:private
+K3S_HOST_PATHS := redmine-plugins:data/redmine/plugins workflow-scripts:workflow private:private
 
 SHOGGOTH_HELM_TIMEOUT?=10m
 SHOGGOTH_HELM_TIMEOUT_UNINSTALL?=2m
@@ -178,8 +178,8 @@ down_helm_cleanup: tunnel_up
 # so anything placed there lands in Chart.Files, gets serialized into the
 # release record, and blows past the 1048576-byte Secret.data cap — `helm
 # upgrade --install` then fails before a single resource is created.
-SHOGGOTH_ARGO_CRDS := $(CURDIR)/shoggoth/argo-workflows/manifests/base/crds/full/argoproj.io_*.yaml
-SHOGGOTH_ESO_CRDS  := $(CURDIR)/shoggoth/external-secrets/deploy/crds/bundle.yaml
+SHOGGOTH_ARGO_CRDS := $(CURDIR)/shoggoth/crd/argo-workflows/manifests/base/crds/full/argoproj.io_*.yaml
+SHOGGOTH_ESO_CRDS  := $(CURDIR)/shoggoth/crd/external-secrets/deploy/crds/bundle.yaml
 SHOGGOTH_CRD_FILES  = $(foreach f,$(wildcard $(SHOGGOTH_ARGO_CRDS)) $(SHOGGOTH_ESO_CRDS),-f $(f))
 
 crds_apply: tunnel_up
@@ -259,7 +259,7 @@ k3s_purge_orphans: tunnel_up
 	#
 	# Safe on the data plane: the chart sets no `spec.target.deletionPolicy`,
 	# so the CRD default `Retain` applies
-	# (shoggoth/external-secrets/deploy/crds/bundle.yaml) and ESO's
+	# (shoggoth/crd/external-secrets/deploy/crds/bundle.yaml) and ESO's
 	# `cleanupManagedSecrets` is a no-op. Removing the finalizer therefore
 	# deletes the CR and nothing else — the same argument
 	# zz-eso-pre-delete.yaml makes for its own force-patch. PushSecrets and

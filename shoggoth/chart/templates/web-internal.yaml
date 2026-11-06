@@ -259,18 +259,26 @@ data:
         <p>A self-hosted development multitool intended for personal use.</p>
         <h2>Service web pages</h2>
         <ul class="services">
+            <li><a href="http://wireguard.{{ .Values.identity.domain }}/">wireguard</a> - WireGuard VPN web management UI (also reachable from outside the VPN through web-external)</li>
             <li><a href="http://git.{{ .Values.identity.domain }}/">git</a> - Gitea git service</li>
             <li><a href="http://redmine.{{ .Values.identity.domain }}/">redmine</a> - Redmine issue tracker</li>
             <li><a href="http://argo.{{ .Values.identity.domain }}/">argo</a> - Argo Workflows (workflow orchestration)</li>
+            <li><a href="http://cdash.{{ .Values.identity.domain }}/">cdash</a> - CDash test result dashboard</li>
             <li><a href="http://registry.{{ .Values.identity.domain }}/v2/_catalog">registry</a> - Container image registry (zot)</li>
             <li><a href="http://python-cache.{{ .Values.identity.domain }}/">python-cache</a> - PyPI cache proxy</li>
             <li><a href="http://apt-cache.{{ .Values.identity.domain }}/">apt-cache</a> - APT package cache
                 <a href="http://apt-cache.{{ .Values.identity.domain }}/acng-report.html">Usage statistics.</a></li>
             <li><a href="http://litellm.{{ .Values.identity.domain }}/">ai</a> - LLM proxy (LiteLLM → LocalAI)</li>
+            <li><a href="http://localai.{{ .Values.identity.domain }}/">localai</a> - Local LLM model server web UI</li>
+            <li><a href="http://basic-memory-ui.{{ .Values.identity.domain }}/">basic-memory</a> - Notes UI (SilverBullet) for the Basic Memory knowledge base</li>
             <li><a href="http://git-pages.{{ .Values.identity.domain }}/">git-pages</a> - Static site hosting</li>
+            <li><a href="http://it-tools.{{ .Values.identity.domain }}/">it-tools</a> - Online tools for developers (timezone, date, ical and geo-coordinates converters)</li>
+            <li><a href="http://fusion.{{ .Values.identity.domain }}/">fusion</a> - RSS feed reader (no authentication, VPN only)</li>
             <li><a href="http://grafana.{{ .Values.identity.domain }}/">grafana</a> - Observability dashboard (traces, metrics, logs)</li>
+            <li><a href="http://victoria-metrics.{{ .Values.identity.domain }}/vmui">victoria-metrics</a> - Metrics UI (VMUI)</li>
             <li><a href="http://slave-term.{{ .Values.identity.domain }}/">slave-term</a> - Interactive web terminal (ttyd + tmux + Qwen Code)</li>
             <li><a href="http://phpldapadmin.{{ .Values.identity.domain }}/">phpldapadmin</a> - LDAP directory web UI</li>
+            <li><a href="http://openbao.{{ .Values.identity.domain }}/">openbao</a> - Secret management UI (LDAP login)</li>
         </ul>
         <div class="download">
             <h2>Client Setup</h2>

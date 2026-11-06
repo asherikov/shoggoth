@@ -1,6 +1,6 @@
 """slash_commands -- single source of truth for the slash-command catalog.
 
-The dispatcher (``shoggoth/workflow/scripts/shoggoth/commands/dispatch.py``)
+The dispatcher (``shoggoth/workflow/shoggoth/commands/dispatch.py``)
 owns the canonical list of slash commands and the ``/help`` message
 renderer (``format_help_text()``). The worker does NOT consult this
 catalog: it implements handlers for the worker-owned commands directly

@@ -1,0 +1,93 @@
+{{- /*
+  templates/it-tools.yaml — it-tools collection of online tools for developers
+  (sharevb/it-tools), a static Vue SPA served by the upstream nginx image.
+  ServiceAccount + Service + Deployment.
+
+  Reached at it-tools.<domain> through the namespace CoreDNS suffix rewrite
+  (*.{domain} -> {namespace}.svc.cluster.local, see templates/dns.yaml): the
+  Service below is the whole ingress, no web-internal proxy entry needed.
+
+  Image tag is a pinned CalVer release (YYYY.M.D-<sha>), the newest release
+  published upstream — the moving `latest` tag resolves to the same digest.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "it-tools")) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: it-tools
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: it-tools
+    app.kubernetes.io/component: it-tools
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: it-tools
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: it-tools
+    app.kubernetes.io/component: it-tools
+spec:
+  selector:
+    app: it-tools
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: it-tools
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: it-tools
+    app.kubernetes.io/component: it-tools
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: it-tools
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.selectorLabels" . | nindent 8 }}
+        app: it-tools
+        app.kubernetes.io/component: it-tools
+    spec:
+      serviceAccountName: it-tools
+      # A static SPA talks to no Kubernetes API.
+      automountServiceAccountToken: false
+      containers:
+      - name: it-tools
+        image: corentinth/it-tools:2024.10.22-7ca5933
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 80
+          name: http
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 128Mi
+            cpu: 500m
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          failureThreshold: 3
+{{- end }}

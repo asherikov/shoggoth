@@ -93,12 +93,14 @@ services:
   cdash-db:                   { enabled: true }
   dns:                        { enabled: true }
   external-secrets:           { enabled: true }
+  fusion:                     { enabled: true }
   git-pages:                  { enabled: true }
   gitea:                      { enabled: true }
   gitea-runner:               { enabled: true }
   grafana:                    { enabled: true }
   headroom:                   { enabled: true }
   headroom-proxy-token:       { enabled: true }
+  it-tools:                   { enabled: true }
   litellm:                    { enabled: true }
   localai:                    { enabled: true }
   loki:                       { enabled: true }

@@ -2,7 +2,7 @@
 
 Comparison of the two PR-review pipelines relevant to the shoggoth maintenance
 workflow. Current selection: **qwen-code `--effort low`** invoked via the
-`/review` slash command in `shoggoth/workflow/scripts/shoggoth.py`.
+`/review` slash command in `shoggoth/workflow/shoggoth.py`.
 Candidate: **alibaba/[open-code-review](https://github.com/alibaba/open-code-review)**
 (OCR), a standalone Go CLI purpose-built for diff-based review.
 

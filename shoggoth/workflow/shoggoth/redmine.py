@@ -26,7 +26,7 @@ class Redmine(HttpApiClient):
         # (``api.${DOMAIN}/redmine``) and accepts an empty token.
         #
         # ``read_tokens=False`` skips the read. The dispatcher
-        # (``shoggoth/workflow/scripts/dispatch.py``) opts into
+        # (``shoggoth/workflow/dispatch.py``) opts into
         # this because its pod runs under
         # ``shoggoth-sandbox-spawner`` SA which is
         # scoped to pods/services CRUD only — no ``get`` on

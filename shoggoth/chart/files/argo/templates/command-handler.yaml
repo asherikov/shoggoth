@@ -8,7 +8,7 @@
 #
 #   1. ``dispatch`` step — runs in a ``shoggoth_tools:alpine`` pod
 #      (kubectl + scripts, no qwen agent). Invokes the standalone
-#      ``shoggoth/workflow/scripts/dispatch.py`` CLI utility —
+#      ``shoggoth/workflow/dispatch.py`` CLI utility —
 #      decoupled from ``shoggoth.py`` because the dispatcher's
 #      dependency surface is different (no agent, no git-cred
 #      sidecar, no ``Shoggoth().checkout()``). Validates the
@@ -244,7 +244,7 @@ spec:
   # ----- dispatch step -----------------------------------------------
   - name: dispatch-step
     # The dispatcher is its own CLI utility
-    # (``shoggoth/workflow/scripts/dispatch.py``), not a
+    # (``shoggoth/workflow/dispatch.py``), not a
     # ``shoggoth.py`` subcommand — decoupling lets it run in
     # the slim ``shoggoth_tools:alpine`` image (no agent, no
     # git-cred sidecar, no ``Shoggoth().checkout()``) while
@@ -279,7 +279,7 @@ spec:
     outputs:
       parameters:
       # Paths must match the dispatch script's OUTPUT_PATHS
-      # (shoggoth/workflow/scripts/shoggoth/commands/dispatch.py).
+      # (shoggoth/workflow/shoggoth/commands/dispatch.py).
       # Argo's executor reads each file after the container exits
       # and propagates its contents as
       # ``outputs.parameters.<name>``.

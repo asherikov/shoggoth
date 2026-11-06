@@ -38,7 +38,7 @@ from .util import die
 # ignores ``args`` — including the empty ``""`` the worker step always
 # forwards as ``"${SHOGGOTH_TASK_ID}"`` for ``ci-failure`` /
 # ``pr-update``. The worker step of
-# ``shoggoth/chart/files/workflow/argo/templates/command-handler.yaml``
+# ``shoggoth/chart/files/argo/templates/command-handler.yaml``
 # execs ``shoggoth.py "${SHOGGOTH_COMMAND}" "${SHOGGOTH_TASK_ID}"``, and
 # an empty ``SHOGGOTH_TASK_ID`` still expands to one argv element that
 # the ``args`` bucket (``nargs="*"``, default ``[]``) collects — there
@@ -111,14 +111,14 @@ def _run(args):
         #
         # ``dispatch`` is NOT a shoggoth.py subcommand —
         # the dispatcher is its own CLI utility
-        # (``shoggoth/workflow/scripts/dispatch.py``) and is
+        # (``shoggoth/workflow/dispatch.py``) and is
         # reached via the ``dispatch`` step of the
         # ``command-handler`` DAG (see
-        # ``shoggoth/chart/files/workflow/argo/templates/command-handler.yaml``).
+        # ``shoggoth/chart/files/argo/templates/command-handler.yaml``).
         # ``sandbox`` is the placeholder for the future
         # /sandbox slash command; it's handled by the
         # dispatcher's ``_handle_sandbox`` (in
-        # ``shoggoth/workflow/scripts/shoggoth/commands/dispatch.py``)
+        # ``shoggoth/workflow/shoggoth/commands/dispatch.py``)
         # and never reaches the worker step. Neither belongs in
         # ``WORKFLOW_COMMANDS`` — see ``state.py`` for the
         # rationale.
