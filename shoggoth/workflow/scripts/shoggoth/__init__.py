@@ -8,7 +8,7 @@ each subsystem can be read in isolation; the ``shoggoth.py`` shim
 at the parent directory re-exports ``main()`` and is the entrypoint
 every caller invokes.
 
-Public surface (re-exported for backward compat):
+Public surface (re-exported at the package root):
   * ``Gitea`` / ``Redmine`` / ``Github`` — HTTP clients.
   * ``Agent`` / ``Shoggoth`` — workflow engine.
   * Every ``*Command`` / ``*Sync`` class — the dispatch targets.
@@ -39,9 +39,9 @@ from urllib.parse import urlencode, urlsplit, urlparse
 from urllib.request import Request, urlopen, HTTPCookieProcessor, build_opener
 from urllib.error import URLError, HTTPError
 
-# Re-exports: the original shoggoth.py exported every top-level name
-# into the script's namespace; callers don't care which submodule the
-# name came from.
+# Re-exports: the package root flattens the submodule names so
+# ``shoggoth.<Name>`` reads the same regardless of which submodule
+# defines it.
 # Keep the list explicit so adding a new public class is a conscious
 # decision rather than an accidental import.
 from .state import (

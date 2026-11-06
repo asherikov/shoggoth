@@ -1,7 +1,6 @@
 ---
 # gitea-pr-update — webhook entry from Gitea's pull_request_review /
-# pull_request_review_request / pull_request_comment events. Equivalent to
-# kestra's main_shoggoth_gitea-pr-update.yml.
+# pull_request_review_request / pull_request_comment events.
 #
 # Webhook endpoint (set up by shoggoth.py argo-webhooks):
 #   POST http://api.{domain}/argo/api/v1/events/shoggoth/gitea-pr-update

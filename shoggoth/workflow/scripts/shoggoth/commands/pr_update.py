@@ -57,12 +57,11 @@ class PrUpdateCommand(CommandBase):
     # The worker only handles worker-owned slash commands
     # (``/review``, ``/squash``, ``/rebase``, ``/drop``,
     # ``/do``). It does NOT consult the slash-command
-    # catalog (``slash_commands.SUPPORTED_COMMANDS``), the
-    # ``/help`` renderer (``format_help_text``), or the
-    # ``DISPATCHER_HANDLED`` set. The dispatcher is the
-    # SOLE owner of dispatcher-handled commands (``/help``,
-    # ``/sandbox``): its ``_handle_pr_update`` body-shape
-    # router inspects ``payload.comment.body`` and
+    # catalog (``slash_commands.SUPPORTED_COMMANDS``) or the
+    # ``/help`` renderer (``format_help_text``). The dispatcher
+    # is the SOLE owner of dispatcher-handled commands
+    # (``/help``, ``/sandbox``): its ``_handle_pr_update``
+    # body-shape router inspects ``payload.comment.body`` and
     # dispatches to the matching ``_handle_<name>`` (or
     # passes the event through to the worker). The worker
     # therefore sees only commands it knows how to handle,
@@ -943,9 +942,9 @@ class PrUpdateCommand(CommandBase):
             # sees the body). The worker has no
             # ``_slash_help`` or ``_slash_sandbox`` method,
             # so the unknown-command branch logs the no-op
-            # and returns — same observable effect as the
-            # previous ``DISPATCHER_HANDLED`` short-circuit
-            # but with no catalog import on the worker side.
+            # and returns — same observable effect as a
+            # dispatcher short-circuit, but with no catalog
+            # import on the worker side.
             log(f"slash-command: no handler for /{command}; "
                 f"silently no-op (no PR-visible response)")
             return

@@ -6,8 +6,11 @@
   Deployment). Both use the `local-path` StorageClass.
 
   The `cdash-init` ConfigMap runs from the cdash container's postStart hook:
-  it seeds the `slave` user and mints a FULL_ACCESS API token, then stores it
-  in OpenBao. web-internal picks the token up on its next restart.
+  it seeds the `slave` user and mints a FULL_ACCESS API token, then writes it
+  to Secret/cdash-api-token through the Kubernetes API using the pod's own
+  ServiceAccount. The PushSecret in cdash-api-token-push.yaml mirrors that
+  Secret into OpenBao, so the pod never holds an OpenBao credential.
+  web-internal picks the token up on its next restart.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "cdash")) }}
 apiVersion: v1
@@ -68,17 +71,8 @@ data:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    . /shoggoth/rendered/cdash/cdash.env
-
-    export APP_KEY DB_PASSWORD
-    export CDASH_AUTHENTICATION_PROVIDER LOGIN_FIELD
-    export LDAP_HOSTS LDAP_PORT LDAP_PROVIDER LDAP_LOCATE_USERS_BY LDAP_USERNAME LDAP_PASSWORD LDAP_BASE_DN
-    export USER_CREATE_PROJECTS TOKEN_DURATION OPENLDAP_SLAVE_PASSWORD SHOGGOTH_VAULT_TOKEN OPENBAO_ADDR
-
     printf 'Listen 80\n' > /etc/apache2/ports.conf
     sed -i 's/:8080/:80/g' /etc/apache2/sites-enabled/cdash-site.conf
-
-    unset LDAP_BIND_PASSWORD
 
     exec /cdash/docker/docker-entrypoint.sh "$@"
 ---
@@ -95,10 +89,6 @@ data:
   init.sh: |
     #!/usr/bin/env bash
     set -euo pipefail
-    . /shoggoth/rendered/cdash/cdash.env
-    export APP_KEY DB_PASSWORD
-    export CDASH_AUTHENTICATION_PROVIDER LOGIN_FIELD
-    export LDAP_HOSTS LDAP_PORT LDAP_PROVIDER LDAP_LOCATE_USERS_BY LDAP_USERNAME LDAP_PASSWORD LDAP_BASE_DN
     cd /cdash
     echo "shoggoth: Waiting for CDash to be ready..."
     for i in $(seq 1 30); do
@@ -205,28 +195,58 @@ data:
         printf '%s\n' "${GRAPHQL_RESPONSE}" >&2
         exit 1
     fi
-    OBAO_HEALTH="$(curl -s -o /dev/null -w '%{http_code}' "${OPENBAO_ADDR}/v1/sys/health" 2>/dev/null)" || true
-    if ! printf '%s' "${OBAO_HEALTH}" | grep -qE '^(200|429|472|473)$'; then
-        echo "shoggoth: FATAL: OpenBao not ready (HTTP ${OBAO_HEALTH})" >&2
+    SA_TOKEN_PATH="/var/run/secrets/kubernetes.io/serviceaccount/token"
+    SA_CA_PATH="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+    SA_TOKEN=""
+    if [ -f "${SA_TOKEN_PATH}" ]; then
+        SA_TOKEN="$(cat "${SA_TOKEN_PATH}")"
+    fi
+    if [ -z "${SA_TOKEN}" ]; then
+        echo "shoggoth: FATAL: service account token not mounted at ${SA_TOKEN_PATH}" >&2
         exit 1
     fi
-    echo "shoggoth: OpenBao is unsealed (HTTP ${OBAO_HEALTH})"
-    OBAO_RESP="$(mktemp)"
-    OBAO_HTTP="$(curl -s -w '%{http_code}' -o "${OBAO_RESP}" -X POST \
-        "${OPENBAO_ADDR}/v1/secret/data/cdash/api-token" \
-        -H "X-Vault-Token: ${SHOGGOTH_VAULT_TOKEN}" \
+    if [ ! -f "${SA_CA_PATH}" ]; then
+        echo "shoggoth: FATAL: CA certificate not mounted at ${SA_CA_PATH}" >&2
+        exit 1
+    fi
+    K8S_HOST="${KUBERNETES_SERVICE_HOST:-}"
+    K8S_PORT="${KUBERNETES_SERVICE_PORT:-}"
+    if [ -z "${K8S_HOST}" ] || [ -z "${K8S_PORT}" ]; then
+        echo "shoggoth: FATAL: KUBERNETES_SERVICE_HOST or KUBERNETES_SERVICE_PORT not set" >&2
+        exit 1
+    fi
+    if [ -z "${SHOGGOTH_NAMESPACE:-}" ]; then
+        echo "shoggoth: FATAL: SHOGGOTH_NAMESPACE not set" >&2
+        exit 1
+    fi
+    K8S_API="https://${K8S_HOST}:${K8S_PORT}"
+    SECRET_URL="${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets/cdash-api-token"
+    SECRETS_URL="${K8S_API}/api/v1/namespaces/${SHOGGOTH_NAMESPACE}/secrets"
+    TOKEN_B64="$(printf '%s' "${RAW_TOKEN}" | base64 -w0)"
+    SECRET_MANIFEST="{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"cdash-api-token\",\"namespace\":\"${SHOGGOTH_NAMESPACE}\"},\"type\":\"Opaque\",\"data\":{\"token\":\"${TOKEN_B64}\"}}"
+    K8S_RESP="$(mktemp)"
+    K8S_CODE="$(curl -sS --cacert "${SA_CA_PATH}" -w '%{http_code}' -o "${K8S_RESP}" \
+        -X PUT \
+        -H "Authorization: Bearer ${SA_TOKEN}" \
         -H "Content-Type: application/json" \
-        -d "{\"data\":{\"value\":\"${RAW_TOKEN}\"}}" 2>&1)" || true
-    if ! printf '%s' "${OBAO_HTTP}" | grep -qE '^(200|204)$'; then
-        echo "shoggoth: FATAL: Failed to store CDash API token in OpenBao (HTTP ${OBAO_HTTP})" >&2
-        echo "shoggoth: Response: $(cat "${OBAO_RESP}" 2>/dev/null)" >&2
-        echo "shoggoth: OPENBAO_ADDR=${OPENBAO_ADDR}" >&2
-        echo "shoggoth: Token length: ${#SHOGGOTH_VAULT_TOKEN}" >&2
-        rm -f "${OBAO_RESP}"
+        -d "${SECRET_MANIFEST}" \
+        "${SECRET_URL}" 2>/dev/null)" || K8S_CODE="000"
+    if [ "${K8S_CODE}" = "404" ]; then
+        K8S_CODE="$(curl -sS --cacert "${SA_CA_PATH}" -w '%{http_code}' -o "${K8S_RESP}" \
+            -X POST \
+            -H "Authorization: Bearer ${SA_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${SECRET_MANIFEST}" \
+            "${SECRETS_URL}" 2>/dev/null)" || K8S_CODE="000"
+    fi
+    if [ "${K8S_CODE}" != "200" ] && [ "${K8S_CODE}" != "201" ] && [ "${K8S_CODE}" != "202" ]; then
+        echo "shoggoth: FATAL: Failed to write Secret cdash-api-token (HTTP ${K8S_CODE})" >&2
+        echo "shoggoth: Response: $(head -c 400 "${K8S_RESP}" 2>/dev/null)" >&2
+        rm -f "${K8S_RESP}"
         exit 1
     fi
-    rm -f "${OBAO_RESP}"
-    echo "shoggoth: CDash slave token created and stored in OpenBao"
+    rm -f "${K8S_RESP}"
+    echo "shoggoth: CDash slave token created and stored in Secret cdash-api-token"
     echo "shoggoth: Restart web-internal to pick up the new token"
 ---
 {{- if (include "shoggoth.isServiceEnabled" (list . "cdash-db")) }}
@@ -371,29 +391,9 @@ spec:
         app: cdash
         app.kubernetes.io/component: cdash
       annotations:
-        secret.reloader.stakater.com/reload: cdash-db-password
+        secret.reloader.stakater.com/reload: cdash-db-password,cdash-app-key,openldap-ldapauth-password,openldap-slave-password
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
-      initContainers:
-      - name: wait-bringup
-        image: asherikov/shoggoth_tools:alpine
-        imagePullPolicy: IfNotPresent
-        command:
-        - sh
-        - -c
-        args:
-        - "echo \"wait-bringup: checking sentinel /shoggoth/rendered/.bringup-done\"\nif [ ! -f /shoggoth/rendered/.bringup-done ]; then\n  echo \"wait-bringup: sentinel not found, dumping diagnostics:\" >&2\n  echo \"wait-bringup: /shoggoth/rendered/ exists: $([ -d /shoggoth/rendered ] && echo yes || echo no)\" >&2\n  if [ -d /shoggoth/rendered ]; then\n    echo \"wait-bringup: contents:\" >&2\n    ls -la /shoggoth/rendered/ >&2 || true\n  fi\n  if [ -f /shoggoth/rendered/bringup.log ]; then\n    echo \"wait-bringup: bringup.log tail:\" >&2\n    tail -20 /shoggoth/rendered/bringup.log >&2 || true\n  fi\n  echo \"wait-bringup: exiting, bringup may still be in progress\" >&2\n  exit 1\nfi\necho \"wait-bringup: sentinel found\"\n"
-        resources:
-          requests:
-            memory: 32Mi
-            cpu: 50m
-          limits:
-            memory: 64Mi
-            cpu: 200m
-        volumeMounts:
-        - name: rendered
-          mountPath: /shoggoth/rendered
-          readOnly: true
       containers:
       - name: cdash
         image: kitware/cdash:v5.4.0
@@ -408,6 +408,11 @@ spec:
         env:
         - name: APP_URL
           value: http://cdash.{{ .Values.identity.domain }}
+        - name: APP_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cdash-app-key
+              key: app-key
         - name: DB_HOST
           value: cdash-db
         - name: DB_PORT
@@ -416,20 +421,56 @@ spec:
           value: cdash
         - name: DB_USERNAME
           value: cdash
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: cdash-db-password
+              key: password
         - name: QUEUE_CONNECTION
           value: database
+        - name: CDASH_AUTHENTICATION_PROVIDER
+          value: ldap
+        - name: LOGIN_FIELD
+          value: Username
+        - name: LDAP_HOSTS
+          value: openldap
+        - name: LDAP_PORT
+          value: '389'
+        - name: LDAP_PROVIDER
+          value: openldap
+        - name: LDAP_LOCATE_USERS_BY
+          value: uid
+        - name: LDAP_USERNAME
+          value: uid=ldapauth,ou=people,{{ include "shoggoth.ldapBaseDn" . }}
+        - name: LDAP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openldap-ldapauth-password
+              key: password
+        - name: LDAP_BASE_DN
+          value: {{ include "shoggoth.ldapBaseDn" . }}
+        - name: USER_CREATE_PROJECTS
+          value: 'true'
+        - name: TOKEN_DURATION
+          value: '0'
+        - name: OPENLDAP_SLAVE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openldap-slave-password
+              key: password
         - name: OTEL_TRACES_EXPORTER
           value: otlp
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: http://otelcol:4318
         - name: SHOGGOTH_DOMAIN
           value: {{ .Values.identity.domain }}
+        - name: SHOGGOTH_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         volumeMounts:
         - name: storage
           mountPath: /cdash/storage
-        - name: rendered
-          mountPath: /shoggoth/rendered
-          readOnly: true
         - name: entrypoint-script
           mountPath: /cdash/entrypoint-wrapper.sh
           subPath: entrypoint-wrapper.sh
@@ -450,7 +491,7 @@ spec:
               - -c
               - |
                 set -o pipefail
-                LOG=/shoggoth/rendered/cdash-init.log
+                LOG=/cdash/storage/cdash-init.log
                 exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
                 echo "=== cdash-init start $(date -Iseconds) ==="
                 /bin/bash /shoggoth/cdash/init.sh
@@ -477,10 +518,6 @@ spec:
           periodSeconds: 10
           failureThreshold: 6
       volumes:
-      - name: rendered
-        hostPath:
-          path: /var/lib/rancher/k3s/storage/{{ .Values.identity.instanceDir }}/rendered
-          type: DirectoryOrCreate
       - name: entrypoint-script
         configMap:
           name: cdash-entrypoint
@@ -495,6 +532,7 @@ spec:
       - name: db-password
         secret:
           secretName: cdash-db-password
+      serviceAccountName: cdash
 ---
 {{- if (include "shoggoth.isServiceEnabled" (list . "cdash-db")) }}
 apiVersion: v1
@@ -505,6 +543,18 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: cdash-db
+    app.kubernetes.io/component: cdash
+{{- end }}
+---
+{{- if (include "shoggoth.isServiceEnabled" (list . "cdash")) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cdash
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: cdash
     app.kubernetes.io/component: cdash
 {{- end }}
 {{- end }}

@@ -93,16 +93,16 @@ class Agent:
 
     # Env-var names whose values must NEVER leak to the qwen subprocess.
     # Mirrors ``qwen_security``: stripping these from the inherited env
-    # before Popen() keeps workflow-injected secrets (OpenBao address,
-    # default AI token) out of the model context. The Gitea / Redmine /
-    # LDAP / SSH tokens are no longer injected by workflow templates
-    # (the script reads them from K8s directly), so they don't need
-    # filtering here. SHOGGOTH_VAULT_TOKEN / OPENBAO_ADDR are kept as a
-    # defensive measure — they are no longer read by this script after
-    # the K8s refactor, but if a workflow template still injects them,
-    # they shouldn't reach the agent either.
+    # before Popen() keeps workflow-injected secrets (default AI token)
+    # out of the model context. The Gitea / Redmine / LDAP / SSH tokens
+    # are no longer injected by workflow templates (the script reads
+    # them from K8s directly), so they don't need filtering here.
+    # SHOGGOTH_VAULT_TOKEN is kept as a defensive measure — it is no
+    # longer read by this script after the K8s refactor, but if a
+    # workflow template still injects it, it shouldn't reach the agent
+    # either.
     SECRET_ENV_KEYS = frozenset([
-        "SHOGGOTH_VAULT_TOKEN", "OPENBAO_ADDR",
+        "SHOGGOTH_VAULT_TOKEN",
         "SHOGGOTH_AI_DEFAULT_TOKEN",
     ])
 

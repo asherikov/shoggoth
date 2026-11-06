@@ -206,3 +206,53 @@ pod-security.kubernetes.io/enforce: {{ include "shoggoth.podSecurityProfile" . }
 pod-security.kubernetes.io/warn: {{ include "shoggoth.podSecurityProfile" . }}
 pod-security.kubernetes.io/audit: {{ include "shoggoth.podSecurityProfile" . }}
 {{- end -}}
+
+{{/*
+ConfigMap `data` entries for every file matching a glob under the chart's
+files/ tree. Used under an existing `data:` key:
+
+  data:
+    {{- include "shoggoth.filesData" (list . "files/grafana/dashboards/*.json" false) | nindent 2 }}
+
+Each key is the file's basename and each value is the file's content, so a
+ConfigMap built this way is byte-compatible with a hand-written data: block
+using the same names — every volumeMount, projected source and subPath that
+references a key keeps working, and `make helm_lint_gates` still sees the
+same resource.
+
+The third argument selects how the content is treated:
+
+  false — mounted verbatim. The right choice for files that carry another
+    engine's templating (Grafana's `{{host_name}}`, `{{service}}`; Argo's
+    `{{workflow.parameters.X}}`) or none at all: Helm never evaluates those
+    braces, so nothing can silently eat them. Files in this mode must NOT
+    carry Helm's literal-brace escape (`{{`...`}}`) — .Files.Get does not
+    render, so the escape text itself would land in the ConfigMap.
+
+  true  — the content is passed through `tpl` with the chart context, for
+    files that substitute `.Values...` or `include ...` at deploy time. A
+    file in this mode must keep the literal-brace escape around any foreign
+    templating, exactly as an inline block scalar does.
+
+Invariants this form depends on, both of which fail silently:
+
+  - basenames must be unique across the whole glob. `base` is applied to
+    every match, so files/a/x.conf and files/b/x.conf emit the same key
+    twice and the second silently wins. `make helm_lint_dupes` (yamllint
+    key-duplicates on the render) is what turns that into a failure.
+  - a glob matching nothing renders an empty `data:`, and a misspelled
+    .Files.Get path renders an empty string. Neither errors. The
+    render-diff check (helm template before/after a change) is the only
+    thing that catches a file that stopped being picked up.
+*/}}
+{{- define "shoggoth.filesData" -}}
+{{- $root := index . 0 -}}
+{{- $glob := index . 1 -}}
+{{- $render := index . 2 -}}
+{{- range $path, $_ := $root.Files.Glob $glob -}}
+{{ base $path }}: |
+{{- $content := $root.Files.Get $path }}
+{{- if $render }}{{ $content = tpl $content $root }}{{ end }}
+{{- $content | trimSuffix "\n" | nindent 2 }}
+{{ end -}}
+{{- end }}

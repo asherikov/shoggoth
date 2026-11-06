@@ -192,25 +192,112 @@ spec:
               # array (the caller's group IDs) and `read -a GROUPS` fails on
               # it, which under `set -e` aborted the script at this line.
               IFS=',' read -r -a CRD_GROUP_LIST <<< "${CRD_GROUPS}"
-              NAMES=()
-              for g in "${CRD_GROUP_LIST[@]}"; do
-                # No `2>/dev/null || true` here on purpose. A Forbidden or an
-                # unreachable API server must fail this hook loudly; it used to
-                # be swallowed, leaving the list empty, which fell into the
-                # "no CRDs found -> exit 0" branch and skipped the wait
-                # entirely. That is how a broken ClusterRole stayed invisible.
-                # Newline-delimited so names stay separate: a space-separated
-                # string plus a "${NAMES// /}" squeeze glued the two groups
-                # into one giant bogus CRD name.
-                jp='{range .items[?(@.spec.group=="'"${g}"'")]}{.metadata.name}{"\n"}{end}'
-                while IFS= read -r n; do
-                  [ -n "${n}" ] && NAMES+=("${n}")
-                done < <(kubectl get crd -o jsonpath="${jp}")
-              done
-              if [ ${#NAMES[@]} -eq 0 ]; then
-                echo "FAIL: no CRDs found for groups: ${CRD_GROUPS}" >&2
+
+              # Retries for the two calls that can fail fast and silently.
+              # A kubectl that cannot REACH the API server says nothing about
+              # the CRDs, and this hook runs at the least idle moment of the
+              # whole install: `make crds_apply` has just pushed ~11 MB of CRD
+              # manifests into the API server server-side, and it re-runs the
+              # establish step for every CRD it touched. `kubectl wait` below
+              # is deliberately NOT wrapped — it carries its own --timeout and
+              # the Job's backoffLimit retries the whole attempt, so wrapping
+              # it would multiply the one budget that has to stay inside
+              # Helm's --timeout.
+              API_RETRIES="${API_RETRIES:-3}"
+              API_RETRY_DELAY="${API_RETRY_DELAY:-5}"
+              kctl() {
+                local attempt=1 errfile rc
+                errfile="${TMPDIR:-/tmp}/kctl-$$-${RANDOM}.err"
+                while :; do
+                  # `rc` is captured on the assignment's own line: a `cat` of
+                  # the stderr file in between would overwrite `$?` and every
+                  # failure would be reported as exit 0.
+                  rc=0
+                  "$@" 2>"${errfile}" || rc=$?
+                  if [ "${rc}" = 0 ]; then
+                    cat "${errfile}" >&2 || true
+                    rm -f "${errfile}"
+                    return 0
+                  fi
+                  cat "${errfile}" >&2 || true
+                  if [ "${attempt}" -ge "${API_RETRIES}" ]; then
+                    echo "FAIL: '$*' failed after ${API_RETRIES} attempts (exit ${rc})" >&2
+                    rm -f "${errfile}"
+                    return "${rc}"
+                  fi
+                  echo "  attempt ${attempt}/${API_RETRIES} of '$*' failed (exit ${rc}); retrying in ${API_RETRY_DELAY}s" >&2
+                  attempt=$((attempt + 1))
+                  sleep "${API_RETRY_DELAY}"
+                done
+              }
+
+              # ONE API call for the whole inventory, not one per group.
+              # `kubectl get crd -o jsonpath` fetches every CRD object in full
+              # and filters client-side, so the per-group call was downloading
+              # the entire inventory once per group — ~30 CRDs, several of them
+              # multi-megabyte — on the least idle moment of the install.
+              # Fetching once and splitting by group locally halves that
+              # payload, and it is what makes the per-group check below
+              # possible at all.
+              if ! INVENTORY=$(kctl kubectl get crd -o jsonpath='{range .items[*]}{.spec.group}{"\t"}{.metadata.name}{"\n"}{end}'); then
+                echo "FAIL: could not read the CRD inventory from the API server" >&2
                 echo "      run 'make crds_apply' — the CRDs live outside the chart." >&2
                 exit 1
               fi
+
+              NAMES=()
+              for g in "${CRD_GROUP_LIST[@]}"; do
+                # A group with no CRDs is a hard failure, and it used to be
+                # invisible. The per-group `kubectl get crd` sat in a process
+                # substitution (`done < <(kubectl …)`), whose exit status
+                # `set -e` never sees: an unreachable API server left that
+                # group's list empty and the hook went on to wait for the
+                # OTHER groups only. That is how this hook once waited for
+                # eight Argo CRDs and zero external-secrets.io ones, on a
+                # cluster where the ESO CRDs were installed and being queried
+                # three minutes earlier — and the "no CRDs found" branch below
+                # never fired, because NAMES was not empty.
+                GROUP_NAMES=()
+                while IFS=$'\t' read -r grp name; do
+                  if [ "${grp}" = "${g}" ] && [ -n "${name}" ]; then
+                    GROUP_NAMES+=("${name}")
+                  fi
+                done <<< "${INVENTORY}"
+                if [ ${#GROUP_NAMES[@]} -eq 0 ]; then
+                  echo "FAIL: no CRDs found in API group '${g}' (wanted groups: ${CRD_GROUPS})" >&2
+                  echo "      run 'make crds_apply' — the CRDs live outside the chart." >&2
+                  if [ -n "${INVENTORY}" ]; then
+                    echo "      groups the API server does serve:" >&2
+                    cut -f1 <<< "${INVENTORY}" | sort -u | sed 's/^/        /' >&2
+                  fi
+                  exit 1
+                fi
+                echo "API group '${g}': ${#GROUP_NAMES[@]} CRDs"
+                NAMES+=("${GROUP_NAMES[@]}")
+              done
               echo "Waiting for ${#NAMES[@]} CRDs to be Established: ${NAMES[*]}"
-              kubectl wait --for=condition=Established --timeout="${WAIT_TIMEOUT}" customresourcedefinition "${NAMES[@]}"
+              if ! kubectl wait --for=condition=Established --timeout="${WAIT_TIMEOUT}" \
+                      customresourcedefinition "${NAMES[@]}"; then
+                # Name the stragglers. Both messages this hook used to end on
+                # — "Unable to connect to the server" and "timed out waiting
+                # for the condition" — leave the operator guessing which CRD
+                # is at fault, and on this chart the answer is almost always
+                # the two biggest Argo ones (clusterworkflowtemplates,
+                # cronworkflows — 2.7 and 2.9 MB of embedded WorkflowSpec
+                # schema), which the API server finishes last.
+                declare -A ESTABLISHED=()
+                while IFS=$'\t' read -r cname cstatus; do
+                  if [ -n "${cname}" ]; then
+                    ESTABLISHED["${cname}"]="${cstatus}"
+                  fi
+                done <<< "$(kctl kubectl get crd -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.conditions[?(@.type=="Established")].status}{"\n"}{end}' || true)"
+                for n in "${NAMES[@]}"; do
+                  st="${ESTABLISHED[${n}]:-unknown}"
+                  if [ "${st}" != "True" ]; then
+                    echo "        ${n} (Established=${st})" >&2
+                  fi
+                done
+                echo "FAIL: not every CRD became Established within ${WAIT_TIMEOUT}" >&2
+                echo "      run 'make crds_apply' — the CRDs live outside the chart." >&2
+                exit 1
+              fi

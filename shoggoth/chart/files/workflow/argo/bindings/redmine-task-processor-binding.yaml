@@ -1,7 +1,6 @@
 ---
 # redmine-task-processor — webhook entry from Redmine's issue.updated /
-# issue.created events. Equivalent to kestra's
-# main_shoggoth_redmine-task-processor.yml.
+# issue.created events.
 #
 # Webhook endpoint (set up by shoggoth.py redmine-argo-webhooks):
 #   POST http://api.{domain}/argo/api/v1/events/shoggoth/redmine-task-processor

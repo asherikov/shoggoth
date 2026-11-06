@@ -279,7 +279,7 @@ granting full access to OpenBao’s secret store. This allows human operators in
 |---------|---------------------------|-------------------------------------------------------------------------|
 | Gitea   | LDAP (bind as `ldapauth`) | On-the-fly account creation; `admins` group members become Gitea admins |
 | Redmine | LDAP (bind as `ldapauth`) | On-the-fly account creation; auto-configured via entrypoint             |
-| CDash   | LDAP (bind as `ldapauth`) | Configured in entrypoint                                                |
+| CDash   | LDAP (bind as `ldapauth`) | Configured by chart env vars                                            |
 | OpenBao | LDAP (bind as `ldapauth`) | `admins` → `shoggoth-admin` policy                                      |
 
 Client Configuration
@@ -598,14 +598,14 @@ make drop_image_tag IMAGE=<repo> TAG=<tag>   # evict a registry tag
 `make k3s_purge_orphans` is the one that removes stale state rather than
 data. It lists the ExternalSecret/PushSecret/SecretStore objects in the
 namespace that the **chart** no longer renders — leftovers from releases
-that predate it, such as the pre-Argo `kestra-db-password` and the
-deprecated `openldap-slave-reviewer-password`. They are custom resources, so
-no Helm release owns them and no `helm uninstall` will ever remove them; they
-sit in the namespace forever and keep the ESO controller reconciling store
-paths nothing reads. `make down` removes them as part of the teardown; run
-the target on its own to inspect them first, and pass `CONFIRM=1` to delete
-what it reports. It deletes CRs, not Secrets — but `make down` purges the
-Secrets too, through the chart's post-delete hook.
+that predate it, such as the deprecated `openldap-slave-reviewer-password`
+or an ExternalSecret for a service the chart no longer ships. They are custom
+resources, so no Helm release owns them and no `helm uninstall` will ever
+remove them; they sit in the namespace forever and keep the ESO controller
+reconciling store paths nothing reads. `make down` removes them as part of
+the teardown; run the target on its own to inspect them first, and pass
+`CONFIRM=1` to delete what it reports. It deletes CRs, not Secrets — but
+`make down` purges the Secrets too, through the chart's post-delete hook.
 
 The credential Secrets — every Secret the External Secrets Operator
 projected, plus the ESO store tokens (`shoggoth-openbao-eso-read-token` and
@@ -693,11 +693,11 @@ Known issues
   retry produces a fresh `Workflow` CRD. Result: one webhook delivery → two (or
   occasionally more) workflows, each spawning its own pod.
 
-  v3.7.0 and the previous kestra-based dispatch did not have this issue: neither
-  wrapped the workflow/execution Create in a retry loop, so a transient
-  response-loss could not produce duplicates. v4’s retry was introduced as part
-  of broader “make event dispatch more resilient” changes; the resilience comes
-  at the cost of double-creation on flaky networks.
+  v3.7.0 did not have this issue: it did not wrap the workflow Create in a
+  retry loop, so a transient response-loss could not produce duplicates.
+  v4’s retry was introduced as part of broader “make event dispatch more
+  resilient” changes; the resilience comes at the cost of double-creation
+  on flaky networks.
 
   Patchable upstream by either (a) hashing
   `{binding-name, payload-sha256, discriminator}` for an idempotent workflow
@@ -706,7 +706,7 @@ Known issues
   dispatch’s Create call (keeping retry on Watch/List operations only). In the
   meantime, the doubling is accepted. If the noise becomes problematic, a
   post-creation dedup pass can be added to the maintenance DAG
-  (`shoggoth/workflow/argo/templates/maintenance.yaml`) that finds duplicate
+  (`shoggoth/chart/files/workflow/argo/templates/maintenance.yaml`) that finds duplicate
   workflows by `workflowEventBinding` label and sub-second `creationTimestamp`
   deltas and deletes all but the oldest — this is not implemented because the
   duplicates are inert (each is a normal Failed workflow, not a corrupted one).
@@ -805,7 +805,13 @@ Operator notes:
 - `make crds_apply` applies the CRDs straight from their upstream sources with
   `kubectl apply --server-side`: the Argo submodule's per-CRD files and the
   External Secrets bundle. There is no vendored copy and no generator — see
-  `make/k3s.mk` for why they must stay out of the chart.
+  `make/k3s.mk` for why they must stay out of the chart. It then waits for
+  the CRDs it pushed to be Established, scoped to the API groups those files
+  own (derived from the files, not hardcoded) and fatally: a cluster with
+  foreign CRDs in it must not gate on those, and a soft `WARN` after 45s let
+  a half-established API server through to `helm upgrade --install`, where
+  the CRD hook then burned its whole budget waiting for the two biggest Argo
+  CRDs — the ones the API server finishes last.
 - `make clusterviz` diagrams are one pipeline:
   `helm template | yq 'select(kind in …)' | kube-diagrams -`.
 - `make up` validates `shoggoth/<instance>.yaml` indirectly: the file is
@@ -847,7 +853,16 @@ Operator notes:
     post-install hook runs, so a post-install wait cannot protect the CRs
     the release creates. The CRDs live outside the chart (upstream
     submodules, applied by `make crds_apply`), so the hook is the safety
-    net for a `helm upgrade --install` run outside `make up`.
+    net for a `helm upgrade --install` run outside `make up`. It reads the
+    whole CRD inventory in ONE API call and splits it by group locally — the
+    per-group `kubectl get crd` it used to make fetched every CRD object in
+    full once per group, and its exit status sat in a process substitution
+    where `set -e` could not see it, so an unreachable API server left that
+    group's list empty and the hook went on waiting for the OTHER groups
+    only. A configured group that yields no CRDs is now a hard failure that
+    names the group and lists the ones the API server does serve, the two
+    calls that can fail fast are retried three times, and a `kubectl wait`
+    that times out names the CRDs that are not Established.
   - `zz-namespace-podsecurity.yaml` — a pre-install / pre-upgrade hook that
     puts the namespace's PodSecurity profile in place (above).
   - `zz-eso-pre-delete.yaml` — a pre-delete hook that removes the release's
@@ -879,7 +894,14 @@ Operator notes:
   the release fails with `timed out waiting for the condition` and none of
   the hook's output reaches the operator. The CRD hook waits 120s per
   attempt with `backoffLimit: 1` — two attempts — against Helm's 10m
-  default, so it fails with its own diagnostic first.
+  default, so it fails with its own diagnostic first. The two API reads
+  inside one attempt are retried three times on top of that, because a
+  kubectl that cannot REACH the API server says nothing about the CRDs and
+  this hook runs at the least idle moment of the install; `kubectl wait`
+  itself is deliberately NOT wrapped, since it carries its own `--timeout`
+  and wrapping it would multiply the one budget that has to stay inside
+  Helm's. No `activeDeadlineSeconds` either — it would kill the pod without
+  printing the diagnostic, which is the exact failure it is there to avoid.
 - The hook Job carries `helm.sh/hook-output-log-policy: hook-failed`. Helm
   prints a failed hook's pod log to stderr because of it, so the diagnostic
   reaches the operator without anyone having to know the Job's name. The log
@@ -979,11 +1001,11 @@ shape is fixed:
 - `target.creationPolicy` is `Owner` unless another writer owns the value.
   `Orphan` + `refreshInterval: 0s` is the pairing for a credential that a
   script writes straight into the K8s Secret (`slave-token`, the runner
-  registration): ESO must not adopt or overwrite it, and the paired
-  PushSecret is the only writer that goes *out* to OpenBao. Without those
-  flags the controller overwrites the script's write with stale OpenBao
-  data on the next reconcile, and the PushSecret sees no change in K8s and
-  skips pushing — leaving the OpenBao value stale.
+  registration, `cdash-api-token`): ESO must not adopt or overwrite it, and
+  the paired PushSecret is the only writer that goes *out* to OpenBao.
+  Without those flags the controller overwrites the script's write with
+  stale OpenBao data on the next reconcile, and the PushSecret sees no
+  change in K8s and skips pushing — leaving the OpenBao value stale.
 - openbao-bootstrap Phase B seeds the OpenBao path with a random value on a
   fresh install, so the ExternalSecret only has to project it. A credential
   whose value comes from a file (`.shoggoth.private/…`) is mirrored into
@@ -1059,6 +1081,42 @@ pod's resolution in step with the namespace's, and two copies of it drift.
 Two pods deliberately opt out and keep `dnsPolicy: ClusterFirstWithHostNet`
 — `registry` and `web-external`, both `hostNetwork: true`, which resolve
 through the host's resolver rather than the namespace's.
+
+**Large embedded files live in `files/`.** Content that a ConfigMap mounts
+as a file — Grafana dashboards, agent-plugin sources, Argo workflow
+templates and event bindings, init scripts, service configs — is not pasted
+into a template as a block scalar. It lives under
+`shoggoth/chart/files/<service>/…` and reaches the ConfigMap through one
+helper:
+
+    data:
+      {{- include "shoggoth.filesData" (list . "files/grafana/dashboards/*.json" false) | nindent 2 }}
+
+Each key is the file's basename and each value is the file's content, so a
+ConfigMap built this way is byte-compatible with the hand-written block it
+replaced — every volumeMount, projected source and subPath keeps working,
+and `make helm_lint_gates` still sees the same resource. The third argument
+picks how the content is treated:
+
+- `false` — mounted verbatim. The right choice for content that carries
+  another engine's templating (Grafana's `{{host_name}}`, Argo's
+  `{{workflow.parameters.X}}`) or none at all: Helm never evaluates those
+  braces, so nothing can silently eat them. Such a file must *not* carry
+  Helm's literal-brace escape (`` {{`…`}} ``) — `.Files.Get` does not
+  render, so the escape text itself would land in the ConfigMap.
+- `true` — the content is rendered with the chart context through `tpl`,
+  for files that substitute `.Values…` or `include …` at deploy time. A
+  file in this mode must keep the literal-brace escape around any foreign
+  templating, exactly as an inline block scalar does.
+
+Two invariants the glob form depends on, both of which fail silently:
+basenames must be unique across the whole glob (`base` is applied to every
+match, so two files sharing a name emit one key twice and the second wins —
+`make helm_lint_dupes` turns that into a failure), and a glob that matches
+nothing renders an empty `data:` rather than an error, so a path typo shows
+up as an empty ConfigMap and only a render diff catches it. `make/lint.mk`
+therefore lists `files/` in `CHART_SOURCES`: an edit to a file there must
+invalidate the offline render exactly like a template edit.
 
 
 References

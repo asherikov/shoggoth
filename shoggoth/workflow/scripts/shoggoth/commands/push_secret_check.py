@@ -45,13 +45,16 @@ class PushSecretCheck:
     # ``redmine-slave-token`` is included even though the redmine
     # pod's ``slave_token_init.rb`` POST caller — not the
     # maintenance workflow — is what writes its K8s Secret: the
-    # three PushSecrets share a SecretStore and a write token, so a
-    # single root-cause failure surfaces in all three and a single
-    # check covers all three.
+    # four PushSecrets share a SecretStore and a write token, so a
+    # single root-cause failure surfaces in all four and a single
+    # check covers all four. ``cdash-api-token`` is the same shape
+    # again — the cdash container's postStart hook mints the token
+    # and writes the K8s Secret itself.
     PUSH_SECRETS = (
         "gitea-slave-token",
         "gitea-runner-token",
         "redmine-slave-token",
+        "cdash-api-token",
     )
 
     # Small delay before querying so the controller has time to
@@ -153,8 +156,11 @@ class PushSecretCheck:
                   "to OpenBao. Three common causes, in order of likelihood: "
                   "(1) the write token at shoggoth-openbao-eso-write-token "
                   "is invalid (revoked, expired, or scoped wrong) — "
-                  "recovery is to delete that K8s Secret and re-run openbao "
-                  "init; (2) the shoggoth-eso-write policy is missing "
+                  "recovery is to re-run the openbao-bootstrap Job "
+                  "(``kubectl delete job openbao-bootstrap && make up``): "
+                  "it validates the stored token with ``lookup-self`` and "
+                  "re-mints it when this OpenBao no longer accepts it; "
+                  "(2) the shoggoth-eso-write policy is missing "
                   "``secret/metadata/<path>`` access — the Vault client "
                   "needs ``read`` for the pre-push ``managed-by`` check "
                   "AND ``create``+``update`` for the post-data metadata "
@@ -162,20 +168,28 @@ class PushSecretCheck:
                   "without the post-data grant the controller records "
                   "``set secret failed: ... PUT /v1/secret/metadata/<path> "
                   "Code: 403 permission denied`` even though the data "
-                  "write itself succeeded — recovery is to re-run openbao "
-                  "init (the policy is idempotent and re-applied "
-                  "unconditionally; the token stays valid); (3) the OpenBao "
-                  "secret at the PushSecret's ``remoteRef.remoteKey`` "
-                  "exists (it was created by the openbao init bootstrap) "
-                  "but does NOT carry "
+                  "write itself succeeded — recovery is to re-run the "
+                  "openbao-bootstrap Job (the policy is idempotent and "
+                  "re-applied unconditionally; the token stays valid); "
+                  "(3) the OpenBao secret at the PushSecret's "
+                  "``remoteRef.remoteKey`` exists but does NOT carry "
                   "``custom_metadata.managed-by: external-secrets`` — the "
                   "external-secrets Vault client (see "
-                  "``providers/v1/vault/client_push.go``) refuses to push "
-                  "to any remote secret that isn't tagged as managed by ESO, "
-                  "and the bootstrap's ``bao_put_value`` writes the data "
-                  "endpoint only (kv-v2 keeps the data and metadata "
-                  "endpoints separate) — recovery is to ``POST`` the "
-                  "missing marker once per affected path: "
+                  "``providers/v1/vault/client_push.go``) reads that marker "
+                  "before the data write and refuses to push to any remote "
+                  "secret that isn't tagged as managed by ESO, and it only "
+                  "self-asserts the marker AFTER a successful write, so a "
+                  "secret created by anything other than the client — the "
+                  "bootstrap's ``bao_put_value`` data-endpoint write, or "
+                  "redmine's ``slave_token_init.rb`` — stays untagged "
+                  "forever. The bootstrap tags all four PushSecret "
+                  "targets — ``gitea/slave-token``, ``gitea/runner-token``, "
+                  "``redmine/slave-token``, ``cdash/api-token`` — with "
+                  "``bao_put_metadata`` on every run, so recovery is "
+                  "to re-run the openbao-bootstrap Job; only a path that "
+                  "did not exist yet when the bootstrap ran (redmine's pod "
+                  "created it afterwards) needs the marker POSTed by hand "
+                  "once: "
                   "``curl -X POST -H 'X-Vault-Token: <root>' -H "
                   "'Content-Type: application/json' -d "
                   "'{\"custom_metadata\":{\"managed-by\":\"external-secrets\"}}' "
@@ -184,9 +198,7 @@ class PushSecretCheck:
                   "``kubectl annotate pushsecret <name> "
                   "force-sync=$(date +%s) --overwrite``). See Phase B.5 in "
                   "shoggoth/chart/templates/openbao.yaml for procedures (1) "
-                  "and (2); for a fresh cluster the bootstrap needs the "
-                  "``bao_put_metadata`` helper added (the script can't fix "
-                  "existing kv data).",
+                  "and (2).",
                   file=sys.stderr)
             die(f"pushsecret-check completed with {self.errors} error(s)")
         print("pushsecret-check: all PushSecrets are Ready")

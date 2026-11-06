@@ -15,3 +15,18 @@ RUN apk add --no-cache \
         openssh-client \
         python3 \
         py3-ldap3
+
+# OTLP/HTTP log export. ``shoggoth/otlp.py`` is a plain urllib client
+# with no OpenTelemetry SDK, so this single variable is the whole
+# contract — the PROTOCOL / TIMEOUT / SERVICE_NAME trio the slave image
+# needs exists for the SDKs, and this image installs none of them.
+ENV OTEL_EXPORTER_OTLP_ENDPOINT="http://otelcol:4318"
+# The workflow scripts run git (mirror sync, slave lifecycle) in pods
+# where nobody can answer a credential prompt; without this git blocks
+# on stdin until the caller's timeout instead of reporting the auth
+# failure. Same rationale as the slave image, which sets it too.
+ENV GIT_TERMINAL_PROMPT="0"
+# Argo captures these containers' stdout (``... 2>&1``); block-buffered
+# Python delays the log stream and reorders it against the step's own
+# output.
+ENV PYTHONUNBUFFERED="1"

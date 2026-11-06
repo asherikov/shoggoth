@@ -73,7 +73,7 @@ hosts:
 	DOMAIN="${DOMAIN}" HOST_IP="${HOST_IP}" ./shoggoth/setup-client.sh --update-hosts
 
 ping:
-	ping "${HOST_IP}"
+	ping -c 1 "${HOST_IP}"
 
 home:
 	firefox http://${DOMAIN}

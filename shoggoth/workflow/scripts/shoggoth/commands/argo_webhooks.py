@@ -29,11 +29,10 @@ from ..state import params
 class SetupArgoWebhooks(GiteaCommand):
     """Configure Gitea org webhooks to deliver events to Argo Workflows.
 
-    Replaces the Kestra-based equivalent that pointed at
-    /api/v1/main/executions/webhook/. Argo's events endpoint is
-    /api/v1/events/{namespace}/{discriminator} and accepts an arbitrary
-    JSON body (no path-suffix key). The discriminator must match the
-    WorkflowEventBinding selector (gitea-pr-update / gitea-ci-failure).
+    Argo's events endpoint is /api/v1/events/{namespace}/{discriminator}
+    and accepts an arbitrary JSON body (no path-suffix key). The
+    discriminator must match the WorkflowEventBinding selector
+    (gitea-pr-update).
     """
 
     def __init__(self, gitea):
@@ -55,12 +54,11 @@ class SetupArgoWebhooks(GiteaCommand):
 
         webhooks = [
             # gitea-ci-failure is intentionally NOT registered: the
-            # deleted Kestra flow `main_shoggoth_gitea-ci-failure.yml`
-            # carried `disabled: true`, and the WorkflowEventBinding
-            # kind has no equivalent kill switch (active by default
-            # once registered). To re-enable CI-failure dispatch in
-            # the future, add the WorkflowEventBinding under
-            # shoggoth/workflow/argo/bindings/ and re-introduce the
+            # WorkflowEventBinding kind has no equivalent kill switch
+            # (active by default once registered). To re-enable
+            # CI-failure dispatch in the future, add the
+            # WorkflowEventBinding under
+            # shoggoth/chart/files/workflow/argo/bindings/ and re-introduce the
             # entry below — with the maintainer understanding that
             # every workflow_run: failure event will spawn a
             # command-handler pod.

@@ -1,7 +1,9 @@
 ---
-# maintenance — equivalent to kestra's main_shoggoth_maintenance.yml.
-# Single-flight via synchronization mutex (was concurrency:limit:1/behavior:CANCEL).
-# DAG ordering preserves only the real cross-step dependencies; steps with
+# maintenance — periodic housekeeping for the shoggoth stack: webhook
+# registration, LDAP syncs, token writers, and the secret-bootstrap check.
+# Single-flight via synchronization mutex, so a submitted run queues in
+# Pending until the holder completes instead of racing it. DAG ordering
+# preserves only the real cross-step dependencies; steps with
 # disjoint state run in parallel. The five levels are:
 #   L0  setup-argo-webhooks               ┐ setup-redmine-argo-webhook (Redmine,
 #                                          ┘   independent of Gitea webhook state)
@@ -129,10 +131,6 @@ spec:
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
-      - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: "http/protobuf"
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "2000"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: REDMINE_SERVER
@@ -165,10 +163,6 @@ spec:
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
-      - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: "http/protobuf"
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "2000"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_DOMAIN
@@ -197,10 +191,6 @@ spec:
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
-      - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: "http/protobuf"
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "2000"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_DOMAIN
@@ -229,10 +219,6 @@ spec:
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
-      - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: "http/protobuf"
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "2000"
       - name: REDMINE_SERVER
         value: "http://redmine.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_DOMAIN
@@ -271,10 +257,6 @@ spec:
       env:
       - name: OTEL_EXPORTER_OTLP_ENDPOINT
         value: "http://otelcol:4318"
-      - name: OTEL_EXPORTER_OTLP_PROTOCOL
-        value: "http/protobuf"
-      - name: OTEL_EXPORTER_OTLP_TIMEOUT
-        value: "2000"
       - name: GITEA_SERVER_URL
         value: "http://git.{{workflow.parameters.SHOGGOTH_DOMAIN}}"
       - name: SHOGGOTH_DOMAIN

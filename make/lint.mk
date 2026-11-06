@@ -17,10 +17,15 @@ LINT_COLLISION_A=${LINT_TMP_DIR}/collision-a.yaml
 LINT_COLLISION_B=${LINT_TMP_DIR}/collision-b.yaml
 
 # Everything a render depends on. A change to any of these re-renders.
+# files/ is listed through `find` rather than $(wildcard .../**): the chart's
+# verbatim-mounted content (Grafana dashboards, plugin sources) lives there,
+# and make's `**` wildcard is version-dependent while find is not. An edit to
+# a file under files/ must invalidate the render exactly like a template edit.
 CHART_SOURCES=$(SHOGGOTH_CHART_ROOT)/Chart.yaml \
 	$(SHOGGOTH_CHART_ROOT)/values.yaml \
 	$(wildcard $(SHOGGOTH_CHART_ROOT)/templates/*.yaml) \
-	$(wildcard $(SHOGGOTH_CHART_ROOT)/templates/*.tpl)
+	$(wildcard $(SHOGGOTH_CHART_ROOT)/templates/*.tpl) \
+	$(shell find $(SHOGGOTH_CHART_ROOT)/files -type f 2>/dev/null)
 
 ${LINT_TMP_DIR}:
 	mkdir -p $@

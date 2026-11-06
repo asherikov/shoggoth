@@ -34,6 +34,38 @@ from .state import (
 )
 from .util import die
 
+# Commands that consume trailing positionals. Every other command
+# ignores ``args`` — including the empty ``""`` the worker step always
+# forwards as ``"${SHOGGOTH_TASK_ID}"`` for ``ci-failure`` /
+# ``pr-update``. The worker step of
+# ``shoggoth/chart/files/workflow/argo/templates/command-handler.yaml``
+# execs ``shoggoth.py "${SHOGGOTH_COMMAND}" "${SHOGGOTH_TASK_ID}"``, and
+# an empty ``SHOGGOTH_TASK_ID`` still expands to one argv element that
+# the ``args`` bucket (``nargs="*"``, default ``[]``) collects — there
+# is no ``task_id`` argument to default it away. That is why the
+# empty-value check in ``_positionals`` is scoped to this set — applied
+# globally it would fail every non-task worker run.
+POSITIONAL_COMMANDS = {
+    "task", "slave-test", "argo-webhooks", "redmine-webhooks",
+}
+
+
+def _positionals(args):
+    """Trailing arguments, for the commands in ``POSITIONAL_COMMANDS``.
+
+    An empty value is an input error rather than a no-op: silently
+    dropping it would let ``argo-webhooks ""`` reach
+    ``_resolve_orgs(None)`` — the "every org" branch — which is the
+    exact foot-gun the single-bucket refactor removes. Terminates
+    with exit 2, matching the ``task`` numeric check in ``_run``.
+    """
+    positional = list(args.args)
+    if "" in positional:
+        sys.stderr.write(
+            f"shoggoth.py: error: {args.command}: empty argument value\n")
+        sys.exit(2)
+    return positional
+
 
 def _run(args):
     """Dispatch ``args.command`` to its handler.
@@ -46,15 +78,24 @@ def _run(args):
     one of the ``*Command`` classes.
 
     Maintenance commands (everything else) don't share init — each
-    instantiates whatever clients it needs (Gitea, OpenBao, Github,
-    Redmine, ...) and dispatches to its handler directly.
+    instantiates whatever clients it needs (Gitea, Github, Redmine,
+    K8s, ...) and dispatches to its handler directly.
 
-    ``task_id`` is validated up front so a bad input fails before the
-    git-cred wait (which can take up to ``GIT_CRED_READY_TIMEOUT``
-    seconds) — preserves the original fail-fast behaviour.
+    Trailing positionals share one ``args`` bucket (see
+    ``_positionals``); ``task``'s task ID is validated up front so a
+    bad input fails before the git-cred wait (which can take up to
+    ``GIT_CRED_READY_TIMEOUT`` seconds) — preserves the original
+    fail-fast behaviour.
     """
+    positional = (_positionals(args)
+                  if args.command in POSITIONAL_COMMANDS else [])
+    # The slot is overloaded: a task ID for ``task``, check names for
+    # ``slave-test``, project names for the webhook setups. Only
+    # ``task`` reads it as an ID.
+    task_id = positional[0] if positional else None
+
     if args.command == "task":
-        if not args.task_id or not args.task_id.isdigit():
+        if not task_id or not task_id.isdigit():
             sys.stderr.write(
                 "shoggoth.py: error: task command requires a numeric task ID\n")
             sys.exit(2)
@@ -73,7 +114,7 @@ def _run(args):
         # (``shoggoth/workflow/scripts/dispatch.py``) and is
         # reached via the ``dispatch`` step of the
         # ``command-handler`` DAG (see
-        # ``shoggoth/workflow/argo/templates/command-handler.yaml``).
+        # ``shoggoth/chart/files/workflow/argo/templates/command-handler.yaml``).
         # ``sandbox`` is the placeholder for the future
         # /sandbox slash command; it's handled by the
         # dispatcher's ``_handle_sandbox`` (in
@@ -89,13 +130,13 @@ def _run(args):
         if args.command != "task":
             gitea.load_payload()
 
-        shoggoth = Shoggoth(redmine, gitea, args)
+        shoggoth = Shoggoth(redmine, gitea, args, task_id)
         shoggoth.checkout()
 
         agent = Agent(shoggoth)
 
         if args.command == "task":
-            cmd = TaskCommand(args.task_id, shoggoth, gitea, redmine, agent)
+            cmd = TaskCommand(task_id, shoggoth, gitea, redmine, agent)
         elif args.command == "ci-failure":
             cmd = CiFailureCommand(shoggoth, gitea, redmine, agent)
         elif args.command == "pr-update":
@@ -118,11 +159,11 @@ def _run(args):
     elif args.command == "argo-webhooks":
         gitea = Gitea()
         cmd = SetupArgoWebhooks(gitea)
-        cmd.execute(args.args or None)
+        cmd.execute(positional or None)
     elif args.command == "redmine-webhooks":
         gitea = Gitea()
         cmd = SetupRedmineWebhooks(gitea)
-        cmd.execute(args.args or None)
+        cmd.execute(positional or None)
     elif args.command == "redmine-argo-webhooks":
         k8s = K8s()
         redmine = Redmine(k8s)
@@ -174,16 +215,12 @@ def _run(args):
         PushSecretCheck().execute()
     elif args.command == "slave-test":
         cmd = SlaveTest()
-        # Slave-test dispatchers pass the check name as the single
-        # positional after `slave-test`. Argparse consumes it as
-        # ``task_id`` (the next positional slot), so read it from there
-        # rather than ``args.args`` — which is reserved for trailing
-        # subcommands like the per-check names a future invocation
-        # could pass.
-        if args.task_id:
-            cmd.execute([args.task_id])
-        else:
-            cmd.execute(None)
+        # Check names share the same positional bucket. ``execute``
+        # validates every name against ``self.checks`` and dies on an
+        # unknown one, so extra names fail closed instead of being
+        # silently dropped (the old single-slot parser ran only the
+        # first).
+        cmd.execute(positional or None)
     elif args.command == "gitea-ldap-sync":
         gitea = Gitea()
         cmd = GiteaLdapSync(gitea)
@@ -225,12 +262,10 @@ def main():
     parser.add_argument("command",
                         choices=sorted(WORKFLOW_COMMANDS | MAINTENANCE_COMMANDS),
                         help="Command to execute")
-    parser.add_argument("task_id", nargs="?", default=None,
-                        help="Redmine task ID (required for `task`); "
-                             "slave-test check name")
     parser.add_argument("args", nargs="*", default=[],
-                        help="Project names for `argo-webhooks` / "
-                             "`redmine-webhooks`")
+                        help="Trailing arguments: task ID (`task`), check "
+                             "name(s) (`slave-test`), or project names "
+                             "(`argo-webhooks` / `redmine-webhooks`)")
 
     parsed = parser.parse_args()
 

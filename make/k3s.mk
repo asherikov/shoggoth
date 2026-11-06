@@ -6,7 +6,10 @@ K3S_SSH=ssh ${SSH_COMMON_ARGS} -t ${USER}@${HOST_IP}
 K3S_API_PORT?=6443
 K3S_TUNNEL_PORT?=6443
 
-K3S_HOST_PATHS := redmine-plugins:redmine/plugins workflow-scripts:workflow/scripts kestra-flows:workflow/kestra/flows argo:workflow/argo private:private
+# Host directories `make sync` populates under
+# /var/lib/rancher/k3s/storage/${INSTANCE}/. Everything here is state or
+# content the chart cannot carry.
+K3S_HOST_PATHS := redmine-plugins:redmine/plugins workflow-scripts:workflow/scripts private:private
 
 SHOGGOTH_HELM_TIMEOUT?=10m
 SHOGGOTH_HELM_TIMEOUT_UNINSTALL?=2m
@@ -77,11 +80,20 @@ client_kubeconfig:
 
 K3S_TUNNEL_LOG?=${K3S_TMP_DIR}/k3s-tunnel.log
 
-tunnel_up:
+tunnel_up: ping
 	mkdir -p ${K3S_TMP_DIR}
-	if [ -f ${K3S_TUNNEL_PID} ] && kill -0 $$(cat ${K3S_TUNNEL_PID}) 2>/dev/null; then \
+	if [ -f ${K3S_TUNNEL_PID} ] && kill -0 $$(cat ${K3S_TUNNEL_PID}) 2>/dev/null \
+		&& curl -sk --connect-timeout 2 --max-time 3 https://127.0.0.1:${K3S_TUNNEL_PORT}/readyz >/dev/null 2>&1; then \
 		echo "Tunnel already running (PID $$(cat ${K3S_TUNNEL_PID}))"; \
 	else \
+		pid=$$(cat ${K3S_TUNNEL_PID} 2>/dev/null || true); \
+		if [ -n "$$pid" ] && kill -0 "$$pid" 2>/dev/null \
+			&& tr '\0' ' ' < /proc/$$pid/cmdline 2>/dev/null | grep -q -- "-L [^ ]*${K3S_TUNNEL_PORT}:"; then \
+			echo "Tunnel stale (PID $$pid alive but not serving the API) — replacing it"; \
+			kill "$$pid" 2>/dev/null || true; \
+			w=0; while kill -0 "$$pid" 2>/dev/null && [ "$$w" -lt 20 ]; do sleep 0.1; w=$$((w + 1)); done; \
+		fi; \
+		rm -f ${K3S_TUNNEL_PID}; \
 		ssh ${SSH_COMMON_ARGS} -L ${K3S_TUNNEL_PORT}:127.0.0.1:${K3S_API_PORT} -N ${USER}@${HOST_IP} \
 			-o ExitOnForwardFailure=yes 2>${K3S_TUNNEL_LOG} & \
 		echo $$! > ${K3S_TUNNEL_PID}; \
@@ -91,13 +103,13 @@ tunnel_up:
 				cat ${K3S_TUNNEL_LOG}; \
 				rm -f ${K3S_TUNNEL_PID}; exit 1; \
 			fi; \
-			if curl -sk --connect-timeout 1 https://127.0.0.1:${K3S_TUNNEL_PORT}/readyz >/dev/null 2>&1; then \
+			if curl -sk --connect-timeout 1 --max-time 2 https://127.0.0.1:${K3S_TUNNEL_PORT}/readyz >/dev/null 2>&1; then \
 				echo "Tunnel started (PID $$(cat ${K3S_TUNNEL_PID}))"; \
 				exit 0; \
 			fi; \
 			sleep 0.5; \
 		done; \
-		echo "Error: Tunnel process alive but API not reachable after 5s"; \
+		echo "Error: Tunnel process alive but the API did not answer"; \
 		echo "--- SSH log ---"; cat ${K3S_TUNNEL_LOG}; \
 		echo "--- Host listen check ---"; \
 		${K3S_SSH} 'sudo ss -tlnp | grep ${K3S_API_PORT} || echo "K3s API port ${K3S_API_PORT} not listening on host"'; \
@@ -216,15 +228,60 @@ k3s_purge_orphans: tunnel_up
 	for kind in externalsecret pushsecret secretstore; do \
 		kubectl get "$$kind" -n ${INSTANCE} -o name 2>/dev/null >> $(K3S_ORPHAN_LIVE) || true ; \
 	done
+	# sub() strips the `kind/` prefix that `kubectl -o name` adds.
 	awk 'NR==FNR { rendered[$$1]=1; next } \
-	     { name=$$1; sub(/^[^/]*\//, "", name); if (!(name in rendered)) print $$1 }' \
+	     { name=$$1; sub(/.*\//, "", name); if (!(name in rendered)) print $$1 }' \
 		$(K3S_ORPHAN_RENDERED) $(K3S_ORPHAN_LIVE) > $(K3S_ORPHAN_ORPHANS)
 	# The empty-render guard is there because the comparison is "in the chart
 	# or not": an empty rendered set would make every object in the namespace
 	# look like an orphan.
+	#
+	# Clear the controller finalizers before deleting, and bound the delete
+	# itself. Both are needed for the same reason: `kubectl delete` waits for
+	# the object to disappear (its --wait defaults to true), and an
+	# ExternalSecret carries
+	# `externalsecrets.external-secrets.io/externalsecret-cleanup`, a
+	# finalizer only the ESO controller removes.
+	#
+	# This target is the LAST step of `make down`, so the ESO controller is
+	# already gone by then — helm uninstall deleted its Deployment before the
+	# CRs (unknown kinds sort last in Helm's uninstall order). Nothing is left
+	# to drain the finalizer, the wait never ends, and kubectl sits there
+	# after having already printed "deleted from <ns> namespace".
+	#
+	# Neither earlier step can cover an orphan. The chart's pre-delete hook
+	# (zz-eso-pre-delete.yaml) selects on
+	# `app.kubernetes.io/instance=<release>`, and `down_helm_cleanup` above on
+	# the `meta.helm.sh/release-*` annotations — and an orphan is by
+	# definition a CR the chart no longer renders, so it carries neither.
+	# This target is the only actor that ever removes one, so it has to
+	# finish the job itself.
+	#
+	# Safe on the data plane: the chart sets no `spec.target.deletionPolicy`,
+	# so the CRD default `Retain` applies
+	# (shoggoth/external-secrets/deploy/crds/bundle.yaml) and ESO's
+	# `cleanupManagedSecrets` is a no-op. Removing the finalizer therefore
+	# deletes the CR and nothing else — the same argument
+	# zz-eso-pre-delete.yaml makes for its own force-patch. PushSecrets and
+	# SecretStores carry no finalizer at all, so on them the patch is a no-op.
+	#
+	# The strip is best-effor.
 	if [ -s $(K3S_ORPHAN_RENDERED) ] && [ -s $(K3S_ORPHAN_ORPHANS) ]; then \
 		sed 's/^/  /' $(K3S_ORPHAN_ORPHANS); \
-		xargs -r -n20 kubectl delete -n ${INSTANCE} --ignore-not-found=true < $(K3S_ORPHAN_ORPHANS); \
+		while read -r obj; do \
+		    [ -n "$$obj" ] || continue; \
+		    if out=$$(kubectl patch -n ${INSTANCE} --type=merge \
+		            -p '{"metadata":{"finalizers":[]}}' "$$obj" 2>&1); then \
+		        : ; \
+		    else \
+		        case "$$out" in \
+		            *"NotFound"*) : ;; \
+		            *) echo "    ERROR: $$obj was not patched: $$out" ;; \
+		        esac ; \
+		    fi ; \
+		done < $(K3S_ORPHAN_ORPHANS) ; \
+		xargs -r -n20 kubectl delete -n ${INSTANCE} --ignore-not-found=true \
+		    --timeout=60s < $(K3S_ORPHAN_ORPHANS); \
 	fi
 
 # Wipe OpenBao raft storage. Does NOT restart anything — run sync_restart after.
@@ -253,6 +310,7 @@ wipe_openbao: tunnel_up
 		done; \
 	fi;
 	-kubectl delete secret openbao-unseal-key -n ${INSTANCE} --ignore-not-found=true
+
 
 # Start all shoggoth services.
 #
@@ -293,7 +351,7 @@ restart_service: tunnel_up
 
 
 log: tunnel_up
-	test -n "$(SERVICE)" ] || (echo "Usage: make log SERVICE=<app-name> [CONTAINER=<name>]" && false)
+	test -n "$(SERVICE)" || (echo "Usage: make log SERVICE=<app-name> [CONTAINER=<name>]" && false)
 	kubectl -n ${INSTANCE} describe pod -l app=$(SERVICE)
 	kubectl -n ${INSTANCE} get pod -l app=$(SERVICE) -o wide 2>&1 || true
 	kubectl -n ${INSTANCE} get pod -l app=$(SERVICE) -o json 2>/dev/null | jq -r '.items[] | .metadata.name as $$pod | ("Pod: " + $$pod), (.status.initContainerStatuses // [] | .[] | "  INIT [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)"), (.status.containerStatuses // [] | .[] | "  MAIN  [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)")' 2>&1 || true
@@ -314,7 +372,7 @@ log: tunnel_up
 #
 # Usage:
 #   make shell                              # interactive sh in slave-dind
-#   make shell APP=kestra                   # first pod labeled app=kestra
+#   make shell APP=slave-term               # first pod labeled app=slave-term
 #   make shell POD=slave-dind-0-abcde       # explicit pod name (overrides APP)
 #   make shell CMD="ls -la /shoggoth"       # run a command instead of an interactive shell
 #   make shell APP=gitea CMD="id"           # combine APP and CMD

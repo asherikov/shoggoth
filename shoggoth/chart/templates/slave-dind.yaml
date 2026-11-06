@@ -5,10 +5,8 @@
   as a sidecar volume, so it only needs to ship whenever this Deployment does.
 
   The /cache persistent storage is shared across all CI consumers
-  (gitea-runner job pods and slave-term; the Kestra migration removed
-  the Kestra Docker task runner path that previously consumed this PVC
-  via slave-dind's DinD). See templates/shared-cache.yaml for the
-  single PVC definition.
+  (gitea-runner job pods and slave-term). See templates/shared-cache.yaml
+  for the single PVC definition.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "slave-dind")) }}
 apiVersion: v1
@@ -249,6 +247,15 @@ spec:
           sizeLimit: 20Gi
       serviceAccountName: slave-dind
 ---
+# No Role/RoleBinding is bound to this ServiceAccount: nothing in this pod
+# (git-cred sidecar, dind daemon, init-git-cred-perms) talks to the API
+# server, and the consumers that spawn containers on slave-dind's dockerd
+# (gitea-runner job pods) get their own filesystem — the runner's
+# `container.valid_volumes` (templates/gitea.yaml) restricts bind mounts to
+# /shoggoth/git-cred and /cache, so a spawned container cannot reach the
+# pod's projected token path either. The token is therefore not mounted at
+# all; add a Role here only alongside a container that actually calls the
+# API.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -258,54 +265,5 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: slave-dind
     app.kubernetes.io/component: slave-dind
----
-# This Role/RB is retained for historical reasons — the Kestra
-# maintenance flow used to run kubectl in a DinD-spawned container
-# that inherited slave-dind's SA token via the docker socket bind.
-# After the Kestra → Argo migration, the maintenance workflow runs
-# natively with `serviceAccountName: shoggoth-maintenance-secret-writer`
-# (see shoggoth/workflow/argo/templates/maintenance.yaml), which holds
-# the equivalent verb grants via templates/maintenance-secret-writer.yaml.
-# This Role/RB is not currently exercised by any live path; remove it
-# only after confirming no consumer still runs kubectl as slave-dind.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: slave-dind-secret-bootstrap
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app: slave-dind
-    app.kubernetes.io/component: slave-dind
-rules:
-- apiGroups:
-  - ''
-  resources:
-  - secrets
-  resourceNames:
-  - gitea-slave-token
-  - gitea-runner-token
-  verbs:
-  - get
-  - create
-  - update
-  - patch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: slave-dind-secret-bootstrap
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "shoggoth.labels" . | nindent 4 }}
-    app: slave-dind
-    app.kubernetes.io/component: slave-dind
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: slave-dind-secret-bootstrap
-subjects:
-- kind: ServiceAccount
-  name: slave-dind
-  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: false
 {{- end }}

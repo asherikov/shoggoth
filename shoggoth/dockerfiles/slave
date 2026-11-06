@@ -107,7 +107,6 @@ RUN \
         pip install ${PYTHON_PKG})
 
 ENV SSH_AUTH_SOCK="/shoggoth/git-cred/ssh_auth_sock"
-ENV CCWS_CACHE="/cache/ccws/"
 ENV PIP_INDEX_URL="http://python-cache/index/"
 ENV PIP_TRUSTED_HOST="python-cache"
 ENV GITEA_SSH_HOST="git"
@@ -118,9 +117,18 @@ ENV BM_MCP_URL="http://litellm/mcp"
 ENV CCACHE_REMOTE_STORAGE="http://build-cache"
 ENV CCACHE_REMOTE_ONLY="true"
 ENV BUILDCACHE_REMOTE="http://build-cache"
-ENV OPENBAO_ADDR="http://openbao:80"
 ENV SHOGGOTH_SLAVE_USER="slave"
+# OTLP/HTTP export for the opentelemetry SDKs installed above. The
+# qwen CLI reads its own QWEN_TELEMETRY_OTLP_PROTOCOL, so both are
+# needed — they are not aliases of each other.
 ENV OTEL_EXPORTER_OTLP_ENDPOINT="http://otelcol:4318"
+ENV OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+ENV OTEL_EXPORTER_OTLP_TIMEOUT="2000"
 ENV QWEN_TELEMETRY_OTLP_PROTOCOL="http"
 ENV OTEL_SERVICE_NAME="slave"
+# A git clone that cannot authenticate must fail, not wait: without
+# this git prompts for a username/password, and in a workflow pod or
+# a browser terminal nobody can answer, so the prompt just burns the
+# caller's timeout budget instead of reporting the credential error.
+ENV GIT_TERMINAL_PROMPT="0"
 
