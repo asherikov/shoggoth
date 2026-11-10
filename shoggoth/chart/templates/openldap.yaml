@@ -4,17 +4,17 @@
   Three ConfigMaps carry a two-stage substitution chain, and it matters which
   stage each placeholder belongs to:
 
-    stage 1 (deploy time) — `make up` runs `envsubst "$ENV_VARS"`, whose
-      whitelist is make/k3s.mk:240. Only SHOGGOTH_DOMAIN, SHOGGOTH_NAMESPACE,
-      SHOGGOTH_DNS_IP and LDAP_BASE_DN are expanded. Those become Go-templates
-      here.
+    render time (Helm) — the base DN and the domain are baked straight into
+      the VARS expression below, as `{{ include "shoggoth.ldapBaseDn" . }}`
+      and `{{ .Values.identity.domain }}`. Nothing runs envsubst over the
+      rendered manifests; Helm is the whole of the pre-pod stage.
 
-    stage 2 (pod start) — `openldap-render-ldif`'s render.sh runs
-      `envsubst "$VARS"` over the LDIF templates with LDAP_BASE_DN,
-      SHOGGOTH_DOMAIN, MDB_DN and the three password hashes in scope. Stage 1
-      already baked the first two, so only MDB_DN and the hashes still do work
-      at that point. The VARS list below is reproduced exactly as legacy left
-      it, including the already-substituted entries — it is not "tidied up".
+    pod start — `openldap-render-ldif`'s render.sh runs
+      `envsubst "$VARS"` over the LDIF templates with MDB_DN and the three
+      password hashes in scope. The base DN and the domain are literal text
+      inside VARS by the time it gets there. The VARS list below is
+      reproduced exactly as legacy left it, including the
+      already-substituted entries — it is not "tidied up".
 
   Every other ${...} in this file (MDB_DN, ADMIN_PW, CONFIG_ADMIN_PW,
   CONFIG_ADMIN_DN, LDAP_URL, LDAP_DIR, SENTINEL, ADMIN_HASH,
@@ -36,7 +36,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: openldap
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
@@ -57,7 +57,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: openldap
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep

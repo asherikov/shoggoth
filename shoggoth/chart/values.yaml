@@ -2,9 +2,9 @@
 #
 # Per-instance overrides live outside the chart, in `shoggoth/<instance>.yaml`
 # (e.g. shoggoth/shoggoth.yaml, shoggoth/shoggoth-test.yaml), and reach Helm via
-# the `--values` flag the Makefile passes on every call:
+# the `--values` flag the installer passes on every call:
 # SHOGGOTH_CONFIG?=shoggoth/${INSTANCE}.yaml. Values set there layer over this
-# file, and `--set` from make start/stop layers over those.
+# file, and a `--set services.<key>.enabled=false` layers over those.
 #
 # Template comments say only what is specific to the file they open: what it
 # renders, who consumes it, what gate it follows. The shared house rules live
@@ -16,16 +16,16 @@
 # fails with "nil pointer evaluating interface {}.nameOverride" the moment any
 # template calls the helper (zz-crd-ready-wait.yaml does, on every render).
 #
-# Left empty, fullname resolves to .Release.Name, which is what the Makefile
-# wants: the release is named shoggoth-<INSTANCE>.
+# Left empty, fullname resolves to .Release.Name, which is what the release
+# naming wants: the release is named shoggoth-<INSTANCE>.
 shoggoth:
   nameOverride: ""
   fullnameOverride: ""
 
 # Identity (replaces SHOGGOTH_DOMAIN, SHOGGOTH_GITHUB_ORG, SHOGGOTH_DNS_IP).
 # identity.instanceDir comes from the per-instance shoggoth/<instance>.yaml,
-# which `make up` passes with --values (matches the former
-# `SHOGGOTH_INSTANCE_DIR=${INSTANCE}` semantics in make/k3s.mk).
+# which the installer passes with --values (matches the former
+# `SHOGGOTH_INSTANCE_DIR=${INSTANCE}` semantics).
 identity:
   domain: ""
   githubOrg: ""
@@ -65,19 +65,18 @@ ldap:
   baseDn: ""
 
 # Per-service enable flags. Each key is spelled the same as the `app:` label of
-# the workload it gates, so `make start|stop SERVICE=<key>` maps one-to-one.
-# A "false" flag emits *no* resources for that service.
+# the workload it gates, so a `--set services.<key>.enabled=false` maps
+# one-to-one. A "false" flag emits *no* resources for that service.
 #
 # Seven services carry a second `app:` label inside another service's template
 # (argo-server, argo-workflow-controller, basic-memory-ui, cdash-db,
 # gitea-runner, openbao-bootstrap, redmine-db). Each pair had no per-label
-# toggle, so Phase 4 gave them one — `make stop SERVICE=redmine-db` has
-# something to switch off.
+# toggle, so Phase 4 gave them one — `redmine-db` now has
+# something to switch off on its own.
 #
-# Every key here matches the `app:` label verbatim — operators pass
-# `make start|stop SERVICE=<label>` and the value key under .services.* is
-# spelled the same way. Templates do not access keys via the dot path
-# (`services.<key>.enabled`) because Go templates parse `-` as subtraction;
+# Every key here matches the `app:` label verbatim — the value key under
+# .services.* is spelled the same way. Templates do not access keys via the dot
+# path (`services.<key>.enabled`) because Go templates parse `-` as subtraction;
 # instead, _helpers.tpl:shoggoth.isServiceEnabled walks the map and reports
 # the boolean for the named key, so this list can stay lowercase-hyphenated
 # uniformly.

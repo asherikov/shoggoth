@@ -118,7 +118,7 @@ spec:
     # worker can be rescheduled into a non-default namespace
     # without code changes). Values are fetched from the
     # shoggoth-workflow-config ConfigMap at admission time — the ConfigMap holds
-    # the actual domain/org/instance-dir/namespace because `make up`'s
+    # the actual domain/org/instance-dir/namespace because the deploy-time
     # envsubst pass renders its `${SHOGGOTH_*}` placeholders to
     # literal values before applying.
     - name: SHOGGOTH_DOMAIN
@@ -332,8 +332,8 @@ spec:
       # kubectl, and the namespace the worker step's
       # commands run in. Wired from the workflow
       # parameter (sourced from the shoggoth-workflow-config
-      # ConfigMap, which `make up` renders to the
-      # cluster's namespace) so a staging-instance
+      # ConfigMap, which the deploy-time envsubst pass renders to
+      # the cluster's namespace) so a staging-instance
       # override that flips the namespace in the
       # ConfigMap flows through to both steps without
       # code changes.

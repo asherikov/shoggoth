@@ -15,10 +15,9 @@
 
   Gated on ``secret-store``: no single service dominates; ``litellm``,
   ``localai``, and ``headroom`` all consume the result, and using
-  ``secret-store`` (the read-side SecretStore gate) keeps the
-  ``make start|stop SERVICE=<consumer>`` toggles independent of the
-  Secret projection. ``secret-store`` is default-on, so a default
-  install is unaffected.
+  ``secret-store`` (the read-side SecretStore gate) keeps the per-consumer
+  toggles independent of the Secret projection. ``secret-store`` is
+  default-on, so a default install is unaffected.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "secret-store")) }}
 apiVersion: external-secrets.io/v1

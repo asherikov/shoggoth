@@ -16,7 +16,7 @@
   What the annotation DID change was the service toggle. Helm honours
   `keep` on the upgrade path too (pkg/kube/client.go skips the deletion of
   a resource that left the manifest when it carries the annotation), so
-  `make stop SERVICE=headroom-proxy-token` left the Secret in place — a
+  disabling `headroom-proxy-token` left the Secret in place — a
   toggle that reported success and stopped nothing. Without the annotation
   the toggle really deletes it, and with it the consumers that mount it
   (otelcol, litellm, headroom) lose their Secret and cannot start. Which

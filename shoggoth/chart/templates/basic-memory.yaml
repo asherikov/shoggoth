@@ -3,9 +3,9 @@
   Two deployments share a single PVC.
 
   Two `app:` labels: `basic-memory` (the MCP Deployment) and
-  `basic-memory-ui` (the silverbullet UI). Phase 4 split them so
-  `make stop SERVICE=basic-memory-ui` stops only the UI. The PVC follows the
-  union of the two toggles because both Deployments mount it — leaving the UI
+  `basic-memory-ui` (the silverbullet UI). Phase 4 split them so the UI can
+  be toggled on its own. The PVC follows the union of the two toggles because
+  both Deployments mount it — leaving the UI
   on with the MCP off must not orphan it against a missing claim.
 */}}
 {{- if or (include "shoggoth.isServiceEnabled" (list . "basic-memory")) (include "shoggoth.isServiceEnabled" (list . "basic-memory-ui")) }}
@@ -19,7 +19,7 @@ metadata:
     app: basic-memory
     app.kubernetes.io/component: basic-memory
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep

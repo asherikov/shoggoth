@@ -30,8 +30,8 @@
 
   ${SHOGGOTH_ADMIN_PASSWORD}, ${SECRET_KEY_BASE}, ${REDMINE_SECRET_KEY_BASE_FILE},
   ${LDAP_BIND_DN}, ${LDAP_BIND_PASSWORD}, ${LDAP_HOST} and the bare shell vars
-  are resolved at pod start by those scripts, not at deploy time — they stay
-  literal here, exactly as envsubst's $ENV_VARS whitelist left them.
+  are resolved at pod start by those scripts — they stay literal here, because
+  nothing expands them on the way through Helm.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "redmine")) }}
 ---
@@ -44,7 +44,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: redmine
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
@@ -65,7 +65,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: redmine
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
@@ -86,7 +86,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: redmine
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep

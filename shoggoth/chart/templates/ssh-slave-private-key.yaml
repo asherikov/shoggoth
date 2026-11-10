@@ -18,7 +18,7 @@
   ``slave-dind``, and ``argo-workflows``, none of which is a strict
   superset. ``secret-store`` is the read-side SecretStore's own gate
   and is default-on, so a default install is unaffected either way,
-  while a per-service toggle (``make stop SERVICE=slave-term`` etc.)
+  while a per-service toggle (``slave-term`` etc.)
   cleanly suspends the gating along with the deployment.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "secret-store")) }}

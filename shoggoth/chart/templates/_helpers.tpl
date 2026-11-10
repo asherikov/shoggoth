@@ -8,8 +8,7 @@ Expand the name of the chart.
 {{/*
 Create a default fully qualified app name.
 Truncated at 53 chars because some Kubernetes name fields are limited to
-this (by the DNS naming spec, matches the namespace constraint
-make/k3s.mk:215 enforces via `printf '%s' "${INSTANCE}" | wc -c -gt 54`).
+this (by the DNS naming spec, the same limit the instance name is held to).
 */}}
 {{- define "shoggoth.fullname" -}}
 {{- if .Values.shoggoth.fullnameOverride -}}
@@ -26,8 +25,8 @@ make/k3s.mk:215 enforces via `printf '%s' "${INSTANCE}" | wc -c -gt 54`).
 
 {{/*
 Canonical shoggoth labels. Preserves the existing `app:` label convention
-from k3s/*.yaml so `make start|stop|restart_service SERVICE=foo` (which
-selects by `kubectl get pod -l app=foo`) keeps working unchanged.
+from k3s/*.yaml so a per-service selector (`kubectl get pod -l app=foo`)
+keeps working unchanged.
 */}}
 {{- define "shoggoth.labels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
@@ -187,17 +186,19 @@ It is not a values key: the privileged Deployments are baked into the
 templates, so any stricter profile breaks the install outright rather
 than degrading gracefully.
 
-ONE source, THREE renderings, so the declaration and the enforcement
-cannot drift:
-  - shoggoth.podSecurityProfile — the word itself, and what the
-    pre-install hook (zz-namespace-podsecurity.yaml) passes to kubectl;
+ONE source, TWO renderings, so the declaration and the strip cannot drift:
+  - shoggoth.podSecurityProfile — the word itself;
   - shoggoth.podSecurityLabels — the three label lines, for the
     Namespace object in templates/namespace.yaml.
-The hook applies the labels with kubectl because a Namespace that is new
-to the release (the first install: the namespace is created outside the
-release — by `make up`'s kubectl call, or by --create-namespace) is not
-reliably reconciled with the profile Helm computes for it — see the hook's
-header.
+
+The installer does not SET these labels, it STRIPS them (ansible/deploy.yml,
+"Strip any PodSecurity profile from the instance namespace"): a namespace
+that is new to the release — the first install, where the namespace is
+created outside the release, by a kubectl call beforehand or by
+--create-namespace — is not reconciled with the profile Helm computes for
+it, so the declaration above does not land there. The strip leaves the
+namespace unlabelled instead, which PodSecurity admission reads as
+`privileged`. See the header of templates/namespace.yaml.
 */}}
 {{- define "shoggoth.podSecurityProfile" -}}privileged{{- end -}}
 
@@ -217,7 +218,7 @@ files/ tree. Used under an existing `data:` key:
 Each key is the file's basename and each value is the file's content, so a
 ConfigMap built this way is byte-compatible with a hand-written data: block
 using the same names — every volumeMount, projected source and subPath that
-references a key keeps working, and `make helm_lint_gates` still sees the
+references a key keeps working, and the render checks still see the
 same resource.
 
 The third argument selects how the content is treated:
@@ -238,8 +239,8 @@ Invariants this form depends on, both of which fail silently:
 
   - basenames must be unique across the whole glob. `base` is applied to
     every match, so files/a/x.conf and files/b/x.conf emit the same key
-    twice and the second silently wins. `make helm_lint_dupes` (yamllint
-    key-duplicates on the render) is what turns that into a failure.
+    twice and the second silently wins. A duplicate-key check over the
+    render is what turns that into a failure.
   - a glob matching nothing renders an empty `data:`, and a misspelled
     .Files.Get path renders an empty string. Neither errors. The
     render-diff check (helm template before/after a change) is the only

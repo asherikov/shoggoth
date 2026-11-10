@@ -1,0 +1,102 @@
+---
+# Destroy an instance: namespace, cluster-scoped RBAC, host storage data.
+#
+# The last step is the one this play buys. A recursive delete of the only copy
+# of the instance's secrets and kubeconfig, reached as
+#
+#     ${K3S_SSH} 'sudo rm -rf /var/lib/rancher/k3s/storage/${INSTANCE}'
+#
+# driven by a variable interpolated into a shell string inside single quotes.
+# `ansible.builtin.file` with `state: absent` is the same operation with the
+# path assembled by Ansible instead of by three levels of quoting, and it runs
+# as a named task on the host rather than as an opaque ssh command line.
+#
+# The other two steps use `kubernetes.core.k8s`, which has the primitives a
+# shell loop had to hand-roll:
+#
+#   * the namespace is a named object, so `state: absent` + `wait` deletes it
+#     and waits, with `wait_timeout` bounding the wait — the bound
+#     `kubectl delete --timeout=120s` applies;
+#   * the cluster-scoped RBAC sweep is `delete_all` with `label_selectors`
+#     (both since 3.0.0), exactly what
+#     `kubectl delete clusterrole,clusterrolebinding -l <selector>` does.
+#     There is no `command` line left in this play.
+#
+# Deliberately still NOT run here: no `helm uninstall`. The release's own
+# record lives in the namespace, so deleting the namespace removes it anyway —
+# and `helm uninstall` would additionally delete the cluster-scoped
+# ClusterRoles/ClusterRoleBindings in argo-workflows.yaml, external-secrets.yaml
+# and otelcol.yaml. This play deletes them explicitly instead (see the two RBAC
+# tasks below).
+#
+# The cluster-scoped RBAC is PER-INSTANCE — each name is prefixed with the
+# release name (see shoggoth/chart/templates/otelcol.yaml) — so the namespace
+# deletion no longer takes them with it. They have to be deleted explicitly, or
+# they leak: a cluster-scoped object is not garbage-collected with its
+# namespace, and its ClusterRoleBinding would keep granting the (now-deleted)
+# instance's ServiceAccount its permissions.
+- name: Destroy a shoggoth instance
+  hosts: instances
+  gather_facts: false
+
+  tasks:
+    - name: Refuse to purge the primary instance
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname != 'shoggoth'
+        fail_msg: >-
+          Refusing to purge {{ inventory_hostname }}: it is the primary
+          instance. This play is for throwaway instances such as
+          shoggoth-test.
+        quiet: true
+      # The guard is first so nothing is deleted before it runs.
+      delegate_to: localhost
+
+    - name: Delete the instance namespace
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Namespace
+        name: "{{ inventory_hostname }}"
+        state: absent
+        wait: true
+        wait_timeout: 120
+      ignore_errors: true
+      delegate_to: localhost
+      # A namespace that will not finish terminating does not stop the purge,
+      # because the steps after it are what actually reclaim the storage.
+
+    # Both RBAC tasks share one label selector, and both are cluster-scoped,
+    # so neither takes a `namespace`. Two tasks rather than one because `k8s`
+    # addresses a single `kind` per call.
+    - name: Delete the instance's ClusterRoles
+      kubernetes.core.k8s:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        state: absent
+        delete_all: true
+        label_selectors:
+          - app.kubernetes.io/instance=shoggoth-{{ inventory_hostname }}
+      ignore_errors: true
+      delegate_to: localhost
+
+    - name: Delete the instance's ClusterRoleBindings
+      kubernetes.core.k8s:
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        state: absent
+        delete_all: true
+        label_selectors:
+          - app.kubernetes.io/instance=shoggoth-{{ inventory_hostname }}
+      ignore_errors: true
+      delegate_to: localhost
+
+    - name: Delete the instance's host storage
+      ansible.builtin.file:
+        path: /var/lib/rancher/k3s/storage/{{ inventory_hostname }}
+        state: absent
+      become: true
+      ignore_errors: true
+      # The one task that runs ON THE HOST rather than being delegated: the
+      # path exists only there. This is the step the whole play is for —
+      # `state: absent` recurses, so the tree and everything under it goes.
+      # It escalates, so a caller has to pass `--ask-become-pass`.

@@ -50,11 +50,10 @@ out of Ready but the container itself.
 Mounting
 --------
 The sandbox pod's spec mounts /shoggoth/workflow-scripts from the
-host (the workflow-scripts:workflow entry in K3S_HOST_PATHS
-in the Makefile rsyncs ./workflow/ to
+host: the host-state step rsyncs the repo's ``workflow/`` tree to
 /var/lib/rancher/k3s/storage/${INSTANCE}/workflow-scripts/ on the
-cluster node), so the same absolute path is visible to every
-container in the pod after `make sync`. Neither image bakes the
+cluster node, so the same absolute path is visible to every
+container in the pod. Neither image bakes the
 workflow scripts in (dockerfiles/slave and dockerfiles/tools carry
 no COPY/ADD for them), so this mount is the only way any container
 -- init, main, or sidecar -- reaches this module.
@@ -554,7 +553,8 @@ def _materialize_workspace_as_user(repo, repo_type, branch, pr_number,
     # ``install_deps=False``: the sandbox pod does NOT install the
     # workspace's dependencies.
     #
-    # The installation is ``make dep_install``, which resolves the
+    # The installation is the workspace's own dependency install,
+    # which resolves the
     # dependency list with rosdep and installs it with apt/pip. It
     # needs the shared ``ci-cache`` PVC mounted at /cache -- the
     # slave image's ``CCWS_CACHE=/cache/ccws/`` points there, and

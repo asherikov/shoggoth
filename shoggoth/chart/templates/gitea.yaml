@@ -4,14 +4,14 @@
   `gitea` (the server Deployment) and `gitea-runner` (act_runner) carry
   their own `app:` labels and their own values keys (`services.gitea.enabled`
   and `services.gitea-runner.enabled`), so either can be toggled independently
-  via `make start|stop SERVICE=<label>`.
+  via its own values key.
 
   Each service's resources are gated on its OWN key. An earlier version gated
   the whole file on the union of the two, on the stated grounds that the two
   Deployments share a PVC and ConfigMap. They do not: gitea-runner mounts only
   `gitea-runner-templates`, `shoggoth-render-config` and `shoggoth-shared-cache`
   — never `gitea-data` nor `gitea-init`. The union therefore meant nothing ever
-  read `services.gitea.enabled`, so `make stop SERVICE=gitea` printed success
+  read `services.gitea.enabled`, so disabling that key printed success
   while Deployment/gitea and Service/git kept serving (the gitea
   ExternalSecrets live in their own templates, gated on `gitea` alone, so they
   did disappear — a half-stopped release). The runner reaches the server over
@@ -24,8 +24,8 @@
 
   ${SHOGGOTH_ADMIN_PASSWORD}, ${LDAP_BIND_DN}, ${LDAP_BIND_PASSWORD},
   ${LDAP_HOST}, ${USER_FILTER} and the bare shell vars are resolved at pod
-  start by those scripts, not at deploy time, so they stay literal here —
-  exactly as envsubst's $ENV_VARS whitelist left them.
+  start by those scripts, so they stay literal here — nothing expands them
+  on the way through Helm.
 
   Deployment/gitea and Service/git share the `services.gitea` gate and so move
   together: the Service selects `app: gitea`, so one without the other is
@@ -45,7 +45,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: gitea
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep

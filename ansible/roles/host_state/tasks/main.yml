@@ -1,0 +1,162 @@
+---
+# Host state under /var/lib/rancher/k3s/storage/<instance>/.
+#
+# Pass 0 of deploy.yml: state and content that only exists on the host, which
+# the chart cannot carry. Each step is a named task; the old
+# `sudo bash -c '<cmds>'` chain was three levels of quoting deep and left the
+# host half-provisioned with no indication of which step failed.
+#
+# Everything that writes a fixed path — the two directories the chart mounts,
+# the blocklist, the setup script — still runs as root on the host, exactly as
+# the old shell chain did. Those tasks run over an ssh session with no tty,
+# where `sudo -n` cannot prompt, so the playbooks that run this role pass
+# `--ask-become-pass` and collect the password once, up front, for the whole
+# play. A NOPASSWD host answers with an empty line, which leaves `become_flags`
+# at its default `-H -S -n` so sudo runs non-interactively.
+#
+# The instance's own storage directory is the one exception, and the exception
+# is the point: it is handed to the login user below, which is what lets the
+# content sync run with no privilege at all. The shared parent above it stays
+# root's and unwritable, and is only made searchable, so the login user can
+# walk through it into its own subtree and can create or remove nothing in it.
+- name: Make the shared storage parent traversable
+  become: true
+  ansible.builtin.file:
+    path: "/var/lib/rancher/k3s/storage"
+    state: directory
+    # No `owner`, no `group`: root keeps both. Only the mode moves, 0700 to
+    # 0755, and 0755 is the whole grant — search permission on this one
+    # directory, which together with the instance's own directory being the
+    # login user's is the entire path the content sync walks.
+    mode: "0755"
+  # This directory is 0700 root:root on a host whose storage tree was built by
+  # `sudo mkdir -p` under root's umask, and k3s's own provisioner does the
+  # same. Nothing noticed while every writer was root; the first writer that
+  # does not is the `synchronize` task at the end of this file, and rsync's
+  # receiver stats the destination path before it looks at a single file: with
+  # this directory unsearchable that stat fails with EACCES and the transfer
+  # dies with `cannot stat destination ... Permission denied (13)`.
+  #
+  # 0755 root-owned preserves what the 0700 provided — one instance not
+  # reaching into another's subtree — as long as this directory stays
+  # unwritable: the login user walks through into its own instance's directory
+  # and creates, renames and removes nothing here. Handing the directory itself
+  # to the login user would give away the create and the remove.
+
+- name: Create the instance storage directory
+  become: true
+  ansible.builtin.file:
+    path: "/var/lib/rancher/k3s/storage/{{ inventory_hostname }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    # `mkdir -p` uses 0777 & ~umask, i.e. 0755 for the usual umask. Stated
+    # explicitly so it does not depend on the ssh session's umask.
+    mode: "0755"
+  # The one chown here, and the reason the rsync below needs no sudo. What the
+  # chart actually needs is a directory a root pod can read, and a root pod
+  # reads a login-user-owned 0755 directory exactly as well as a root-owned
+  # one. A root-run rsync wrote the three content directories as root only
+  # because the parent it created them under was root-owned — a consequence of
+  # `sudo mkdir -p` over the whole tree, not of anything downstream.
+  #
+  # Only this instance's own directory is handed over. The shared
+  # /var/lib/rancher/k3s/storage parent above it stays root's and unwritable,
+  # so one instance cannot reach into another's subtree through it.
+  #
+  # `state: directory` on an existing path chowns it rather than skipping it,
+  # which is what repairs a tree a previous root-run rsync left root-owned.
+  # The walk stops here on purpose: the next task re-owns the three
+  # directories `synchronize` writes, and the two `copy` tasks below keep
+  # installing their files as root.
+
+- name: Create the directories the chart mounts
+  become: true
+  ansible.builtin.file:
+    path: "/var/lib/rancher/k3s/storage/{{ inventory_hostname }}/{{ item }}"
+    state: directory
+    # `mkdir -p` uses 0777 & ~umask, i.e. 0755 for the usual umask. Stated
+    # explicitly so it does not depend on the ssh session's umask.
+    mode: "0755"
+  loop:
+    - coredns-blacklists
+    - scripts
+  # The three host content directories (redmine-plugins, workflow-scripts,
+  # private) are NOT created here. They are handed to the login user by the
+  # next task instead, which owns them for the `synchronize` task's benefit —
+  # and which deliberately states no `mode`, because shoggoth/data/private is
+  # 0700 and pre-creating its host copy as 0755 would make the instance's
+  # secrets directory world-readable until the sync corrected it.
+
+- name: Hand the host content directories to the login user
+  become: true
+  ansible.builtin.file:
+    path: "/var/lib/rancher/k3s/storage/{{ inventory_hostname }}/{{ item.dst }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    # No `mode`, deliberately: the directory the `synchronize` task writes
+    # here takes its permissions from the SOURCE directory under `-a`, and
+    # shoggoth/data/private is 0700. Stating a mode would fix the host's copy
+    # of the secrets directory at whatever was written here.
+  loop: "{{ shoggoth_host_paths }}"
+  loop_control:
+    label: "{{ item.dst }}"
+  # A root-run rsync left these three directories — and everything in them —
+  # owned by root. The `synchronize` task below now runs as the login user,
+  # and rsync needs WRITE access to a directory to create, replace or delete
+  # anything inside it. Owning the directory is sufficient: unlinking a file
+  # needs write permission on the containing directory, not on the file, so a
+  # root-owned leftover inside a login-user-owned directory is still deletable.
+  #
+  # It is also what makes the chown above non-recursive. Walking the tree
+  # would re-own the blocklist and the setup script that the two `copy` tasks
+  # install as root, for no benefit.
+
+- name: Install the DNS blocklist
+  become: true
+  ansible.builtin.copy:
+    # Copied from the control node's own tree rather than from a host-side
+    # copy: there is no host-side copy of the tree any more.
+    src: "{{ shoggoth_source_dir }}/data/dns/hosts-blacklist/hosts"
+    dest: "/var/lib/rancher/k3s/storage/{{ inventory_hostname }}/coredns-blacklists/blocklist.hosts"
+    mode: "0644"
+
+- name: Install the client setup script
+  become: true
+  ansible.builtin.copy:
+    src: "{{ shoggoth_source_dir }}/setup-client.sh"
+    dest: "/var/lib/rancher/k3s/storage/{{ inventory_hostname }}/scripts/setup-client.sh"
+    # `cp` without -p keeps the exec bit; the source is 0755.
+    mode: "0755"
+
+- name: Sync the host content directories
+  # No `rsync_path: "sudo rsync"`, and no `become`. The old
+  # `sudo bash -c '... rsync -a --delete ...'` escalated because every
+  # directory on the destination path was root-owned; the tasks above hand the
+  # instance's own directory and the three content directories to the login
+  # user and make the shared parent searchable, so the transfer walks a path
+  # that is the login user's own subtree and needs no privilege at all.
+  # `synchronize` cannot take a sudo password anyway — rsync has no way to
+  # pass one — so this was the one task in the play that could only ever have
+  # worked against a NOPASSWD host.
+  #
+  # What root ownership bought is preserved without root: `archive: true`
+  # carries `-o`/`-g`, which rsync applies only when it runs as root. Running
+  # as the login user it silently skips them, so the host's copies of the
+  # three directories come out owned by the login user rather than by root —
+  # which is what the chown above asks for anyway. The k3s pods that mount
+  # them run as root and read them either way.
+  #
+  # `delegate_to: localhost` pins the module to the control node, the same
+  # reason as in deploy.yml: the source tree is a local directory and the
+  # destination is reached with the inventory entry's own connection vars.
+  ansible.posix.synchronize:
+    src: "{{ shoggoth_source_dir }}/{{ item.src }}/"
+    dest: "/var/lib/rancher/k3s/storage/{{ inventory_hostname }}/{{ item.dst }}/"
+    # `-a` and `--delete`, matching the rsync this role replaced:
+    # `rsync -a --delete ./$SRC/ /var/lib/rancher/k3s/storage/$K3S_DIR/$DST/`.
+    archive: true
+    delete: true
+  loop: "{{ shoggoth_host_paths }}"
+  loop_control:
+    label: "{{ item.src }} -> {{ item.dst }}"
+  delegate_to: localhost

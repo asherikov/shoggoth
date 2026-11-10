@@ -18,7 +18,7 @@ metadata:
     app: registry
     app.kubernetes.io/component: registry
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep

@@ -12,7 +12,7 @@ metadata:
     app: localai
     app.kubernetes.io/component: localai
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
@@ -34,7 +34,7 @@ metadata:
     app: localai
     app.kubernetes.io/component: localai
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
@@ -56,7 +56,7 @@ metadata:
     app: localai
     app.kubernetes.io/component: localai
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep
@@ -112,7 +112,7 @@ data:
   # `url: file:///models/nomic-embed-text-v1.5.yaml`. It lives here rather
   # than in web-internal-html because this ConfigMap is mounted as a
   # required volume below: a ConfigMap owned by another service is deleted
-  # by `make stop SERVICE=<that-service>`, which would leave this pod in
+  # when that service is toggled off, which would leave this pod in
   # ContainerCreating and take LocalAI (and the litellm routes that proxy
   # to it) down as a side effect of stopping an unrelated service.
   nomic-embed-text-v1.5.yaml: |

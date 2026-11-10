@@ -28,8 +28,8 @@
       Error: uninstallation completed with 1 error(s): context deadline exceeded
 
   The count is 1 because the DELETEs all succeeded — only the wait timed
-  out. `make down` then recovers through `force-helm-cleanup`
-  (make/k3s.mk), which patches the finalizers away by force.
+  out. The uninstall then recovers through the installer's forced-cleanup
+  path, which patches the finalizers away by force.
 
   This hook makes the controller do the cleanup the way it is meant to: it
   runs BEFORE Helm deletes anything, so the ESO controller (and OpenBao) are
@@ -42,16 +42,23 @@
 
   The hook is best-effort BY CONSTRUCTION and MUST NEVER FAIL THE
   UNINSTALL. A failing pre-delete hook aborts `helm uninstall` entirely,
-  which would turn a cosmetic problem into a broken `make down`. So:
+  which would turn a cosmetic problem into a broken uninstall. So:
     - the script ends in an unconditional `exit 0`;
     - it runs without `errexit` and checks every step explicitly;
     - if the controller does not drain the finalizers within the budget
-      (it is unhealthy, or the service was toggled off with
-      `make stop SERVICE=external-secrets`), the hook clears the
+      (it is unhealthy, or the service was toggled off), the hook clears the
       finalizers itself — the objects are already terminating, so this only
       completes a delete that was requested anyway;
-    - if even that fails, it says so and exits 0, leaving `make down`'s
-      `force-helm-cleanup` fallback as the backstop.
+    - if even that fails, it says so and exits 0, leaving the
+      forced-cleanup fallback as the backstop.
+    - if it cannot READ the cluster at all, it says that too, and says that
+      it cleared nothing. This is the case that used to be reported as
+      success: `count` ended in `2>/dev/null | wc -l`, which reports zero
+      for an unreachable API server, so the hook printed "all ESO CRs are
+      gone" and exited 0 on a cluster it had never successfully queried.
+      Helm then deleted the release with the finalizers still in place and
+      its `--wait` blocked for the whole timeout. A teardown hook that
+      cannot observe the cluster must not certify its state.
 
   SCOPE: only the CRs of THIS release, selected by
   `app.kubernetes.io/instance=<release name>` — the label
@@ -70,7 +77,7 @@
   stored in the RELEASE record, not the ones in the chart on disk. A release
   installed before this template existed carries no pre-delete hook, so its
   uninstall still wedges; the hook takes effect from the next
-  `helm upgrade --install` (`make up`) onwards.
+  `helm upgrade --install` onwards.
 
   The RBAC trio below is part of the hook, not an ordinary resource: Helm
   applies hook resources before the rest of the release, so a Job that needs
@@ -229,21 +236,61 @@ spec:
 
               log() { echo "[eso-pre-delete] $*"; }
 
-              # The CRDs live outside the chart (make crds_apply applies
-              # them), so a missing CRD is a normal state here: the count is
-              # zero and the hook has nothing to do. The error is swallowed
-              # on purpose — a teardown hook must not fail on it.
+              # A read that failed is not a read that said zero.
+              #
+              # `count` used to end in `2>/dev/null | wc -l`, and that
+              # combination reports ZERO for an API server it cannot reach:
+              # the error goes to /dev/null and stdout comes back empty. So
+              # on a cluster whose pod->apiserver path was dropping
+              # connections, this hook issued no deletes, polled an empty
+              # list, and printed "all ESO CRs are gone — helm uninstall
+              # --wait has nothing to block on" before exiting 0. It had
+              # certified a state it never observed. Helm then deleted the
+              # release with the ExternalSecrets still holding their
+              # finalizers, and its --wait blocked for the whole timeout:
+              #
+              #     Error: uninstallation completed with 1 error(s):
+              #       * timed out waiting for the condition
+              #
+              # The finalizers are the one thing this hook exists to clear,
+              # so a hook that cannot read the cluster has to say so rather
+              # than report success. Same rule argo-workflows.yaml's
+              # apply-workflows init container and zz-crd-ready-wait.yaml
+              # were both fixed under: readability is established before
+              # judgement, and a transport failure is not a verdict.
+              #
+              # A missing CRD does NOT read as a normal zero. `kubectl get`
+              # on a kind the API server does not serve exits non-zero with
+              # "the server doesn't have a resource type", and that exit says
+              # nothing about reachability — so a cluster carrying no ESO CRDs
+              # at all takes the WARN branch below, about a cluster this hook
+              # read perfectly well. The CRDs live outside the chart and are
+              # applied before the install, which makes that the one cluster
+              # state this branch misdescribes. It is the safe direction to
+              # be wrong in — the hook clears nothing and says so — and the
+              # `2>&1` above is what puts kubectl's own reason in the log.
+              # A served-but-absent kind is the normal zero: exit 0, empty
+              # list.
               count() {
-                local n
-                n=$(kubectl get "$1" -n "${NS}" -l "${SEL}" --no-headers -o name 2>/dev/null \
-                    | wc -l | tr -d '[:space:]')
-                printf '%s' "${n:-0}"
+                local out rc=0
+                out=$(kubectl get "$1" -n "${NS}" -l "${SEL}" --no-headers -o name 2>&1) || rc=$?
+                if [ "${rc}" -ne 0 ]; then
+                  return 1
+                fi
+                printf '%s' "$(printf '%s\n' "${out}" | grep -c '[^[:space:]]' || true)"
               }
 
+              # The total, or a failure if either read failed. The failure
+              # has to travel through the return status, not a variable:
+              # `count` runs inside `$(...)`, and a variable it sets there
+              # dies with that subshell.
               remaining() {
-                local total=0 kind
+                local total=0 kind c
                 for kind in externalsecret pushsecret; do
-                  total=$(( total + $(count "${kind}") ))
+                  if ! c=$(count "${kind}"); then
+                    return 1
+                  fi
+                  total=$(( total + ${c:-0} ))
                 done
                 printf '%s' "${total}"
               }
@@ -261,11 +308,30 @@ spec:
 
               deadline=$(( SECONDS + DRAIN ))
               while [ "${SECONDS}" -lt "${deadline}" ]; do
-                [ "$(remaining)" -eq 0 ] && break
+                # A read that fails is not a read that said none are left,
+                # so it does not break the loop: it costs one poll and the
+                # loop keeps its deadline.
+                if left=$(remaining); then
+                  [ "${left}" -eq 0 ] && break
+                fi
                 sleep 2
               done
 
-              left=$(remaining)
+              if ! left=$(remaining); then
+                # The hook could not read the cluster, so it cleared nothing
+                # and knows nothing. It still exits 0 — a failing pre-delete
+                # hook aborts `helm uninstall` outright, which would turn a
+                # connectivity problem into a broken uninstall — but it
+                # says what happened instead of reporting success.
+                log "WARN: could not read this release's ESO CRs from the API server."
+                log "      This hook therefore cleared nothing, and it cannot tell whether"
+                log "      any ExternalSecret still holds its finalizer."
+                log "      That is a pod->API-server connectivity failure, not an ESO"
+                log "      problem — the same i/o timeout class this chart documents"
+                log "      elsewhere. A forced cleanup strips the finalizers"
+                log "      itself, so use that if this uninstall then blocks on --wait."
+                exit 0
+              fi
               if [ "${left}" -eq 0 ]; then
                 log "all ESO CRs are gone — helm uninstall --wait has nothing to block on"
                 exit 0
@@ -273,13 +339,18 @@ spec:
 
               # The controller is not draining the finalizers: it is
               # unhealthy, or it was never there (the service was toggled
-              # off with `make stop SERVICE=external-secrets`). Clear them
-              # so the objects can complete the delete Helm already asked
-              # for. Only the `metadata.finalizers` field is touched, and
-              # only on objects of this release.
+              # off). Clear them so the objects can complete the delete Helm
+              # already asked for. Only the `metadata.finalizers` field is
+              # touched, and only on objects of this release.
               log "WARN: ${left} ESO CR(s) still hold their finalizer after ${DRAIN}s — clearing them"
               for kind in externalsecret pushsecret; do
-                objs=$(kubectl get "${kind}" -n "${NS}" -l "${SEL}" -o name 2>/dev/null)
+                # Not `2>/dev/null` here either: an unreachable API server
+                # would list nothing, and the loop would silently patch zero
+                # objects while the WARN above promises it is clearing them.
+                if ! objs=$(kubectl get "${kind}" -n "${NS}" -l "${SEL}" -o name 2>&1); then
+                  log "WARN: could not list the ${kind} objects to clear: ${objs}"
+                  continue
+                fi
                 for obj in ${objs}; do
                   if ! kubectl patch "${obj}" -n "${NS}" --type=merge \
                           -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1; then
@@ -289,12 +360,17 @@ spec:
               done
 
               for _ in $(seq 1 10); do
-                [ "$(remaining)" -eq 0 ] && break
+                if r=$(remaining); then
+                  [ "${r}" -eq 0 ] && break
+                fi
                 sleep 1
               done
-              left=$(remaining)
+              if ! left=$(remaining); then
+                log "WARN: cannot read the ESO CRs any more — the objects may or may not be gone."
+                exit 0
+              fi
               if [ "${left}" -ne 0 ]; then
                 log "WARN: ${left} ESO CR(s) are still terminating — helm uninstall --wait will time out on them,"
-                log "      and 'make down' clears them itself (make/k3s.mk: force-helm-cleanup)."
+                log "      and the forced cleanup clears them itself."
               fi
               exit 0

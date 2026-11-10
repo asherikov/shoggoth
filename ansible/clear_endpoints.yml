@@ -1,0 +1,654 @@
+---
+# Clear the `kubernetes` service's endpoint records for good — by removing the
+# master leases that keep putting them back.
+#
+# Deleting the v1 Endpoints object with `kubectl delete` is not sufficient:
+# /registry/services/endpoints/default/kubernetes is DERIVED state, restored at
+# every start. The source of truth is one kine row per apiserver,
+# /registry/masterleases/<ip>, whose value is an Endpoints object whose whole
+# content is Subsets[0].Addresses = [{IP: <ip>}] and whose lease column is 15.
+# `ListLeases()` is a recursive GetList over that prefix; `doReconcile`
+# REPLACES the published address list with what it returns and Updates the
+# object in place. The Endpoints object and the EndpointSlices follow the
+# lease set, so nothing else has to go.
+#
+# WHAT THIS PLAY DOES. It stops k3s, backs the datastore up beside the
+# original, appends kine's own delete row for each named address's master
+# lease, verifies, and starts k3s again. The Endpoints object is NOT touched,
+# so the reconciler rewrites it in place on its next cycle and there is no
+# window in which the service has no endpoints.
+#
+# Usage:
+#   ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook --limit shoggoth \
+#     -e ansible_host=<ip> ansible/clear_endpoints.yml \
+#     -e 'shoggoth_k3s_stale_ips=<ip> [<ip> ...]' --ask-become-pass
+#
+# ---------------------------------------------------------------------------
+# How the play is put together
+# ---------------------------------------------------------------------------
+#   * `trap 'restart_k3s; rm -rf $$STAGE' EXIT` is a `block`/`rescue`/
+#     `always`. What does NOT carry over is a hard interrupt: a shell EXIT trap
+#     fires on Ctrl-C and SIGTERM, an Ansible `always` block does not reliably
+#     run when the play is killed outright — so a play interrupted between the
+#     stop and the write leaves k3s down, which is why every failure message
+#     here names the recovery.
+#   * No staging directory: `command` takes `argv` and captures stdout, so the
+#     SQL travels as one argument and the output comes back registered.
+#   * One sudo password for the whole play (`--ask-become-pass`).
+#   * An empty `shoggoth_k3s_stale_ips` is a failed assert with a usage line:
+#     a hint followed by loops over nothing reads like a completed run.
+#   * `NeedDaemonReload` would be fetched by `systemctl show` and read by
+#     nothing; it is dropped rather than requested.
+#
+# The read, the write and the verify are shell commands: no sqlite module
+# exists in ansible-core or in the two pinned collections. ansible-core cannot
+# run a module on a host without a python3, so the python3 half of the reader
+# fallback is guaranteed by the time the play reaches the datastore; the
+# sqlite3 CLI is still preferred, being the reader whose output format the
+# parsing below assumes.
+#
+# ---------------------------------------------------------------------------
+# Which tasks run where
+# ---------------------------------------------------------------------------
+# All of them run ON THE HOST, undelegated — the only play in the tree where
+# that is true of every task (purge.yml's host-storage step and kubeconfig.yml's
+# `slurp` are each one step inside a play whose work is elsewhere). The unit,
+# the datastore and the sidecar files exist only there, and the cluster itself
+# is not contacted: the tunnel is not a prerequisite and the release is not
+# read. Both instances in the inventory point at one machine, so
+# `--limit shoggoth` only selects which entry's connection vars are used;
+# the datastore is host state, shared by both.
+- name: Clear the kubernetes service's stale endpoint records
+  hosts: instances
+  gather_facts: false
+  # Nothing here reads a fact, and the connection-level
+  # `ansible_python_interpreter` discovery does not need gathering.
+
+  vars:
+    # Word-split on whitespace; an empty list is caught by the assert below.
+    shoggoth_ce_stale_ips: "{{ shoggoth_k3s_stale_ips | default('') | split }}"
+
+    # One row per master lease, newest revision only: `MAX(id)` per name, and
+    # the join is what keeps a tombstoned name from reporting its older, live
+    # revision.
+    shoggoth_ce_read_sql: >-
+      SELECT k.name || '|' || k.id || '|' || k.deleted || '|' ||
+      COALESCE(k.create_revision, 0)
+      FROM kine k
+      JOIN (SELECT name, MAX(id) AS mid FROM kine GROUP BY name) m ON m.mid = k.id
+      WHERE k.name LIKE '%/masterleases/%'
+      ORDER BY k.id
+
+    # The same join, printed for the verification grep below: the address,
+    # then the newest row's deleted flag and lease.
+    shoggoth_ce_verify_sql: >-
+      SELECT k.name || '  newest deleted=' || k.deleted || '  lease=' ||
+      COALESCE(k.lease, 0) || '  row=' || k.id
+      FROM kine k
+      JOIN (SELECT name, MAX(id) AS mid FROM kine GROUP BY name) m ON m.mid = k.id
+      WHERE k.name LIKE '%/masterleases/%'
+      ORDER BY k.name
+
+    # The fallback reader for a host with no sqlite3 CLI. The SQL arrives as
+    # argv[2], which is what lets the whole statement set travel in one
+    # `command` argument. `isolation_level=None` is autocommit, so the BEGIN
+    # IMMEDIATE/COMMIT pair runs as ordinary statements.
+    shoggoth_ce_python_reader: |-
+      import sqlite3, sys
+      c = sqlite3.connect(sys.argv[1], isolation_level=None)
+      [print('|'.join('' if v is None else str(v) for v in row))
+       for s in sys.argv[2].split(';') if s.strip()
+       for row in c.execute(s).fetchall()]
+      c.close()
+
+  tasks:
+    # -----------------------------------------------------------------------
+    # Before anything is stopped
+    # -----------------------------------------------------------------------
+    # Every check in this section is a read, and every one of them has to
+    # survive a `--check` run: the `command` tasks carry
+    # `check_mode: false` for the reason deploy.yml's kubeconfig probe
+    # does — a probe that only reads changes nothing, and a check-mode run
+    # that skips it dies on an undefined registration one task later.
+    - name: Check the request
+      ansible.builtin.assert:
+        that:
+          - shoggoth_ce_stale_ips | length > 0
+        fail_msg: >-
+          Usage: ansible-playbook ansible/clear_endpoints.yml
+          -e shoggoth_k3s_stale_ips="<ip> [<ip> ...]"
+          Example: ansible-playbook ansible/clear_endpoints.yml
+          -e shoggoth_k3s_stale_ips="192.0.2.111"
+        quiet: true
+      # `quiet` keeps the passing case to one line, the same as service.yml's
+      # usage assert.
+
+    - name: Read the k3s unit's argv and state
+      ansible.builtin.command:
+        cmd: systemctl show k3s -p ExecStart -p ActiveState
+      register: shoggoth_ce_unit
+      changed_when: false
+      # A read. `failed_when: false` so the assert below can say what an
+      # empty answer means — a host with no k3s unit, or one that was never
+      # reachable — instead of surfacing systemctl's own "Unit k3s.service
+      # could not be found" as the play's failure.
+      failed_when: false
+      check_mode: false
+
+    - name: Find the argv and the active state
+      ansible.builtin.set_fact:
+        shoggoth_ce_argv: >-
+          {%- set ns = namespace(argv='') -%}
+          {%- for line in shoggoth_ce_unit.stdout_lines -%}
+          {%- if 'argv[]=' in line and not ns.argv -%}
+          {%- set ns.argv = line.split('argv[]=')[-1].split(' ; ')[0] -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ ns.argv }}
+        shoggoth_ce_active_state: >-
+          {%- set ns = namespace(state='') -%}
+          {%- for line in shoggoth_ce_unit.stdout_lines -%}
+          {%- if line.startswith('ActiveState=') -%}
+          {%- set ns.state = line.split('=', 1)[1] -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ ns.state }}
+      # `argv[]=` never begins a line — systemd writes one line per property,
+      # and ExecStart's is `ExecStart={ path=... ; argv[]=... ; ... }` — so the
+      # extraction strips everything before it: `split('argv[]=')[-1]` is that
+      # greedy match, `split(' ; ')[0]` cuts at systemd's field separator, and
+      # the `not ns.argv` guard keeps the FIRST of several ExecStart lines,
+      # which is the server. ActiveState does begin its line, so it is anchored.
+
+    - name: Refuse without a k3s systemd unit
+      ansible.builtin.assert:
+        that:
+          - shoggoth_ce_argv | length > 0
+        fail_msg: >-
+          FAIL: 'systemctl show k3s' returned nothing — k3s is not a systemd
+          unit on {{ inventory_hostname }}, or the host was not reachable
+          ({{ shoggoth_ce_unit.stderr | default('no error was reported', true) | trim }}).
+          Nothing was done.
+      # No `quiet`: the play's only "is this even a k3s host" failure, and the
+      # stderr is the difference between a wrong host and a dead one.
+
+    - name: Find the datastore and the advertised address in the unit's argv
+      ansible.builtin.set_fact:
+        shoggoth_ce_unit_args: >-
+          {%- set ns = namespace(datadir='', node_ip='', advertise='') -%}
+          {%- set args = shoggoth_ce_argv.split(' ') -%}
+          {%- for i in range(args | length) -%}
+          {%- if args[i] == '--data-dir' and i + 1 < (args | length) and not args[i + 1].startswith('--') -%}
+          {%- set ns.datadir = args[i + 1] -%}
+          {%- elif args[i].startswith('--data-dir=') -%}
+          {%- set ns.datadir = args[i].split('=', 1)[1] -%}
+          {%- endif -%}
+          {%- if args[i] == '--advertise-address' and i + 1 < (args | length) and not args[i + 1].startswith('--') -%}
+          {%- set ns.advertise = args[i + 1] -%}
+          {%- elif args[i].startswith('--advertise-address=') -%}
+          {%- set ns.advertise = args[i].split('=', 1)[1] -%}
+          {%- endif -%}
+          {%- if args[i] == '--node-ip' and i + 1 < (args | length) and not args[i + 1].startswith('--') -%}
+          {%- set ns.node_ip = args[i + 1] -%}
+          {%- elif args[i].startswith('--node-ip=') -%}
+          {%- set ns.node_ip = args[i].split('=', 1)[1] -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ {'datadir': ns.datadir, 'node_ip': ns.node_ip, 'advertise': ns.advertise} }}
+      # Both `--flag=value` and `--flag value` are accepted for all three
+      # flags, and the second form is refused when the next argument is itself
+      # a flag. `namespace` is what lets the loop's findings out of the loop.
+
+    - name: Resolve the paths
+      ansible.builtin.set_fact:
+        shoggoth_ce_dataroot: "{{ shoggoth_ce_unit_args.datadir or '/var/lib/rancher/k3s/server' }}"
+        shoggoth_ce_advertise: >-
+          {{ shoggoth_ce_unit_args.advertise
+             or (shoggoth_ce_unit_args.node_ip.split(',')[0] if shoggoth_ce_unit_args.node_ip else '') }}
+        # The advertise address falls back to the first entry of `--node-ip`,
+        # a comma-separated list. It is only ever printed as a note, but a
+        # wrong note is worse than none.
+
+    - name: Point at the datastore
+      ansible.builtin.set_fact:
+        shoggoth_ce_dbpath: "{{ shoggoth_ce_dataroot }}/db/state.db"
+        shoggoth_ce_ts: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+        shoggoth_ce_backup_path: "{{ shoggoth_ce_dataroot }}/db/state.db.pre-clear.{{ shoggoth_ce_ts }}"
+      # The timestamp comes from the control node: it only has to be unique
+      # and readable, and it names the backup after the moment it was taken
+      # rather than the host's clock.
+
+    - name: Find sqlite3 on the host
+      ansible.builtin.shell:
+        cmd: command -v sqlite3
+      register: shoggoth_ce_sqlite3
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      # `shell`, not `command`: `command -v` is a POSIX shell builtin and the
+      # `command` module execs its argv directly — there is no `command`
+      # binary, so the task would fail with ENOENT whether or not sqlite3 is
+      # installed. The one place in the play where a shell is required.
+
+    - name: Find python3 on the host
+      ansible.builtin.shell:
+        cmd: command -v python3
+      register: shoggoth_ce_python3
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Refuse without a way to write the datastore
+      ansible.builtin.assert:
+        that:
+          - shoggoth_ce_sqlite3.rc == 0 or shoggoth_ce_python3.rc == 0
+        fail_msg: >-
+          FAIL: neither sqlite3 nor python3 is installed on {{ inventory_hostname }},
+          so the datastore cannot be written. Nothing was done.
+        quiet: true
+
+    - name: Note that python3's sqlite3 module is doing the work
+      ansible.builtin.debug:
+        msg: >-
+          note: sqlite3 is not installed on {{ inventory_hostname }}; using
+          python3's sqlite3 module instead. It writes the same rows in the
+          same format.
+      when: shoggoth_ce_sqlite3.rc != 0
+
+    - name: Choose the datastore reader
+      ansible.builtin.set_fact:
+        shoggoth_ce_reader: >-
+          {{ [shoggoth_ce_sqlite3.stdout, '-noheader', '-batch']
+             if shoggoth_ce_sqlite3.rc == 0
+             else [shoggoth_ce_python3.stdout, '-c', shoggoth_ce_python_reader] }}
+      # Both readers take the datastore path and then the SQL as their last two
+      # arguments, so every task below can spell
+      # `shoggoth_ce_reader + [dbpath, sql]` without caring which is in play.
+      # Both print NULL as the empty string, so the parsing is identical.
+
+    # -----------------------------------------------------------------------
+    # Stop k3s — the disruptive step
+    # -----------------------------------------------------------------------
+    - name: Refuse while the unit is settling
+      ansible.builtin.assert:
+        that:
+          - shoggoth_ce_active_state in ['active', 'inactive', 'failed', 'dead']
+        fail_msg: >-
+          REFUSING: ActiveState={{ shoggoth_ce_active_state }} is neither
+          active nor stopped, so the apiserver may be live — 'reloading' and
+          'activating' both serve requests, and a tombstone written behind a
+          live apiserver's back is re-broadcast and recreated by its lease
+          reconciler. Wait for the unit to settle and run this again;
+          nothing was done.
+      # This gate is why the read below is trustworthy: the leases are only
+      # stable once nothing is refreshing them.
+
+    - name: Announce the stop
+      ansible.builtin.debug:
+        msg: "k3s is active. Stopping it — the cluster is down until this play ends."
+      when: shoggoth_ce_active_state == 'active'
+
+    - name: Note that k3s is not running
+      ansible.builtin.debug:
+        msg: "note: k3s is not active, so there is nothing to stop."
+      when: shoggoth_ce_active_state != 'active'
+
+    - name: Stop k3s
+      ansible.builtin.systemd:
+        name: k3s
+        state: stopped
+      become: true
+      when: shoggoth_ce_active_state == 'active'
+      # `sudo systemctl stop k3s`. A stop that fails fails the play here,
+      # before the datastore block, so nothing was written and there is
+      # nothing to restart.
+
+    - name: Remember that this play stopped k3s
+      ansible.builtin.set_fact:
+        shoggoth_ce_stopped: true
+      when: shoggoth_ce_active_state == 'active'
+      # The fact the `always` block's restart is gated on. Set even in check
+      # mode, where the stop above is skipped; the restart it gates is skipped
+      # there too.
+
+    # -----------------------------------------------------------------------
+    # The datastore work, with k3s stopped
+    # -----------------------------------------------------------------------
+    # Everything from the backup to the verification, so that one `always`
+    # can cover every exit path.
+    - name: Clear the master leases with k3s stopped
+      block:
+        - name: Find the datastore and its sidecar files
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ shoggoth_ce_dbpath }}"
+            - "{{ shoggoth_ce_dbpath }}-wal"
+            - "{{ shoggoth_ce_dbpath }}-shm"
+          register: shoggoth_ce_db_files
+          become: true
+          # The datastore directory is root's and not searchable by the login
+          # user, so even a `stat` inside it escalates. The WAL and its
+          # shared-memory file are what a live k3s may have left beside the
+          # database, and a backup that misses them restores into a corrupt
+          # database.
+
+        - name: Refuse without a datastore to back up
+          ansible.builtin.assert:
+            that:
+              - shoggoth_ce_db_files.results[0].stat.exists
+            fail_msg: >-
+              There is no datastore at {{ shoggoth_ce_dbpath }}, so there is
+              nothing to clear. Is the data-dir in the unit's argv right?
+              Nothing was done.
+          # Without this the copy loop would back up nothing and then fail on
+          # the read with a confusing message.
+
+        - name: Back up the datastore beside the original
+          ansible.builtin.copy:
+            src: "{{ item.item }}"
+            dest: "{{ item.item }}.pre-clear.{{ shoggoth_ce_ts }}"
+            # `cp -a` beside the original, as a named task: `remote_src` keeps
+            # the copy on the host and running as root carries the mode.
+            remote_src: yes
+          loop: "{{ shoggoth_ce_db_files.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+          become: true
+          register: shoggoth_ce_backup
+
+        - name: Report the backup
+          ansible.builtin.debug:
+            msg: "backup: {{ shoggoth_ce_backup_path }}"
+
+        - name: Read the master-lease rows
+          ansible.builtin.command:
+            argv: "{{ shoggoth_ce_reader + [shoggoth_ce_dbpath, shoggoth_ce_read_sql] }}"
+          become: true
+          check_mode: false
+          register: shoggoth_ce_read
+          # A read, forced to run in check mode: the one step that proves the
+          # datastore path and the SQL against the live schema, which is what a
+          # dry run should exercise. In check mode k3s was NOT stopped, so this
+          # reads a database a live apiserver is writing — safe, because a
+          # SELECT takes a shared lock at most and changes nothing.
+
+        - name: Refuse when the datastore holds no master lease
+          ansible.builtin.assert:
+            that:
+              - shoggoth_ce_read.stdout | trim | length > 0
+            fail_msg: >-
+              FAIL: no master-lease row could be read at all, so nothing was
+              matched and nothing was written. The live database was not
+              modified.
+
+        - name: Index the master-lease rows by address
+          ansible.builtin.set_fact:
+            shoggoth_ce_leases: >-
+              {%- set ns = namespace(rows={}) -%}
+              {%- for line in shoggoth_ce_read.stdout_lines -%}
+              {%- if line -%}
+              {%- set parts = line.split('|') -%}
+              {%- if parts | length >= 3 and parts[0].startswith('/registry/masterleases/') -%}
+              {%- set _ = ns.rows.update({parts[0].rsplit('/', 1)[-1]: {'id': parts[1], 'deleted': parts[2]}}) -%}
+              {%- endif -%}
+              {%- endif -%}
+              {%- endfor -%}
+              {{ ns.rows }}
+          # The read's four columns become a dict keyed by address, holding
+          # the row id and the deleted flag — the two fields every decision
+          # below needs. `namespace` again: a `{% set %}` inside the loop
+          # would not survive it.
+
+        - name: Classify the named addresses
+          ansible.builtin.set_fact:
+            shoggoth_ce_report: >-
+              {%- set ns = namespace(lines=[]) -%}
+              {%- for ip in shoggoth_ce_stale_ips -%}
+              {%- if ip not in shoggoth_ce_leases -%}
+              {%- set ns.lines = ns.lines + ['%s: no master-lease row exists — nothing to drop.' | format(ip)] -%}
+              {%- elif shoggoth_ce_leases[ip].deleted == '1' -%}
+              {%- set ns.lines = ns.lines + ['%s: already tombstoned — nothing to drop.' | format(ip)] -%}
+              {%- else -%}
+              {%- set ns.lines = ns.lines + ['%s: LIVE (row %s) — will be tombstoned.' | format(ip, shoggoth_ce_leases[ip].id)] -%}
+              {%- endif -%}
+              {%- endfor -%}
+              {{ ns.lines }}
+          # One line per named address, in the order they were named.
+
+        - name: Report the named addresses
+          ansible.builtin.debug:
+            msg: "{{ item }}"
+          loop: "{{ shoggoth_ce_report }}"
+
+        - name: Decide which addresses are live
+          ansible.builtin.set_fact:
+            shoggoth_ce_live: >-
+              {%- set ns = namespace(live=[], named=[]) -%}
+              {%- for ip, row in shoggoth_ce_leases.items() -%}
+              {%- if row.deleted != '1' -%}
+              {%- set ns.live = ns.live + [ip] -%}
+              {%- if ip in shoggoth_ce_stale_ips -%}
+              {%- set ns.named = ns.named + [ip] -%}
+              {%- endif -%}
+              {%- endif -%}
+              {%- endfor -%}
+              {{ {'live': ns.live | sort, 'named': ns.named | sort} }}
+          # `live` is every address a running apiserver still owns; `named` is
+          # the intersection with the request. The tombstone that follows is
+          # written for every named address, live or not, because the
+          # INSERT ... SELECT is a no-op on a row that is already tombstoned.
+
+        - name: Decide what the record will hold
+          ansible.builtin.set_fact:
+            shoggoth_ce_remain: >-
+              {%- set ns = namespace(ips=[]) -%}
+              {%- for ip in shoggoth_ce_live.live -%}
+              {%- if ip not in shoggoth_ce_stale_ips -%}
+              {%- set ns.ips = ns.ips + [ip] -%}
+              {%- endif -%}
+              {%- endfor -%}
+              {{ ns.ips | sort }}
+
+        - name: Refuse when every live lease would be dropped
+          ansible.builtin.assert:
+            that:
+              - shoggoth_ce_remain | length > 0
+            fail_msg: >-
+              REFUSING: every live master lease is one of the named
+              addresses. Dropping all of them leaves ListLeases() empty, and
+              doReconcile then refuses to touch the endpoints object on every
+              cycle — the stale addresses would be frozen in place
+              permanently. Live leases now:
+              {{ shoggoth_ce_live.live | join('\n      ') }}
+          # No `quiet`, and the live leases are listed: this is the refusal
+          # an operator has to act on, by naming fewer addresses.
+
+        - name: Report what the record will hold
+          ansible.builtin.debug:
+            msg: "after this drop the record will hold:"
+
+        - name: Report the addresses that will remain
+          ansible.builtin.debug:
+            msg: "      {{ item }}"
+          loop: "{{ shoggoth_ce_remain }}"
+
+        - name: Note the drops that cannot hold
+          ansible.builtin.set_fact:
+            shoggoth_ce_notes: >-
+              {%- set ns = namespace(lines=[]) -%}
+              {%- for ip in shoggoth_ce_stale_ips -%}
+              {%- if shoggoth_ce_advertise and ip == shoggoth_ce_advertise -%}
+              {%- set ns.lines = ns.lines + ['note: %s is the address the loaded argv advertises. UpdateLease recreates that lease every 10s, so it will be back within one cycle — this drop cannot hold for it.' | format(ip)] -%}
+              {%- endif -%}
+              {%- if ip in shoggoth_ce_live.named -%}
+              {%- set ns.lines = ns.lines + ['note: %s is a LIVE master lease, i.e. an address a running apiserver is advertising right now. It is refreshed every 10s against a 15s TTL, so it returns within one cycle — this drop cannot hold for it. Restart k3s on the host that owns it and let the lease expire, or name a different address.' | format(ip)] -%}
+              {%- endif -%}
+              {%- endfor -%}
+              {{ ns.lines }}
+
+        - name: Report the drops that cannot hold
+          ansible.builtin.debug:
+            msg: "{{ item }}"
+          loop: "{{ shoggoth_ce_notes }}"
+
+        - name: Report that there is nothing to do
+          ansible.builtin.debug:
+            msg: >-
+              Nothing to do: no live master lease matches any named address.
+              The datastore was not modified.
+          when: shoggoth_ce_live.named | length == 0
+
+        # -----------------------------------------------------------------
+        # Write and verify
+        # -----------------------------------------------------------------
+        # Skipped whole in check mode — a check must never write a
+        # tombstone — and skipped when nothing named is live, which is the
+        # nothing-to-do path. The `always` below restarts k3s either way.
+        - name: Tombstone the named addresses
+          when:
+            - shoggoth_ce_live.named | length > 0
+            - not ansible_check_mode
+          block:
+            - name: Build the tombstone statements
+              ansible.builtin.set_fact:
+                shoggoth_ce_write_sql: >-
+                  BEGIN IMMEDIATE;
+                  {% for ip in shoggoth_ce_stale_ips %}
+                  INSERT INTO kine (name, created, deleted, create_revision, prev_revision, lease, value, old_value)
+                    SELECT k.name, 0, 1, COALESCE(NULLIF(k.create_revision, 0), k.id), k.id, 0, NULL, k.value
+                    FROM kine k
+                    JOIN (SELECT name, MAX(id) AS mid FROM kine GROUP BY name) m ON m.mid = k.id
+                    WHERE k.name = '/registry/masterleases/{{ ip }}' AND k.deleted = 0;
+                  {% endfor %}
+                  COMMIT;
+              # kine's own delete row: the same name, `deleted` set to 1,
+              # `create_revision` carried over from the newest live row so the
+              # tombstone stays attached to the object it buries, and `lease`
+              # zeroed. One transaction, so a partial write is not a state the
+              # datastore can be left in.
+
+            - name: Write the tombstone rows
+              ansible.builtin.command:
+                argv: "{{ shoggoth_ce_reader + [shoggoth_ce_dbpath, shoggoth_ce_write_sql] }}"
+              become: true
+              register: shoggoth_ce_write
+              # No output is expected: the statement list ends at COMMIT. The
+              # verification is the next task, a separate read, which is what
+              # lets it be named.
+
+            - name: Read the master-lease rows back
+              ansible.builtin.command:
+                argv: "{{ shoggoth_ce_reader + [shoggoth_ce_dbpath, shoggoth_ce_verify_sql] }}"
+              become: true
+              register: shoggoth_ce_verify
+
+            - name: Report what the datastore now holds
+              ansible.builtin.debug:
+                msg: "      {{ item }}"
+              loop: "{{ shoggoth_ce_verify.stdout_lines }}"
+
+            - name: Check every named address is tombstoned
+              ansible.builtin.set_fact:
+                shoggoth_ce_verify_bad: >-
+                  {%- set ns = namespace(bad=[], missing=[], row='') -%}
+                  {%- for ip in shoggoth_ce_live.named -%}
+                  {%- set ns.row = '' -%}
+                  {%- for line in shoggoth_ce_verify.stdout_lines -%}
+                  {%- if line.startswith('/registry/masterleases/' ~ ip ~ '  newest deleted=') -%}
+                  {%- set ns.row = line -%}
+                  {%- endif -%}
+                  {%- endfor -%}
+                  {%- if not ns.row -%}
+                  {%- set ns.missing = ns.missing + [ip] -%}
+                  {%- elif not ns.row.startswith('/registry/masterleases/' ~ ip ~ '  newest deleted=1') -%}
+                  {%- set ns.bad = ns.bad + [ip] -%}
+                  {%- endif -%}
+                  {%- endfor -%}
+                  {{ {'bad': ns.bad, 'missing': ns.missing} }}
+              # A missing row means the write may not have committed; a row
+              # still reading `deleted=0` means it did not take. The trailing
+              # `  newest deleted=` anchor is what keeps `1.2.3.4` from
+              # matching the row for `1.2.3.45`.
+
+            - name: Fail when a verification row is missing
+              ansible.builtin.assert:
+                that:
+                  - shoggoth_ce_verify_bad.missing | length == 0
+                fail_msg: >-
+                  FAIL: no verification row came back for:
+                  {{ shoggoth_ce_verify_bad.missing | join(', ') }}
+                  The write may not have committed. Restore from
+                  {{ shoggoth_ce_backup_path }} if in doubt.
+
+            - name: Fail when an address is still live
+              ansible.builtin.assert:
+                that:
+                  - shoggoth_ce_verify_bad.bad | length == 0
+                fail_msg: >-
+                  FAIL: still live after the write:
+                  {{ shoggoth_ce_verify_bad.bad | join(', ') }}
+                  Restore from {{ shoggoth_ce_backup_path }} if in doubt, or
+                  re-run now that k3s is stopped.
+
+            - name: Report the drop
+              ansible.builtin.debug:
+                msg: "every named address is tombstoned."
+
+        - name: Note that k3s is left stopped
+          ansible.builtin.debug:
+            msg: "k3s was not running when this started, so it is left stopped."
+          when: not (shoggoth_ce_stopped | default(false))
+
+      rescue:
+        # The trap's job, minus the interrupt case the header names: say
+        # what failed, print the two diagnostics, and stop.
+        - name: Read fs.protected_regular as a diagnostic
+          ansible.builtin.command:
+            cmd: cat /proc/sys/fs/protected_regular
+          changed_when: false
+          failed_when: false
+          register: shoggoth_ce_protected
+          # A backup that cannot be written is the failure this answers: a
+          # `protected_regular` of 1 blocks writes into a sticky world-writable
+          # directory by anyone but the owner — a different problem from a full
+          # disk, and a different fix.
+
+        - name: Say what failed and where the backup is
+          ansible.builtin.debug:
+            msg: >-
+              FAILED at '{{ ansible_failed_task.name | default('a step of the clear') }}':
+              {{ ansible_failed_result.msg | default('no reason was given') }}
+              fs.protected_regular on {{ inventory_hostname }}:
+              {{ shoggoth_ce_protected.stdout | default('unreadable', true) | trim }}
+          # `ansible_failed_result` still carries the module's own `msg`
+          # even when the failing task had `no_log`, and the module's msg
+          # is the error text, never the datastore's contents.
+
+        - name: Stop with the datastore as it is
+          ansible.builtin.fail:
+            msg: >-
+              The datastore was not modified, or was modified by one
+              all-or-nothing transaction. Restore from the backup if in
+              doubt: {{ shoggoth_ce_backup_path }}
+              If k3s did not come back up, start it with
+              `ssh {{ ansible_host | default(inventory_hostname) }} sudo systemctl start k3s`
+              and check the journal.
+          # A rescue that runs to the end clears the failure, so the play
+          # would report success on a datastore it refused to touch. This
+          # is the task that keeps the exit status honest — the same role
+          # kubeconfig.yml's `fail` plays there.
+
+      always:
+        - name: Start k3s again
+          ansible.builtin.systemd:
+            name: k3s
+            state: started
+          become: true
+          when: shoggoth_ce_stopped | default(false)
+          # A no-op unless this play stopped it. A start that fails here
+          # fails the play, which on the success path is the "k3s did not
+          # start" failure.
+
+        - name: Say k3s is back
+          ansible.builtin.debug:
+            msg: "k3s started."
+          when: shoggoth_ce_stopped | default(false)

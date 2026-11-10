@@ -57,6 +57,7 @@ class SlaveTest:
             "mcp": self._check_mcp,
             "telemetry": self._check_telemetry,
             "pip-cache": self._check_pip_cache,
+            "apt-cache": self._check_apt_cache,
         }
 
     @property
@@ -545,6 +546,24 @@ class SlaveTest:
             self._fail(f"pip download via {index_url} produced no files")
             return
         print(f"OK: pip download through python-cache ({files[0]})")
+
+    def _check_apt_cache(self):
+        # The apt-cacher-ng report page — the endpoint the test's
+        # apt-proxy step curls, from the other side: that step reaches the
+        # service through the rewritten <domain> name over the VPN, this
+        # one through the in-cluster short name the slave image's apt
+        # config already uses. Unlike the test-side curl, which discards
+        # its status code with `--output /dev/null`, a non-200 fails here.
+        url = params.apt_cache_url.rstrip("/")
+        print(f"Apt cache URL: {url}")
+        if "apt-cache" not in url:
+            self._fail("APT_CACHE_URL does not point at the apt-cache proxy")
+            return
+        status = HttpApiClient.http_status(f"{url}/acng-report.html")
+        if status != 200:
+            self._fail(f"GET {url}/acng-report.html: HTTP {status}")
+            return
+        print(f"OK: apt-cacher-ng report page served (HTTP {status})")
 
     def execute(self, services=None):
         selected = services or list(self.checks)

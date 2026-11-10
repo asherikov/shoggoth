@@ -60,7 +60,7 @@ metadata:
     app: fusion
     app.kubernetes.io/component: fusion
   annotations:
-    # Kept across `helm uninstall` so `make down` stops the workload but
+    # Kept across `helm uninstall` so uninstalling stops the workload but
     # preserves the feed database. Reinstall adopts it: shoggoth.labels
     # survives uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep

@@ -1,0 +1,97 @@
+---
+# Flip one service toggle on the release: enable, or disable.
+#
+# Both are one `helm upgrade --install` against the release, differing only in
+# the boolean they `--set` on `services.<x>.enabled`. A restart is not a third
+# action here: the play is a toggle, so an ordering that runs one and then the
+# other belongs wherever the sequence is expressed, not here.
+#
+# The port is possible because the pinned collection DOES expose the two flags
+# the earlier notes in this tree claimed it did not — verify against
+# ansible/requirements.yml before quoting either claim again:
+#
+#   * `take_ownership` -> `--take-ownership`, since kubernetes.core 6.1.0;
+#   * `reuse_values`   -> `--reuse-values=<bool>`, since 3.0.0.
+#
+# Two traps in the module, and both are SILENT — the play would run, report
+# success, and do the wrong thing:
+#
+#   * `reuse_values` is ignored unless `reset_values: false` is set too.
+#     `reset_values` defaults to true and the module only warns, so without
+#     the pair the flag never reaches the command line and every toggle would
+#     reset the release's other values to chart defaults: enabling one service
+#     would silently undo every other override the release carries.
+#   * `set_values[].value` is concatenated as `"--set " + value`, so a YAML
+#     `false` is a bool there and raises TypeError. Both values below are
+#     quoted strings for that reason.
+#
+# Every task is `delegate_to: localhost`, for the reason deploy.yml's header
+# gives: the module shells out to `helm`, the chart is a control-node
+# directory, and KUBECONFIG is a control-node file read from the environment.
+# The release is reached at 127.0.0.1:6443 through the forward, so the tunnel
+# has to be up first.
+- name: Flip a single service toggle on the shoggoth release
+  hosts: instances
+  gather_facts: false
+
+  tasks:
+    - name: Check the service toggle request
+      ansible.builtin.assert:
+        that:
+          - shoggoth_service | default('') | length > 0
+          - shoggoth_service_action in ['enable', 'disable']
+        fail_msg: >-
+          Usage: ansible-playbook ansible/service.yml -e shoggoth_service=<app-name>
+          -e shoggoth_service_action=enable|disable
+        quiet: true
+      # An empty SERVICE would reach helm as `services..enabled`, which
+      # rejects it with something far less helpful. `quiet` keeps the passing
+      # case to a single line so the guard is not louder than the deploy it
+      # precedes.
+      delegate_to: localhost
+
+    # `release_namespace` is `inventory_hostname`, which is what
+    # deploy.yml's own helm task spells.
+    - name: Disable {{ shoggoth_service }}
+      kubernetes.core.helm:
+        chart_ref: "{{ shoggoth_chart_root }}"
+        release_name: shoggoth-{{ inventory_hostname }}
+        release_namespace: "{{ inventory_hostname }}"
+        values_files:
+          - "{{ shoggoth_instance_config }}"
+        set_values:
+          - name: services.{{ shoggoth_service }}.enabled
+            value: "false"
+        reuse_values: true
+        reset_values: false
+        wait: true
+        take_ownership: true
+        create_namespace: true
+        timeout: "{{ shoggoth_helm_timeout }}"
+      when: shoggoth_service_action == 'disable'
+      delegate_to: localhost
+      # Always "changed" from Ansible's point of view, the same as deploy.yml's
+      # own upgrade task: the module runs the command whether or not anything
+      # differs, and a real diff would mean parsing helm's output.
+
+    - name: Enable {{ shoggoth_service }}
+      kubernetes.core.helm:
+        chart_ref: "{{ shoggoth_chart_root }}"
+        release_name: shoggoth-{{ inventory_hostname }}
+        release_namespace: "{{ inventory_hostname }}"
+        values_files:
+          - "{{ shoggoth_instance_config }}"
+        set_values:
+          - name: services.{{ shoggoth_service }}.enabled
+            value: "true"
+        reuse_values: true
+        reset_values: false
+        wait: true
+        take_ownership: true
+        create_namespace: true
+        timeout: "{{ shoggoth_helm_timeout }}"
+      when: shoggoth_service_action == 'enable'
+      delegate_to: localhost
+      # Two `when:`-guarded tasks rather than one task with a computed value:
+      # each names the action it performs, and the duplication is the module
+      # arguments, which are the same for every service and every action.

@@ -14,7 +14,7 @@
   fresh write with stale OpenBao data.
 
   Gated on ``gitea-runner``: the runner registration deploys only when
-  that service is enabled, so ``make stop SERVICE=gitea-runner`` cleanly
+  that service is enabled, so disabling ``gitea-runner`` cleanly
   retires both the Deployment and the credential.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}

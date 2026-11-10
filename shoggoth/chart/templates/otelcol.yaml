@@ -9,7 +9,7 @@
   `{{ include "shoggoth.fullname" . }}-otelcol`, NOT bare `otelcol`. A
   cluster-scoped object has no namespace to separate two shoggoth instances
   on one cluster, so a bare name would make both instances render the SAME
-  ClusterRole. `make up` passes `--take-ownership`, so the second install
+  ClusterRole. A second install run with `--take-ownership`
   silently re-labels the first instance's ClusterRole to its own release and
   rewrites the ClusterRoleBinding's `subjects` list — `rbac/v1.Subjects` is
   an atomic list with no merge key, so the first instance's ServiceAccount is

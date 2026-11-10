@@ -1,7 +1,7 @@
 # Per-instance shoggoth configuration — test instance.
 #
 # Same contract as shoggoth/shoggoth.yaml; see that file for the full
-# description. Selected with `make up INSTANCE=shoggoth-test`.
+# description. Selected with the instance name shoggoth-test.
 #
 # Every value the cluster resolves globally must differ from
 # shoggoth/shoggoth.yaml, or a second instance cannot be installed beside the

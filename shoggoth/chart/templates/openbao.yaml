@@ -9,18 +9,18 @@
 
   LITERAL GO-TEMPLATE TEXT — read before editing.
   The LDAP group filter below is `"groupfilter":"(member={{.UserDN}})"`. That
-  is OpenBao's own templating, not Helm's. envsubst leaves it alone, and
-  OpenBao interpolates it when the auth method is configured. A chart cannot
-  pass it through raw: Helm would evaluate `{{.UserDN}}` against its own
+  is OpenBao's own templating, not Helm's. Nothing in the deploy path touches
+  it, and OpenBao interpolates it when the auth method is configured. A chart
+  cannot pass it through raw: Helm would evaluate `{{.UserDN}}` against its own
   context and emit `<no value>`, silently widening the group filter to match
   every directory entry. It is written here as {{ "{{.UserDN}}" }}, which
   renders back to the original bytes.
 
   Everything else that looks like ${...} (ROOT_TOKEN, OPENBAO_ADDR, CERT_DIR,
   UNSEAL_KEY, the ESO_* payloads, K8S_API, BAO_DATA, ...) is a plain shell
-  variable resolved inside the scripts at pod start and stays literal. Only
-  the envsubst $ENV_VARS whitelist (make/k3s.mk:240) was ever expanded at
-  deploy time.
+  variable resolved inside the scripts at pod start and stays literal. There
+  is no pass over the rendered manifests that would expand any of them —
+  Helm is the whole of the pre-pod stage.
 */}}
 {{- if or (include "shoggoth.isServiceEnabled" (list . "openbao")) (include "shoggoth.isServiceEnabled" (list . "openbao-bootstrap")) }}
 ---
@@ -248,9 +248,9 @@ data:
     # ``auth/token/lookup-self`` is the right question to ask -- it is
     # the call the external-secrets Vault client makes when it
     # authenticates, so a 200 here means the controller gets in too. A
-    # token whose OpenBao was re-initialised (a fresh ``sys/init``, or
-    # ``make wipe_openbao``) is not in the new instance's token store
-    # and answers 403 -- exactly the state in which the ESO controller
+    # token whose OpenBao was re-initialised (a fresh ``sys/init``, or a
+    # wipe) is not in the new instance's token store and answers 403 --
+    # exactly the state in which the ESO controller
     # reports "unable to validate store" while OpenBao itself is
     # healthy and the credential is still sitting in the Secret.
     #
@@ -858,7 +858,7 @@ data:
 # The two ConfigMaps stay under the union: openbao-config is mounted by the
 # StatefulSet and openbao-bootstrap by the Job, so either service needs the
 # union to hold. The workload objects below are gated on `openbao` alone —
-# putting them under the union made `make stop SERVICE=openbao` a no-op while
+# putting them under the union made the `openbao` toggle a no-op while
 # `openbao-bootstrap` remained enabled, because the union kept rendering them.
 {{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "openbao")) }}
@@ -888,7 +888,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: openbao
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep

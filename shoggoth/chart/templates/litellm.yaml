@@ -2,11 +2,12 @@
   templates/litellm.yaml — LiteLLM proxy + its rendered-config pipeline.
 
   The `litellm-templates` ConfigMap ships the *template* form of config.yaml.
-  `${OLLAMA_CLOUD_TOKEN}` and `${GITEA_SLAVE_TOKEN}` stay literal:
-  make/k3s.mk restricts envsubst to the $ENV_VARS whitelist, so those two
-  are expanded at *pod* runtime by the render-config initContainer
-  (templates/render-config.yaml) instead. Only the SHOGGOTH_AI_DEFAULT_* vars
-  are deploy-time substitutions, so they become .Values.ai.*.
+  `${OLLAMA_CLOUD_TOKEN}` and `${GITEA_SLAVE_TOKEN}` stay literal and are
+  expanded at *pod* runtime by the render-config initContainer
+  (templates/render-config.yaml); nothing expands them on the way through
+  Helm, because there is no envsubst pass over the rendered manifests. The
+  SHOGGOTH_AI_DEFAULT_* vars are the ones that moved out of that class
+  entirely — they are .Values.ai.* now, filled by Helm at render time.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "litellm")) }}
 apiVersion: v1
@@ -19,7 +20,7 @@ metadata:
     app: litellm
     app.kubernetes.io/component: litellm
   annotations:
-    # Kept across `helm uninstall` so `make down` stops workloads but
+    # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
     # uninstall, so Helm's ownership check still passes.
     helm.sh/resource-policy: keep

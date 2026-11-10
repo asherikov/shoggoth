@@ -1,0 +1,34 @@
+---
+# Install with: ansible-galaxy collection install -r ansible/requirements.yml
+#
+# Two collections. `kubernetes.core` carries 14 tasks across four modules —
+# `helm` and `helm_template` (down.yml, service.yml), `k8s` and `k8s_info`
+# (down.yml, purge.yml, deploy.yml) — so it is not the near-unused dependency
+# it once was; deploy.yml's header explains why that one play still reaches for
+# a command instead of the module.
+#
+# A collection is only the modules. `kubernetes.core`'s import the `kubernetes`
+# Python client, which neither command below installs and nothing in this tree
+# can add for you — it has to be importable by the interpreter running
+# ansible-core, so on a pipx install that is
+# `pipx inject ansible-core kubernetes`. See "Known issues" in this directory's
+# README.
+#
+# Both are pinned to the versions ansible/README.md certifies this tree
+# against. Unpinned, the install resolves to whatever is latest at install
+# time, and the behaviours the README lists as verified — the `k8s_info`
+# empty-resources assumption deploy.yml's namespace guard is built on, the
+# `--rsh` flags deploy.yml relies on — were checked against THESE versions, so
+# a fresh install must produce them.
+collections:
+  - name: ansible.posix
+    version: 2.2.2
+    # `synchronize` — the rsync wrapper. Used by the host_state role, which
+    # deploy.yml runs as its Pass 0.
+
+  - name: kubernetes.core
+    version: 6.6.0
+    # Four modules, 14 tasks: `k8s_info` is the namespace existence check in
+    # deploy.yml; `k8s` deletes the CRs and the namespaces in down.yml and
+    # purge.yml; `helm` and `helm_template` carry the uninstall in down.yml and
+    # the service toggle in service.yml.

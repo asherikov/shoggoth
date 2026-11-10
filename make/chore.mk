@@ -1,3 +1,7 @@
+# The flags shared by every helm command that reads the chart: the release
+# namespace and the per-instance configuration file.
+SHOGGOTH_HELM_COMMON_ARGS = --namespace $(INSTANCE) --values $(SHOGGOTH_CONFIG)
+
 DIAGRAMS_RESOURCES=$(shell find ${HOME} ${PIPX_HOME} ${PIPX_GLOBAL_HOME} -ipath "*/resources/alibabacloud" | head -1 | xargs -I {} dirname {})
 SKILL_DIR?=shoggoth/ai/plugin/skills/
 

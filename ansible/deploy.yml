@@ -1,0 +1,352 @@
+---
+# The deploy play — three passes, in order:
+#   Pass 0  provision /var/lib/rancher/k3s/storage/<instance>/ and its content
+#   Pass 1  the CRDs — every run, server-side, from upstream sources
+#   Pass 2  `kubectl get namespace || kubectl create namespace`, then
+#           `helm upgrade --install`, then `helm status | head -12`
+#
+# Pass 0 comes first because the chart's hostPath mounts must exist before the
+# release that mounts them.
+#
+# ---------------------------------------------------------------------------
+# Which tasks run where
+# ---------------------------------------------------------------------------
+# Pass 1 and Pass 2 run on the CONTROL NODE, delegated task by task: the chart
+# is a local directory, the CRD files are local paths, and
+# KUBECONFIG=private/kubeconfig is a control-node path — none of which exist in
+# the host's ssh session. Pass 0 runs ON THE HOST, undelegated: it writes
+# /var/lib/rancher/k3s/storage/<instance>/, which exists only there. The role's
+# `synchronize` task is delegated back to the control node, which is what lets
+# the source tree be a local directory.
+#
+# The play targets `instances`; `--limit` chooses the instance.
+# `gather_facts: false` costs nothing: nothing here reads a fact.
+#
+# ---------------------------------------------------------------------------
+# Why this is almost entirely `ansible.builtin.command`
+# ---------------------------------------------------------------------------
+# `kubernetes.core` is used for exactly one thing here — the namespace
+# existence check. It cannot express the rest:
+#
+#   * the namespace must be created but NOT managed — the chart owns the
+#     Namespace object's metadata, and `state: present` would express the
+#     opposite;
+#   * the CRD apply needs `--server-side --force-conflicts` against local
+#     files, which no module wraps;
+#   * the Established wait is `kubectl wait`.
+#
+# `kubernetes.core.helm` does expose `--take-ownership` (since 6.1.0) and
+# `ansible/service.yml` uses it; the upgrade below predates that.
+- name: Deploy the shoggoth release and provision the host state
+  hosts: instances
+  gather_facts: false
+
+  tasks:
+    - name: Load the instance configuration
+      ansible.builtin.include_vars:
+        file: "{{ shoggoth_instance_config }}"
+      # The same six values the chart derives, from the same file. Runs
+      # locally.
+
+    # -----------------------------------------------------------------------
+    # Preflight — can the control node address the cluster at all?
+    # -----------------------------------------------------------------------
+    # With no usable kubeconfig, kubectl does not say so: client-go falls back
+    # to `http://localhost:8080` and the failure surfaces as
+    # `failed to download openapi: ... connection refused` — a URL nothing here
+    # configured, attached to whatever CRD was applied first. It reads like a
+    # broken cluster or a broken CRD file, and it is neither.
+    #
+    # A check and not a step because this play cannot fetch the kubeconfig:
+    # reading it from the host needs the host's sudo password, and `private/`
+    # is not in git.
+    - name: Check that kubectl has a usable kubeconfig
+      ansible.builtin.command:
+        cmd: kubectl config current-context
+      register: shoggoth_kube_context
+      changed_when: false
+      # Not a failure: the task below reports it, with the fix in the message.
+      # rc is 1 for "no current context"; anything else means kubectl is not on
+      # PATH, which the README's prerequisite table covers.
+      failed_when: false
+      # `command` has no check-mode support, so a dry run would skip this task
+      # and the `when` below would read `.rc` off a result that has none. A
+      # pure read, forced to run in check mode too.
+      check_mode: false
+      delegate_to: localhost
+
+    - name: Refuse to deploy without a kubeconfig
+      ansible.builtin.fail:
+        msg: >-
+          kubectl has no current context, so every kubectl and helm call in
+          this play would reach http://localhost:8080 — client-go's fallback
+          when no kubeconfig resolves a cluster, and not an address anything
+          in this project configures. KUBECONFIG is
+          {{ lookup('env', 'KUBECONFIG') | default('unset', true) }}. Run
+          `ansible/kubeconfig.yml` once — it reads
+          /etc/rancher/k3s/k3s.yaml from the host over SSH and writes
+          {{ shoggoth_kubeconfig }} — and then this play again.
+      when: shoggoth_kube_context.rc != 0
+      delegate_to: localhost
+
+    # -----------------------------------------------------------------------
+    # Pass 0 — host state
+    # -----------------------------------------------------------------------
+    # State and content that only exists on the host, which the chart cannot
+    # carry. Runs before Pass 2: the chart's hostPath mounts point into this
+    # tree, and a pod scheduled against a missing directory gets an empty
+    # volume rather than an error.
+    #
+    # These tasks run ON THE HOST, the one part of the play that is not
+    # delegated. Most escalate to root and need the sudo password
+    # `--ask-become-pass` collects; the content sync does not, because the role
+    # hands the instance's storage directory to the login user first.
+    - name: Provision the host storage tree and its content
+      ansible.builtin.include_role:
+        name: host_state
+
+    # -----------------------------------------------------------------------
+    # Pass 1 — CRDs
+    # -----------------------------------------------------------------------
+    - name: Apply the CRDs server-side
+      ansible.builtin.command:
+        # One invocation per file rather than one invocation with every `-f`:
+        # the CRD sets are disjoint, so this is equivalent, and a failure names
+        # the file that failed instead of failing the whole apply opaquely.
+        cmd: kubectl apply --server-side=true --force-conflicts -f {{ item }}
+      loop: "{{ shoggoth_crd_files }}"
+      loop_control:
+        label: "{{ item | basename }}"
+      delegate_to: localhost
+      # `command` splits on whitespace, so a path with a space would break; the
+      # upstream CRD filenames have none.
+
+    - name: Wait for every CRD to be Established
+      ansible.builtin.command:
+        cmd: kubectl wait --for=condition=Established --timeout=45s customresourcedefinition --all
+      register: shoggoth_crd_wait
+      changed_when: false
+      # Never fails the run, by design: a not-yet-Established CRD is a warning,
+      # not a stop.
+      failed_when: false
+      # As with the kubeconfig probe: a read, forced to run in check mode so
+      # the WARN below has a result to read.
+      check_mode: false
+      delegate_to: localhost
+
+    - name: Warn if not every CRD became Established
+      ansible.builtin.debug:
+        msg: "not every CRD Established in 45s — check 'kubectl get crd'"
+      when: shoggoth_crd_wait.rc != 0
+      delegate_to: localhost
+
+    # -----------------------------------------------------------------------
+    # Pass 2 — namespace, release, status
+    # -----------------------------------------------------------------------
+    - name: Check whether the instance namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ inventory_hostname }}"
+      register: shoggoth_namespace
+      # A lookup: a missing namespace returns an empty `resources` list rather
+      # than failing. Delegated like the commands — the kubeconfig it reads is
+      # the control-node private/kubeconfig.
+      delegate_to: localhost
+
+    - name: Create the instance namespace
+      ansible.builtin.command:
+        cmd: kubectl create namespace {{ inventory_hostname }}
+      when: shoggoth_namespace.resources | length == 0
+      delegate_to: localhost
+      # Deliberately NOT `k8s` with `state: present`: the chart owns the
+      # Namespace object's metadata (shoggoth/chart/templates/namespace.yaml);
+      # this only guarantees it EXISTS.
+
+    # -----------------------------------------------------------------------
+    # PodSecurity: strip the profile labels from the instance namespace
+    # -----------------------------------------------------------------------
+    # PodSecurity baseline is incompatible with the chart — several Deployments
+    # (slave-dind, wireguard, localai, openbao-bootstrap, dind) use hostPath
+    # volumes + privileged containers + hostNetwork + capabilities that violate
+    # `baseline` by design, so a namespace labelled `enforce=baseline` makes
+    # their pods `FailedCreate` with
+    # `forbidden: violates PodSecurity "baseline:latest"`.
+    #
+    # The trailing `-` removes a label. A namespace with none of the three
+    # carries no PodSecurity profile, so Kubernetes applies the cluster default
+    # — `privileged` on k3s — which is what the chart needs.
+    #
+    # It runs BEFORE the install, and whether or not the namespace was just
+    # created above: a pre-existing namespace still carrying the labels is
+    # exactly the case the strip exists for.
+    #
+    # `failed_when: false` is what the old `|| true` did — labels that cannot be
+    # stripped are usually already absent, and the warning below reports it
+    # instead of passing silently.
+    #
+    # The step lives here rather than in the chart's pre-install hook
+    # (zz-namespace-podsecurity.yaml), which ran the chart's tools image with no
+    # kubeconfig, so every call it made died with `connection refused`.
+    - name: Strip any PodSecurity profile from the instance namespace
+      ansible.builtin.command:
+        cmd: >-
+          kubectl label namespace {{ inventory_hostname }}
+          pod-security.kubernetes.io/enforce-
+          pod-security.kubernetes.io/warn-
+          pod-security.kubernetes.io/audit-
+          --overwrite
+      register: shoggoth_podsecurity_strip
+      failed_when: false
+      delegate_to: localhost
+      # Same spelling as zz-crd-ready-wait.yaml's namespace: the task that
+      # owns the step owns its failure report.
+
+    - name: Warn if the PodSecurity labels could not be stripped
+      ansible.builtin.debug:
+        msg: >-
+          could not strip the PodSecurity labels from namespace
+          {{ inventory_hostname }}:
+          {{ shoggoth_podsecurity_strip.stderr | default('no output') }}
+
+          If the install below fails with
+          'violates PodSecurity "baseline:latest"', strip them by hand —
+          kubectl label namespace {{ inventory_hostname }}
+          pod-security.kubernetes.io/enforce- — and re-run.
+      # `is defined` because `command` does not support check mode: a dry run
+      # SKIPS the strip, and `.rc` off a skipped result is undefined rather
+      # than zero. The strip MUTATES, so — unlike the two probes above — it is
+      # deliberately NOT forced to run in check mode: a check that relabels the
+      # namespace is not a check.
+      when: shoggoth_podsecurity_strip.rc is defined and shoggoth_podsecurity_strip.rc != 0
+      delegate_to: localhost
+
+    # -----------------------------------------------------------------------
+    # A release record that is not `deployed` cannot be upgraded
+    # -----------------------------------------------------------------------
+    # `helm upgrade --install` refuses one outright —
+    # `Error: UPGRADE FAILED: "shoggoth-shoggoth" has no deployed releases` —
+    # with no flag to get past it: `--install` does not help, `--force` is about
+    # resource conflicts rather than release state, and `--atomic` implies
+    # `--wait`, which would turn a release whose pods never become ready into a
+    # failed deploy. Only `helm uninstall` (or deleting the release Secret)
+    # clears the record.
+    #
+    # A record gets into that state without anyone asking:
+    #
+    #   * `helm upgrade --install` fails — a hook exits non-zero, or a resource
+    #     is rejected — and Helm KEEPS the record, marked `failed`;
+    #   * `helm uninstall --wait` times out on the ESO CRs' finalizers (see
+    #     zz-eso-pre-delete.yaml's header) and leaves it `pending-uninstall`.
+    #
+    # Both are states the next deploy inherits. down.yml clears the record too,
+    # but only when its uninstall succeeds.
+    - name: Check the state of the release record
+      ansible.builtin.command:
+        cmd: helm status shoggoth-{{ inventory_hostname }} --namespace {{ inventory_hostname }} -o json
+      register: shoggoth_release_record
+      changed_when: false
+      # Not a failure: "release: not found" is rc=1 and is the common case on
+      # a fresh cluster.
+      failed_when: false
+      delegate_to: localhost
+      # `-o json` because the only thing read out of it is `.info.status`; the
+      # consumer below defaults stdout to `{}` before `from_json`, which would
+      # otherwise raise on an empty string.
+
+    - name: Clear a release record that is not deployed
+      block:
+        - name: Uninstall the release record
+          ansible.builtin.command:
+            cmd: >-
+              helm uninstall shoggoth-{{ inventory_hostname }}
+              --namespace {{ inventory_hostname }}
+              --wait
+              --timeout {{ shoggoth_helm_timeout_uninstall }}
+      rescue:
+        # The task name says what was being cleared but not what to DO about
+        # it, and helm's own "timed out waiting for the condition" names no
+        # object and no remedy — so the explanation is printed here instead.
+        - name: Explain why the release record could not be cleared
+          ansible.builtin.fail:
+            msg: >-
+              helm uninstall shoggoth-{{ inventory_hostname }} --wait gave up
+              after {{ shoggoth_helm_timeout_uninstall }}, so the release
+              record (status '{{
+              (shoggoth_release_record.stdout | default('{}', true)
+              | from_json).get('info', {}).get('status', 'absent') }}') is
+              still in place and the install below cannot start: helm
+              upgrade --install refuses a release that has no deployed
+              revision.
+
+              A timed-out uninstall is almost always a stuck resource rather
+              than a slow one. The chart's ExternalSecrets carry the
+              finalizer 'externalsecrets.external-secrets.io/externalsecret-cleanup',
+              which only the ESO controller can remove, and Helm deletes the
+              controller (a known kind) BEFORE the CRs (an unknown kind, so
+              it sorts last), so on an uninstall the finalizers are left
+              with nobody to drain them and the objects stay Terminating.
+
+              Run `ansible/down.yml` — it strips those finalizers and
+              retries the uninstall without hooks — and then this play
+              again.
+
+              If `ansible/down.yml` cannot clear it either, the record
+              itself can be removed directly, which orphans its resources
+              rather than deleting them; the install below re-adopts them
+              with --take-ownership:
+              kubectl -n {{ inventory_hostname }} delete secret
+              sh.helm.release.v1.shoggoth-{{ inventory_hostname }}
+      when:
+        - shoggoth_release_record.rc == 0
+        - (shoggoth_release_record.stdout | default('{}', true) | from_json).get('info', {}).get('status', 'absent') != 'deployed'
+      delegate_to: localhost
+      # `shoggoth_helm_timeout_uninstall`, not `shoggoth_helm_timeout`: this is
+      # an uninstall, and both are defined for every play from
+      # group_vars/instances.yml.
+      #
+      # `--wait` because the step after it re-adopts whatever survives:
+      # `--take-ownership` claims pre-existing resources matching by
+      # (kind, name, namespace), so a half-deleted release still works — but
+      # without the wait the two runs can overlap on the same objects.
+      #
+      # Deliberately NOT `ignore_errors`: failing here, under a name that says
+      # what was being cleared, is the honest error. A release whose RESOURCES
+      # are stuck needs the finalizers stripped first; this guard clears a
+      # record, it does not fight a wedged delete.
+
+    - name: Install or upgrade the release
+      ansible.builtin.command:
+        cmd: >-
+          helm upgrade --install shoggoth-{{ inventory_hostname }}
+          {{ shoggoth_chart_root }}
+          --namespace {{ inventory_hostname }}
+          --values {{ shoggoth_instance_config }}
+          --create-namespace
+          --take-ownership
+          --timeout {{ shoggoth_helm_timeout }}
+      delegate_to: localhost
+      # `--take-ownership` lets Helm claim pre-existing resources that match a
+      # chart resource's (kind, name, namespace) but lack the
+      # `app.kubernetes.io/managed-by: Helm` label; without it the first install
+      # against a cluster that already has unmanaged copies aborts with
+      # `invalid ownership metadata`. Idempotent after adoption.
+      #
+      # `--create-namespace` is kept even though the namespace was just created:
+      # it is the flag's own idempotence, not belt-and-braces.
+      #
+      # Always "changed" from Ansible's point of view — helm upgrade --install
+      # runs whether or not anything differs.
+
+    - name: Show the release status
+      ansible.builtin.command:
+        cmd: helm status shoggoth-{{ inventory_hostname }} --namespace {{ inventory_hostname }}
+      register: shoggoth_release_status
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Release status
+      ansible.builtin.debug:
+        var: shoggoth_release_status.stdout_lines[:12]
+      # The last 12 lines of `helm status` output.
+      delegate_to: localhost

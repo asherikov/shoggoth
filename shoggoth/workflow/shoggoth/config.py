@@ -66,6 +66,16 @@ class Parameters:
         "Pip": [
             ("pip_index_url", "PIP_INDEX_URL", False, ""),
         ],
+        "Apt": [
+            # apt-cacher-ng's HTTP surface. The slave image points apt at
+            # this host unconditionally — dockerfiles/slave writes
+            # `Acquire::http::Proxy "http://apt-cache"` into
+            # /etc/apt/apt.conf.d/ — so the default is the endpoint the
+            # image's own apt traffic already uses. The test's
+            # apt-proxy step checks the same service through the
+            # rewritten <domain> name instead; both are the one apt-cacher-ng.
+            ("apt_cache_url", "APT_CACHE_URL", False, "http://apt-cache:80"),
+        ],
         "SSH": [
             ("ssh_auth_sock", "SSH_AUTH_SOCK", False, ""),
         ],

@@ -1,0 +1,85 @@
+---
+# Drop a tag from the local zot registry cache. Doing so triggers an
+# on-demand re-sync from upstream on the next pull of IMAGE:TAG.
+#
+# zot is configured with anonymous access, so no credentials are required.
+# The reachability requirement is the one thing that shapes this play: the
+# registry answers on the host's own port (hostNetwork), not on the service
+# route the DNS rewrite produces. That is why no tunnel is established — and
+# why every task here is `delegate_to: localhost`, so the request leaves the
+# control node directly.
+#
+# `ansible.builtin.uri` replaces a curl/mktemp/case shell dance. The
+# interesting part is `status_code`: listing 404 alongside 200/202/204 makes
+# the "tag not present" case an accepted outcome rather than something to
+# detect and branch on, and any other code fails the task with the response
+# body in the message.
+- name: Drop a tag from the local zot registry cache
+  hosts: instances
+  gather_facts: false
+
+  tasks:
+    - name: Load the instance configuration
+      ansible.builtin.include_vars:
+        file: "{{ shoggoth_instance_config }}"
+      # The two values the URL is built from — `identity.domain` and
+      # `network.registry.hostPort` — come straight out of the instance
+      # config. Loading the file rather than passing them keeps one source of
+      # truth, the same as deploy.yml.
+      delegate_to: localhost
+
+    - name: Check the request
+      ansible.builtin.assert:
+        that:
+          - shoggoth_image | default('') | length > 0
+          - shoggoth_tag | default('') | length > 0
+        fail_msg: >-
+          Usage: ansible-playbook ansible/drop_image_tag.yml -e shoggoth_image=<repo>
+          -e shoggoth_tag=<tag>
+          Example: ansible-playbook ansible/drop_image_tag.yml
+          -e shoggoth_image=library/nginx -e shoggoth_tag=latest
+        quiet: true
+      # A missing image or tag prints the same two lines the assert's
+      # `fail_msg` carries.
+      delegate_to: localhost
+
+    - name: Delete the manifest
+      ansible.builtin.uri:
+        url: "http://registry.{{ identity.domain }}:{{ network.registry.hostPort }}/v2/{{ shoggoth_image }}/manifests/{{ shoggoth_tag }}"
+        method: DELETE
+        headers:
+          # The OCI manifest media types zot may be holding for this tag, as
+          # one Accept header. Folded with `>-` so the commas survive as
+          # spaces.
+          Accept: >-
+            application/vnd.oci.image.manifest.v1+json,
+            application/vnd.oci.image.index.v1+json,
+            application/vnd.docker.distribution.manifest.v2+json,
+            application/vnd.docker.distribution.manifest.list.v2+json
+        status_code:
+          - 200
+          - 202
+          - 204
+          # 404 is the "tag not present" case and is idempotent, not an
+          # error: dropping a tag that is not cached is a success.
+          - 404
+      register: shoggoth_drop_image_tag
+      delegate_to: localhost
+      # `follow_redirects` is left at its default. zot answers the DELETE
+      # directly, and a 3xx would therefore reach `status_code` and fail.
+
+    - name: Report the tag as dropped
+      ansible.builtin.debug:
+        msg: "OK: tag dropped (HTTP {{ shoggoth_drop_image_tag.status }})"
+      # `is defined` because `uri` has no check-mode support: a check-mode
+      # run skips the DELETE above — which is the point, a check must not
+      # drop the tag — and `.status` off a skipped result is undefined
+      # rather than 200.
+      when: shoggoth_drop_image_tag.status is defined and shoggoth_drop_image_tag.status != 404
+      delegate_to: localhost
+
+    - name: Report the tag as absent
+      ansible.builtin.debug:
+        msg: "OK: tag not present (HTTP 404, idempotent)"
+      when: shoggoth_drop_image_tag.status is defined and shoggoth_drop_image_tag.status == 404
+      delegate_to: localhost

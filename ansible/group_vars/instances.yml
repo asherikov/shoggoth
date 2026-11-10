@@ -1,0 +1,206 @@
+---
+# Applies to every entry in [instances].
+#
+# ---------------------------------------------------------------------------
+# Connection
+# ---------------------------------------------------------------------------
+# Stated rather than left to chance: an undefined `ansible_user` falls back
+# silently to the local username, which on a control node is rarely the
+# account the host expects. `USER` comes from the environment.
+ansible_connection: ssh
+ansible_user: "{{ lookup('env', 'USER') | default(lookup('pipe', 'id -un'), true) }}"
+
+# `HOST_IP` from the environment. The name the inventory used to spell,
+# `host.<domain>`, resolves for nothing: setup-client.sh's `update_hosts`
+# writes <ip> <domain> and <ip> <service>.<domain> but never host.<domain>.
+#
+# An empty value is deliberate, and is the whole point: it fails the connection
+# step with "hostname contains invalid characters" and reaches no host at all.
+# Omitting the declaration instead would fall back to `inventory_hostname` —
+# `shoggoth` — which DOES resolve in a cluster DNS, so a hand-run play would
+# open an SSH session to a live server that is not the one asked for. A name
+# that never connects is the safer failure.
+#
+# An `-e ansible_host` extra var outranks this default.
+ansible_host: "{{ lookup('env', 'HOST_IP') }}"
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+# `inventory_dir` is the directory holding hosts.ini. Every playbook lives
+# beside it, so this is stable regardless of which playbook is invoked.
+#
+# If the pinned Ansible version refuses to resolve a magic variable inside
+# group_vars, the fix is to move this block into each play's `vars:` — the
+# values do not change, only where they are declared.
+shoggoth_ansible_root: "{{ inventory_dir }}"
+
+# `normpath` collapses the `..` lexically, without touching the filesystem and
+# without resolving symlinks. It matters: `query('fileglob', ...)` below returns
+# ALREADY-normalized paths, so without this the CRD list would be a mix of
+# `/repo/shoggoth/crd/...` and `/repo/ansible/../shoggoth/crd/...`.
+shoggoth_repo_root: "{{ (shoggoth_ansible_root + '/..') | normpath }}"
+shoggoth_source_dir: "{{ (shoggoth_repo_root + '/shoggoth') | normpath }}"
+shoggoth_chart_root: "{{ (shoggoth_repo_root + '/shoggoth/chart') | normpath }}"
+shoggoth_crd_root: "{{ (shoggoth_repo_root + '/shoggoth/crd') | normpath }}"
+
+# shoggoth/<instance>.yaml. deploy.yml loads it with `include_vars`, so there is
+# exactly one source of truth. Do not copy values out of it into group_vars or a
+# host_vars file — there is no host_vars/ directory, and adding one is how the
+# two spellings drift apart.
+shoggoth_instance_config: "{{ shoggoth_repo_root }}/shoggoth/{{ inventory_hostname }}.yaml"
+
+# Where the kubeconfig play writes its output — the `KUBECONFIG` path from the
+# environment.
+shoggoth_kubeconfig: "{{ shoggoth_repo_root }}/private/kubeconfig"
+
+# ---------------------------------------------------------------------------
+# CRDs
+# ---------------------------------------------------------------------------
+# What Pass 1 of deploy.yml applies with `kubectl apply --server-side=true
+# --force-conflicts`, straight from their upstream sources. This list is the
+# only spelling of the CRD set in the repo.
+#
+# They are deliberately NOT in the chart: Helm's loader has no crds/ case, so
+# anything placed there lands in Chart.Files, gets serialized into the release
+# record, and blows past the 1048576-byte Secret.data cap — `helm upgrade
+# --install` then fails before a single resource is created.
+#
+# Sorted, because the fileglob query is sorted and a deterministic order makes
+# a failed apply reproducible.
+shoggoth_crd_files: >-
+  {{ (query('fileglob', shoggoth_crd_root + '/argo-workflows/manifests/base/crds/full/argoproj.io_*.yaml')
+      + [shoggoth_crd_root + '/external-secrets/deploy/crds/bundle.yaml']) | sort }}
+
+# ---------------------------------------------------------------------------
+# Host content
+# ---------------------------------------------------------------------------
+# State and content the chart cannot carry. `dst` is the directory under
+# /var/lib/rancher/k3s/storage/<instance>/, `src` is the path inside the
+# shoggoth/ tree.
+#
+# `dst` is NOT the source directory's name, and it must not be: the chart
+# mounts `/var/lib/rancher/k3s/storage/<instance>/workflow-scripts` into
+# slave-dind at /host_volumes/workflow-scripts
+# (shoggoth/chart/templates/slave-dind.yaml:234), while the source directory
+# is `workflow/`. Copying the source name into `dst` would sync the content
+# somewhere nothing mounts — the container would silently get an empty
+# directory, and only at runtime.
+shoggoth_host_paths:
+  - dst: redmine-plugins
+    src: data/redmine/plugins
+  - dst: workflow-scripts
+    src: workflow
+  # `dst: private` is the name the CHART mounts, not the repo path: openbao.yaml
+  # mounts /var/lib/rancher/k3s/storage/<instance>/private at /shoggoth/private
+  # in the openbao-init Job, and `.Values.ai.defaultTokenFileRef` points inside
+  # that container path. Renaming `dst` would move the secrets somewhere the
+  # mount does not reach, and the bootstrap would silently seed a random token
+  # instead of reading the file. The repo-side source lives under data/.
+  - dst: private
+    src: data/private
+
+# The helm timeout for the deploy play; the single spelling point for every
+# caller — there is no override above it.
+shoggoth_helm_timeout: 10m
+
+# ---------------------------------------------------------------------------
+# Service toggles
+# ---------------------------------------------------------------------------
+# What `ansible/service.yml` does: `enable` or `disable`. An
+# `-e shoggoth_service_action=…` extra var outranks this default.
+#
+# `shoggoth_service` is deliberately NOT defaulted: an empty SERVICE reaches
+# helm as `services..enabled` and fails there with something far less helpful
+# than the play's own assert.
+shoggoth_service_action: enable
+
+# ---------------------------------------------------------------------------
+# The `down` family's custom resources
+# ---------------------------------------------------------------------------
+# What `ansible/down.yml` operates on, and the only spelling of it in the tree.
+# One map of kind -> facts, plus two name lists, because the two steps ask
+# different questions about the same kinds:
+#
+#   * The cleanup step asks which CRs are holding THIS release's uninstall
+#     open. Its predicate is the `meta.helm.sh/release-*` annotation pair Helm
+#     puts on every object it installs, or a `deletionTimestamp` already set.
+#   * The orphan purge asks which of the three ESO kinds the chart no longer
+#     renders. An orphan carries neither the annotation nor the instance label
+#     by definition, so it can only be found by diffing a render against the
+#     live set.
+#
+# `api_version` is a fact about the kind, read out of the vendored CRDs
+# (shoggoth/crd/) rather than out of the chart: the ESO bundle serves
+# ExternalSecret and SecretStore at v1 — with v1beta1 still listed but not the
+# storage version — and PushSecret only at v1alpha1, while argo serves all five
+# of its kinds at v1alpha1. It has to be spelled because `kubernetes.core`
+# defaults `api_version` to `v1`, right for none of them, and a wrong
+# group/version is a 404 rather than a warning.
+#
+# `namespaced` is the third fact, and the one that cannot be read off the
+# kind's name: `ClusterWorkflowTemplate` is the only cluster-scoped kind here.
+# `kubectl get clusterworkflowtemplate -n <ns>` silently ignores the namespace;
+# the collection's `k8s`/`k8s_info` hand it to the dynamic client instead, so
+# the play omits `namespace:` for it rather than depend on that being harmless.
+shoggoth_down_cr_kinds:
+  ExternalSecret:
+    api_version: external-secrets.io/v1
+    namespaced: true
+  PushSecret:
+    api_version: external-secrets.io/v1alpha1
+    namespaced: true
+  SecretStore:
+    api_version: external-secrets.io/v1
+    namespaced: true
+  Workflow:
+    api_version: argoproj.io/v1alpha1
+    namespaced: true
+  WorkflowTemplate:
+    api_version: argoproj.io/v1alpha1
+    namespaced: true
+  CronWorkflow:
+    api_version: argoproj.io/v1alpha1
+    namespaced: true
+  ClusterWorkflowTemplate:
+    api_version: argoproj.io/v1alpha1
+    namespaced: false
+  WorkflowTaskSet:
+    api_version: argoproj.io/v1alpha1
+    namespaced: true
+
+# The two kind lists, as names into the map above. The order is not cosmetic:
+# it is the order the CRs are listed and reported in.
+shoggoth_down_cleanup_kinds:
+  - ExternalSecret
+  - PushSecret
+  - Workflow
+  - WorkflowTemplate
+  - CronWorkflow
+  - ClusterWorkflowTemplate
+  - WorkflowTaskSet
+
+shoggoth_down_orphan_kinds:
+  - ExternalSecret
+  - PushSecret
+  - SecretStore
+
+# The `--timeout` on the first `helm uninstall` in down.yml; the single
+# spelling point, as with `shoggoth_helm_timeout`. The second step's retry
+# keeps its hardcoded 30s: it is a second chance, not a fresh budget.
+shoggoth_helm_timeout_uninstall: 2m
+
+# ---------------------------------------------------------------------------
+# k3s datastore repair
+# ---------------------------------------------------------------------------
+# The stale endpoint addresses `ansible/clear_endpoints.yml` tombstones out of
+# the kine datastore — space-separated, passed as `-e shoggoth_k3s_stale_ips=…`.
+#
+# Defaulted to empty so a run without the var fails on the play's own assert and
+# prints the usage line. The alternative — leaving it undefined, the way
+# `shoggoth_service` is — would make every hand run die on an undefined variable
+# inside `shoggoth_ce_stale_ips`, and an undefined-variable error says nothing
+# about what the variable wants. The shell target this replaces walked its
+# loops over an empty list and exited 0, which reads like a completed run; that
+# is the failure the assert exists to prevent.
+shoggoth_k3s_stale_ips: ""

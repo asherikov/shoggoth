@@ -1,0 +1,317 @@
+---
+# Tear down the shoggoth release. One play, three steps: uninstall, strip the
+# ESO finalizers, then purge the orphans.
+#
+# ---------------------------------------------------------------------------
+# Why an uninstall needs three steps
+# ---------------------------------------------------------------------------
+# `helm uninstall` deletes workloads and ConfigMaps and deliberately leaves
+# the data plane alone. Two things survive it, and each step below is about
+# one of them:
+#
+#   1. CRs whose controller finalizers `--wait` is blocking on. Helm deletes a
+#      known kind (the ESO controller Deployment) before an unknown one (the
+#      ExternalSecret CRs), so the controller gets its SIGTERM while the CRs
+#      it owns still wait for a finalizer only it can remove. The second step
+#      strips those finalizers and retries the uninstall without hooks.
+#   2. ESO objects the chart no longer renders — CRs no release owns, which no
+#      uninstall will ever remove and neither earlier step can find: the
+#      chart's pre-delete hook selects on the instance label and the second
+#      step on the `meta.helm.sh/release-*` annotations, while an orphan
+#      carries neither by definition. The purge diffs a render against the
+#      live set and deletes the difference.
+#
+# The namespace's credential Secrets are the post-delete hook's job
+# (zz-secret-purge.yaml) and are not touched here.
+#
+# ---------------------------------------------------------------------------
+# Implementation notes
+# ---------------------------------------------------------------------------
+# The CR predicate is a `{% for %}` loop rather than a filter chain:
+# `selectattr` and `map(attribute=…)` split on `.`, so
+# `metadata.annotations['meta.helm.sh/release-name']` raises
+# `UndefinedError: 'dict object' has no attribute "annotations['meta"`, and
+# there is no `contains` test in bare Jinja2. `json_query` is not available
+# either — only ansible.posix and kubernetes.core are pinned.
+#
+# The orphan diff compares NAMES, not (kind, name), so a rendered name masks a
+# live object of a different kind with the same name — kept deliberately.
+#
+# The second uninstall is a hard failure and the orphan purge is best-effort as
+# a whole. There is no CONFIRM gate: the play deletes unconditionally.
+#
+# ---------------------------------------------------------------------------
+# Which tasks run where
+# ---------------------------------------------------------------------------
+# Every task is `delegate_to: localhost`, for deploy.yml's reason: the modules
+# shell out to `helm` and `kubectl`, the chart is a control-node directory,
+# `helm_template`'s `values_files` are read from the target host's filesystem
+# (which is the control node once the task is delegated), and KUBECONFIG is a
+# control-node path read from the environment. The release is reached at
+# 127.0.0.1:6443 through a forward, so the tunnel has to be up first.
+- name: Tear down the shoggoth release
+  hosts: instances
+  gather_facts: false
+
+  tasks:
+    # -----------------------------------------------------------------------
+    # The uninstall, best-effort
+    # -----------------------------------------------------------------------
+    - name: Uninstall the release
+      kubernetes.core.helm:
+        release_name: shoggoth-{{ inventory_hostname }}
+        release_namespace: "{{ inventory_hostname }}"
+        release_state: absent
+        wait: true
+        wait_timeout: "{{ shoggoth_helm_timeout_uninstall }}"
+      delegate_to: localhost
+      ignore_errors: true
+      # Without this register the WARN below is unreachable: `ignore_errors`
+      # turns a failed uninstall into a normal result, so only the registered
+      # variable distinguishes it, and the `default(false)` in the WARN's
+      # `when` silently swallows the case where it was never set.
+      register: shoggoth_down_uninstall
+      # `release_namespace` is exported as HELM_NAMESPACE
+      # (module_utils/helm.py:154-158), which is what `--namespace` does;
+      # `wait` + `wait_timeout` are `--wait --timeout`, and `purge` defaults
+      # true so `--keep-history` is not passed.
+      #
+      # A release that fails to uninstall is still a hard module failure, so
+      # `ignore_errors` carries the old `||` and the task below the WARN.
+
+    - name: Warn if the uninstall failed
+      ansible.builtin.debug:
+        msg: "WARN: helm uninstall failed, forced cleanup is going to take care of this."
+      when: shoggoth_down_uninstall.failed | default(false)
+      delegate_to: localhost
+
+    # -----------------------------------------------------------------------
+    # Strip the finalizers, then retry
+    # -----------------------------------------------------------------------
+    # Two branches, OR'd: already terminating, or installed by this release.
+    - name: List the chart CRs in the namespace
+      kubernetes.core.k8s_info:
+        api_version: "{{ item.value.api_version }}"
+        kind: "{{ item.key }}"
+        namespace: "{{ inventory_hostname if item.value.namespaced else omit }}"
+      loop: "{{ shoggoth_down_cr_kinds | dict2items }}"
+      when: item.key in shoggoth_down_cleanup_kinds
+      register: shoggoth_down_live
+      delegate_to: localhost
+      ignore_errors: true
+      # A failed listing reads as "no CRs of this kind" — the outcome a missing
+      # CRD should have — and `ignore_errors` still prints it.
+      #
+      # `api_version` is spelled for every kind because the collection defaults
+      # it to `v1` (module_utils/args_common.py), right for none of these
+      # eight. `namespace` is omitted for the cluster-scoped kind.
+
+    - name: Find the chart CRs the uninstall is blocked on
+      ansible.builtin.set_fact:
+        shoggoth_down_blocking: >-
+          {%- set out = [] -%}
+          {%- for res in shoggoth_down_live.results -%}
+          {%- for obj in res.resources | default([]) -%}
+          {%- set md = obj.metadata -%}
+          {%- if md.deletionTimestamp is defined
+                   or ((md.annotations | default({}, true)).get('meta.helm.sh/release-name') == 'shoggoth-' ~ inventory_hostname
+                       and (md.annotations | default({}, true)).get('meta.helm.sh/release-namespace') == inventory_hostname) -%}
+          {%- set _ = out.append({'kind': res.item.key, 'name': md.name}) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ out }}
+      delegate_to: localhost
+      # One pass over (kind x object). `res.item` is the `dict2items` pair, so
+      # the kind cannot drift from the api_version it was listed with;
+      # `res.resources | default([])` covers the kinds the `when:` skipped and
+      # the ones whose listing failed.
+
+    - name: Report the CRs blocking the uninstall
+      ansible.builtin.debug:
+        var: shoggoth_down_blocking
+      when: shoggoth_down_blocking | length > 0
+      delegate_to: localhost
+
+    - name: Strip the finalizers from the blocking CRs
+      kubernetes.core.k8s:
+        state: patched
+        merge_type: merge
+        api_version: "{{ shoggoth_down_cr_kinds[item.kind].api_version }}"
+        kind: "{{ item.kind }}"
+        name: "{{ item.name }}"
+        namespace: "{{ inventory_hostname if shoggoth_down_cr_kinds[item.kind].namespaced else omit }}"
+        definition:
+          metadata:
+            finalizers: []
+      loop: "{{ shoggoth_down_blocking }}"
+      delegate_to: localhost
+      ignore_errors: true
+      # `state: patched` + `merge_type: merge` is `kubectl patch --type=merge`,
+      # and the body is `{"metadata":{"finalizers":[]}}` — an EMPTY list, which
+      # is what makes it a strip rather than a set. A missing object is a
+      # documented silent skip with a warning
+      # (module_utils/k8s/runner.py:177-186); any other failure raises, and
+      # `ignore_errors` prints it and carries on.
+
+    - name: Check whether the release still exists
+      ansible.builtin.command:
+        cmd: helm status shoggoth-{{ inventory_hostname }} --namespace {{ inventory_hostname }}
+      register: shoggoth_down_release_status
+      changed_when: false
+      failed_when: false
+      # A read, forced to run in check mode: `command` has no check-mode
+      # support, so a check-mode run would skip this task and the retry's
+      # `when` below would read `.rc` off a result that has none.
+      check_mode: false
+      delegate_to: localhost
+      # The retry only runs when the release is still in the store, so one the
+      # first uninstall already took is not uninstalled twice.
+
+    - name: Uninstall the release without its hooks
+      kubernetes.core.helm:
+        release_name: shoggoth-{{ inventory_hostname }}
+        release_namespace: "{{ inventory_hostname }}"
+        release_state: absent
+        wait: true
+        wait_timeout: 30s
+        disable_hook: true
+      when: shoggoth_down_release_status.rc == 0
+      delegate_to: localhost
+      # `--timeout 30s --no-hooks`, hardcoded: the second chance on a release
+      # the first uninstall could not take, and a fresh budget would only wait
+      # longer for the same stuck finalizer the step above already cleared.
+      #
+      # Deliberately NOT `ignore_errors`: a failure here fails the play and the
+      # orphan purge below does not run. See the header for the one-line change.
+
+    # -----------------------------------------------------------------------
+    # Delete what the chart no longer renders
+    # -----------------------------------------------------------------------
+    # A `block`/`rescue` rather than `ignore_errors` on six tasks: the purge is
+    # best-effort as a whole and its WARN is the rescue's `debug`. The two
+    # listings carry their own `ignore_errors` and do not reach the rescue.
+    - name: Purge the orphaned ESO objects
+      block:
+        - name: Render the chart's ESO objects
+          kubernetes.core.helm_template:
+            chart_ref: "{{ shoggoth_chart_root }}"
+            release_name: shoggoth-{{ inventory_hostname }}
+            release_namespace: "{{ inventory_hostname }}"
+            values_files:
+              - "{{ shoggoth_instance_config }}"
+          register: shoggoth_down_render
+          delegate_to: localhost
+          changed_when: false
+          # `helm template`: the same chart on disk, release name, namespace and
+          # values file; the render comes back on `stdout`. `values_files` are
+          # read from the TARGET host's filesystem, which is why this task is
+          # delegated like every other.
+          #
+          # `changed_when: false` because the module reports `changed: true`
+          # unconditionally and rendering changes nothing.
+
+        - name: Find the ESO objects the chart renders
+          ansible.builtin.set_fact:
+            shoggoth_down_rendered: >-
+              {{ shoggoth_down_render.stdout | from_yaml_all
+                 | select('mapping') | selectattr('kind', 'defined')
+                 | selectattr('kind', 'in', shoggoth_down_orphan_kinds)
+                 | selectattr('metadata.name', 'defined')
+                 | map(attribute='metadata.name') | unique | sort | list }}
+          delegate_to: localhost
+          # `from_yaml_all` parses EVERY document, where a `yq` selection only
+          # inspected the ones it selected. The chart has no NOTES.txt; adding
+          # one would emit a bare `NOTES:` document and break this task.
+          # `select('mapping')` discards the comment-only and empty documents
+          # `helm template` emits between resources.
+
+        - name: List the ESO objects in the namespace
+          kubernetes.core.k8s_info:
+            api_version: "{{ item.value.api_version }}"
+            kind: "{{ item.key }}"
+            namespace: "{{ inventory_hostname if item.value.namespaced else omit }}"
+          loop: "{{ shoggoth_down_cr_kinds | dict2items }}"
+          when: item.key in shoggoth_down_orphan_kinds
+          register: shoggoth_down_live_orphans
+          delegate_to: localhost
+          ignore_errors: true
+
+        - name: Find the ESO objects the chart no longer renders
+          ansible.builtin.set_fact:
+            shoggoth_down_orphans: >-
+              {%- set out = [] -%}
+              {%- for res in shoggoth_down_live_orphans.results -%}
+              {%- for obj in res.resources | default([]) -%}
+              {%- if obj.metadata.name not in shoggoth_down_rendered -%}
+              {%- set _ = out.append({'kind': res.item.key, 'name': obj.metadata.name}) -%}
+              {%- endif -%}
+              {%- endfor -%}
+              {%- endfor -%}
+              {{ out }}
+          delegate_to: localhost
+
+        - name: Report the orphaned ESO objects
+          ansible.builtin.debug:
+            var: shoggoth_down_orphans
+          when:
+            - shoggoth_down_rendered | length > 0
+            - shoggoth_down_orphans | length > 0
+          delegate_to: localhost
+
+        - name: Strip the finalizers from the orphaned ESO objects
+          kubernetes.core.k8s:
+            state: patched
+            merge_type: merge
+            api_version: "{{ shoggoth_down_cr_kinds[item.kind].api_version }}"
+            kind: "{{ item.kind }}"
+            name: "{{ item.name }}"
+            namespace: "{{ inventory_hostname if shoggoth_down_cr_kinds[item.kind].namespaced else omit }}"
+            definition:
+              metadata:
+                finalizers: []
+          loop: "{{ shoggoth_down_orphans }}"
+          when:
+            - shoggoth_down_rendered | length > 0
+            - shoggoth_down_orphans | length > 0
+          delegate_to: localhost
+          ignore_errors: true
+
+        - name: Delete the orphaned ESO objects
+          kubernetes.core.k8s:
+            api_version: "{{ shoggoth_down_cr_kinds[item.kind].api_version }}"
+            kind: "{{ item.kind }}"
+            name: "{{ item.name }}"
+            namespace: "{{ inventory_hostname if shoggoth_down_cr_kinds[item.kind].namespaced else omit }}"
+            state: absent
+            wait: true
+            wait_timeout: 60
+          loop: "{{ shoggoth_down_orphans }}"
+          when:
+            - shoggoth_down_rendered | length > 0
+            - shoggoth_down_orphans | length > 0
+          delegate_to: localhost
+          # `kubectl delete --ignore-not-found=true --timeout=60s`: `state:
+          # absent` returns `{}` for an object that is already gone
+          # (module_utils/k8s/service.py:448-455), and `wait` + `wait_timeout`
+          # bound the wait the same way.
+          #
+          # The wait needs the strip above it: this is the LAST step, so the
+          # ESO controller is already gone, and an ExternalSecret's
+          # `externalsecret-cleanup` finalizer is one only that controller
+          # removes — without the strip the wait never ends after the delete
+          # has already printed "deleted from <ns> namespace".
+          #
+          # Safe on the data plane: the chart sets no
+          # `spec.target.deletionPolicy`, so the CRD default `Retain` applies
+          # and `cleanupManagedSecrets` is a no-op. PushSecrets and
+          # SecretStores carry no finalizer at all, so on them the patch is a
+          # no-op too.
+
+      rescue:
+        - name: Warn that the orphan purge failed
+          ansible.builtin.debug:
+            msg: "WARN: the orphan purge failed; the release is uninstalled regardless."
+          delegate_to: localhost
+          # The WARN the shell used to print on failure; the failing task's own
+          # output is still printed above, which the `||` threw away.

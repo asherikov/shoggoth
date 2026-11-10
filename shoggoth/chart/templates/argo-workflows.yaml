@@ -16,14 +16,14 @@
   map and the documented example would silently stop working.
 
   The CRDs themselves are not here — they are applied straight from the
-  argo-workflows submodule by `make crds_apply`, outside the chart.
+  argo-workflows submodule, outside the chart.
 
   Note on cluster-scoped names: the 3 ClusterRoles and 3 ClusterRoleBindings
   here are named `{{ include "shoggoth.fullname" . }}-<base>`, NOT bare
   `<base>`. A cluster-scoped object has no namespace to separate two shoggoth
   instances on one cluster, so a bare name would make both instances render
-  the SAME ClusterRole. `make up` passes `--take-ownership`, so the second
-  install silently re-labels the first instance's ClusterRole to its own
+  the SAME ClusterRole. A second install run with `--take-ownership`
+  silently re-labels the first instance's ClusterRole to its own
   release and rewrites the ClusterRoleBinding's `subjects` list —
   `rbac/v1.Subjects` is an atomic list with no merge key, so the first
   instance's ServiceAccount is dropped from it. That is worse here than in
@@ -351,7 +351,7 @@ subjects:
 # immutable server-side: Helm cannot patch a roleRef, it can only create
 # and delete. Renaming the binding makes the change a delete + create,
 # which Helm does. Keeping the name and changing only the roleRef would
-# make every `make up` fail with "field is immutable".
+# make every upgrade fail with "field is immutable".
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -718,7 +718,7 @@ spec:
           # Each secret is still gated on the SAME `services.<x>.enabled`
           # flag that gates the resource it waits for. The ExternalSecrets
           # are conditional (gitea-runner-token.yaml is wrapped in its own
-          # `isServiceEnabled "gitea-runner"`), so `make stop SERVICE=<x>`
+          # `isServiceEnabled "gitea-runner"`), so disabling `gitea-runner`
           # deletes the CR and an ungated wait would then burn its full
           # timeout, exit 1, and CrashLoopBackOff this controller — taking
           # the whole Argo subsystem down with a symptom that points at a
@@ -786,10 +786,10 @@ spec:
         # the source (templates/ and bindings/), carried into this pod by
         # the argo-workflow-templates / argo-workflow-bindings ConfigMaps
         # below and mounted at /workflow/argo/templates and
-        # /workflow/argo/bindings. No `make sync` step and no host
+        # /workflow/argo/bindings. No host-side sync step and no host
         # directory: the packaged chart is self-contained, and an edit to
-        # a workflow file invalidates the lint render through
-        # CHART_SOURCES (make/lint.mk) like any other template edit.
+        # a workflow file invalidates the lint render through the chart's
+        # own source list like any other template edit.
         #
         # The files are mounted VERBATIM (render=false in the helper):
         # they carry Argo's own parameter syntax — the double-braced
@@ -1044,7 +1044,7 @@ spec:
       # The workflow sources ride inside the chart (files/argo/)
       # rather than on a host directory: a packaged chart then carries
       # everything the apply-workflows init container needs, with no
-      # `make sync` prerequisite and no host state that can drift from
+      # host-sync prerequisite and no host state that can drift from
       # git. Two volumes, not one, so the projected layout still presents
       # /workflow/argo/templates and /workflow/argo/bindings as separate
       # directories — the init container applies each kind from its own
@@ -1065,11 +1065,11 @@ spec:
 # `value` or `valueFrom` — and `{{`{{workflow.parameters.X}}`}}` references in the
 # templates must resolve to one of those declared parameters. So instead of
 # baking literal values into the templates (which would have to be re-rendered
-# by `make sync` / `make up` on every env-var change), we point at this
+# on every env-var change), we point at this
 # ConfigMap; the controller fetches each key at admission time. The four
-# `${SHOGGOTH_*}` placeholders below are substituted to actual values by
-# `make up`'s envsubst pass (make/k3s.mk), so the ConfigMap in the cluster
-# holds the literal domain, namespace, github org, and instance dir.
+# SHOGGOTH_* keys below are filled from .Values by Helm itself — there is no
+# envsubst pass over the rendered manifests — so the ConfigMap in the
+# cluster holds the literal domain, namespace, github org, and instance dir.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -1105,8 +1105,9 @@ data:
 {{- /*
 Hoisted out of the podSpecPatch JSON below. The workflow-pod wait-bootstrap
 waits on ExternalSecrets that live in their own templates and are gated on
-services.gitea / services.secret-store; `make stop SERVICE=<x>` deletes those
-CRs, so an ungated wait would time out and crash-loop every workflow pod.
+services.gitea / services.secret-store; disabling either
+CR's gate deletes those CRs, so an ungated wait would time out and
+crash-loop every workflow pod.
 These cannot be inlined at the use site: the use site is inside a YAML
 double-quoted scalar, where a `{{ if (include "...") }}` action would have to
 escape its quotes as \" — which the template engine does not accept inside an
@@ -1145,10 +1146,10 @@ data:
       # util/template/template.go uses fasttemplate's `{{`{{...}}`}}` syntax
       # only). So workflow templates now reference these via
       # `{{`{{workflow.parameters.SHOGGOTH_DOMAIN}}`}}` etc. and the values
-      # below — `${SHOGGOTH_*}` is substituted to actual values by
-      # `make up`'s envsubst pass (make/k3s.mk), so what lands in
-      # the cluster is the literal domain, namespace, etc. The four
-      # parameters cover every `${SHOGGOTH_*}` reference in
+      # below, which Helm fills from .Values directly — there is no envsubst
+      # pass over the rendered manifests — so what lands in the cluster is
+      # the literal domain, namespace, etc. The four parameters cover every
+      # `${SHOGGOTH_*}` reference in
       # shoggoth/chart/files/argo/templates/*.yaml (image references,
       # env values, URL fragments, and hostPath volumes).
       arguments:

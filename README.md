@@ -66,6 +66,7 @@ lists the minimum; newer is fine unless called out.
 | kubectl     | bundled   | Comes with k3s; the operator host uses the same version (transferred via the SSH-tunneled kubeconfig).                                                                              |
 | yq          | mikefarah v4 | The `Makefile` reads every configuration value out of `shoggoth/<instance>.yaml` through yq. The Python `yq` package is a *different* tool with a different CLI — install mikefarah's release (https://github.com/mikefarah/yq). |
 | envsubst    | gettext   | Used by `make host_install_nixos` to render `shoggoth.nix` and `ports.nix`. Bundled with most distros; on Alpine it is in the `gettext` package. |
+| ansible-core | ≥ 2.22.0 | Older versions not compatible with the latest python. |
 
 Comparison
 ----------
@@ -259,7 +260,7 @@ Account passwords are auto-generated on first run and stored in OpenBao. The
 admin password is resolved in order of priority:
 
 1.  Existing value in OpenBao (`secret/data/openldap/admin-password`)
-2.  File at `private/admin-password.txt` (first-run only; not used for rotation)
+2.  File at `shoggoth/data/private/admin-password.txt` (first-run only; not used for rotation)
 3.  Auto-generated random password (stored in OpenBao for subsequent starts)
 
 ### Group memberships
@@ -497,6 +498,10 @@ Key consequences of the Helm takeover:
   apply both at once: `--values` and `--set` are layered, last write wins.
 
 ``` bash
+# Fetch the cluster kubeconfig once — a fresh clone has none, needs the host's
+# sudo password:
+make client_kubeconfig
+
 # Start (or upgrade) the chart release for INSTANCE=shoggoth:
 make up
 
@@ -515,8 +520,8 @@ make log SERVICE=localai
 # SSH to the host
 make ssh
 
-# Sync the local tree to the host and bring it back up from scratch
-make sync_restart
+# Tear the instance down and bring it back up from scratch
+make restart
 ```
 
 ### After `make up`
@@ -535,9 +540,6 @@ INSTANCE=shoggoth            # namespace + config file name; release is shoggoth
 
 # See what came up:
 kubectl get pods,svc,deployment,statefulset -n $INSTANCE
-
-# Health check suite (registry, DNS, api-gateway routing). Requires VPN connectivity:
-make test INSTANCE=$INSTANCE
 
 # Is the WireGuard admin password actually provided? Walks the whole
 # ExternalSecret chain and exits non-zero if it is not:
@@ -595,55 +597,14 @@ raft on the PVC, which `down` keeps.
 Destructive operations live next door:
 
 ``` bash
-make purge INSTANCE=<name>   # delete namespace, host data, remote dir
+make purge INSTANCE=<name>   # delete namespace, cluster RBAC, host data
 make wipe_openbao           # wipe OpenBao raft + unseal-key secret
-make k3s_purge_orphans      # report (CONFIRM=1 to delete) CRs the chart no longer renders
+make k3s_purge_orphans      # report and delete CRs the chart no longer renders
 make drop_image_tag IMAGE=<repo> TAG=<tag>   # evict a registry tag
 ```
 
-`make k3s_purge_orphans` is the one that removes stale state rather than
-data. It lists the ExternalSecret/PushSecret/SecretStore objects in the
-namespace that the **chart** no longer renders — leftovers from releases
-that predate it, such as the deprecated `openldap-slave-reviewer-password`
-or an ExternalSecret for a service the chart no longer ships. They are custom
-resources, so no Helm release owns them and no `helm uninstall` will ever
-remove them; they sit in the namespace forever and keep the ESO controller
-reconciling store paths nothing reads. `make down` removes them as part of
-the teardown; run the target on its own to inspect them first, and pass
-`CONFIRM=1` to delete what it reports. It deletes CRs, not Secrets — but
-`make down` purges the Secrets too, through the chart's post-delete hook.
+Refer to makefiles for more details.
 
-The credential Secrets — every Secret the External Secrets Operator
-projected, plus the ESO store tokens (`shoggoth-openbao-eso-read-token` and
-`-write-token`), the `openbao-unseal-key` backup and the
-`shoggoth-ca`/`shoggoth-server` TLS pairs — are removed by the chart's
-post-delete hook (`zz-secret-purge.yaml`), as part of `helm uninstall`
-itself. A bare `helm uninstall` therefore removes the credentials too. The
-chart-owned Secrets (the ESO webhook cert, the argo webhook receiver token,
-the headroom proxy token) are NOT in the set: Helm deletes them with the
-release, and deleting them out from under a release that is still running
-would break it. Helm's own release record
-(`sh.helm.release.v1.shoggoth-<instance>.v<n>`) is not in the set either —
-it is Helm's bookkeeping, not a credential, and deleting it breaks
-`helm status` and leaves a later `helm uninstall` with nothing to
-uninstall. The tokens are re-minted by the `openbao-bootstrap` Job, which
-is an ordinary chart resource — it only runs again after a `make down`
-(which deletes the Job) and the next `make up` (which re-creates it). The
-unseal-key backup is re-written by the bootstrap from the copy it keeps
-on the PVC; if the PVC goes too, the next bootstrap initialises a fresh
-OpenBao and every seeded credential changes.
-
-`make purge` also deletes the instance's cluster-scoped RBAC (the
-`ClusterRole`/`ClusterRoleBinding` pairs), which a namespace deletion does not
-reach — a cluster-scoped object is not garbage-collected with its namespace,
-and its binding would otherwise keep granting the deleted instance's
-ServiceAccount its permissions. It selects them by
-`app.kubernetes.io/instance=shoggoth-<instance>`, so a second instance on the
-same cluster is left alone.
-
-`make purge` refuses the default `shoggoth` instance outright, so it always needs
-an explicit `INSTANCE=<name>`. It also reads `INSTANCE` the same way as every
-other target — namespace and config name, not the `shoggoth-`-prefixed release.
 
 Troubleshooting
 ===============
@@ -771,187 +732,34 @@ Known issues
   delete the CRs of a release that was installed after the one being torn
   down.
 
+- ansible-core 2.21.x cannot run a module on a host whose `python3` is 3.15 The
+  tree was validated against ansible-core 2.21.6, and that version fails on
+  such a host with a traceback that looks nothing like a version problem:
+  `AttributeError: module 'dataclasses' has no attribute '_is_type'`. The
+  trigger is a three-way combination: ansible-core ≤ 2.21.6 on the control
+  node, `python3` ≥ 3.15 on the target host, and any task that runs on the host
+  rather than being delegated to the control node. **Fix: ansible-core 2.22.0
+  or newer on the control node** — 2.22.0 passes `...` as the `getattr`
+  default, turning the patch into a no-op on 3.15.
+
+- The `kubernetes` service's endpoint is a stale address. Containers cannot
+  reach the API server, e.g., ` {"level":"error","logger":"setup","msg":"unable
+  to start manager", "error":"failed to determine if
+  *v1.ValidatingWebhookConfiguration is namespaced: failed to get restmapping:
+  failed to get server groups: Get \"https://10.43.0.1:443/api\": dial tcp
+  10.43.0.1:443: i/o timeout",
+  "stacktrace":"...cmd/controller/certcontroller.go:123..."}`. Check, on the
+  host with `ip -4 addr show` and `kubectl get endpoints,endpointslices
+  kubernetes`. Clear with `ansible/clear_endpoints.yml`.
+
 Helm
 ====
 
 Operator notes:
 
-- The namespace's PodSecurity profile is applied by the chart, in a
-  pre-install/pre-upgrade hook (`chart/templates/zz-namespace-podsecurity.yaml`),
-  not by `make up`. The chart's workloads use hostPath, privileged containers
-  and hostNetwork, which the `baseline` profile rejects — so the profile has
-  to be `privileged` before they are created. Declaring it in
-  `templates/namespace.yaml` is not enough on a first install (the namespace
-  is created by `--create-namespace`, outside the release, so Helm's
-  reconciliation leaves it alone); the hook applies it with `kubectl`, and
-  it does so for every Helm invocation, not only for `make up`. The profile
-  itself comes from one place (`_helpers.tpl: shoggoth.podSecurityProfile`),
-  so the declaration and the enforcement cannot drift apart. The hook's own
-  pod is written to satisfy `restricted`, because it is admitted under the
-  profile that is in place when it runs — the one it is about to change.
-- `helm uninstall` runs the chart's PRE-DELETE hook
-  (`chart/templates/zz-eso-pre-delete.yaml`) before it deletes anything: the
-  hook removes this release's ExternalSecret/PushSecret CRs while the ESO
-  controller is still running, so the controller removes its own finalizers
-  and `helm uninstall --wait` has no custom resource left to block on. The
-  hook is best-effort by construction and never fails the uninstall; `make
-  down` keeps the finalizer scrub as the backstop for a release installed
-  before the hook existed. Helm runs the hooks stored in the RELEASE record,
-  so the hook applies from the next `make up` onwards.
-- `make helm_lint` is the umbrella for the chart checks, which live in
-  `make/lint.mk`; each check is also a target of its own.
 - `shoggoth/shoggoth.yaml` is the per-instance configuration and the single
-  source of truth. `make up` hands it to Helm with `--values` and the chart
-  derives every `SHOGGOTT_*` pod environment variable from it. It is
-  hand-maintained, not generated: nothing is passed with `--set`, and the
-  Makefile reads values out of this one file (`SHOGGOTH_CFG` in `Makefile`).
-  `shoggoth/chart/values.yaml` documents every key; anything omitted here falls
-  back to that default. Requires `yq` (mikefarah v4 — the Python `yq` package
-  is a different tool).
-- `make crds_apply` applies the CRDs straight from their upstream sources with
-  `kubectl apply --server-side`: the Argo submodule's per-CRD files and the
-  External Secrets bundle. There is no vendored copy and no generator — see
-  `make/k3s.mk` for why they must stay out of the chart. It then waits for
-  the CRDs it pushed to be Established, scoped to the API groups those files
-  own (derived from the files, not hardcoded) and fatally: a cluster with
-  foreign CRDs in it must not gate on those, and a soft `WARN` after 45s let
-  a half-established API server through to `helm upgrade --install`, where
-  the CRD hook then burned its whole budget waiting for the two biggest Argo
-  CRDs — the ones the API server finishes last.
-- `make clusterviz` diagrams are one pipeline:
-  `helm template | yq 'select(kind in …)' | kube-diagrams -`.
-- `make up` validates `shoggoth/<instance>.yaml` indirectly: the file is
-  handed straight to helm with `--values`, so a missing or malformed one
-  surfaces as a helm parse error rather than a quieter half-rendered
-  Service. Service on/off state lives in the release Secret, set via
-  `make start` / `make stop` — there is no per-service toggle file.
-- `make up` creates the namespace with `kubectl` before it calls Helm and
-  passes `--take-ownership`; the two are a pair and neither works without
-  the other. The chart renders the release Namespace as an object
-  (`shoggoth/chart/templates/namespace.yaml`), so the namespace is part of
-  the release manifest — and Helm's install path creates the namespace
-  itself (`--create-namespace`) only *after* its install-time ownership
-  check. With `--create-namespace` alone, Helm ends up POSTing the
-  manifest's Namespace object into the namespace it just created
-  (`namespaces "shoggoth" already exists`); with the namespace created
-  beforehand but without `--take-ownership` it refuses the manifest
-  instead (`invalid ownership metadata`). `--create-namespace` is kept as a
-  no-op safety net — Helm ignores the `AlreadyExists`. A Helm without
-  `--take-ownership` support cannot install this chart, and a hand-run
-  `helm upgrade --install` has to create the namespace itself first
-  (`kubectl create namespace <ns>`) before it passes `--take-ownership`.
-- The namespace's PodSecurity level is enforced by a chart hook, not by
-  `make up`. The chart declares `enforce=privileged` on the Namespace
-  object, but Helm does not apply a namespace's metadata when the object is
-  new in the manifest — the patch it computes is the three-way merge of the
-  previous release's manifest against the new one, and for a new resource
-  that delta is empty. The pre-install/pre-upgrade hook
-  (`zz-namespace-podsecurity.yaml`) labels the namespace with `kubectl`
-  before any workload of the release is applied, and it has to: the chart's
-  workloads use hostPath, privileged containers and hostNetwork, and the
-  `openbao-bootstrap` Job in particular is the only writer of the
-  SecretStore's token — a namespace labelled `baseline` rejects it, and
-  every ExternalSecret then stalls on `SecretStore "..." is not ready`.
-- The release has four Helm hooks:
-  - `zz-crd-ready-wait.yaml` — a pre-install / pre-upgrade hook that waits
-    for the CRDs the chart depends on to be Established. It is a
-    pre-install hook because Helm creates the release's resources BEFORE a
-    post-install hook runs, so a post-install wait cannot protect the CRs
-    the release creates. The CRDs live outside the chart (upstream
-    submodules, applied by `make crds_apply`), so the hook is the safety
-    net for a `helm upgrade --install` run outside `make up`. It reads the
-    whole CRD inventory in ONE API call and splits it by group locally — the
-    per-group `kubectl get crd` it used to make fetched every CRD object in
-    full once per group, and its exit status sat in a process substitution
-    where `set -e` could not see it, so an unreachable API server left that
-    group's list empty and the hook went on waiting for the OTHER groups
-    only. A configured group that yields no CRDs is now a hard failure that
-    names the group and lists the ones the API server does serve, the two
-    calls that can fail fast are retried three times, and a `kubectl wait`
-    that times out names the CRDs that are not Established.
-  - `zz-namespace-podsecurity.yaml` — a pre-install / pre-upgrade hook that
-    puts the namespace's PodSecurity profile in place (above).
-  - `zz-eso-pre-delete.yaml` — a pre-delete hook that removes the release's
-    ExternalSecret/PushSecret CRs while the ESO controller is still
-    running, so the controller drains its own finalizers and
-    `helm uninstall --wait` has no custom resource left to block on. Helm
-    runs the hooks stored in the RELEASE record, so it applies from the next
-    `make up` onwards.
-  - `zz-secret-purge.yaml` — a post-delete hook that removes the
-    credential Secrets the release leaves behind at runtime: the ones the
-    External Secrets Operator projected (both `creationPolicy: Owner` and
-    `Orphan` targets — the latter are never garbage-collected, and the
-    former are collected asynchronously, so neither is gone when Helm asks
-    for the uninstall to be over) and the ones the `openbao-bootstrap` Job
-    writes (the unseal-key backup, the two ESO store tokens, and the CA
-    and server TLS pairs). Those Secrets are in no manifest and carry no
-    ownerReference, so nothing else reclaims them. Helm runs a post-delete
-    hook AFTER the release's resources are gone and BEFORE it purges the
-    release record, so the hook deletes by label and by name and never
-    touches the record itself: `helm uninstall` deletes that record right
-    afterwards, and a record this hook had already removed turns the
-    uninstall into "Failed to purge the release: release: not found". The
-    hook is best-effort and always exits 0 — a failing post-delete hook
-    does not abort the uninstall, but it does turn it into
-    "uninstallation completed with 1 error(s)".
-- A hook's budget must be SMALLER than Helm's `--timeout`, and the hook must
-  fail itself when it runs out. Helm's `--timeout` is the deadline of Helm's
-  own watch on the hook Job, and Helm spends it silently: when it expires,
-  the release fails with `timed out waiting for the condition` and none of
-  the hook's output reaches the operator. The CRD hook waits 120s per
-  attempt with `backoffLimit: 1` — two attempts — against Helm's 10m
-  default, so it fails with its own diagnostic first. The two API reads
-  inside one attempt are retried three times on top of that, because a
-  kubectl that cannot REACH the API server says nothing about the CRDs and
-  this hook runs at the least idle moment of the install; `kubectl wait`
-  itself is deliberately NOT wrapped, since it carries its own `--timeout`
-  and wrapping it would multiply the one budget that has to stay inside
-  Helm's. No `activeDeadlineSeconds` either — it would kill the pod without
-  printing the diagnostic, which is the exact failure it is there to avoid.
-- The hook Job carries `helm.sh/hook-output-log-policy: hook-failed`. Helm
-  prints a failed hook's pod log to stderr because of it, so the diagnostic
-  reaches the operator without anyone having to know the Job's name. The log
-  names the CRDs it was waiting for and says to run `make crds_apply`; the
-  Job is kept on failure for inspection and reaped by
-  `ttlSecondsAfterFinished` ten minutes later.
-- The release does NOT wait for the External Secrets layer. The chart's
-  workloads mount Secrets that only an ExternalSecret creates, so if that
-  layer is not serving — the SecretStore never becomes Ready, or the ESO
-  controller cannot reach OpenBao — the release still installs and the
-  affected workloads stay Pending on `secret "..." not found`. `helm`
-  reporting "Install complete" is not a signal that the cluster is working.
-  Check the layer by hand: `kubectl -n shoggoth get secretstore` (both
-  stores must be Ready), `kubectl -n shoggoth get externalsecret`, and the
-  ESO controller's log. The `openbao-bootstrap` Job writes the token the
-  SecretStore authenticates with, so it is the first thing to look at when a
-  store never validates. `make secret_check` walks that chain for one
-  credential and reports the step that broke: the store (with the ESO
-  controller's own log line for it), the ExternalSecret (with the reason ESO
-  recorded), the projected Secret, the OpenBao value behind it, whether the
-  ESO read token is still valid in OpenBao, and whether the pods that mount
-  the Secret are running.
-
-  One failure mode used to have no self-healing path, and now does.
-  `openbao-bootstrap` mints the ESO store token only when
-  `shoggoth-openbao-eso-read-token` is ABSENT, so an OpenBao that was
-  re-initialised after the Secret was written — a fresh init, or
-  `make wipe_openbao` — used to leave the old token Secret in place
-  holding a token that no longer exists. The store then failed with
-  `unable to validate store` and every ESO-managed Secret stopped being
-  projected, even though OpenBao itself was healthy and the credential was
-  still in it. The bootstrap now VALIDATES the stored token against the
-  OpenBao it is talking to (`auth/token/lookup-self` with the stored token
-  as the credential) and mints a replacement when that fails, so the next
-  bootstrap run heals the store on its own. The manual repair is still
-  there for a release whose bootstrap Job has already run:
-
-  ``` bash
-  kubectl -n $INSTANCE delete secret shoggoth-openbao-eso-read-token shoggoth-openbao-eso-write-token
-  kubectl -n $INSTANCE delete job openbao-bootstrap && make up
-  ```
-
-  The values themselves do not rotate: the bootstrap's Phase B is
-  skip-if-exists, so only the store tokens are re-minted.
+  source of truth. It is hand-maintained, not generated, and the Makefile reads
+  values out of this one file.
 
 Chart template conventions
 ---------------------------
@@ -987,11 +795,14 @@ false. Two rules follow:
 
 Hook templates are the one exception. A hook that renders nothing cannot do
 its job, so the `zz-*` hook templates (`zz-crd-ready-wait.yaml`,
-`zz-namespace-podsecurity.yaml`, `zz-eso-pre-delete.yaml`) are not gated: the
-first has to wait for the CRDs on every install, the second has to put the
-namespace's PodSecurity profile in place before any workload of the release
-is created, and the third has to clean up after a release whose ESO
-controller was toggled off.
+`zz-eso-pre-delete.yaml`) are not gated: the first has to wait for the CRDs
+on every install, and the second has to clean up after a release whose ESO
+controller was toggled off. (A third, `zz-namespace-podsecurity.yaml`, used
+to put the namespace's PodSecurity profile in place; it ran `kubectl` with
+no kubeconfig, could not reach the API server, and failed the install with
+`BackoffLimitExceeded`. The step now lives on the control node instead —
+`ansible/deploy.yml`: "Strip any PodSecurity profile from the instance
+namespace".)
 
 **Credentials.** `templates/<name>.yaml` projects one credential out of
 OpenBao into a K8s Secret; `templates/<name>-push.yaml` mirrors it back. The

@@ -1,12 +1,12 @@
 ---
 # slave-test — end-to-end verification of the services the slave depends on.
 #
-# Eight checks (gitea-api, redmine-api, git-http, git-ssh,
-# embeddings, mcp, telemetry, pip-cache) followed by a final "assert all
-# passed" step. Originally seven ran in parallel with only git-ssh waiting
-# on git-http (they share the scratch repo — first writer wins, second's
+# Nine checks (gitea-api, redmine-api, git-http, git-ssh,
+# embeddings, mcp, telemetry, pip-cache, apt-cache) followed by a final
+# "assert all passed" step. Originally seven ran in parallel with only git-ssh
+# waiting on git-http (they share the scratch repo — first writer wins, second's
 # POST may race). Now serialized: spec.parallelism: 1 caps the workflow at
-# one active pod at a time, so all eight checks run back-to-back in
+# one active pod at a time, so all checks run back-to-back in
 # scheduler-determined order and the final assert step's exit code is the
 # AND of every check's exit code.
 #
@@ -93,9 +93,14 @@ spec:
         arguments:
           parameters:
           - {name: check_name, value: pip-cache}
+      - name: apt-cache
+        template: check
+        arguments:
+          parameters:
+          - {name: check_name, value: apt-cache}
       - name: assert-all-passed
         template: assert-all-passed
-        depends: "(gitea-api.Succeeded || gitea-api.Failed || gitea-api.Errored) && (redmine-api.Succeeded || redmine-api.Failed || redmine-api.Errored) && (git-http.Succeeded || git-http.Failed || git-http.Errored) && (git-ssh.Succeeded || git-ssh.Failed || git-ssh.Errored) && (embeddings.Succeeded || embeddings.Failed || embeddings.Errored) && (mcp-servers.Succeeded || mcp-servers.Failed || mcp-servers.Errored) && (telemetry.Succeeded || telemetry.Failed || telemetry.Errored) && (pip-cache.Succeeded || pip-cache.Failed || pip-cache.Errored)"
+        depends: "(gitea-api.Succeeded || gitea-api.Failed || gitea-api.Errored) && (redmine-api.Succeeded || redmine-api.Failed || redmine-api.Errored) && (git-http.Succeeded || git-http.Failed || git-http.Errored) && (git-ssh.Succeeded || git-ssh.Failed || git-ssh.Errored) && (embeddings.Succeeded || embeddings.Failed || embeddings.Errored) && (mcp-servers.Succeeded || mcp-servers.Failed || mcp-servers.Errored) && (telemetry.Succeeded || telemetry.Failed || telemetry.Errored) && (pip-cache.Succeeded || pip-cache.Failed || pip-cache.Errored) && (apt-cache.Succeeded || apt-cache.Failed || apt-cache.Errored)"
         arguments:
           parameters:
           - {name: gitea-api-exit, value: "{{tasks.gitea-api.outputs.parameters.exit_code}}"}
@@ -106,6 +111,7 @@ spec:
           - {name: mcp-servers-exit, value: "{{tasks.mcp-servers.outputs.parameters.exit_code}}"}
           - {name: telemetry_exit, value: "{{tasks.telemetry.outputs.parameters.exit_code}}"}
           - {name: pip-cache-exit, value: "{{tasks.pip-cache.outputs.parameters.exit_code}}"}
+          - {name: apt-cache-exit, value: "{{tasks.apt-cache.outputs.parameters.exit_code}}"}
 
   - name: check
     inputs:
@@ -114,11 +120,11 @@ spec:
     # R1-8: a failing check is recorded as Failed but does not skip
     # dependents.
     #
-    # The seven "dependency-free" parallel checks (gitea-api, redmine-api,
-    # git-http, embeddings, mcp-servers, telemetry, pip-cache) have NO
-    # `continueOn`. This is intentional: Argo's validator forbids combining
-    # `continueOn` and `depends` *anywhere* in the same template. Once any
-    # task in the DAG declares `depends:` (here `git-ssh` and
+    # The eight "dependency-free" parallel checks (gitea-api, redmine-api,
+    # git-http, embeddings, mcp-servers, telemetry, pip-cache, apt-cache)
+    # have NO `continueOn`. This is intentional: Argo's validator forbids
+    # combining `continueOn` and `depends` *anywhere* in the same template.
+    # Once any task in the DAG declares `depends:` (here `git-ssh` and
     # `assert-all-passed`), `usingDepends` flips true at the template level
     # and the per-task check `usingDepends && task.ContinueOn != nil`
     # (workflow/validate/validate.go:1355) rejects every other task with a
@@ -239,6 +245,7 @@ spec:
       - name: mcp-servers-exit
       - name: telemetry_exit
       - name: pip-cache-exit
+      - name: apt-cache-exit
     container:
       image: registry.{{workflow.parameters.SHOGGOTH_DOMAIN}}/slave:noble
       imagePullPolicy: IfNotPresent
@@ -257,6 +264,7 @@ spec:
         if [ "{{inputs.parameters.mcp-servers-exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: mcp-servers exited {{inputs.parameters.mcp-servers-exit}}"; fi; total=$((total+1))
         if [ "{{inputs.parameters.telemetry_exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: telemetry exited {{inputs.parameters.telemetry_exit}}"; fi; total=$((total+1))
         if [ "{{inputs.parameters.pip-cache-exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: pip-cache exited {{inputs.parameters.pip-cache-exit}}"; fi; total=$((total+1))
+        if [ "{{inputs.parameters.apt-cache-exit}}" != "0" ]; then failed=$((failed+1)); echo "FAIL: apt-cache exited {{inputs.parameters.apt-cache-exit}}"; fi; total=$((total+1))
         if [ "$failed" -gt 0 ]; then
           echo "slave-test: $failed/$total check(s) failed, see WARNING tasks above"
           exit 1

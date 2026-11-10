@@ -6,8 +6,8 @@
 
   The blacklists hostPath
   (/var/lib/rancher/k3s/storage/${SHOGGOTH_INSTANCE_DIR}/coredns-blacklists)
-  is mounted read-only from the host; it is populated by `make sync`
-  in make/k3s.mk:43-46.
+  is mounted read-only from the host; it is populated outside the release,
+  by the host-state step that runs before the install.
 
   Original env-var placeholders are mapped as:
     ${SHOGGOTH_NAMESPACE}      -> {{ .Release.Namespace }}
@@ -16,7 +16,7 @@
     ${SHOGGOTH_INSTANCE_DIR}   -> {{ .Values.identity.instanceDir }}
 
   The `app: dns` label is preserved verbatim so `kubectl get pods -l app=dns`
-  and `make start|stop SERVICE=dns` continue to work without changes.
+  and the service toggle continue to work without changes.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "dns")) }}
 apiVersion: v1

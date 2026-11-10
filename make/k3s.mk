@@ -1,4 +1,4 @@
-export KUBECONFIG?=private/kubeconfig
+export KUBECONFIG?=$(CURDIR)/private/kubeconfig
 K3S_TMP_DIR?=.tmp
 K3S_TUNNEL_PID?=${K3S_TMP_DIR}/k3s-tunnel.pid
 
@@ -6,46 +6,11 @@ K3S_SSH=ssh ${SSH_COMMON_ARGS} -t ${USER}@${HOST_IP}
 K3S_API_PORT?=6443
 K3S_TUNNEL_PORT?=6443
 
-# Host directories `make sync` populates under
-# /var/lib/rancher/k3s/storage/${INSTANCE}/. Everything here is state or
-# content the chart cannot carry.
-K3S_HOST_PATHS := redmine-plugins:data/redmine/plugins workflow-scripts:workflow private:private
-
-SHOGGOTH_HELM_TIMEOUT?=10m
-SHOGGOTH_HELM_TIMEOUT_UNINSTALL?=2m
-
-# The namespace every helm command addresses the release in. It is a
-# variable of its own because the offline lint renders retarget it per
-# render (see make/lint.mk): a lint render must not be mistakable for a
-# real install.
-SHOGGOTH_HELM_NAMESPACE ?= $(INSTANCE)
-
-# The flags shared by every helm command that reads the chart: the release
-# namespace and the per-instance configuration file.
-SHOGGOTH_HELM_COMMON_ARGS = --namespace $(SHOGGOTH_HELM_NAMESPACE) --values $(SHOGGOTH_CONFIG)
-
-SHOGGOTH_HELM_STATUS = helm status shoggoth-$(INSTANCE) --namespace $(SHOGGOTH_HELM_NAMESPACE)
-
-# `--take-ownership` lets Helm label-and-claim pre-existing resources that
-# match a chart resource's (kind, name, namespace) but lack the
-# `app.kubernetes.io/managed-by: Helm` label. Without this flag, the first
-# install against a cluster that already has unmanaged copies of chart-owned
-# resources aborts with `invalid ownership metadata`. After adoption the flag
-# is idempotent for subsequent installs.
-SHOGGOTH_HELM_UPGRADE = helm upgrade --install shoggoth-$(INSTANCE) $(SHOGGOTH_CHART_ROOT) \
-	$(SHOGGOTH_HELM_COMMON_ARGS) \
-	--create-namespace \
-	--take-ownership \
-	--timeout $(SHOGGOTH_HELM_TIMEOUT)
-
-SHOGGOTH_HELM_UNINSTALL = helm uninstall shoggoth-$(INSTANCE) --namespace $(SHOGGOTH_HELM_NAMESPACE) --wait
-
 
 # installation
 # -----
 host_install_nixos:
 	echo "Installing K3s on ${HOST} via NixOS..."
-	${MAKE} sync
 	mkdir -p ${K3S_TMP_DIR}
 	export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_DNS_IP="${DNS_IP}" SHOGGOTH_REGISTRY_PORT="${REGISTRY_PORT}" \
 		SHOGGOTH_WEB_EXT_PORT="${WEB_EXT_PORT}" SHOGGOTH_WG_PORT="${WG_PORT}" SHOGGOTH_WG_UI_PORT="${WG_UI_PORT}"; \
@@ -66,13 +31,17 @@ pull_registry_image:
 	echo "Pulling registry image on ${HOST} (bypassing containerd mirror)..."
 	${K3S_SSH} 'sudo k3s ctr images pull ghcr.io/project-zot/zot:v2.1.21'
 
-client_kubeconfig:
-	echo "Fetching kubeconfig from ${HOST}..."
-	mkdir -p private
-	echo "[sudo] password for ${USER}:"
-	${K3S_SSH} 'sudo cat /etc/rancher/k3s/k3s.yaml' > ${KUBECONFIG}
-	chmod 600 ${KUBECONFIG}
-	echo "Kubeconfig saved to ${KUBECONFIG}"
+
+# The whole control-node setup, in the order it has to happen: ansible-core
+# itself, the `kubernetes` Python client its modules import, then the two
+# collections.
+control_setup:
+	pipx install "ansible-core>=2.22.0"
+	pipx inject ansible-core kubernetes
+	ansible-galaxy collection install -r ansible/requirements.yml
+	# get kubeconfig
+	$(ANSIBLE)/kubeconfig.yml \
+		-e shoggoth_kubeconfig=$(if $(filter /% ~%,$(KUBECONFIG)),$(KUBECONFIG),$(CURDIR)/$(KUBECONFIG)) --ask-become-pass
 
 
 # connection & health
@@ -132,223 +101,33 @@ tunnel_down:
 # Stop all shoggoth services: `helm uninstall` plus a purge of the namespace's
 # Secrets. `helm uninstall` deletes workloads and ConfigMaps but deliberately
 # leaves the data plane alone.
-#
-# The escalation lives in `down_helm_cleanup`, which this target runs
-# UNCONDITIONALLY — after the uninstall attempt, not only when it failed.
-# It is the backstop for everything the hook does not cover (a controller
-# that was already unhealthy, a hook that could not run, a release without
-# the hook).
 down: tunnel_up
-	$(SHOGGOTH_HELM_UNINSTALL) --timeout $(SHOGGOTH_HELM_TIMEOUT_UNINSTALL) 2>&1 \
-		|| echo "WARN: helm uninstall failed, forced cleanup is going to take care of this."
-	${MAKE} --no-print-directory down_helm_cleanup
-	${MAKE} --no-print-directory k3s_purge_orphans \
-		|| echo "WARN: the orphan purge failed; the release is uninstalled regardless."
+	$(ANSIBLE)/down.yml
 
-# Strip controller finalizers from chart CRs that `helm uninstall --wait` is
-# blocking on. Idempotent and non-destructive on the data plane. After this
-# step, chart CRs become immediately deletable by helm uninstall / kubectl;
-.PHONY: down_helm_cleanup
-down_helm_cleanup: tunnel_up
-	for kind in externalsecret pushsecret workflow workflowtemplate cronworkflow clusterworkflowtemplate workflowtaskset; do \
-	    names=$$(kubectl get "$$kind" -n ${INSTANCE} -o json 2>/dev/null \
-	        | jq -r --arg rel "shoggoth-$(INSTANCE)" --arg ns "${INSTANCE}" \
-	          '.items[] | select((.metadata.deletionTimestamp != null) or (((.metadata.annotations["meta.helm.sh/release-name"]) // "") == $$rel and ((.metadata.annotations["meta.helm.sh/release-namespace"]) // "") == $$ns)) | .metadata.name' 2>/dev/null) ; \
-	    if [ -z "$$names" ]; then continue; fi ; \
-	    echo "  $$kind: $$names" ; \
-	    for name in $$names; do \
-	        if out=$$(kubectl patch -n ${INSTANCE} --type=merge \
-	                -p '{"metadata":{"finalizers":[]}}' "$$kind/$$name" 2>&1); then \
-	            : ; \
-	        else \
-	            case "$$out" in \
-	                *"NotFound"*) : ;; \
-	                *) echo "    ERROR: $$kind/$$name was not patched: $$out" ;; \
-	            esac ; \
-	        fi ; \
-	    done ; \
-	done ; \
-	if $(SHOGGOTH_HELM_STATUS) >/dev/null 2>&1; then \
-	    $(SHOGGOTH_HELM_UNINSTALL) --timeout 30s --no-hooks 2>&1; \
-	fi
-
-# Apply the CRDs straight from their upstream sources with kubectl.
-#
-# The CRDs are deliberately NOT in the chart. Helm's loader has no crds/ case,
-# so anything placed there lands in Chart.Files, gets serialized into the
-# release record, and blows past the 1048576-byte Secret.data cap — `helm
-# upgrade --install` then fails before a single resource is created.
-SHOGGOTH_ARGO_CRDS := $(CURDIR)/shoggoth/crd/argo-workflows/manifests/base/crds/full/argoproj.io_*.yaml
-SHOGGOTH_ESO_CRDS  := $(CURDIR)/shoggoth/crd/external-secrets/deploy/crds/bundle.yaml
-SHOGGOTH_CRD_FILES  = $(foreach f,$(wildcard $(SHOGGOTH_ARGO_CRDS)) $(SHOGGOTH_ESO_CRDS),-f $(f))
-
-crds_apply: tunnel_up
-	kubectl apply --server-side=true --force-conflicts $(SHOGGOTH_CRD_FILES) \
-	    || { echo "FAIL: CRD apply failed"; exit 1; }
-	kubectl wait --for=condition=Established --timeout=45s customresourcedefinition --all \
-	    || echo "  WARN: not every CRD Established in 45s — check 'kubectl get crd'"
-
-# Destroy an instance: namespace, PVCs, Secrets, host data, remote directory.
-#
-# Deliberately does NOT run `helm uninstall` first, unlike `make down`. The
-# release's own record lives in the namespace, so deleting the namespace
-# removes it anyway — and `helm uninstall` would additionally delete the
-# cluster-scoped ClusterRoles/ClusterRoleBindings in argo-workflows.yaml,
-# external-secrets.yaml and otelcol.yaml. This target deletes them
-# explicitly instead (see below).
-#
-# The cluster-scoped RBAC is PER-INSTANCE (each name is prefixed with the
-# release name — see shoggoth/chart/templates/otelcol.yaml), so the namespace
-# deletion no longer takes them with it. They have to be deleted explicitly, or
-# they leak: a cluster-scoped object is not garbage-collected with its
-# namespace, and its ClusterRoleBinding would keep granting the (now-deleted)
-# instance's ServiceAccount its permissions.
+# Destroy an instance: namespace, cluster-scoped RBAC, host storage data.
 purge: tunnel_up
-	test "${INSTANCE}" != "shoggoth"
-	-kubectl delete namespace ${INSTANCE} --ignore-not-found=true --timeout=120s
-	-kubectl delete clusterrole,clusterrolebinding \
-		-l app.kubernetes.io/instance=shoggoth-$(INSTANCE) --ignore-not-found=true
-	-${K3S_SSH} 'sudo rm -rf /var/lib/rancher/k3s/storage/${INSTANCE}'
-	-${K3S_SSH} 'rm -rf ${REMOTE_PATH}/${INSTANCE}'
-
-# Delete the External Secrets objects in the ${INSTANCE} namespace that the
-# chart does not render any more. They are CRs, and no Helm release owns them,
-# so no `helm uninstall` will ever remove them. The ESO store tokens are
-# Secrets, not CRs, and are not touched here.
-K3S_ORPHAN_RENDERED=${K3S_TMP_DIR}/orphans-rendered.txt
-K3S_ORPHAN_LIVE=${K3S_TMP_DIR}/orphans-live.txt
-K3S_ORPHAN_ORPHANS=${K3S_TMP_DIR}/orphans-orphans.txt
-k3s_purge_orphans: tunnel_up
-	mkdir -p $(K3S_TMP_DIR)
-	helm template shoggoth-$(INSTANCE) $(SHOGGOTH_CHART_ROOT) \
-		$(SHOGGOTH_HELM_COMMON_ARGS) \
-		| yq -r 'select(.kind == "ExternalSecret" or .kind == "PushSecret" or .kind == "SecretStore") | .metadata.name' \
-		| sed '/^---$$/d' | sort -u > $(K3S_ORPHAN_RENDERED)
-	: > $(K3S_ORPHAN_LIVE)
-	for kind in externalsecret pushsecret secretstore; do \
-		kubectl get "$$kind" -n ${INSTANCE} -o name 2>/dev/null >> $(K3S_ORPHAN_LIVE) || true ; \
-	done
-	# sub() strips the `kind/` prefix that `kubectl -o name` adds.
-	awk 'NR==FNR { rendered[$$1]=1; next } \
-	     { name=$$1; sub(/.*\//, "", name); if (!(name in rendered)) print $$1 }' \
-		$(K3S_ORPHAN_RENDERED) $(K3S_ORPHAN_LIVE) > $(K3S_ORPHAN_ORPHANS)
-	# The empty-render guard is there because the comparison is "in the chart
-	# or not": an empty rendered set would make every object in the namespace
-	# look like an orphan.
-	#
-	# Clear the controller finalizers before deleting, and bound the delete
-	# itself. Both are needed for the same reason: `kubectl delete` waits for
-	# the object to disappear (its --wait defaults to true), and an
-	# ExternalSecret carries
-	# `externalsecrets.external-secrets.io/externalsecret-cleanup`, a
-	# finalizer only the ESO controller removes.
-	#
-	# This target is the LAST step of `make down`, so the ESO controller is
-	# already gone by then — helm uninstall deleted its Deployment before the
-	# CRs (unknown kinds sort last in Helm's uninstall order). Nothing is left
-	# to drain the finalizer, the wait never ends, and kubectl sits there
-	# after having already printed "deleted from <ns> namespace".
-	#
-	# Neither earlier step can cover an orphan. The chart's pre-delete hook
-	# (zz-eso-pre-delete.yaml) selects on
-	# `app.kubernetes.io/instance=<release>`, and `down_helm_cleanup` above on
-	# the `meta.helm.sh/release-*` annotations — and an orphan is by
-	# definition a CR the chart no longer renders, so it carries neither.
-	# This target is the only actor that ever removes one, so it has to
-	# finish the job itself.
-	#
-	# Safe on the data plane: the chart sets no `spec.target.deletionPolicy`,
-	# so the CRD default `Retain` applies
-	# (shoggoth/crd/external-secrets/deploy/crds/bundle.yaml) and ESO's
-	# `cleanupManagedSecrets` is a no-op. Removing the finalizer therefore
-	# deletes the CR and nothing else — the same argument
-	# zz-eso-pre-delete.yaml makes for its own force-patch. PushSecrets and
-	# SecretStores carry no finalizer at all, so on them the patch is a no-op.
-	#
-	# The strip is best-effor.
-	if [ -s $(K3S_ORPHAN_RENDERED) ] && [ -s $(K3S_ORPHAN_ORPHANS) ]; then \
-		sed 's/^/  /' $(K3S_ORPHAN_ORPHANS); \
-		while read -r obj; do \
-		    [ -n "$$obj" ] || continue; \
-		    if out=$$(kubectl patch -n ${INSTANCE} --type=merge \
-		            -p '{"metadata":{"finalizers":[]}}' "$$obj" 2>&1); then \
-		        : ; \
-		    else \
-		        case "$$out" in \
-		            *"NotFound"*) : ;; \
-		            *) echo "    ERROR: $$obj was not patched: $$out" ;; \
-		        esac ; \
-		    fi ; \
-		done < $(K3S_ORPHAN_ORPHANS) ; \
-		xargs -r -n20 kubectl delete -n ${INSTANCE} --ignore-not-found=true \
-		    --timeout=60s < $(K3S_ORPHAN_ORPHANS); \
-	fi
-
-# Wipe OpenBao raft storage. Does NOT restart anything — run sync_restart after.
-# Useful when the unseal key is lost or OpenBao data is corrupted.
-wipe_openbao: tunnel_up
-	-kubectl scale statefulset openbao -n ${INSTANCE} --replicas=0 2>/dev/null || true
-	-kubectl wait --for=delete pod/openbao-0 -n ${INSTANCE} --timeout=60s 2>/dev/null || true
-	PV_JSON=$$(kubectl get pv -o json | jq -r '.items[] | select(.spec.claimRef.name=="openbao-data" and .spec.claimRef.namespace=="${INSTANCE}")'); \
-	PV_HOST_PATH=$$(printf '%s' "$${PV_JSON}" | jq -r '.spec.local.path // empty'); \
-	PV_NAME=$$(printf '%s' "$${PV_JSON}" | jq -r '.metadata.name // empty'); \
-	if [ -n "$${PV_HOST_PATH}" ]; then \
-		${K3S_SSH} "sudo sh -c 'find \"$${PV_HOST_PATH}\" -mindepth 1 -exec rm -rf {} +'"; \
-		WIPE_EXIT=$$?; \
-		if [ $${WIPE_EXIT} -ne 0 ]; then \
-			echo "ERROR: Host data wipe failed (exit code $${WIPE_EXIT}). Check sudo access."; \
-			exit 1; \
-		fi; \
-	fi; \
-	if [ -n "$${PV_NAME}" ]; then \
-		kubectl patch pv "$${PV_NAME}" -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true; \
-		-kubectl delete pvc openbao-data -n ${INSTANCE} --ignore-not-found=true --wait=false 2>/dev/null; \
-		-kubectl delete pv "$${PV_NAME}" --ignore-not-found=true --wait=false 2>/dev/null; \
-		for i in 1 2 3 4 5 6 7 8 9 10; do \
-			kubectl get pvc openbao-data -n ${INSTANCE} >/dev/null 2>&1 || break; \
-			sleep 1; \
-		done; \
-	fi;
-	-kubectl delete secret openbao-unseal-key -n ${INSTANCE} --ignore-not-found=true
-
+	$(ANSIBLE)/purge.yml --ask-become-pass
 
 # Start all shoggoth services.
-#
-# Two passes, one after the other:
-#   Pass 1 (CRDs, server-side)  -> `make crds_apply`, every run.
-#   Pass 2 (everything else)    -> `helm upgrade --install`.
-#
-# The namespace is created by THIS target, with kubectl, before the helm call;
-# the chart owns the namespace OBJECT — its metadata — not its existence (see
-# shoggoth/chart/templates/namespace.yaml). The kubectl call is not
-# belt-and-braces, it is load-bearing, and -create-namespace cannot replace it.
-up: tunnel_up crds_apply
-	kubectl get namespace $(INSTANCE) >/dev/null 2>&1 \
-		|| kubectl create namespace $(INSTANCE) >/dev/null
-	$(SHOGGOTH_HELM_UPGRADE)
-	$(SHOGGOTH_HELM_STATUS) | head -12
+up: tunnel_up
+	$(ANSIBLE)/deploy.yml --ask-become-pass
 
-# `make start|stop|restart_service SERVICE=<x>` runs `helm upgrade
-# --reuse-values` with `--set services.<x>.enabled=<bool>` to flip a single
-# toggle.
+# `make start|stop SERVICE=<x>` flips a single service toggle:
+# `helm upgrade --reuse-values` with `--set services.<x>.enabled=<bool>`.
 
 .PHONY: start
 start: tunnel_up
-	$(SHOGGOTH_HELM_UPGRADE) --set services.${SERVICE}.enabled=true --reuse-values --wait
-
+	$(ANSIBLE)/service.yml -e shoggoth_service=$(SERVICE) -e shoggoth_service_action=enable
 .PHONY: stop
 stop: tunnel_up
-	$(SHOGGOTH_HELM_UPGRADE) --set services.${SERVICE}.enabled=false --reuse-values --wait
+	$(ANSIBLE)/service.yml -e shoggoth_service=$(SERVICE) -e shoggoth_service_action=disable
 
-
-# Restart a single service: stop + start, both via Helm. Depends on tunnel_up
-# so the underlying `start`/`stop` calls reach the API; those two run the
-# version gate themselves, so it is not repeated here.
+# Restart a single service: the two toggles above, in that order. The tunnel
+# is a prerequisite of both, so it is up before either half runs.
 .PHONY: restart_service
 restart_service: tunnel_up
-	$(MAKE) stop SERVICE=${SERVICE}
-	$(MAKE) start SERVICE=${SERVICE}
-
+	${MAKE} stop
+	${MAKE} start
 
 log: tunnel_up
 	test -n "$(SERVICE)" || (echo "Usage: make log SERVICE=<app-name> [CONTAINER=<name>]" && false)
@@ -413,37 +192,11 @@ status: tunnel_up
 	    -o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,STATUS:.status.phase \
         2>&1 || true
 
-# Drop a tag from the local zot registry cache.
+# Drop a tag from the local registry cache.
 #
 # Triggers on-demand re-sync from upstream on the next pull of IMAGE:TAG.
 # zot is configured with anonymous access, so no credentials are required.
 # Requires network reachability to registry.${DOMAIN}:${REGISTRY_PORT}.
 # Example: make drop_image_tag IMAGE=library/nginx TAG=latest
 drop_image_tag:
-	if [ -z "${IMAGE}" ] || [ -z "${TAG}" ]; then \
-		echo "Usage: make drop_image_tag IMAGE=<repo> TAG=<tag>"; \
-		echo "Example: make drop_image_tag IMAGE=library/nginx TAG=latest"; \
-		exit 1; \
-	fi
-	echo "=== Dropping tag ${IMAGE}:${TAG} from registry.${DOMAIN} ==="
-	RESP_FILE=$$(mktemp); \
-	HTTP_CODE=$$(curl -sS -o "$${RESP_FILE}" -w '%{http_code}' \
-		-X DELETE \
-		-H 'Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json' \
-		"http://registry.${DOMAIN}:${REGISTRY_PORT}/v2/${IMAGE}/manifests/${TAG}"); \
-	CURL_EXIT=$$?; \
-	if [ $${CURL_EXIT} -ne 0 ]; then \
-		echo "  FAIL: curl exited with $${CURL_EXIT}" >&2; \
-		rm -f "$${RESP_FILE}"; \
-		exit 1; \
-	fi; \
-	case "$${HTTP_CODE}" in \
-		202|200|204) echo "  OK: tag dropped (HTTP $${HTTP_CODE})" ;; \
-		404) echo "  OK: tag not present (HTTP 404, idempotent)" ;; \
-		*) echo "  FAIL: HTTP $${HTTP_CODE}" >&2; \
-			[ -s "$${RESP_FILE}" ] && cat "$${RESP_FILE}" >&2; \
-			rm -f "$${RESP_FILE}"; \
-			exit 1 ;; \
-	esac; \
-	rm -f "$${RESP_FILE}"
-	echo "Done. Next pull of ${IMAGE}:${TAG} will re-sync from upstream."
+	$(ANSIBLE)/drop_image_tag.yml -e shoggoth_image=$(IMAGE) -e shoggoth_tag=$(TAG)

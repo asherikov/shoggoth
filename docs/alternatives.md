@@ -312,7 +312,7 @@ Possible mitigations (none currently implemented):
   - + `hosts` plugin auto-reloads blocklist file every 1h (configurable)
   - + standalone lifecycle — `make down` cleanly removes from shoggoth namespace
   - - returns 0.0.0.0 for blocked domains (not NXDOMAIN) — client connects to null address
-  - - blocklist downloaded during `make sync` (requires internet on build host)
+  - - blocklist is a git submodule that Pass 0 of `deploy.yml` copies locally; `make up` never refreshes it, so a clone is only as current as its last `git submodule update --remote`
 
 ### Blocklist sources
 
@@ -1682,9 +1682,10 @@ in the docs/ tree.
 
 - The Argo CRD submodule
   (`shoggoth/crd/argo-workflows/manifests/base/crds/full/argoproj.io_*.yaml`)
-  is rsync'd to the host by `make sync` (see
-  `shoggoth/crd/argo-workflows/manifests/base/crds/full/`). Any chosen
-  tool needs to scan both `shoggoth/k3s/*.yaml` and the CRD submodule
+  is a repo path, not a host one: nothing copies it to the host. `make up`
+  applies the CRDs straight from these local files (Pass 1 of
+  ansible/deploy.yml). Any chosen tool needs to scan both
+  `shoggoth/k3s/*.yaml` and the CRD submodule
   to graph Argo `Workflow` / `WorkflowTemplate` / `EventBus` /
   `EventSource` / `Sensor` objects.
 - KubeDiagrams is the only tool with vendored, ready-to-use config

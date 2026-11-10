@@ -1,18 +1,18 @@
 # Per-instance shoggoth configuration.
 #
-# THIS FILE IS THE SOURCE OF TRUTH. `make up` passes it to Helm with
+# THIS FILE IS THE SOURCE OF TRUTH. The install passes it to Helm with
 # --values; the chart derives every SHOGGOTT_* pod environment variable from
 # it (see e.g. chart/templates/git-pages.yaml, wireguard.yaml, openldap.yaml).
 #
 # There is no variable injection: nothing is passed with --set, and the
-# Makefile reads values out of this file rather than defining them separately.
+# installer reads values out of this file rather than defining them separately.
 #
 # `shoggoth/chart/values.yaml` documents every key and its default; anything
 # omitted here falls back to that default. Ports are quoted strings to match
 # the chart's own types.
 #
 # The pre-chart `shoggoth.env` remains only for host-install rendering
-# (shoggoth.nix, ports.nix via envsubst in make/k3s.mk:32). It is no longer a
+# (shoggoth.nix, ports.nix via envsubst at install time). It is no longer a
 # source for anything Helm reads.
 
 identity:
@@ -42,7 +42,11 @@ network:
 ai:
   defaultModel: openai/MiniMax-M3
   defaultApi: https://api.minimax.io/v1
-  # Path to the K8s Secret holding the token, not the token itself.
+  # Path to the token FILE inside the openbao-init Job container, not to a K8s
+  # Secret. The Job mounts the host's synced copy of shoggoth/data/private at
+  # /shoggoth/private (chart/templates/openbao.yaml), and openbao-bootstrap
+  # reads this file on every run and mirrors it into OpenBao's
+  # ai/default-token, which the ai-default-token ExternalSecret then projects.
   defaultTokenFileRef: /shoggoth/private/ai-default-token.txt
 
 gitea:

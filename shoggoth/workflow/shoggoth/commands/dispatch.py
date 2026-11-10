@@ -22,8 +22,7 @@ from . import slash_commands
 # (subcommands: ``wait-bootstrap``, ``init-perms``, ``sandbox``,
 # ``cleanup``), mounted into the sandbox pod at
 # ``/shoggoth/workflow-scripts/`` via a hostPath volume (the
-# ``workflow-scripts:workflow`` K3S_HOST_PATHS entry in
-# the Makefile rsyncs the repo's ``workflow/`` to the
+# host-state step rsyncs the repo's ``workflow/`` tree to the
 # cluster node). Each container invokes python3 with the
 # subcommand and (for the sandbox subcommand) the user-controlled
 # ``--repo`` and ``--branch`` values as separate argv items
@@ -1365,14 +1364,12 @@ class DispatchCommand(CommandBase):
                          "defaultMode": 493,
                      }},
                     # HostPath of the cluster-node's workflow-
-                    # scripts directory. The Makefile's
-                    # `workflow-scripts:workflow`
-                    # K3S_HOST_PATHS entry rsyncs the repo's
-                    # `workflow/` to
+                    # scripts directory. The host-state step
+                    # rsyncs the repo's `workflow/` to
                     # `/var/lib/rancher/k3s/storage/${INSTANCE}/workflow-scripts/`
-                    # on the cluster node at `make sync` time,
-                    # so the same absolute path is visible to
-                    # every container in the pod after sync.
+                    # on the cluster node, so the same absolute
+                    # path is visible to every container in the
+                    # pod.
                     # Neither image bakes the workflow scripts
                     # in (dockerfiles/slave and
                     # dockerfiles/tools carry no COPY/ADD for
