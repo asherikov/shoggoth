@@ -276,6 +276,14 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
   - - does not cache upstream registries — only redistributes already-pulled images
   - - upstream activity has slowed (originally uber/kraken); maintenance cadence is uncertain
 
+- <https://github.com/quay/quay>
+  - Two distinct sync mechanisms, easily confused: the **proxy cache** (`FEATURE_PROXY_CACHE`, per-organization *Remote Registry* setting) is a true pull-through — on-demand fetch on client pull, layers cached and served in parallel, refresh when the upstream digest changes, cached copy served within the configured staleness period when the upstream is down; **repository mirroring** (`POST /api/v1/repository/{repository}/mirror`, `sync_start_date` / `sync_interval` / glob `root_rule`) is scheduled stateful replication by a worker, not pull-through
+  - + LDAP/OIDC auth, robot accounts, Clair scanning, quotas, audit logs — the security surface Zot deliberately lacks
+  - - Flask app + PostgreSQL + Redis + object storage vs Zot's single Go binary; operator path needs OLM, batteries-included assumes OpenShift + NooBaa/ODF
+  - - one cache organization per upstream with an extra URL path segment (`<quay>/<org>/<ns>/<image>`): shoggoth's 9 upstreams → 9 orgs and 27 client rewires vs Zot's 1 endpoint / 3
+  - - anonymous users cannot pull uncached images through the proxy cache — every current pull (containerd, Docker, DinD, runner pods) is unauthenticated
+  - Red Hat builds quay itself on konflux-ci — the two ecosystems are coupled (see CI/CD factory)
+
 ### Containerd mirror fallback behavior
 
 When a mirror endpoint is configured in `registries.yaml`, containerd tries the
@@ -760,6 +768,15 @@ follow-up decision.
   - - secrets/job logs visible to anyone with `get pods` / `get pods/log` in the namespace while a run is active (no DinD boundary)
 - <https://github.com/harness/harness>
 
+## CI/CD factory
+
+- <https://github.com/konflux-ci/konflux-ci>
+  - Kubernetes-native "software factory" on Tekton: build → test → sign (cosign) → release, with SLSA L3 provenance, SBOMs, hermetic builds, and Conforma policy gates; managed dependency updates (mintmaker), integration tests, staged releases, web UI
+  - + supply-chain trust built in rather than bolted on
+  - - operator + Tekton + pipelines-as-code + ~8 controllers (integration-service, release-service, image-controller, application-api, internal-services, namespace-lister, ...) plus a pod per build — sized for a shared cluster, not a single node
+  - - webhooks documented for GitHub (App), GitLab, and Forgejo — Gitea, shoggoth's forge, is not a documented forge
+  - - value is trusted artifacts, the threat model the README defers ("security is non-existent"); shoggoth's release is a single-node `helm upgrade`
+
 ## MCP for Gitea
 
 - **[gitea-mcp-server](https://gitea.com/gitea/gitea-mcp)** (selected)
@@ -1231,6 +1248,21 @@ Open items:
   - - broken visualization
 - LSP
   - - compile commands are needed for C++
+
+## Web crawling / docs ingestion
+
+- **<https://github.com/unclecode/crawl4ai>** (Apache 2.0) [selected] — on-demand docs fetch for agents, exposed through the litellm MCP gateway
+  - + MCP server built into the image (SSE /mcp/sse + WS /mcp/ws): md/html/screenshot/pdf/execute_js/crawl/ask
+  - + cache with ETag/Last-Modified revalidation — a repeated fetch of an unchanged page costs one HEAD
+  - + secure by default: CRAWL4AI_API_TOKEN gates non-loopback binds, /health is the only open endpoint
+  - - one pod carries Python + Redis + Gunicorn + Chromium (--shm-size=1g); cache has no TTL or size cap
+- <https://github.com/fastcrw/crw>
+  - + Rust single binary, ~14 MB idle; streamable-HTTP POST /mcp (litellm transport "http"); map/search/extract/PDF parse; Moka cache with 1h TTL and 256 MB cap
+  - - AGPL-3.0; pre-1.0 (v0.44.x, ~2 releases/week, breaking changes); MCP path forces cache bypass (max_age=0), so gateway fetches are always cold
+  - - self-hosted default is unauthenticated (CRW_AUTH__API_KEYS empty); no browser in the image — JS rendering needs a LightPanda sidecar, search needs SearXNG
+- <https://github.com/mendableai/firecrawl>
+  - + reference implementation with official MCP server (firecrawl/firecrawl-mcp-server)
+  - - AGPL-3.0; full stack (Playwright pool + queue + Postgres/Redis) heavier than the slot needs
 
 ## Container orchestration
 
