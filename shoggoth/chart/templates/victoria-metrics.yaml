@@ -112,4 +112,36 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: victoria-metrics-data
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: victoria-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: victoria-metrics
+spec:
+  podSelector:
+    matchLabels:
+      app: victoria-metrics
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: otelcol
+        - podSelector:
+            matchLabels:
+              app: tempo
+        - podSelector:
+            matchLabels:
+              app: grafana
+        - podSelector:
+            matchLabels:
+              app: web-internal
+      ports:
+        - port: 80
+          protocol: TCP
 {{- end }}

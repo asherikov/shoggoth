@@ -214,6 +214,30 @@ data:
                 proxy_set_header Connection $connection_upgrade;
             }
         }
+        # --- victoria-metrics (VMUI) ---
+        # VMUI serves from /vmui and rewrites asset paths under that prefix,
+        # so the proxy must pass the original URI through untouched.
+        upstream victoria-metrics {
+            zone victoria-metrics 1m;
+            server victoria-metrics.{{ .Release.Namespace }}.svc.cluster.local resolve;
+        }
+        server {
+            listen 80;
+            server_name victoria-metrics.{{ .Values.identity.domain }};
+            location = / {
+                return 302 /vmui;
+            }
+            location /vmui {
+                proxy_pass http://victoria-metrics;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection $connection_upgrade;
+            }
+        }
     }
 
 ---

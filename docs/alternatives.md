@@ -1336,6 +1336,94 @@ k8s-compatible and would transition cleanly.
 
 ---
 
+## CNI / cluster networking
+
+k3s bundles flannel (VXLAN) as CNI, kube-proxy (iptables) for service load
+balancing, and a kube-router network-policy controller that runs but is
+unused — the whole security model is "reachable only through the VPN"
+(`docs/adr/0001-services-behind-vpn.md`), with every service listening on the
+pod network and only the VPN routing it. The three ingress policies the chart
+does carry (loki, tempo, victoria-metrics) narrow who may write to those
+backends, and they stay inert unless a CNI enforces NetworkPolicy. One
+capability is still missing: per-service network policy (L3/L4/L7/FQDN)
+across the whole chart. The other, internal-traffic observability (which
+services interact, how much), is already deployed — Inspektor Gadget,
+compared against Caretta under the kube-router entry below. This section is
+the shortlist; the phasing and rollback for the Cilium option are summarised
+against its entry below.
+
+One constraint shapes every option: wg-easy runs as a `hostNetwork` pod and
+pushes `AllowedIPs=10.43.0.0/16`, so VPN clients reach ClusterIPs through
+kube-proxy's iptables DNAT in the host netns. Any option that replaces
+kube-proxy must re-verify that path, and every option rewrites the
+interface-name-dependent host firewall stanza
+(`trustedInterfaces=["cni0"]`, `FORWARD -i wg0 -o cni0` in `shoggoth.nix`).
+
+- **[flannel + kube-proxy](https://github.com/flannel-io/flannel)** (Apache 2.0) (selected, current)
+  - + zero migration cost — already deployed, and the bundled kube-router
+    controller accepts plain `kind: NetworkPolicy` (L3/L4) today with no flag
+    changes and no maintenance window
+  - + keeps the wg0 -> ClusterIP path byte-identical
+  - - no FQDN egress, no L7, no flow or DNS observability
+- <https://github.com/cilium/cilium> (Apache 2.0) — **proposed**
+  - + the only option covering all three goals: eBPF CNI, CiliumNetworkPolicy
+    (L3/L4/L7, `toFQDNs`, DNS-aware rules, `fromEntities: host` for
+    wg-easy-masqueraded VPN clients), and Hubble (relay, UI, metrics families
+    dns/drop/tcp/flow — scraped into the existing otelcol -> VictoriaMetrics
+    pipeline)
+  - + kube-proxy replacement is opt-in and deferred to a later phase, so the
+    one genuine unknown (wg0 -> ClusterIP under eBPF LB) is not assumed
+  - + official Helm chart and cilium-cli match the repo's `make/*.mk` + Helm
+    house style; auto-detects k3s CNI paths
+  - - full CNI swap: k3s flags, `cni0` -> `cilium_host` firewall edit, one
+    maintenance window in which every pod restarts
+  - - ~250-400 MB (agent + operator + relay + metrics); eBPF features need
+    kernel >= 5.10 with BTF; Cilium's host-netns iptables coexist with NixOS
+    nftables (verify after swap)
+- <https://github.com/antrea-io/antrea> (Apache 2.0, CNCF Incubating)
+  - + closest full substitute: OVS/eBPF datapath, kube-proxy replacement
+    (`proxyAll`), FQDN egress and L7 HTTP rules, tiered policies (cleaner than
+    Cilium for the incremental per-service rollout)
+  - + policy enforcement lives in OVS flows rather than host iptables — least
+    invasive option on the NixOS nftables axis
+  - - no Hubble equivalent: Traceflow plus a flow exporter whose good path is
+    ClickHouse-backed (heavy) — only a partial fit for observability
+  - - no official Helm chart (vendored manifest + kubectl apply), smaller
+    community; same full CNI swap and window
+- <https://github.com/kube-router/kube-router> + an internal-traffic collector (Apache 2.0)
+  - + zero-migration combination: kube-router enforces L3/L4 NetworkPolicy on flannel as-is (it already runs in k3s), and the collector is an eBPF DaemonSet that works with any CNI and exports per-link traffic bytes as Prometheus metrics — one otelcol job plus a Grafana Node Graph dashboard renders the service-interaction graph
+  - + no CNI swap, no host edits, no window, no wg0 exposure, ~50-100 MB
+  - - kube-router has no FQDN/L7 policy and no flow data of its own
+  - Observability half — **[Inspektor Gadget](https://github.com/inspektor-gadget/inspektor-gadget)** (Apache 2.0, CNCF Sandbox) (selected, deployed as the `gadget` service):
+    - + namespace-scoped at three layers: `gadget-namespace` limits daemon discovery to the release namespace, `operator.KubeManager.namespace` is evaluated inside the eBPF program so the other instance's sockets are never recorded, and `otel_scope_name` (`top-tcp-<ns>`) plus otelcol's anchored keep regex re-check on ingest
+    - + CNCF Sandbox, 2.9k stars, monthly releases (v0.58.0 on 2026-11-04)
+    - + already wired: otelcol scrapes it at 1s, the series reach VictoriaMetrics, the Service Map panel consumes them as-is
+    - + gadget images signature-checked against IG's key; `preStop: /cleanup` detaches the probes and unpins the maps
+    - - kernel >= 5.10 with BTF — already the chart's floor (README: "host kernel >= 5.10 — Required for Inspektor Gadget")
+    - - pod-level identity: the exporter emits no `k8s.pod.*` attributes, so there is no `service` label and the panel strips pod suffixes via `label_replace`, with ~half of endpoints unresolved
+    - - `sent_raw` / `received_raw` are per-interval deltas — `avg_over_time` is the rate, `rate()` must not be used
+    - - 10 host mounts, 8 added capabilities, apparmor unconfined, cluster-scoped RBAC renamed per release; two daemons per node double-charge the same kprobes
+  - Observability half — <https://github.com/groundcover-com/caretta> (Apache 2.0):
+    - - no namespace scoping at any layer (v0.0.17 source): `kprobe/tcp_data_queue` and `tracepoint/sock:inet_sock_set_state` attach with `nil` options, the program has no cgroup/pid/netns check, and the whole config surface is five env vars, none a namespace
+    - - identity resolution is cluster-wide (`Pods("")`, `Services("")`, cluster-wide ClusterRole)
+    - - separation only at query time on `client_namespace` / `server_namespace` — the other instance's traffic is still collected, exported and ingested
+    - - tolerates `NoSchedule` only, not `NoExecute`
+    - + `caretta_links_observed` carries `client_*` / `server_*` name+namespace+kind, `server_port`, `role` and `*_id` — the Node Graph label set directly
+    - + `traverseUpHierarchy` (default) folds pods into their Deployment — workload identity without the suffix-stripping chain
+    - + unresolved peers (IP, external domain, `node`, `external`) are first-class label values
+    - + kernel >= 4.16 with CO-RE, no BTF stated, and "does not require any modifications of the cluster"
+    - + own Grafana dashboard; chart bundles Victoria Metrics + Grafana, both disableable
+    - - no GitHub release, last commit v0.0.17 on 2025-03-17, 19 open issues, single-vendor (groundcover)
+    - - own label space (`client_kind` / `server_kind`, not `src_k8s_*` / `dst_k8s_*`): a second scrape target plus a rewritten identity chain
+    - - bundled Grafana defaults to anonymous access with `admin` / `caretta`
+  - Decision: keep Inspektor Gadget — caretta cannot be scoped to a namespace at collection time.
+- <https://github.com/projectcalico/calico> (Apache 2.0) — considered, dropped
+  - + most widely deployed; iptables mode works without BTF
+  - - FQDN egress policies are a Calico Enterprise feature, not OSS — the
+    decisive gap against the enforcement goal
+
+---
+
 ## Cluster visualization
 
 Tools that produce static or interactive diagrams of the shoggoth stack

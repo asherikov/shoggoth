@@ -1,5 +1,5 @@
 ---
-# The deploy play — three passes, in order:
+# The deploy play — two passes, in order:
 #   Pass 0  provision /var/lib/rancher/k3s/storage/<instance>/ and its content
 #   Pass 1  the CRDs — every run, server-side, from upstream sources
 #   Pass 2  `kubectl get namespace || kubectl create namespace`, then
@@ -7,6 +7,12 @@
 #
 # Pass 0 comes first because the chart's hostPath mounts must exist before the
 # release that mounts them.
+#
+# No pass waits for any workload's readiness. `helm upgrade --install` omits
+# `--wait` on purpose: a wait would cover every workload in the chart and turn
+# one slow StatefulSet into a failed deploy, and helm has no per-workload wait
+# to express "wait for exactly this one". Readiness is asserted per service
+# afterwards — `make status SERVICE=<name>` — rather than gating the install.
 #
 # ---------------------------------------------------------------------------
 # Which tasks run where

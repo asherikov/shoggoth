@@ -3,7 +3,7 @@ name: shoggoth
 description: Shoggoth self-hosted agentic development multitool (single-node K3s).
 type: application
 # Chart version. Bump it on any change to what the chart renders.
-version: 0.5.0
+version: 0.6.0
 appVersion: "0.1.1"
 home: https://github.com/asherikov/shoggoth
 sources:

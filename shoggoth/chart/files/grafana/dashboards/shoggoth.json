@@ -239,8 +239,8 @@
         "list": []
     },
     "time": {"from": "now-1h", "to": "now"},
-    "title": "Shoggoth",
+    "title": "Overview",
     "description": "Shoggoth infrastructure overview: host metrics and traces",
     "uid": "shoggoth",
-    "version": 2
+    "version": 3
 }

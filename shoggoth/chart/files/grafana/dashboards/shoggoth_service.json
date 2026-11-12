@@ -126,8 +126,8 @@
         ]
     },
     "time": {"from": "now-1h", "to": "now"},
-    "title": "Shoggoth Service",
+    "title": "Service",
     "description": "Per-service observability: CPU, memory, network, disk, and logs for a single selected container",
     "uid": "shoggoth-service",
-    "version": 3
+    "version": 4
 }

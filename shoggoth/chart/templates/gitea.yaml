@@ -228,7 +228,12 @@ spec:
           value: git.{{ .Values.identity.domain }}
         - name: GITEA__service__NO_REPLY_ADDRESS
           value: noreply.git.{{ .Values.identity.domain }}
-        - name: GITEA__webhook__ALLOWED_HOST_LIST
+        # ALLOWED_HOST_LIST belongs to [security]: [webhook].ALLOWED_HOST_LIST is
+        # the deprecated spelling — Gitea logs a deprecation warning on every
+        # start (modules/setting/webhook.go) and drops the fallback in v28.0.0.
+        # The effective value is unchanged: [webhook] wins when present, and
+        # otherwise falls back to [security].
+        - name: GITEA__security__ALLOWED_HOST_LIST
           value: private
         - name: GITEA__admin__USER_DISABLED_FEATURES
           value: deletion

@@ -1,0 +1,136 @@
+{
+    "annotations": {
+        "list": []
+    },
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 1,
+    "id": null,
+    "links": [],
+    "panels": [
+        {
+            "title": "Tracked Connections",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 8, "x": 0, "y": 0},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "count(sent_raw{otel_scope_name=~\"$scope\"})", "instant": true, "range": false, "refId": "A"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "none",
+                    "color": {"mode": "value"}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Bytes Sent",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 8, "x": 8, "y": 0},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "sum(sum_over_time(sent_raw{otel_scope_name=~\"$scope\"}[$__range]))", "instant": true, "range": false, "refId": "A"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "bytes",
+                    "color": {"mode": "value"}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Bytes Received",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 8, "x": 16, "y": 0},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "sum(sum_over_time(received_raw{otel_scope_name=~\"$scope\"}[$__range]))", "instant": true, "range": false, "refId": "A"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "bytes",
+                    "color": {"mode": "value"}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Service Map",
+            "description": "One edge per workload pair over the dashboard's time range, weighted by total bytes sent. Pod names are reduced to their workload by stripping the generated suffix, so a Deployment with many pods is one node. Endpoints the resolver could not name collapse to one node per kind (unresolved-raw, unresolved-host) instead of vanishing, and are usually among the highest-degree nodes here — that is external traffic with no Kubernetes object behind it, not a gap in the query.",
+            "type": "nodeGraph",
+            "gridPos": {"h": 23, "w": 24, "x": 0, "y": 4},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "label_join(sum by (source, target) (label_replace(label_replace(label_replace(label_replace(label_replace(label_replace(label_join(label_join(sum by (src_k8s_name, dst_k8s_name, src_k8s_kind, dst_k8s_kind) (sum_over_time(sent_raw{otel_scope_name=~\"$scope\"}[$__range])), \"dst_node\", \":\", \"dst_k8s_name\", \"dst_k8s_kind\"), \"src_node\", \":\", \"src_k8s_name\", \"src_k8s_kind\"), \"src_node\", \"$1$2\", \"src_node\", \"^(.+?)(?:-[a-z0-9]{5,}-[a-z0-9]{5,}|-[a-z0-9]{5}|-[0-9]+)(:pod)$\"), \"dst_node\", \"$1$2\", \"dst_node\", \"^(.+?)(?:-[a-z0-9]{5,}-[a-z0-9]{5,}|-[a-z0-9]{5}|-[0-9]+)(:pod)$\"), \"source\", \"$1\", \"src_node\", \"^([^:]+):.+$\"), \"target\", \"$1\", \"dst_node\", \"^([^:]+):.+$\"), \"source\", \"unresolved-$1\", \"src_node\", \"^:(.+)$\"), \"target\", \"unresolved-$1\", \"dst_node\", \"^:(.+)$\")), \"id\", \" -> \", \"source\", \"target\") > 0", "format": "table", "instant": true, "range": false, "refId": "A"}
+            ],
+            "transformations": [
+                {"id": "calculateField", "options": {"mode": "binary", "binary": {"left": {"matcher": {"id": "byName", "options": "Value"}}, "operator": "/", "right": {"fixed": "1048576"}}, "alias": "mainstat"}},
+                {"id": "organize", "options": {"excludeByName": {"Time": true, "Value": true}}}
+            ],
+            "options": {"layoutAlgorithm": "force", "edges": {"mainStatUnit": "MiB"}}
+        },
+        {
+            "title": "Top Destinations",
+            "type": "timeseries",
+            "gridPos": {"h": 18, "w": 12, "x": 0, "y": 27},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "topk(8, sum by (dst_k8s_name) (avg_over_time(sent_raw{otel_scope_name=~\"$scope\",dst_k8s_name!=\"\"}[$__interval])))", "legendFormat": "{{dst_k8s_name}}", "refId": "A"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "Bps",
+                    "min": 0,
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Top Sources",
+            "type": "timeseries",
+            "gridPos": {"h": 18, "w": 12, "x": 12, "y": 27},
+            "datasource": {"uid": "vm"},
+            "targets": [
+                {"expr": "topk(8, sum by (src_k8s_name) (avg_over_time(sent_raw{otel_scope_name=~\"$scope\",src_k8s_name!=\"\"}[$__interval])))", "legendFormat": "{{src_k8s_name}}", "refId": "A"}
+            ],
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "Bps",
+                    "min": 0,
+                    "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "lineWidth": 1.5, "showPoints": "never", "fillOpacity": 10}
+                },
+                "overrides": []
+            }
+        }
+    ],
+    "refresh": "30s",
+    "schemaVersion": 40,
+    "tags": ["shoggoth", "service-map"],
+    "templating": {
+        "list": [
+            {
+                "current": {"text": "", "value": ""},
+                "definition": "label_values(sent_raw, otel_scope_name)",
+                "hide": 0,
+                "includeAll": true,
+                "label": "Gadget scope",
+                "multi": false,
+                "name": "scope",
+                "options": [],
+                "query": {"qryType": 1, "query": "label_values(sent_raw, otel_scope_name)", "refId": "VariableQuery-0"},
+                "refresh": 2,
+                "sort": 1,
+                "type": "query",
+                "datasource": {"uid": "vm"}
+            }
+        ]
+    },
+    "time": {"from": "now-1h", "to": "now"},
+    "title": "Service Map",
+    "description": "Service map from Inspektor Gadget's top_tcp collector. sent_raw and received_raw are per-interval DELTAS: the gadget drains its eBPF map on every fetch, so each sample is the bytes moved in roughly one second. avg_over_time(...[$__interval]) is therefore already a rate in bytes/second, and rate() must not be used — these are gauges. A quiet link produces no datapoint and goes stale rather than holding its last value, so a gap means no traffic, not a failed scrape. Identity is pod-level (kubeipresolver does not walk owner references), so the node graph strips the generated pod suffix to get workload nodes, and roughly half the endpoints are unresolved — kind raw or host with an empty name — so they collapse into one node per kind and stay visible in the graph rather than being dropped. There is no service label on these series: the gadget exporter emits no k8s.pod.* resource attributes, so otelcol's k8s_attributes processor cannot associate them and transform/service never fires. Filter on otel_scope_name, not service.",
+    "uid": "shoggoth-service-map",
+    "version": 12
+}

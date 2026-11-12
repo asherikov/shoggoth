@@ -1,7 +1,9 @@
 # offline chart validation.
 
 .PHONY: helm_lint helm_lint_chart helm_lint_render helm_lint_dupes \
-        helm_lint_gates helm_lint_collision helm_lint_roledef
+        helm_lint_gates helm_lint_collision helm_lint_roledef \
+        helm_lint_gadget_scope helm_lint_embedded helm_lint_netpol \
+        helm_lint_rollout helm_lint_inspektor
 
 # Values for the offline renders. This is just the instance config: the
 # checks render to a file and never apply anything, so there is nothing here
@@ -31,7 +33,9 @@ ${LINT_TMP_DIR}:
 	mkdir -p $@
 
 helm_lint: helm_lint_chart helm_lint_render helm_lint_dupes \
-           helm_lint_gates helm_lint_collision helm_lint_roledef
+           helm_lint_gates helm_lint_collision helm_lint_roledef \
+           helm_lint_gadget_scope helm_lint_embedded helm_lint_netpol \
+           helm_lint_rollout helm_lint_inspektor
 
 # `helm lint` catches Go-template parse errors and malformed chart
 # metadata, and reports both itself.
@@ -203,6 +207,142 @@ helm_lint_roledef: ${LINT_COLLISION_A} ${LINT_COLLISION_B}
 	cat ${LINT_TMP_DIR}/collision-a.unresolved ${LINT_TMP_DIR}/collision-b.unresolved \
 		> ${LINT_TMP_DIR}/collision.unresolved
 	diff /dev/null ${LINT_TMP_DIR}/collision.unresolved
+
+# The gadget instance's `name` label, its `otel-metrics-name` and otelcol's
+# keep-regex are one string written out in three places: gadget.yaml renders
+# `tcp:<name>` into the annotation, and otelcol-config.yaml renders the
+# anchored regex that keeps only that scope. Nothing derives one from the
+# other, so a rename in either file fails nowhere -- the scrape succeeds, the
+# keep action matches nothing, and the series disappear. The three spellings
+# are asserted equal in the render.
+helm_lint_gadget_scope: ${LINT_RENDER}
+	yq -r 'select(.kind == "ConfigMap" and .metadata.labels.type == "gadget-instance") | .metadata.labels.name' ${LINT_RENDER} \
+		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/gadget-scope.names
+	grep -c '' ${LINT_TMP_DIR}/gadget-scope.names
+	yq -r 'select(.kind == "ConfigMap" and .metadata.labels.type == "gadget-instance") | .data["operator.otel-metrics.otel-metrics-name"]' ${LINT_RENDER} \
+		| sed '/^---$$/d' | sed 's|^tcp:||' | sort -u > ${LINT_TMP_DIR}/gadget-scope.metrics
+	diff ${LINT_TMP_DIR}/gadget-scope.names ${LINT_TMP_DIR}/gadget-scope.metrics
+	yq -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_RENDER} \
+		| sed -n 's/.*regex: "\^\(.*\)$$"/\1/p' | sort -u > ${LINT_TMP_DIR}/gadget-scope.regex
+	diff ${LINT_TMP_DIR}/gadget-scope.names ${LINT_TMP_DIR}/gadget-scope.regex
+
+# Six ConfigMaps carry a whole YAML document inside a block scalar: the
+# collector pipeline, the gadget daemon's own config, and four service
+# templates. Nothing parses those blocks until the process that reads them
+# starts and exits, and a broken block scalar is otherwise invisible -- the
+# ConfigMap is valid YAML whatever its data values are, so helm_lint_dupes
+# and the render stay green while the collector or the daemon crash-loops on
+# a config parse error. Every ConfigMap that has a `config.yaml` key is
+# extracted and parsed here, so a new one is covered the moment it exists.
+# The same single-rule config as helm_lint_dupes, for the same reason: an
+# unrelated `colons` violation is not a duplicate-key regression.
+#
+# The failures are collected rather than propagated: a `for` loop's exit
+# status is the last command's, so a broken block in the middle of the list
+# would be masked by a clean one after it. Each failing name is appended and
+# the collection is asserted empty, and yamllint's own report is printed
+# before the assertion so the offending line is visible.
+helm_lint_embedded: ${LINT_RENDER}
+	yq -r 'select(.kind == "ConfigMap") | .metadata.name + " " + ((.data // {}) | keys | .[])' ${LINT_RENDER} \
+		| sed '/^---$$/d' | awk '$$2 == "config.yaml" { print $$1 }' | sort -u \
+		> ${LINT_TMP_DIR}/embedded.names
+	grep -c '' ${LINT_TMP_DIR}/embedded.names
+	cp /dev/null ${LINT_TMP_DIR}/embedded.failed
+	cp /dev/null ${LINT_TMP_DIR}/embedded.log
+	for n in $$(cat ${LINT_TMP_DIR}/embedded.names); do \
+		CM_NAME="$$n" yq -r 'select(.kind == "ConfigMap" and .metadata.name == strenv(CM_NAME)) | .data["config.yaml"]' ${LINT_RENDER} \
+			> ${LINT_TMP_DIR}/embedded-$$n.yaml; \
+		yamllint -d '{rules: {key-duplicates: enable}}' ${LINT_TMP_DIR}/embedded-$$n.yaml \
+			>> ${LINT_TMP_DIR}/embedded.log 2>&1 \
+			|| echo "$$n" >> ${LINT_TMP_DIR}/embedded.failed; \
+	done
+	cat ${LINT_TMP_DIR}/embedded.log
+	diff /dev/null ${LINT_TMP_DIR}/embedded.failed
+
+# The three NetworkPolicies' ingress allowlists duplicate pod labels by hand,
+# and nothing pinned the two sets together: a pod-label rename leaves every
+# policy admitting pods that no longer exist, and a deleted `podSelector`
+# entry silently stops admitting a consumer -- both with every helm_lint_*
+# target green. The forward direction resolves each admitted `app` label and
+# each policy's own target against the pod templates of the same render; the
+# reverse direction compares the admitted set against the expected table
+# below, which is what catches a removal. A service whose policy is gated off
+# renders no policy at all, so its row simply does not appear and is not
+# compared.
+NETPOL_INGRESS_EXPECTED = victoria-metrics:otelcol,tempo,grafana,web-internal loki:otelcol,grafana tempo:otelcol,grafana
+
+helm_lint_netpol: ${LINT_RENDER}
+	yq -r 'select(.kind == "DaemonSet" or .kind == "Deployment" or .kind == "StatefulSet") | select(.spec.template.metadata.labels.app != null) | .spec.template.metadata.labels.app' ${LINT_RENDER} \
+		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/netpol-apps.txt
+	grep -c '' ${LINT_TMP_DIR}/netpol-apps.txt
+	yq -r 'select(.kind == "NetworkPolicy") | .spec.podSelector.matchLabels.app' ${LINT_RENDER} \
+		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/netpol-targets.txt
+	grep -c '' ${LINT_TMP_DIR}/netpol-targets.txt
+	comm -23 ${LINT_TMP_DIR}/netpol-targets.txt ${LINT_TMP_DIR}/netpol-apps.txt \
+		> ${LINT_TMP_DIR}/netpol-orphan.txt
+	diff /dev/null ${LINT_TMP_DIR}/netpol-orphan.txt
+	yq -r 'select(.kind == "NetworkPolicy") | .spec.podSelector.matchLabels.app as $$t | .spec.ingress[] | .from[] | .podSelector.matchLabels.app | $$t + " " + .' ${LINT_RENDER} \
+		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/netpol-admits.txt
+	grep -c '' ${LINT_TMP_DIR}/netpol-admits.txt
+	awk '{ print $$2 }' ${LINT_TMP_DIR}/netpol-admits.txt | sort -u \
+		> ${LINT_TMP_DIR}/netpol-admitted.txt
+	comm -23 ${LINT_TMP_DIR}/netpol-admitted.txt ${LINT_TMP_DIR}/netpol-apps.txt \
+		> ${LINT_TMP_DIR}/netpol-dangling.txt
+	diff /dev/null ${LINT_TMP_DIR}/netpol-dangling.txt
+	for e in $(NETPOL_INGRESS_EXPECTED); do \
+		t=$${e%%:*}; s=$${e#*:}; \
+		for x in $$(echo $$s | tr ',' ' '); do echo "$$t $$x"; done; \
+	done | sort -u > ${LINT_TMP_DIR}/netpol-expected.txt
+	diff ${LINT_TMP_DIR}/netpol-expected.txt ${LINT_TMP_DIR}/netpol-admits.txt
+
+# The otelcol DaemonSet's pod template carried no reference to the config it
+# mounts: the collector pipeline is defined only in otelcol-config.yaml, and
+# reloader.yaml passes --resources-to-ignore=configmaps, so a ConfigMap edit
+# rolled nothing and the old pipeline kept running until the DaemonSet was
+# deleted by hand. The checksum/config annotation is what makes the edit
+# visible, and this is its regression guard -- it renders twice with a value
+# that changes only that ConfigMap and asserts the pod template is no longer
+# byte-identical. Removing the annotation fails here.
+helm_lint_rollout: ${LINT_RENDER}
+	helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) \
+		--namespace lint \
+		$(SHOGGOTH_HELM_VALUES_LINT) \
+		--set gadget.metricsPort=2424 \
+		> ${LINT_TMP_DIR}/rollout-alt.yaml.tmp
+	mv ${LINT_TMP_DIR}/rollout-alt.yaml.tmp ${LINT_TMP_DIR}/rollout-alt.yaml
+	yq -r 'select(.kind == "DaemonSet" and .metadata.name == "otelcol") | .spec.template.metadata.annotations // {} | to_entries | .[] | .key + "=" + .value' ${LINT_RENDER} \
+		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/rollout-base.txt
+	yq -r 'select(.kind == "DaemonSet" and .metadata.name == "otelcol") | .spec.template.metadata.annotations // {} | to_entries | .[] | .key + "=" + .value' ${LINT_TMP_DIR}/rollout-alt.yaml \
+		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/rollout-alt.txt
+	grep -c '' ${LINT_TMP_DIR}/rollout-base.txt
+	if diff ${LINT_TMP_DIR}/rollout-base.txt ${LINT_TMP_DIR}/rollout-alt.txt > ${LINT_TMP_DIR}/rollout-diff.txt; then \
+		echo "otelcol pod template is byte-identical when otelcol-config changes"; \
+		exit 1; \
+	fi
+	wc -l < ${LINT_TMP_DIR}/rollout-diff.txt
+
+# The inspektor scrape job targets gadget.<ns>.svc.cluster.local, a Service
+# that exists only while services.gadget.enabled is true. helm_lint_gates
+# cannot see an ungated job: it compares only the kind/name ids of each
+# key's own resources, and otelcol-config renders byte-identically in both
+# renders. This renders with the gadget off and asserts the job is gone from
+# the embedded config.
+helm_lint_inspektor: ${LINT_RENDER}
+	yq -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_RENDER} \
+		| grep 'job_name: inspektor' > ${LINT_TMP_DIR}/inspektor-on.txt
+	grep -c '' ${LINT_TMP_DIR}/inspektor-on.txt
+	helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) \
+		--namespace lint \
+		$(SHOGGOTH_HELM_VALUES_LINT) \
+		--set services.gadget.enabled=false \
+		> ${LINT_TMP_DIR}/inspektor-off.yaml.tmp
+	mv ${LINT_TMP_DIR}/inspektor-off.yaml.tmp ${LINT_TMP_DIR}/inspektor-off.yaml
+	yq -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_TMP_DIR}/inspektor-off.yaml \
+		> ${LINT_TMP_DIR}/inspektor-off.conf
+	grep -c '' ${LINT_TMP_DIR}/inspektor-off.conf
+	grep 'job_name: inspektor' ${LINT_TMP_DIR}/inspektor-off.conf \
+		> ${LINT_TMP_DIR}/inspektor-off.txt || true
+	diff /dev/null ${LINT_TMP_DIR}/inspektor-off.txt
 
 # ---------------------------------------------------------------------------
 # ansible/ offline validation

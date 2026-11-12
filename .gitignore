@@ -2,3 +2,4 @@
 .qwen
 mountpoint
 __pycache__
+.tmp

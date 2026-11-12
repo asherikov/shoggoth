@@ -67,6 +67,7 @@ lists the minimum; newer is fine unless called out.
 | yq          | mikefarah v4 | The `Makefile` reads every configuration value out of `shoggoth/<instance>.yaml` through yq. The Python `yq` package is a *different* tool with a different CLI — install mikefarah's release (https://github.com/mikefarah/yq). |
 | envsubst    | gettext   | Used by `make host_install_nixos` to render `shoggoth.nix` and `ports.nix`. Bundled with most distros; on Alpine it is in the `gettext` package. |
 | ansible-core | ≥ 2.22.0 | Older versions not compatible with the latest python. |
+| host kernel  | ≥ 5.10   | Required for Inspektor Gadget |
 
 Comparison
 ----------
@@ -157,6 +158,9 @@ configurable domain, set to `s.local` by default.
     <https://github.com/VictoriaMetrics/VictoriaMetrics>.
   - `otelcol.` — OpenTelemetry Collector (hostmetrics + docker_stats → OTLP)
     <https://opentelemetry.io/docs/collector/>.
+  - `gadget.` — Inspektor Gadget daemon
+    (<https://github.com/inspektor-gadget/inspektor-gadget>) recording which
+    workloads talk to each other and how much traffic flows.
 - User and secret management:
   - `openldap.` — OpenLDAP directory for centralized authentication
     <https://github.com/osixia/docker-openldap>.
@@ -211,7 +215,9 @@ Tempo + VictoriaMetrics) as the central observability backend, with an
 [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) pipeline for
 telemetry ingestion. Traces, metrics, and logs from services and the host system
 are collected and forwarded to the appropriate backends, where they can be
-viewed on the Grafana dashboard.
+viewed on the Grafana dashboards — provisioned into a "Shoggoth" folder
+(Overview, Service, AI, Service Map) by the dashboard provider in
+`shoggoth/chart/templates/grafana.yaml`.
 
 Shoggoth slave container
 ------------------------

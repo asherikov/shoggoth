@@ -1,0 +1,532 @@
+{{- /*
+  templates/gadget.yaml — Inspektor Gadget: the daemon and this instance's
+  collector.
+
+  Nine objects, all in the release namespace except the two cluster-scoped
+  RBAC ones: ServiceAccount, the daemon's config ConfigMap, the otel-metrics
+  Service, the DaemonSet, ClusterRole + ClusterRoleBinding, Role +
+  RoleBinding, and the gadget-instance ConfigMap the daemon reconciles into a
+  running `top_tcp`.
+
+  ---------------------------------------------------------------------------
+  Why one daemon PER INSTANCE, and why it is possible here
+  ---------------------------------------------------------------------------
+  The upstream chart cannot do this: charts/gadget/templates/_helpers.tpl
+  hardcodes `gadget.fullname` to the literal string "gadget", so its
+  ClusterRole and ClusterRoleBinding are always `gadget-cluster-role` and
+  `gadget-cluster-role-binding` regardless of release name or namespace. A
+  cluster-scoped object has no namespace to separate two instances, so two
+  releases would render the SAME two names — the second install fails with
+  `invalid ownership metadata`, and `--take-ownership` only moves the
+  annotation between releases. otelcol.yaml carries the same rename for the
+  same reason, with the failure mode spelled out in its header.
+
+  So exactly two names are derived from the release here, and everything else
+  is namespaced and can keep upstream's:
+
+    ClusterRole         {{ include "shoggoth.fullname" . }}-gadget-cluster-role
+    ClusterRoleBinding  {{ include "shoggoth.fullname" . }}-gadget-cluster-role-binding
+
+  Both carry `shoggoth.labels`, so `app.kubernetes.io/instance` is the release
+  name and ansible/purge.yml's cluster-scoped RBAC sweep
+  (`app.kubernetes.io/instance=shoggoth-<instance>`) reclaims them with the
+  rest — a cluster-scoped object is not garbage-collected with its namespace.
+
+  The cost is real and is the reason this is a decision rather than a
+  default: two privileged daemons on one node, each attaching its own kprobes
+  to the same `tcp_sendmsg`/`tcp_cleanup_rbuf`, so every matching call is
+  charged twice and each daemon discards the other instance's namespaces
+  inside the eBPF program. Three things that would make it IMPOSSIBLE rather
+  than merely wasteful were checked, and all three are clear:
+
+    * bpffs pins. pkg/operators/ebpf/ebpf.go sets
+      `Maps.PinPath: "/sys/fs/bpf"`, but cilium/ebpf only pins a map whose
+      spec says `PinByName`, and its ELF reader leaves that at the zero value
+      (`PinNone`) unless the eBPF source declares
+      `__uint(pinning, LIBBPF_PIN_BY_NAME)`. Only the GPU gadgets do;
+      `top_tcp` does not, so each daemon gets its own anonymous map.
+    * NRI hooks. pkg/operators/kubemanager/hooks-utils.go appends to the
+      SHARED host /etc/nri/conf.json and overwrites /opt/nri/bin/nrigadget,
+      which two daemons would fight over — but `hook-mode: auto` on containerd
+      resolves to `fanotify+ebpf` (containerhook.Supported()), so NRI is
+      never installed here.
+    * Port 2224. `hostNetwork` defaults to false, so each pod binds its own
+      IP and neither Service contends for the port.
+
+  ---------------------------------------------------------------------------
+  Why the instance ConfigMap is release-owned now
+  ---------------------------------------------------------------------------
+  The previous design rendered this object with the upstream chart and applied
+  it on top of a shared release, owned by nobody. That split existed only
+  because one release could not be told which instance was asking. With the
+  daemon per instance it is an ordinary template: the release owns it, so
+  `helm uninstall` removes the daemon AND this instance's collector in one
+  step, and there is no label-selector delete, no instance counting and no
+  "uninstall when the last one goes" logic anywhere.
+
+  The daemon still reconciles it exactly as before, and that is the part worth
+  being precise about: `gadget-namespace` in the daemon's config is
+  `.Release.Namespace`, and pkg/gadget-service/store/k8s-configmap-store
+  watches ConfigMaps labelled `type: gadget-instance` in THAT namespace with
+  an informer. So a ConfigMap owned by the release is picked up within
+  seconds, on install and on upgrade alike — ownership by Helm is orthogonal
+  to how the daemon discovers it.
+
+  The object's own name is free: the daemon keys on `metadata.name`, and the
+  sha256 truncation upstream derives from the entry name was only that
+  chart's naming convention. `top-tcp-<namespace>` is the same string the
+  otelcol keep-regex matches, so the two spellings still meet in one place.
+
+  ---------------------------------------------------------------------------
+  Two details that are easy to get wrong
+  ---------------------------------------------------------------------------
+  * No `shoggoth.podDnsConfig`. The daemon pulls gadget images from ghcr.io
+    and reaches the API server by the in-cluster IP in its service account
+    token; it never has to answer on <domain>, which is what the chart's
+    `dnsPolicy: None` split-horizon resolver is for. Default ClusterFirst
+    resolves both.
+  * The metrics port is ONE value (.Values.gadget.metricsPort), consumed by
+    the listen address, the Service and the otelcol scrape job, so the three
+    cannot drift apart.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "gadget")) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gadget
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gadget
+    app.kubernetes.io/component: gadget
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gadget
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gadget
+    app.kubernetes.io/component: gadget
+data:
+  # The daemon's own configuration, mounted read-only at /etc/ig. Shape and
+  # defaults are upstream's (charts/gadget/templates/configmap.yaml and
+  # values.yaml); what this file changes is `gadget-namespace` and the
+  # otel-metrics listener.
+  config.yaml: |-
+    events-buffer-length: "16384"
+    containerd-socketpath: /run/containerd/containerd.sock
+    crio-socketpath: /run/crio/crio.sock
+    docker-socketpath: /run/docker.sock
+    podman-socketpath: /run/podman/podman.sock
+    # The namespace this daemon watches for gadget-instance ConfigMaps — its
+    # OWN, which is what makes the collector per-instance: the other
+    # instance's daemon never sees this instance's ConfigMap, and vice versa.
+    gadget-namespace: {{ .Release.Namespace }}
+    daemon-log-level: info
+    multi-tenancy: false
+    multi-tenancy-scope-api-group: ""
+    multi-tenancy-scope-resource: pods
+    multi-tenancy-scope-verb: create
+    operator:
+      kubemanager:
+        # auto resolves to fanotify+ebpf on containerd, which is why the NRI
+        # hook is not installed (see the header).
+        fallback-podinformer: true
+        hook-mode: auto
+      oci:
+        # Gadget images are pulled by the daemon itself and signature-checked
+        # against IG's key. `disallow-pulling: false` is what lets it fetch
+        # from ghcr.io at all.
+        verify-image: true
+        public-keys:
+          - |
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoDOC0gYSxZTopenGmX3ZFvQ1DSfh
+            Ir4EKRt5jC+mXaJ7c7J+oREskYMn/SfZdRHNSOjLTZUMDm60zpXGhkFecg==
+            -----END PUBLIC KEY-----
+        allowed-gadgets: []
+        disallow-pulling: false
+        insecure-registries: []
+      otel-metrics:
+        otel-metrics-listen: true
+        otel-metrics-listen-address: "0.0.0.0:{{ .Values.gadget.metricsPort }}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gadget
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gadget
+    app.kubernetes.io/component: gadget
+spec:
+  # `app: gadget`, the same label the DaemonSet's pods carry. Namespace-scoped,
+  # so the two instances' Services do not collide the way upstream's
+  # cluster-scoped RBAC would.
+  selector:
+    app: gadget
+  ports:
+    - name: otel-metrics
+      port: {{ .Values.gadget.metricsPort }}
+      targetPort: {{ .Values.gadget.metricsPort }}
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gadget
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gadget
+    app.kubernetes.io/component: gadget
+spec:
+  selector:
+    matchLabels:
+      app: gadget
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.selectorLabels" . | nindent 8 }}
+        app: gadget
+        app.kubernetes.io/component: gadget
+      annotations:
+        # Unconfined, so the container can write /sys/fs/bpf and
+        # /sys/kernel/debug/tracing. Without it the daemon fails with
+        # "failed to create folder for pinning bpf maps: mkdir
+        # /sys/fs/bpf/gadget: permission denied" before it loads anything.
+        container.apparmor.security.beta.kubernetes.io/gadget: unconfined
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.gadget.metricsPort }}"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: gadget
+      # Both spelled out rather than left to the default: they are the two
+      # host namespaces that would make two daemons on one node contend (the
+      # port above, and the host PID namespace the GPU bridge would need).
+      # Neither is used — see the header.
+      hostPID: false
+      hostNetwork: false
+      nodeSelector:
+        kubernetes.io/os: linux
+      # Upstream's defaults, and load-bearing on a single-node cluster with
+      # any taint on it: without NoExecute the daemon would be evicted by the
+      # very pressure it is meant to observe.
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+      containers:
+        - name: gadget
+          image: "{{ .Values.gadget.image }}:{{ .Values.gadget.tag }}"
+          imagePullPolicy: {{ .Values.gadget.pullPolicy }}
+          command: [ "/bin/gadgettracermanager", "-serve" ]
+          terminationMessagePolicy: FallbackToLogsOnError
+          lifecycle:
+            # Detaches the probes and removes what it pinned, so a rolling
+            # upgrade or a scale-down leaves no dangling kprobe behind.
+            preStop:
+              exec:
+                command:
+                  - "/cleanup"
+          livenessProbe:
+            exec:
+              command:
+                - /bin/gadgettracermanager
+                - -liveness
+            periodSeconds: 5
+            timeoutSeconds: 2
+          readinessProbe:
+            exec:
+              command:
+                - /bin/gadgettracermanager
+                - -liveness
+            periodSeconds: 5
+            timeoutSeconds: 2
+          startupProbe:
+            exec:
+              command:
+                - /bin/gadgettracermanager
+                - -liveness
+            # 12 x 5s = 60s to come up. eBPF loading is the slow part, and it
+            # is the part that fails on a kernel without BTF and without
+            # btfgen coverage.
+            failureThreshold: 12
+            periodSeconds: 5
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: GADGET_POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            # The daemon's own image, full ref. `kubectl-gadget deploy`
+            # rewrites this to the full ref too, so a full ref is the value
+            # the daemon expects to find here.
+            - name: GADGET_IMAGE
+              value: "{{ .Values.gadget.image }}:{{ .Values.gadget.tag }}"
+            - name: HOST_ROOT
+              value: "/host"
+            - name: IG_EXPERIMENTAL
+              value: "false"
+          securityContext:
+            readOnlyRootFilesystem: true
+            # With hostPID/hostNetwork/privileged all false, the SELinux
+            # context is what lets it mount host directories with the right
+            # permissions. Ignored when SELinux is not enabled.
+            seLinuxOptions:
+              type: "spc_t"
+            capabilities:
+              drop:
+                - ALL
+              add:
+                # bpf(): often checks CAP_SYS_ADMIN.
+                # perf_event_open(): CAP_PERFMON or CAP_SYS_ADMIN.
+                # fanotify_init()/fanotify_mark(): the container-detection
+                #   path, which is what `hook-mode: auto` resolves to here.
+                # mount()/setns(): installing namespaces.
+                - SYS_ADMIN
+                # Addresses out of /proc/kallsyms; without it every address
+                # reads as 0 and the socket enricher cannot resolve
+                # socket_file_ops.
+                - SYSLOG
+                # /proc/$pid/ns/mnt and friends.
+                - SYS_PTRACE
+                # RemoveMemlock, so the daemon can lift RLIMIT_MEMLOCK.
+                - SYS_RESOURCE
+                # mmap() of the ring buffers.
+                - IPC_LOCK
+                # Raw sockets (dns, snisnoop gadgets).
+                - NET_RAW
+                # clsact qdiscs and tc filters (tcnetworktracer gadgets).
+                - NET_ADMIN
+                # ELF reads through /proc/$pid/map_files for the OTel eBPF
+                # profiler's symbolization.
+                - DAC_READ_SEARCH
+          volumeMounts:
+            - mountPath: /host/bin
+              name: bin
+              readOnly: true
+            # NRI and OCI config files are written here by the entrypoint
+            # (see the header: the NRI path is not taken on containerd, but
+            # the mount is upstream's and the CRI-O path still needs it).
+            - mountPath: /host/etc
+              name: etc
+              readOnly: false
+            # NRI and OCI binaries, same reason.
+            - mountPath: /host/opt
+              name: opt
+              readOnly: false
+            - mountPath: /host/usr
+              name: usr
+              readOnly: true
+            - mountPath: /host/run
+              name: run
+              readOnly: true
+            # The container-hook fanotify-marks directories under /host/var.
+            - mountPath: /host/var
+              name: var
+              readOnly: true
+            - mountPath: /host/proc
+              name: proc
+              readOnly: true
+            - mountPath: /run
+              name: run
+            - mountPath: /sys/kernel/debug
+              name: debugfs
+            - mountPath: /sys/fs/cgroup
+              name: cgroup
+              readOnly: true
+            - mountPath: /sys/fs/bpf
+              name: bpffs
+            # The root filesystem is read-only, so gadget images are unpacked
+            # into an emptyDir rather than the container's own layer.
+            - mountPath: /var/lib/ig
+              name: oci
+            - mountPath: /etc/ig
+              name: config
+              readOnly: true
+            # Same reason, for the wasm cache.
+            - mountPath: /var/run/ig/wasm-cache
+              name: wasm-cache
+              readOnly: false
+      volumes:
+        - name: bin
+          hostPath:
+            path: /bin
+        - name: etc
+          hostPath:
+            path: /etc
+        - name: opt
+          hostPath:
+            path: /opt
+        - name: usr
+          hostPath:
+            path: /usr
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: run
+          hostPath:
+            path: /run
+        - name: var
+          hostPath:
+            path: /var
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+        - name: oci
+          emptyDir:
+        - name: wasm-cache
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: gadget
+            defaultMode: 0o400
+---
+# The two cluster-scoped objects, and the only two names this template derives
+# from the release. See the header for why they cannot keep upstream's.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-gadget-cluster-role
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gadget
+    app.kubernetes.io/component: gadget
+rules:
+  - apiGroups: [""]
+    resources: ["nodes/configz"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["namespaces", "nodes", "pods"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    # list is needed by the network-policy gadget; watch by the operators
+    # that enrich with service information.
+    verbs: ["list", "watch"]
+  - apiGroups: ["gadget.kinvolk.io"]
+    resources: ["traces", "traces/status"]
+    # This chart defines the resource, so it needs every right on it.
+    verbs: ["delete", "deletecollection", "get", "list", "patch", "create", "update", "watch"]
+  - apiGroups: ["*"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets", "jobs", "cronjobs", "replicationcontrollers"]
+    # Owner references, used by the seccomp gadget.
+    verbs: ["get"]
+  - apiGroups: ["security-profiles-operator.x-k8s.io"]
+    resources: ["seccompprofiles"]
+    # Integration with the Kubernetes Security Profiles Operator.
+    verbs: ["list", "watch", "create"]
+  - apiGroups: ["security.openshift.io"]
+    # OpenShift only: the privileged SCC is what allows the host mounts and
+    # host namespaces this DaemonSet uses.
+    resources: ["securitycontextconstraints"]
+    resourceNames: ["privileged"]
+    verbs: ["use"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "shoggoth.fullname" . }}-gadget-cluster-role-binding
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gadget
+    app.kubernetes.io/component: gadget
+# roleRef is immutable server-side, so this must name the ClusterRole above
+# exactly — helm_lint_roledef resolves it against the same render for that
+# reason.
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "shoggoth.fullname" . }}-gadget-cluster-role
+subjects:
+  - kind: ServiceAccount
+    name: gadget
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gadget-role
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gadget
+    app.kubernetes.io/component: gadget
+rules:
+  - apiGroups: [ "" ]
+    resources: [ "secrets" ]
+    # The pull secret for image-based gadgets.
+    verbs: [ "get" ]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    # create/patch/update/delete on configmaps is what the daemon uses to
+    # manage gadget instances it discovers.
+    verbs: ["get", "watch", "list", "create", "delete", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gadget-role-binding
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gadget
+    app.kubernetes.io/component: gadget
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gadget-role
+subjects:
+  - kind: ServiceAccount
+    name: gadget
+---
+# This instance's collector. The daemon reconciles it into a running `top_tcp`
+# within seconds of it appearing, because the informer watches the namespace
+# rather than the release — see the header.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: top-tcp-{{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gadget
+    app.kubernetes.io/component: gadget-instance
+    # The selector pkg/gadget-service/store/k8s-configmap-store watches, and
+    # the `name` label is the entry name — the same string the otelcol
+    # keep-regex in templates/otelcol.yaml matches.
+    type: gadget-instance
+    name: top-tcp-{{ .Release.Namespace }}
+  # The five annotations the daemon reads off the object. gadgetImage is the
+  # only one that is not optional; the rest carry upstream's defaults.
+  annotations:
+    gadgetImage: {{ .Values.gadget.gadgetImage | quote }}
+    gadgetTags: ""
+    gadgetTimeout: "0"
+    gadgetLogLevel: "0"
+    gadgetNodes: ""
+data:
+  # Namespace filter, evaluated inside the eBPF program: the counterpart of
+  # the keep-regex in templates/otelcol.yaml, and the reason the two
+  # instances are separate collectors rather than one collector with a label
+  # filter on top.
+  operator.KubeManager.namespace: {{ .Release.Namespace | quote }}
+  # Becomes the otel_scope_name label; what makes the two instances' series
+  # separable after they shared one scrape endpoint.
+  operator.otel-metrics.otel-metrics-name: tcp:top-tcp-{{ .Release.Namespace }}
+  operator.oci.annotate: {{ .Values.gadget.annotate | quote }}
+{{- end }}

@@ -1149,8 +1149,8 @@
         "from": "now-1h",
         "to": "now"
     },
-    "title": "Shoggoth AI",
+    "title": "AI",
     "description": "LLM proxy metrics, LiteLLM trace observability, direct MCP client telemetry, and coding agent session logs",
     "uid": "shoggoth-ai",
-    "version": 2
+    "version": 3
 }

@@ -93,6 +93,7 @@ services:
   dns:                        { enabled: true }
   external-secrets:           { enabled: true }
   fusion:                     { enabled: true }
+  gadget:                     { enabled: true }
   git-pages:                  { enabled: true }
   gitea:                      { enabled: true }
   gitea-runner:               { enabled: true }
@@ -126,6 +127,68 @@ services:
   web-external:               { enabled: true }
   web-internal:               { enabled: true }
   wireguard:                  { enabled: true }
+
+# Inspektor Gadget — the eBPF service-map collector behind the per-instance
+# traffic series. Rendered by templates/gadget.yaml and gated on
+# `services.gadget.enabled`, so an instance opts out the chart's way
+# (`--set services.gadget.enabled=false`) rather than by deleting a file.
+#
+# ONE DAEMON PER INSTANCE, in the instance's own namespace. The upstream chart
+# cannot do this: it hardcodes `gadget.fullname` to the literal string
+# "gadget", so its cluster-scoped ClusterRole/ClusterRoleBinding would collide
+# between two releases. This template renames exactly those two objects per
+# instance, which is what makes a per-instance daemon possible — the cost is
+# in the template's header.
+gadget:
+  # The daemon image. ghcr.io is in the containerd mirror list
+  # (shoggoth/shoggoth.nix), so containerd pulls this through the local zot
+  # mirror and only falls back to upstream when the mirror misses; IfNotPresent
+  # keeps a daemon restart from re-pulling.
+  image: ghcr.io/inspektor-gadget/inspektor-gadget
+  tag: v0.58.0
+  pullPolicy: IfNotPresent
+  # The gadget OCI image the daemon pulls for this instance's collector. NOT
+  # covered by that mirror: the daemon pulls it itself, through its own `oci`
+  # operator into the `oci` emptyDir, and containerd's registries.yaml
+  # configures containerd rather than the daemon's registry client. This image
+  # needs a direct path to ghcr.io from the pod network.
+  gadgetImage: ghcr.io/inspektor-gadget/gadget/top_tcp:v0.58.0
+  # The otel-metrics endpoint. ONE spelling, consumed by the daemon's listen
+  # address, the Service below and the otelcol scrape job in
+  # templates/otelcol.yaml, so the three cannot drift apart. It is also IG's
+  # own default, which is why it is not a per-instance value.
+  metricsPort: "2224"
+  # top_tcp ships with no metrics annotations, so everything the otel-metrics
+  # operator needs is passed here. The comma-separated form is required: the
+  # chart renders this into a ConfigMap data key, and params.AsStringSlice()
+  # splits on commas.
+  #
+  #   tcp:metrics.collect=true                    export this data source
+  #   tcp:metrics.snapshot=true                   tcp is an array data
+  #                                                source, so gauges must
+  #                                                be observable snapshots
+  #   tcp.sent_raw / tcp.received_raw: gauge      the map-iterator fetch
+  #                                                drains the map on every
+  #                                                map-fetch-interval, so
+  #                                                these are per-interval
+  #                                                deltas; a counter would
+  #                                                re-accumulate them
+  #   ...:metrics.type=key                        everything that is either
+  #                                                a service-map label or
+  #                                                part of the map key
+  #
+  # The key set is the eBPF map key (mntns_id, pid, tid, src, dst) plus the
+  # kubeipresolver labels. Snapshot mode rejects an array whose rows share a
+  # key set — without addr_raw/port two connections from one process to
+  # different external IPs would collide and freeze the snapshot at its last
+  # good value. comm is also in the eBPF key but is not a datasource field, so
+  # it cannot join the set. The README's Service Map section carries the full
+  # rationale.
+  #
+  # Sum sent_raw alone: a link between two pods in the same namespace is
+  # recorded once per socket direction, so sent_raw + received_raw would count
+  # it twice.
+  annotate: "tcp:metrics.collect=true,tcp:metrics.snapshot=true,tcp.sent_raw:metrics.type=gauge,tcp.received_raw:metrics.type=gauge,tcp.mntns_id:metrics.type=key,tcp.pid:metrics.type=key,tcp.tid:metrics.type=key,tcp.src.addr_raw:metrics.type=key,tcp.src.port:metrics.type=key,tcp.dst.addr_raw:metrics.type=key,tcp.dst.port:metrics.type=key,tcp.src.k8s.kind:metrics.type=key,tcp.src.k8s.namespace:metrics.type=key,tcp.src.k8s.name:metrics.type=key,tcp.dst.k8s.kind:metrics.type=key,tcp.dst.k8s.namespace:metrics.type=key,tcp.dst.k8s.name:metrics.type=key"
 
 # Optional image-override surface (replaces hard-coded tags inside service
 # manifests; defaults currently leave each manifest's existing tag in place).
