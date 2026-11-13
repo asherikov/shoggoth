@@ -480,15 +480,23 @@ class SlaveTest:
             self._fail(f"MCP {name}: no tools returned: {body[:300]}")
             return
         print(f"OK: {len(tools)} tool(s): {', '.join(t.get('name', '?') for t in tools[:10])}")
+        return tools
 
     def _check_mcp(self):
-        # Only the litellm MCP proxy is checked: it's the single
-        # ingress for the in-cluster MCP traffic (gitea / basic-memory
-        # / etc. all flow through it), so its reachability is the
-        # meaningful signal. The direct ``mcp-gitea`` and
-        # ``basic-memory`` URLs are intentionally not exercised here
-        # — those backends may be reachable only through the proxy
-        # and the proxy is the surface the agents actually call.
+        # The litellm MCP proxy is the single ingress for the
+        # in-cluster MCP traffic (gitea / basic-memory / crawl4ai all
+        # flow through it), so its reachability is the meaningful
+        # signal. Every backend is verified the same way: through the
+        # aggregate tools/list, never directly — the backends'
+        # credentials (Secret/crawl4ai-token, the gitea slave token)
+        # live in litellm, and the check pods must not carry them.
+        # kubectl is unavailable in the slave:noble image, so the
+        # check cannot fetch a Secret at runtime either.
+        #
+        # The tradeoff is visibility: litellm absorbs a per-backend
+        # fault and drops that backend's tools from the aggregate, so
+        # tools/list still answers 200 and a broken backend is not
+        # distinguishable from a quiet one by this check alone.
         self._check_mcp_server("litellm", params.mcp_litellm_url)
 
     def _check_telemetry(self):

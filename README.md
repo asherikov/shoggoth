@@ -149,6 +149,9 @@ configurable domain, set to `s.local` by default.
     - `localai.` — local LLM model server <https://github.com/mudler/LocalAI>.
     - `mcp-gitea.` – Gitea MCP server <https://gitea.com/gitea/gitea-mcp>.
     - `basic-memory.` — Basic Memory MCP server <https://basicmemory.com>.
+    - `crawl4ai.` — Crawl4AI web page fetcher <https://crawl4ai.com/> with a
+      built-in MCP server, exposed to agents through the litellm gateway;
+      cluster-internal only, no VPN ingress.
 - Grafana monitoring suite:
   - `grafana.` — observability dashboard (traces, metrics, logs)
     <https://grafana.com/>.
@@ -616,11 +619,11 @@ Troubleshooting
 ===============
 
 - `LiteLLM:ERROR: opentelemetry.py - 'list' object has no attribute 'get'`:
-  known LiteLLM bug (PR
-  [\#26713](https://github.com/BerriAI/litellm/pull/26713)) where the OTel
-  callback calls `.get()` on `response_obj` which can be a list instead of a
-  dict. Non-fatal — traces still emit, just missing some attributes. Will be
-  resolved when the PR merges into a stable release.
+  known LiteLLM bug
+  (<https://github.com/BerriAI/litellm/issues/48719>, still open) where the
+  OTel callback calls `.get()` on `response_obj`, which is a list for MCP
+  `tools/list` through the gateway. Non-fatal — traces still emit, just
+  missing some attributes. See Known issues below for the full analysis.
 - `Tempo: "failed to find segment for index"`: WAL watcher error in
   `metrics_generator` after config changes (e.g. `span_metrics.dimensions`).
   Self-healing — the watcher retries every 5 seconds and recovers once new WAL
@@ -757,6 +760,48 @@ Known issues
   "stacktrace":"...cmd/controller/certcontroller.go:123..."}`. Check, on the
   host with `ip -4 addr show` and `kubectl get endpoints,endpointslices
   kubernetes`. Clear with `ansible/clear_endpoints.yml`.
+
+- `LiteLLM:ERROR: opentelemetry.py:2690 - OpenTelemetry logging error in
+  set_attributes 'list' object has no attribute 'get'` (also seen with
+  `'CallToolResult'` and `'DecisionsResponse'` in place of `'list'`): upstream
+  bug <https://github.com/BerriAI/litellm/issues/48719>, still open. The OTel
+  callback's `set_attributes` reads `response_obj.get("id")`
+  (`litellm/integrations/opentelemetry.py:2476` in v1.102.0) guarded only by a
+  truthiness check, and the whole method body sits in one `try/except` that
+  logs at ERROR and calls `handle_callback_failure`.
+
+  Three response shapes reach that line without a `.get()`. Two of them are
+  ours, both on the MCP gateway: `tools/list` passes a *list* of tool dicts
+  (`litellm/proxy/_experimental/mcp_server/server.py:2380` — `result=[tool.
+  model_dump(...) for tool in all_tools]` into `async_success_handler`), and
+  `tools/call` passes an MCP `CallToolResult`. So every slave-test `mcp` check
+  and every agent MCP session against the gateway emits one of these errors.
+  The third, `/v1/decisions` (`DecisionsResponse`), is not deployed here.
+  `v1.102.0` has no guard at all — no dict check and no `CallToolResult`
+  handling — and the same line is unfixed on `main` and through `v1.109.0rc1`,
+  so bumping the image does not help. The fix referenced by the
+  Troubleshooting entry above, PR
+  [\#26713](https://github.com/BerriAI/litellm/pull/26713), was closed
+  unmerged on 2026-08-30 and never reached a release.
+
+  Impact is bounded: the exception is caught, the request succeeds and the
+  span still exports. What it costs is (a) the ERROR + traceback in the pod
+  log — `LITELLM_LOG=WARNING` does not suppress it, only the level of
+  `verbose_logger` does; (b) one
+  `litellm_callback_logging_failures_metric{callback_name="opentelemetry"}`
+  increment per call — no chart alert reads that metric; and (c) every
+  attribute `set_attributes` would have set after that line is missing on the
+  span (`gen_ai.response.id`, `litellm.call_id`, response model, usage,
+  finish reason). The spanmetrics panels on the `shoggoth_ai` dashboard count
+  the span regardless, so only the trace-level attributes are degraded.
+
+  Accepted as-is. The local fix would be a runtime guard — a
+  `sitecustomize.py` shipped through a ConfigMap and put on the litellm
+  container's `PYTHONPATH`, wrapping `OpenTelemetry.set_attributes` to treat a
+  `response_obj` without a callable `.get` as `None` (the guard proposed in
+  the issue) — which trades a monkey-patch on a pinned image for the removal
+  of a benign log line. Drop this entry when upstream lands a type-agnostic
+  guard.
 
 Helm
 ====

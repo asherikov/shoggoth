@@ -122,6 +122,16 @@ spec:
         - name: headroom-proxy-token
           mountPath: /etc/otelcol-contrib/secrets/headroom-proxy-token
           readOnly: true
+        # Crawl4AI's /metrics is behind the same bearer token as the rest
+        # of its API (/health is the only open endpoint), so the scrape
+        # job in otelcol-config.yaml authenticates the same way headroom's
+        # does. Gated on `crawl4ai` because the Secret it projects exists
+        # only while that service does (templates/crawl4ai-token.yaml).
+        {{- if include "shoggoth.isServiceEnabled" (list . "crawl4ai") }}
+        - name: crawl4ai-token
+          mountPath: /etc/otelcol-contrib/secrets/crawl4ai-token
+          readOnly: true
+        {{- end }}
         resources:
           requests:
             memory: 256Mi
@@ -173,6 +183,16 @@ spec:
           items:
             - key: token
               path: token
+      # Same pattern for the crawl4ai scrape; gated on `crawl4ai` so the
+      # DaemonSet never mounts a Secret the service toggle removed.
+      {{- if include "shoggoth.isServiceEnabled" (list . "crawl4ai") }}
+      - name: crawl4ai-token
+        secret:
+          secretName: crawl4ai-token
+          items:
+            - key: token
+              path: token
+      {{- end }}
 ---
 apiVersion: v1
 kind: ServiceAccount

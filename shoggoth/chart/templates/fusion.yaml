@@ -114,6 +114,8 @@ spec:
         # Auth off — see the header for the reasoning and the revert path.
         - name: FUSION_ALLOW_EMPTY_PASSWORD
           value: "true"
+        - name: FUSION_LOG_LEVEL
+          value: "WARN"
         ports:
         - containerPort: 80
           name: http

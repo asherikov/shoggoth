@@ -462,6 +462,10 @@ spec:
           value: otlp
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: http://otelcol:4318
+        # config/logging.php falls back to env('LOG_LEVEL', 'debug'), so
+        # without this CDash runs at debug.
+        - name: LOG_LEVEL
+          value: warning
         - name: SHOGGOTH_DOMAIN
           value: {{ .Values.identity.domain }}
         - name: SHOGGOTH_NAMESPACE

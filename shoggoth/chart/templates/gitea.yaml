@@ -243,6 +243,8 @@ spec:
           value: 'true'
         - name: GITEA__opentelemetry__ENDPOINT
           value: http://otelcol:4317
+        - name: GITEA__log__LEVEL
+          value: warn
         ports:
         - containerPort: 80
           name: http

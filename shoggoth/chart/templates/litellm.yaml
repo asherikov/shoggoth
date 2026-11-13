@@ -2,8 +2,9 @@
   templates/litellm.yaml — LiteLLM proxy + its rendered-config pipeline.
 
   The `litellm-templates` ConfigMap ships the *template* form of config.yaml.
-  `${OLLAMA_CLOUD_TOKEN}` and `${GITEA_SLAVE_TOKEN}` stay literal and are
-  expanded at *pod* runtime by the render-config initContainer
+  `${OLLAMA_CLOUD_TOKEN}`, `${GITEA_SLAVE_TOKEN}` and `${CRAWL4AI_API_TOKEN}`
+  stay literal and are expanded at *pod* runtime by the render-config
+  initContainer
   (templates/render-config.yaml); nothing expands them on the way through
   Helm, because there is no envsubst pass over the rendered manifests. The
   SHOGGOTH_AI_DEFAULT_* vars are the ones that moved out of that class
@@ -70,7 +71,7 @@ spec:
         app: litellm
         app.kubernetes.io/component: litellm
       annotations:
-        secret.reloader.stakater.com/reload: gitea-slave-token,ai-default-token
+        secret.reloader.stakater.com/reload: gitea-slave-token,ai-default-token,crawl4ai-token
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
@@ -88,8 +89,13 @@ spec:
             secretKeyRef:
               name: gitea-slave-token
               key: token
+        - name: CRAWL4AI_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: crawl4ai-token
+              key: token
         - name: RENDER_VARS
-          value: ${OLLAMA_CLOUD_TOKEN}${GITEA_SLAVE_TOKEN}
+          value: ${OLLAMA_CLOUD_TOKEN}${GITEA_SLAVE_TOKEN}${CRAWL4AI_API_TOKEN}
         command:
         - bash
         - -c
@@ -121,9 +127,10 @@ spec:
           set -euo pipefail
           NS="{{ .Release.Namespace }}"
           # The K8s Secrets this pod needs (ai-default-token,
-          # gitea-slave-token) are mounted natively — the render-config
-          # init container resolves both through secretKeyRef, so the
-          # kubelet holds that container until they exist. Only the
+          # gitea-slave-token, crawl4ai-token) are mounted natively —
+          # the render-config init container resolves each through
+          # secretKeyRef, so the kubelet holds that container until
+          # they exist. Only the
           # headroom Service readiness below has no native equivalent,
           # so it is the only thing left to poll for.
           # Block until the headroom Service has at least one
@@ -189,6 +196,16 @@ spec:
           value: http/protobuf
         - name: OTEL_TRACES_EXPORTER
           value: otlp
+        # Console verbosity. litellm/_logging.py reads LITELLM_LOG at
+        # import and setLevels it on the proxy/verbose loggers; without
+        # it the default is DEBUG, which floods the pod log with one
+        # block per request. The proxy CLI has no log-level flag
+        # (proxy_cli.py: only --detailed_debug, which forces DEBUG),
+        # so the env var is the only knob. Caveat: uvicorn's own
+        # access/error loggers are not wired to it — those stay at
+        # uvicorn's default info, which is sparse enough to keep.
+        - name: LITELLM_LOG
+          value: WARNING
         - name: SHOGGOTH_DOMAIN
           value: {{ .Values.identity.domain }}
         # Headroom guardrail endpoint. Mirrors the `api_base` value
@@ -282,11 +299,12 @@ metadata:
 rules:
 # No `secrets` rule and no `externalsecrets` rule: the wait loop used to
 # poll the ExternalSecret CRs (`kubectl get externalsecret <name>` →
-# their Ready condition) before the headroom poll. Those two secrets
-# (ai-default-token, gitea-slave-token) are now resolved by the kubelet
-# itself — render-config declares non-optional `secretKeyRef`s, so the
-# kubelet refuses to start that init container until the Secrets and
-# their keys exist, with no API read and therefore no RBAC needed.
+# their Ready condition) before the headroom poll. Those secrets
+# (ai-default-token, gitea-slave-token, crawl4ai-token) are now resolved
+# by the kubelet itself — render-config declares non-optional
+# `secretKeyRef`s, so the kubelet refuses to start that init container
+# until the Secrets and their keys exist, with no API read and therefore
+# no RBAC needed.
 # `wait_for_service_endpoints` (see the wait-bootstrap init container
 # in this Deployment) polls `kubectl get services/endpoints` to block
 # the main litellm container until the headroom Service has at least
@@ -415,5 +433,12 @@ data:
             url: "http://basic-memory:80/mcp"
             transport: "http"
             description: "Basic Memory MCP server"
+            allow_all_keys: true
+        crawl4ai:
+            url: "http://crawl4ai:80/mcp/sse"
+            transport: "sse"
+            description: "Crawl4AI MCP server"
+            auth_type: "bearer_token"
+            auth_value: "${CRAWL4AI_API_TOKEN}"
             allow_all_keys: true
 {{- end }}

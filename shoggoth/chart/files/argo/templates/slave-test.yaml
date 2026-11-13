@@ -2,13 +2,13 @@
 # slave-test — end-to-end verification of the services the slave depends on.
 #
 # Nine checks (gitea-api, redmine-api, git-http, git-ssh,
-# embeddings, mcp, telemetry, pip-cache, apt-cache) followed by a final
-# "assert all passed" step. Originally seven ran in parallel with only git-ssh
-# waiting on git-http (they share the scratch repo — first writer wins, second's
-# POST may race). Now serialized: spec.parallelism: 1 caps the workflow at
-# one active pod at a time, so all checks run back-to-back in
-# scheduler-determined order and the final assert step's exit code is the
-# AND of every check's exit code.
+# embeddings, mcp, telemetry, pip-cache, apt-cache)
+# followed by a final "assert all passed" step. Originally seven ran in
+# parallel with only git-ssh waiting on git-http (they share the scratch
+# repo — first writer wins, second's POST may race). Now serialized:
+# spec.parallelism: 1 caps the workflow at one active pod at a time, so
+# all checks run back-to-back in scheduler-determined order and the
+# final assert step's exit code is the AND of every check's exit code.
 #
 # We keep the DAG (instead of converting to a Steps template) so the
 # per-task dependency graph — git-ssh depends on git-http, assert-all-
@@ -121,7 +121,8 @@ spec:
     # dependents.
     #
     # The eight "dependency-free" parallel checks (gitea-api, redmine-api,
-    # git-http, embeddings, mcp-servers, telemetry, pip-cache, apt-cache)
+    # git-http, embeddings, mcp-servers, telemetry,
+    # pip-cache, apt-cache)
     # have NO `continueOn`. This is intentional: Argo's validator forbids
     # combining `continueOn` and `depends` *anywhere* in the same template.
     # Once any task in the DAG declares `depends:` (here `git-ssh` and
@@ -166,6 +167,13 @@ spec:
       # bakes the endpoint/protocol/timeout (see dockerfiles/slave), and
       # this pod carries the CoreDNS resolver that makes the short
       # `otelcol` name resolve.
+      # Python's stdout is block-buffered when it is a pipe, so a check
+      # killed at activeDeadlineSeconds used to lose everything it had
+      # printed — the UI showed a pod with no logs and the only clue
+      # was "Step exceeded its deadline". Unbuffered output survives
+      # the SIGKILL.
+      - name: PYTHONUNBUFFERED
+        value: "1"
       - name: SHOGGOTH_CHECK_NAME
         value: "{{inputs.parameters.check_name}}"
       - name: GITEA_SERVER_URL

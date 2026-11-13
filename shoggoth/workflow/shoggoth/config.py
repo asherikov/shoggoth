@@ -54,11 +54,13 @@ class Parameters:
             ("embeddings_model", "EMBEDDINGS_MODEL", False, "nomic-embed-text"),
         ],
         "MCP": [
-            # The litellm MCP proxy is the only MCP ingress the
-            # slave-test verifies (see ``_check_mcp``). The direct
-            # ``mcp-gitea`` and ``basic-memory`` backends are not
-            # exercised here — they're reachable only through the
-            # proxy, and the proxy is the surface the agents call.
+            # The litellm MCP proxy is the single MCP ingress the
+            # slave-test verifies (see ``_check_mcp``): every backend
+            # (gitea, basic-memory, crawl4ai) is reachable only through
+            # it, and the proxy is the surface the agents call. No
+            # backend URL or credential is configured here — the
+            # backends' tokens live in litellm, and the check pods must
+            # not carry them.
             # URL matches the ``BM_MCP_URL`` baked into the slave
             # image (``shoggoth/dockerfiles/slave``).
             ("mcp_litellm_url", "MCP_LITELLM_URL", False, "http://litellm/mcp"),

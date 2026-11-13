@@ -113,6 +113,7 @@ spec:
         args:
         - --namespaces={{ .Release.Namespace }}
         - --resources-to-ignore=configmaps
+        - --log-level=warn
         ports:
         - containerPort: 9090
           name: http

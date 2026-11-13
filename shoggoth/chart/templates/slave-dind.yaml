@@ -35,7 +35,7 @@ data:
     trap cleanup EXIT
     echo "shoggoth: Starting dockerd..." >&2
     cat /etc/docker/daemon.json
-    dockerd --host unix:///dind/docker.sock --config-file /etc/docker/daemon.json --log-level info &
+    dockerd --host unix:///dind/docker.sock --config-file /etc/docker/daemon.json --log-level warn &
     DOCKERD_PID=$!
     echo "shoggoth: Waiting for dockerd to be ready..." >&2
     ATTEMPT=1

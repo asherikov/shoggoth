@@ -79,7 +79,7 @@ data:
         "compat": ["docker2s2"]
       },
       "log": {
-        "level": "info"
+        "level": "warn"
       },
       "extensions": {
         "sync": {

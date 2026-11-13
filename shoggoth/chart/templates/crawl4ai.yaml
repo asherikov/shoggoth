@@ -1,0 +1,111 @@
+{{- /*
+  templates/crawl4ai.yaml — Crawl4AI web page fetcher with its built-in MCP
+  server. Consumed by litellm via the API gateway: the mcp_servers entry in
+  the rendered litellm config points at http://crawl4ai:80/mcp/sse and
+  authenticates with Secret/crawl4ai-token (templates/crawl4ai-token.yaml).
+
+  CRAWL4AI_API_TOKEN is load-bearing: the image's entrypoint binds
+  127.0.0.1 when no credential is present and refuses the all-interfaces
+  bind, so without the token the Service would route to a socket nothing
+  outside the pod can reach. The same token gates every endpoint except
+  /health, which is what the probes and the otelcol scrape job use.
+
+  /dev/shm is a Memory-backed emptyDir sized to 1Gi, the k8s equivalent of
+  the documented `--shm-size=1g`: Chromium's renderer processes share memory
+  through it and crash on the 64MB pod default.
+
+  No PVC and no config.yml mount: the page cache is ephemeral by design
+  (basic-memory is the durable store) and the image defaults cover the rest.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "crawl4ai")) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: crawl4ai
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: crawl4ai
+    app.kubernetes.io/component: crawl4ai
+spec:
+  selector:
+    app: crawl4ai
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crawl4ai
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app: crawl4ai
+    app.kubernetes.io/component: crawl4ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crawl4ai
+  template:
+    metadata:
+      labels:
+        {{- include "shoggoth.selectorLabels" . | nindent 8 }}
+        app: crawl4ai
+        app.kubernetes.io/component: crawl4ai
+    spec:
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
+      initContainers: []
+      containers:
+      - name: crawl4ai
+        image: unclecode/crawl4ai:0.9.2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 80
+          name: http
+        env:
+        - name: CRAWL4AI_PORT
+          value: '80'
+        - name: CRAWL4AI_API_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: crawl4ai-token
+              key: token
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otelcol:4318
+        - name: SHOGGOTH_DOMAIN
+          value: {{ .Values.identity.domain }}
+        volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 250m
+          limits:
+            memory: 2Gi
+            cpu: '1'
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 80
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 6
+      volumes:
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 1Gi
+{{- end }}

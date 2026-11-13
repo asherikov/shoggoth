@@ -143,6 +143,31 @@ data:
                           - source_labels: [job]
                             target_label: job_name
                             regex: "(.+)"
+                    # crawl4ai exposes /metrics in Prometheus format
+                    # (observability.prometheus, on by default in the
+                    # image), but the startup auth guard gates every
+                    # endpoint except /health behind
+                    # CRAWL4AI_API_TOKEN — the same token that makes the
+                    # entrypoint accept the all-interfaces bind. The
+                    # Secret is mounted from templates/crawl4ai-token.yaml
+                    # in templates/otelcol.yaml; `bearer_token_file` keeps
+                    # the token out of this ConfigMap.
+                    {{- if include "shoggoth.isServiceEnabled" (list . "crawl4ai") }}
+                    - job_name: crawl4ai
+                      scrape_interval: 15s
+                      metrics_path: /metrics
+                      bearer_token_file: /etc/otelcol-contrib/secrets/crawl4ai-token/token
+                      static_configs:
+                          - targets:
+                                - crawl4ai:80
+                      metric_relabel_configs:
+                          - source_labels: [instance]
+                            target_label: hostname
+                            regex: "([^:]+):.*"
+                          - source_labels: [job]
+                            target_label: job_name
+                            regex: "(.+)"
+                    {{- end }}
                     - job_name: git-pages
                       scrape_interval: 15s
                       static_configs:

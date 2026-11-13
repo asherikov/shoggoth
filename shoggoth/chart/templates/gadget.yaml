@@ -124,7 +124,7 @@ data:
     # OWN, which is what makes the collector per-instance: the other
     # instance's daemon never sees this instance's ConfigMap, and vice versa.
     gadget-namespace: {{ .Release.Namespace }}
-    daemon-log-level: info
+    daemon-log-level: warn
     multi-tenancy: false
     multi-tenancy-scope-api-group: ""
     multi-tenancy-scope-resource: pods

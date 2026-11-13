@@ -107,6 +107,8 @@ spec:
           value: otlp
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: http://otelcol:4318
+        - name: BASIC_MEMORY_LOG_LEVEL
+          value: WARNING
         - name: SHOGGOTH_DOMAIN
           value: {{ .Values.identity.domain }}
         volumeMounts:

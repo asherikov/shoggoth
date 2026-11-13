@@ -48,7 +48,7 @@ data:
 
     api_addr      = "http://openbao:80"
     cluster_addr  = "http://openbao:81"
-    log_level     = "debug"
+    log_level     = "warn"
 
 ---
 apiVersion: v1

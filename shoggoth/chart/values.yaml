@@ -90,6 +90,7 @@ services:
   basic-memory-ui:            { enabled: true }
   cdash:                      { enabled: true }
   cdash-db:                   { enabled: true }
+  crawl4ai:                   { enabled: true }
   dns:                        { enabled: true }
   external-secrets:           { enabled: true }
   fusion:                     { enabled: true }

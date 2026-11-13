@@ -55,8 +55,13 @@ metadata:
     app: apt-cache
     app.kubernetes.io/component: apt-cache
 data:
+  # apt-cacher-ng has no severity levels; VerboseLog is its only verbosity
+  # knob (0 keeps activity type, time and transfer sizes, drops the extended
+  # per-client info). Read because the entrypoint passes -c as a directory,
+  # and port.conf sorts after acng.conf so it wins.
   port.conf: |
     Port: 80
+    VerboseLog: 0
 ---
 apiVersion: apps/v1
 kind: Deployment

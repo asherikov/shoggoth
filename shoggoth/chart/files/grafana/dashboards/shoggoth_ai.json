@@ -881,17 +881,12 @@
                     "refId": "A"
                 },
                 {
-                    "expr": "sum(rate(headroom_compression_tokens_saved_total{job_name=\"headroom\"}[5m]))",
-                    "legendFormat": "compression /s",
+                    "expr": "sum(rate(headroom_savings_attributed_tokens_total{job_name=\"headroom\", source=\"tool_search\"}[5m]))",
+                    "legendFormat": "tool-schema deferral /s (est.)",
                     "refId": "B"
-                },
-                {
-                    "expr": "sum(rate(headroom_proxy_tokens_tool_schema_saved_total{job_name=\"headroom\"}[5m]))",
-                    "legendFormat": "tool-schema deferred /s",
-                    "refId": "C"
                 }
             ],
-            "description": "Tokens saved per second by headroom, broken down by layer (compression vs. tool-schema deferral). The two are summed in headroom_proxy_tokens_saved_total upstream; this view shows the split. Sourced from headroom's /metrics via the headroom scrape job in the otelcol collector.",
+            "description": "Tokens saved per second by headroom. The total is the compression layer (per-conversation novel savings); tool-schema deferral rides a separate attribution ledger that upstream exports with realized=\"false\" and estimated=true, so treat that series as an estimate, not a measured saving. Sourced from headroom's /metrics via the headroom scrape job in the otelcol collector.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "tok/s",
@@ -907,7 +902,7 @@
             }
         },
         {
-            "title": "Headroom Compression Keep Ratio (P50)",
+            "title": "Headroom Token Savings Ratio",
             "type": "timeseries",
             "gridPos": {
                 "h": 9,
@@ -920,17 +915,12 @@
             },
             "targets": [
                 {
-                    "expr": "1 - histogram_quantile(0.5, sum(rate(headroom_compression_ratio_bucket{job_name=\"headroom\"}[15m])) by (le))",
-                    "legendFormat": "p50 reduction",
+                    "expr": "sum(rate(headroom_tokens_saved_total{job_name=\"headroom\"}[15m])) / clamp_min(sum(rate(headroom_tokens_input_total{job_name=\"headroom\"}[15m])), 1)",
+                    "legendFormat": "saved / input (15m)",
                     "refId": "A"
-                },
-                {
-                    "expr": "1 - histogram_quantile(0.95, sum(rate(headroom_compression_ratio_bucket{job_name=\"headroom\"}[15m])) by (le))",
-                    "legendFormat": "p95 reduction",
-                    "refId": "B"
                 }
             ],
-            "description": "How aggressively headroom is shrinking payloads. headroom_compression_ratio_bucket reports the keep-ratio (output/input); we subtract from 1 so the line trends up = more compression. P50 reflects typical traffic; P95 catches outliers where a content type resists compression.",
+            "description": "Fraction of billed input tokens removed by compression before the request leaves the proxy. Upstream exports no ratio histogram (no compression_ratio buckets at the pinned version), so this is derived from the saved and input counters over a 15m window.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "percentunit",
@@ -948,7 +938,7 @@
             }
         },
         {
-            "title": "Headroom Pre-Call Latency (p50 / p95 / p99)",
+            "title": "Headroom Latency & Overhead (avg / max)",
             "type": "timeseries",
             "gridPos": {
                 "h": 9,
@@ -961,25 +951,25 @@
             },
             "targets": [
                 {
-                    "expr": "histogram_quantile(0.5, sum(rate(headroom_latency_seconds_bucket{job_name=\"headroom\"}[5m])) by (le))",
-                    "legendFormat": "p50",
+                    "expr": "sum(rate(headroom_latency_ms_sum{job_name=\"headroom\"}[5m])) / clamp_min(sum(rate(headroom_latency_ms_count{job_name=\"headroom\"}[5m])), 1)",
+                    "legendFormat": "avg request latency",
                     "refId": "A"
                 },
                 {
-                    "expr": "histogram_quantile(0.95, sum(rate(headroom_latency_seconds_bucket{job_name=\"headroom\"}[5m])) by (le))",
-                    "legendFormat": "p95",
+                    "expr": "sum(rate(headroom_overhead_ms_sum{job_name=\"headroom\"}[5m])) / clamp_min(sum(rate(headroom_overhead_ms_count{job_name=\"headroom\"}[5m])), 1)",
+                    "legendFormat": "avg headroom overhead",
                     "refId": "B"
                 },
                 {
-                    "expr": "histogram_quantile(0.99, sum(rate(headroom_latency_seconds_bucket{job_name=\"headroom\"}[5m])) by (le))",
-                    "legendFormat": "p99",
+                    "expr": "headroom_overhead_ms_max{job_name=\"headroom\"}",
+                    "legendFormat": "max overhead (since start)",
                     "refId": "C"
                 }
             ],
-            "description": "Overhead headroom adds to each LLM call (compress + cache lookup, pre-call hook). Compare against the LiteLLM LLM Request Latency panels above to confirm headroom is a small fraction of total latency — p99 should stay well below the upstream LLM TTFT.",
+            "description": "Overhead headroom adds to each LLM call. Upstream exports sum/count/min/max counters, not histogram buckets, so percentiles are not derivable; averages come from rate(sum)/rate(count) and the max is a since-start gauge. Compare the overhead average against the LLM Request Latency panels above to confirm headroom is a small fraction of total latency.",
             "fieldConfig": {
                 "defaults": {
-                    "unit": "s",
+                    "unit": "ms",
                     "custom": {
                         "drawStyle": "line",
                         "lineInterpolation": "smooth",
@@ -992,7 +982,7 @@
             }
         },
         {
-            "title": "Headroom Request Rate by Mode",
+            "title": "Headroom Requests by Provider",
             "type": "timeseries",
             "gridPos": {
                 "h": 9,
@@ -1005,17 +995,17 @@
             },
             "targets": [
                 {
-                    "expr": "sum(rate(headroom_requests_total{job_name=\"headroom\"}[5m])) by (mode)",
-                    "legendFormat": "{{mode}}",
+                    "expr": "sum(rate(headroom_requests_by_provider{job_name=\"headroom\"}[5m])) by (provider)",
+                    "legendFormat": "{{provider}}",
                     "refId": "A"
                 },
                 {
-                    "expr": "sum(rate(headroom_cache_hits_total{job_name=\"headroom\"}[5m]))",
-                    "legendFormat": "cache hits",
+                    "expr": "sum(rate(headroom_requests_failed_total{job_name=\"headroom\"}[5m])) by (provider)",
+                    "legendFormat": "{{provider}} errors",
                     "refId": "B"
                 }
             ],
-            "description": "Headroom calls per second, broken down by mode (cache vs. token). Cache hits shown as a second series for the cost-saving ratio.",
+            "description": "Headroom calls per second by upstream provider. Failures are 4xx/5xx excluding 429 (rate limits are counted separately below). headroom_requests_total carries no mode label at the pinned version, so the per-provider breakdown is the closest equivalent to the old mode split.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "reqps",
@@ -1027,7 +1017,23 @@
                         "fillOpacity": 10
                     }
                 },
-                "overrides": []
+                "overrides": [
+                    {
+                        "matcher": {
+                            "id": "byRegexp",
+                            "options": ".*errors"
+                        },
+                        "properties": [
+                            {
+                                "id": "color",
+                                "value": {
+                                    "fixedColor": "red",
+                                    "mode": "fixed"
+                                }
+                            }
+                        ]
+                    }
+                ]
             }
         },
         {
@@ -1097,12 +1103,12 @@
             },
             "targets": [
                 {
-                    "expr": "sum(rate(headroom_cache_hits_total{job_name=\"headroom\"}[15m])) / clamp_min(sum(rate(headroom_requests_total{job_name=\"headroom\"}[15m])), 1)",
+                    "expr": "sum(rate(headroom_requests_cached_total{job_name=\"headroom\"}[15m])) / clamp_min(sum(rate(headroom_requests_total{job_name=\"headroom\"}[15m])), 1)",
                     "legendFormat": "cache hit ratio (15m)",
                     "refId": "A"
                 }
             ],
-            "description": "Fraction of pre-call invocations served from the semantic cache vs. recomputed. High values mean headroom is saving work; low values mean cache keys are not colliding (which is expected with diverse agent traffic).",
+            "description": "Fraction of proxy requests served from headroom's own semantic cache (headroom_requests_cached_total) rather than recomputed; upstream has no headroom_cache_hits_total. High values mean headroom is reusing work; low values are expected with diverse agent traffic. Provider-side prompt caching is a different mechanism — see Headroom Provider Cache Tokens below.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "percentunit",
@@ -1133,6 +1139,249 @@
                     "fields": "",
                     "values": false
                 }
+            }
+        },
+        {
+            "title": "Headroom Provider Cache Tokens",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 0,
+                "y": 117
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate(headroom_cache_read_tokens_total{job_name=\"headroom\"}[5m])) by (provider)",
+                    "legendFormat": "read {{provider}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum(rate(headroom_cache_write_tokens_total{job_name=\"headroom\"}[5m])) by (provider)",
+                    "legendFormat": "write {{provider}}",
+                    "refId": "B"
+                },
+                {
+                    "expr": "sum(rate(headroom_uncached_input_tokens_total{job_name=\"headroom\"}[5m])) by (provider)",
+                    "legendFormat": "uncached {{provider}}",
+                    "refId": "C"
+                }
+            ],
+            "description": "Provider prompt-cache economics per upstream provider: reads are discounted tokens, writes are billed at a premium, uncached input is full price. This is where headroom's compression savings turn into money — a high write-to-read ratio means the cache prefix keeps getting busted (see headroom_provider_cache_bust_total and headroom_cache_bust_total).",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "tok/s",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Headroom Errors & Rate Limits",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 8,
+                "y": 117
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate(headroom_requests_rate_limited_total{job_name=\"headroom\"}[5m])) by (source)",
+                    "legendFormat": "429 from {{source}}",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum(rate(headroom_upstream_connection_errors_total{job_name=\"headroom\"}[5m])) by (provider)",
+                    "legendFormat": "conn error {{provider}}",
+                    "refId": "B"
+                },
+                {
+                    "expr": "sum(rate(headroom_compression_failed_total{job_name=\"headroom\"}[5m])) by (reason)",
+                    "legendFormat": "compress fail {{reason}}",
+                    "refId": "C"
+                }
+            ],
+            "description": "Health signals for the proxy path: 429s split by who refused (headroom's own limiter vs. the upstream provider), exhausted-retry transport failures where the proxy answered 502 itself, and fail-open compression failures by reason (timeout vs. error). Compression failures never fail a request, but a rising rate means the compression budget is too tight or a transform is broken.",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "color": {
+                        "fixedColor": "red",
+                        "mode": "fixed"
+                    },
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Headroom Token Volume",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 16,
+                "y": 117
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum(rate(headroom_tokens_input_total{job_name=\"headroom\"}[5m]))",
+                    "legendFormat": "input",
+                    "refId": "A"
+                },
+                {
+                    "expr": "sum(rate(headroom_tokens_output_total{job_name=\"headroom\"}[5m]))",
+                    "legendFormat": "output",
+                    "refId": "B"
+                }
+            ],
+            "description": "Gross billed token volume through the proxy (input prefers the provider's own usage count, falling back to a local estimate). Pair with the savings panels above to see net vs. gross traffic.",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "tok/s",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Crawl4AI Request Rate by Handler",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 0,
+                "y": 108
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum by (handler) (rate(http_requests_total{job_name=\"crawl4ai\", handler!~\"/metrics|/health\"}[5m]))",
+                    "legendFormat": "{{handler}}",
+                    "refId": "A"
+                }
+            ],
+            "description": "Crawl4AI requests per second by route. /metrics (otelcol's 15s scrape) and /health (kubelet probes) are excluded as constant-rate noise; MCP traffic from the LiteLLM gateway shows up as /mcp/sse and /mcp/messages.",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Crawl4AI Request Rate by Status",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 8,
+                "y": 108
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "sum by (status) (rate(http_requests_total{job_name=\"crawl4ai\"}[5m]))",
+                    "legendFormat": "{{status}}",
+                    "refId": "A"
+                }
+            ],
+            "description": "Crawl4AI responses per second by status code, all handlers included — a 401 on /metrics here means the otelcol bearer token no longer matches the crawl4ai startup token, and a 4xx/5xx on /mcp/* means the gateway's token or call shape is wrong.",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "reqps",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
+            }
+        },
+        {
+            "title": "Crawl4AI Request Duration (p50 / p95 / p99)",
+            "type": "timeseries",
+            "gridPos": {
+                "h": 9,
+                "w": 8,
+                "x": 16,
+                "y": 108
+            },
+            "datasource": {
+                "uid": "vm"
+            },
+            "targets": [
+                {
+                    "expr": "histogram_quantile(0.5, sum by (le) (rate(http_request_duration_seconds_bucket{job_name=\"crawl4ai\", handler!~\"/metrics|/health\"}[5m])))",
+                    "legendFormat": "p50",
+                    "refId": "A"
+                },
+                {
+                    "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job_name=\"crawl4ai\", handler!~\"/metrics|/health\"}[5m])))",
+                    "legendFormat": "p95",
+                    "refId": "B"
+                },
+                {
+                    "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{job_name=\"crawl4ai\", handler!~\"/metrics|/health\"}[5m])))",
+                    "legendFormat": "p99",
+                    "refId": "C"
+                }
+            ],
+            "description": "End-to-end request latency from the FastAPI instrumentator histogram, excluding /metrics and /health as above. Buckets are the instrumentator defaults, so the p99 tail is coarse.",
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "s",
+                    "custom": {
+                        "drawStyle": "line",
+                        "lineInterpolation": "smooth",
+                        "lineWidth": 1.5,
+                        "showPoints": "never",
+                        "fillOpacity": 10
+                    }
+                },
+                "overrides": []
             }
         }
     ],

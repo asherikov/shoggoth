@@ -25,7 +25,7 @@ data:
         worker_connections 1024;
     }
 
-    error_log /dev/stderr debug;
+    error_log /dev/stderr warn;
 
     http {
         resolver {{ .Values.identity.dnsIp }} valid=30s;

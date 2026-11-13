@@ -461,7 +461,7 @@ spec:
           name: ldaps
         args:
         - --loglevel
-        - debug
+        - warning
         env:
         - name: LDAP_DOMAIN
           value: {{ .Values.identity.domain }}
@@ -469,12 +469,21 @@ spec:
           value: /run/secrets/openldap_admin_password
         - name: LDAP_CONFIG_PASSWORD_FILE
           value: /run/secrets/openldap_config_admin_password
+        # slapd's -d bitmask: 0 is the quietest and drops upstream's default
+        # 256 (stats — one bind-result line per operation). process.sh passes
+        # -d unconditionally, and every Debug() call is gated on
+        # `ldap_debug & level`, so 0 silences slapd's own logging; fatal
+        # startup errors bypass Debug() and still reach stderr.
         - name: LDAP_LOG_LEVEL
-          value: '256'
+          value: '0'
         - name: LDAP_TLS
           value: 'false'
+        # Numeric in light-baseimage 1.3.2 (none=0 error=1 warning=2 info=3
+        # debug=4 trace=5); log-helper compares it with `[ -ge ]`, so a name
+        # here would abort startup. The run tool overwrites it from
+        # --loglevel above, so the arg is the effective knob.
         - name: CONTAINER_LOG_LEVEL
-          value: '5'
+          value: '2'
         - name: LDAP_REMOVE_CONFIG_AFTER_SETUP
           value: 'false'
         - name: OTEL_TRACES_EXPORTER

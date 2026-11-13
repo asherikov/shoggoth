@@ -1,0 +1,35 @@
+{{- /*
+  templates/crawl4ai-token.yaml — shared secret for the crawl4ai API.
+
+  Consumers: the crawl4ai pod itself (CRAWL4AI_API_TOKEN, which is also
+  what makes its entrypoint accept the all-interfaces bind), the litellm
+  render-config init container (expanded into the mcp_servers auth_value),
+  and the otelcol scrape of /metrics (bearer_token_file). /health is the
+  only crawl4ai endpoint that works without it.
+
+  Same shape as headroom-proxy-token.yaml and for the same reasons: a
+  literal in this file needs no `helm.sh/resource-policy: keep` (a re-render
+  reproduces it byte for byte), and no ExternalSecret/PushSecret pair —
+  nothing in the crawl4ai pod mints or rotates the value, so there is no
+  runtime writer for an Orphan policy to stay out of the way of. Token
+  rotation: regenerate via `openssl rand -hex 32`, base64-encode (no wrap),
+  and replace data.token below; all three consumers pick the new value up
+  on their next restart.
+
+  Gated on `crawl4ai`: the token has no consumer that survives the service
+  being off, and otelcol's mount of it is gated the same way.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "crawl4ai")) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: crawl4ai-token
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: crawl4ai-token
+type: Opaque
+data:
+  # base64 of openssl rand -hex 32
+  token: OGI1YWU3MmI3MDc1MGY1Y2E5MWUwNDI0YTY4OTYzNTk5OGYwZmYxZGEzMDYzMGE1NzU1ZGE4M2IyNzRlYTk5MQ==
+{{- end }}

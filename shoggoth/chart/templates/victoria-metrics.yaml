@@ -74,6 +74,7 @@ spec:
         - -retentionPeriod=1y
         - -selfScrapeInterval=15s
         - -httpListenAddr=:80
+        - -loggerLevel=WARN
         ports:
         - containerPort: 80
           name: http
