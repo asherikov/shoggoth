@@ -45,7 +45,7 @@ spec:
       initContainers: []
       containers:
       - name: mcp-gitea
-        image: docker.gitea.com/gitea-mcp-server:1.7.0
+        image: docker.gitea.com/gitea-mcp-server:1.13.0
         imagePullPolicy: IfNotPresent
         command:
         - /app/gitea-mcp

@@ -74,7 +74,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: wireguard
-        image: ghcr.io/wg-easy/wg-easy:15.4.0
+        image: ghcr.io/wg-easy/wg-easy:15.5.0
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: {{ .Values.network.wireguard.udpPort }}

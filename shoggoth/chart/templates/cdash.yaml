@@ -294,7 +294,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: postgres
-        image: postgres:18-alpine
+        image: postgres:18.7-alpine
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5432
@@ -396,7 +396,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: cdash
-        image: kitware/cdash:v5.4.0
+        image: kitware/cdash:v5.6.0
         imagePullPolicy: IfNotPresent
         command:
         - /cdash/entrypoint-wrapper.sh

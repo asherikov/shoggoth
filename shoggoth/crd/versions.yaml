@@ -1,0 +1,14 @@
+# Pinned versions of the two CRD submodules under shoggoth/crd/.
+#
+# A submodule pointer is a gitlink (mode 160000) recorded in the superproject's
+# index, not file content, so there is nothing on disk for a `file` target to
+# match: updatecli bumps the tag here instead, and the `update` target in
+# make/chore.mk checks each submodule out to it. Each key below is both a key of
+# this file and a directory under shoggoth/crd/.
+#
+# These have to track the chart's controller images. A CRD older than the
+# controller that owns it is a deploy that fails in a way neither side reports:
+# the controller emits a field the CRD does not have, or the CRD rejects what an
+# older controller sends.
+argo-workflows: v4.1.6
+external-secrets: v2.15.0

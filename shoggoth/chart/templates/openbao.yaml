@@ -7,16 +7,7 @@
   of the two toggles for the same reason as gitea: both are dispatched from
   this one file, so they cannot be toggled apart.
 
-  LITERAL GO-TEMPLATE TEXT — read before editing.
-  The LDAP group filter below is `"groupfilter":"(member={{.UserDN}})"`. That
-  is OpenBao's own templating, not Helm's. Nothing in the deploy path touches
-  it, and OpenBao interpolates it when the auth method is configured. A chart
-  cannot pass it through raw: Helm would evaluate `{{.UserDN}}` against its own
-  context and emit `<no value>`, silently widening the group filter to match
-  every directory entry. It is written here as {{ "{{.UserDN}}" }}, which
-  renders back to the original bytes.
-
-  Everything else that looks like ${...} (ROOT_TOKEN, OPENBAO_ADDR, CERT_DIR,
+  Everything that looks like ${...} (ROOT_TOKEN, OPENBAO_ADDR, CERT_DIR,
   UNSEAL_KEY, the ESO_* payloads, K8S_API, BAO_DATA, ...) is a plain shell
   variable resolved inside the scripts at pod start and stays literal. There
   is no pass over the rendered manifests that would expand any of them —
@@ -507,38 +498,42 @@ data:
         fi
     done
 
-    # === Phase B.5: Configure OpenBao LDAP auth (idempotent) ===
-    phase "Phase B.5: configuring OpenBao LDAP auth"
-    LDAP_BASE_DN="dc=$(printf '%s' "{{ .Values.identity.domain }}" | sed 's/\./,dc=/g')"
-    LDAP_BIND_DN="uid=ldapauth,ou=people,{{ include "shoggoth.ldapBaseDn" . }}"
-    LDAP_BIND_PASSWORD=$(bao_get_value "openldap/ldapauth-password" 2>/dev/null) || die "openldap/ldapauth-password missing in OpenBao"
-    [ -z "${LDAP_BIND_PASSWORD}" ] && die "openldap/ldapauth-password is empty in OpenBao"
-    LDAP_AUTH_ENABLED="$(curl -sf --max-time 10 -H "X-Vault-Token: ${ROOT_TOKEN}" \
-        "${OPENBAO_ADDR}/v1/sys/auth" 2>/dev/null \
-        | grep -q '"ldap/"' && echo true || echo false)"
-    if [ "${LDAP_AUTH_ENABLED}" != "true" ]; then
-        log "Phase B.5: enabling auth/ldap"
-        curl -sfS --max-time 10 -X POST "${OPENBAO_ADDR}/v1/sys/auth/ldap" \
-            -H "X-Vault-Token: ${ROOT_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d '{"type":"ldap"}' > /dev/null
-    fi
-    log "Phase B.5: configuring LDAP backend"
-    # Capture body+curl-err so a misconfigured backend shows up here, not later
-    # in an external consumer's "invalid bind credentials" message.
-    LDAP_CONFIG_BODY=/tmp/bao-ldap-config.json
-    if ! code=$(curl -sS --max-time 10 -o "${LDAP_CONFIG_BODY}" -w '%{http_code}' \
-        -X POST "${OPENBAO_ADDR}/v1/auth/ldap/config" \
+    # === Phase B.5: drop the stale auth/ldap mount (idempotent) ===
+    # OpenBao >= 2.7 no longer bundles the LDAP auth engine (it moved to the
+    # external openbao-plugin-auth-ldap, openbao GH-3882), so an auth/ldap
+    # mount persisted by an older version can never be set up again: every
+    # unseal logs "plugin not found in the catalog: ldap" and skips the
+    # entry. Remove it once. A mount that is already absent is not an
+    # error, and a failure here is not fatal either — nothing authenticates
+    # through auth/ldap, so a leftover entry only costs log noise.
+    phase "Phase B.5: disabling stale auth/ldap mount"
+    if code=$(curl -sS --max-time 10 -o /tmp/bao-ldap-disable.json -w '%{http_code}' \
+        -X DELETE \
         -H "X-Vault-Token: ${ROOT_TOKEN}" \
-        -H "Content-Type: application/json" \
-        -d "{\"url\":\"ldap://openldap:389\",\"binddn\":\"${LDAP_BIND_DN}\",\"bindpass\":\"${LDAP_BIND_PASSWORD}\",\"userdn\":\"ou=people,{{ include "shoggoth.ldapBaseDn" . }}\",\"groupdn\":\"ou=groups,{{ include "shoggoth.ldapBaseDn" . }}\",\"userattr\":\"uid\",\"groupattr\":\"cn\",\"groupfilter\":\"(member={{`{{.UserDN}}`}})\",\"username_as_alias\":true,\"deny_null_bind\":true}" 2>/tmp/bao-ldap-config-err.txt); then
-        die "POST /v1/auth/ldap/config: curl failed (rc=${code}); err=$(cat /tmp/bao-ldap-config-err.txt)"
+        "${OPENBAO_ADDR}/v1/sys/auth/ldap" 2>/tmp/bao-ldap-disable-err.txt); then
+        case "${code}" in
+            200|204)
+                log "Phase B.5: auth/ldap mount disabled (HTTP ${code})"
+                ;;
+            400|404)
+                log "Phase B.5: no auth/ldap mount to disable (HTTP ${code})"
+                ;;
+            *)
+                log "Phase B.5: WARN disable auth/ldap HTTP ${code}: $(head -c 400 /tmp/bao-ldap-disable.json)"
+                ;;
+        esac
+    else
+        log "Phase B.5: WARN disable auth/ldap: curl failed (rc=${code}); err=$(head -c 200 /tmp/bao-ldap-disable-err.txt | tr '\n' ' ')"
     fi
-    if [ "${code}" != "200" ] && [ "${code}" != "204" ]; then
-        die "POST /v1/auth/ldap/config HTTP ${code}: $(head -c 400 ${LDAP_CONFIG_BODY})"
-    fi
-    log "Phase B.5: LDAP backend configured (HTTP ${code})"
-    log "Phase B.5: creating shoggoth-admin ACL policy"
+
+    # === Phase B.5: shoggoth-admin policy + token for operators ===
+    # The LDAP auth backend that mapped the directory's admins group onto
+    # this policy is gone with the plugin (see above), so operators get a
+    # dedicated token instead of directory credentials. Same shape as the
+    # ESO tokens below: mint once, keep it while THIS OpenBao still accepts
+    # it, re-mint otherwise. The root token stays where it was, in the
+    # openbao-unseal-key Secret.
+    phase "Phase B.5: provisioning shoggoth-admin policy + token"
     POLICY_BODY=/tmp/bao-acl.json
     if ! code=$(curl -sS --max-time 10 -o "${POLICY_BODY}" -w '%{http_code}' \
         -X POST "${OPENBAO_ADDR}/v1/sys/policies/acl/shoggoth-admin" \
@@ -551,20 +546,37 @@ data:
         die "POST /v1/sys/policies/acl/shoggoth-admin HTTP ${code}: $(head -c 400 ${POLICY_BODY})"
     fi
     log "Phase B.5: shoggoth-admin policy applied (HTTP ${code})"
-    # Best-effort: admins group binding only resolves once the LDAP admins
-    # group exists, which is created by the openldap init. Surface failures
-    # for visibility but tolerate them.
-    log "Phase B.5: mapping admins group to shoggoth-admin"
-    if ! code=$(curl -sS --max-time 10 -o /tmp/bao-group.json -w '%{http_code}' \
-        -X POST "${OPENBAO_ADDR}/v1/auth/ldap/groups/admins" \
-        -H "X-Vault-Token: ${ROOT_TOKEN}" \
-        -H "Content-Type: application/json" \
-        -d '{"policies":"shoggoth-admin"}' 2>/tmp/bao-group-err.txt); then
-        log "Phase B.5: WARN admins group binding: curl failed (rc=${code}); err=$(cat /tmp/bao-group-err.txt); openldap may not have 'admins' group yet — will retry on next bootstrap"
-    elif [ "${code}" != "200" ] && [ "${code}" != "204" ]; then
-        log "Phase B.5: WARN admins group binding HTTP ${code}: $(head -c 400 /tmp/bao-group.json); openldap may not have 'admins' group yet — will retry on next bootstrap"
+
+    ADMIN_TOKEN_B64="$(kubectl get secret -n "${NAMESPACE}" shoggoth-openbao-admin-token -o jsonpath='{.data.token}' 2>/dev/null || true)"
+    if [ -n "${ADMIN_TOKEN_B64}" ] && ! bao_token_usable "${ADMIN_TOKEN_B64}"; then
+        log "Phase B.5: the stored shoggoth-openbao-admin-token is not valid in this OpenBao — re-minting"
+        ADMIN_TOKEN_B64=""
+    fi
+    if [ -z "${ADMIN_TOKEN_B64}" ]; then
+        log "Phase B.5: minting shoggoth-admin token"
+        ADMIN_TOKEN_RESP=/tmp/bao-admin-token.json
+        if ! code=$(curl -sS --max-time 10 -o "${ADMIN_TOKEN_RESP}" -w '%{http_code}' \
+            -X POST "${OPENBAO_ADDR}/v1/auth/token/create" \
+            -H "X-Vault-Token: ${ROOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"policies":["shoggoth-admin"],"ttl":"87600h","renewable":true,"no_parent":true}' 2>/tmp/bao-admin-token-err.txt); then
+            die "POST /v1/auth/token/create: curl failed (rc=${code}); err=$(cat /tmp/bao-admin-token-err.txt)"
+        fi
+        if [ "${code}" != "200" ] && [ "${code}" != "204" ]; then
+            die "POST /v1/auth/token/create HTTP ${code}: $(head -c 400 ${ADMIN_TOKEN_RESP})"
+        fi
+        ADMIN_TOKEN="$(jq -r '.auth.client_token // empty' "${ADMIN_TOKEN_RESP}" 2>/dev/null)"
+        if [ -z "${ADMIN_TOKEN}" ]; then
+            die "Failed to extract client_token from /v1/auth/token/create response: $(head -c 400 ${ADMIN_TOKEN_RESP})"
+        fi
+        ADMIN_PAYLOAD=$(jq -c -n \
+            --arg t "$(printf '%s' "${ADMIN_TOKEN}" | base64 -w0)" \
+            --arg ns "${NAMESPACE}" \
+            '{apiVersion:"v1",kind:"Secret",metadata:{name:"shoggoth-openbao-admin-token",namespace:$ns},type:"Opaque",data:{"token":$t}}')
+        k8s_put_secret shoggoth-openbao-admin-token "${ADMIN_PAYLOAD}"
+        log "Phase B.5: shoggoth-openbao-admin-token K8s Secret written"
     else
-        log "Phase B.5: admins group bound (HTTP ${code})"
+        log "Phase B.5: shoggoth-openbao-admin-token already present and valid — keeping it"
     fi
     log "Phase B.5: complete"
 
@@ -1012,7 +1024,7 @@ spec:
               mountPath: /openbao/file
       containers:
         - name: openbao
-          image: openbao/openbao:2.6.2
+          image: openbao/openbao:2.7.2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80

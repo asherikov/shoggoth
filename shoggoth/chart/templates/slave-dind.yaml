@@ -166,7 +166,7 @@ spec:
         securityContext:
           runAsUser: 1000
       - name: dind
-        image: docker:29.8.1-dind
+        image: docker:29.9.3-dind
         imagePullPolicy: IfNotPresent
         securityContext:
           privileged: true

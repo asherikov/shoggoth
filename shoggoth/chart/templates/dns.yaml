@@ -106,7 +106,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: coredns
-        image: rancher/mirrored-coredns-coredns:1.14.7
+        image: rancher/mirrored-coredns-coredns:1.15.0
         imagePullPolicy: IfNotPresent
         args:
         - -conf

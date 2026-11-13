@@ -358,7 +358,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: postgres
-        image: postgres:18-alpine
+        image: postgres:18.7-alpine
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5432
@@ -456,7 +456,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: redmine
-        image: redmine:7.0.1-alpine3.24
+        image: redmine:7.0.3-alpine3.24
         imagePullPolicy: IfNotPresent
         args:
         - rails

@@ -210,7 +210,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: grafana
-        image: grafana/grafana:13.2.4
+        image: grafana/grafana:13.3.1
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
@@ -257,22 +257,26 @@ spec:
         lifecycle:
           postStart:
             exec:
+              # /bin/sh, not /bin/bash: grafana 13.3.0 removed bash from the
+              # alpine image (grafana/grafana#132643), so a bash postStart
+              # hook fails with FailedPostStartHook and crash-loops the pod.
               command:
-              - /bin/bash
+              - /bin/sh
               - -c
               - |
                 set -o pipefail
 
                 LOG=/var/log/shoggoth-grafana-init.log
 
-                exec > >(tee -a "${LOG}" > /proc/1/fd/1) 2>&1
+                main() {
+                    echo "=== grafana-init start $(date -Iseconds) ==="
+                    grafana cli --homepath /usr/share/grafana admin reset-admin-password "$(tr -d '\n\r' < /run/secrets/admin_password)"
+                    rc=$?
+                    echo "=== grafana-init exit ${rc} $(date -Iseconds) ==="
+                    exit "${rc}"
+                }
 
-                echo "=== grafana-init start $(date -Iseconds) ==="
-
-                grafana cli --homepath /usr/share/grafana admin reset-admin-password
-                "$(tr -d ''\n\r'' < /run/secrets/admin_password)"
-
-                echo "=== grafana-init exit $? $(date -Iseconds) ==="
+                main 2>&1 | tee -a "${LOG}"
 
         resources:
           requests:

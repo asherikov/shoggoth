@@ -1,0 +1,655 @@
+# Bump every pinned version in this tree.
+#
+# Updatecli's designed flow is "read a version from a registry, write it into a
+# file": there is no clone, no branch, no commit and no pull request. The scm is
+# disabled and the apply flags below belt-and-brace it, so a run only ever edits
+# the working tree and leaves the commit to the developer. See docs/alternatives.md.
+#
+# This file lives in shoggoth/ but every path below is REPO-ROOT-relative, so
+# `options.relativepaths` is deliberately left unset: the default
+# "workingdirectory" resolves them against the process working directory, which
+# the make target pins to the repo root with `-w`. Setting "manifest" would
+# anchor them next to this file instead and every path would need a `../`.
+#
+# `sources` and `targets` are maps keyed by resource id, not lists: that is what
+# Config.Sources / Config.Targets are (map[string]source.Config). The key is the
+# id a target's `sourceid` points at.
+#
+# Targets that write the same file are chained with `dependson`. Updatecli runs
+# each DAG vertex in its own goroutine and the file target is an unsynchronised
+# read-modify-write, so without the chain two targets on one file would race and
+# one of the two updates would be lost. The chains always run from a lower id to
+# a higher one in the order below, so they cannot form a loop.
+#
+# The last two targets are the exception to "one target, one pinned image": the
+# CRD submodules under shoggoth/crd/ have no version in any file to rewrite — a
+# submodule pointer is a gitlink in the superproject's index — so they are pinned
+# in shoggoth/crd/versions.yaml and checked out by the `update` target in
+# make/chore.mk. See docs/alternatives.md.
+name: Bump pinned versions
+
+scms:
+  local:
+    disabled: true
+
+sources:
+  postgres:
+    kind: dockerimage
+    spec:
+      image: postgres
+      tagfilter: '^\d+(\.\d+)*-alpine$'
+      versionfilter:
+        kind: regex/semver
+        regex: '^(\d+(?:\.\d+)*)-alpine$'
+  redmine:
+    kind: dockerimage
+    spec:
+      image: redmine
+      tagfilter: '^\d+(\.\d+)*-alpine3\.24$'
+      versionfilter:
+        kind: regex/semver
+        regex: '^(\d+(?:\.\d+)*)-alpine3\.24$'
+  docker-dind:
+    kind: dockerimage
+    spec:
+      image: docker
+      tagfilter: '^\d+(\.\d+)*-dind$'
+      versionfilter:
+        kind: regex/semver
+        regex: '^(\d+(?:\.\d+)*)-dind$'
+  silverbullet:
+    kind: dockerimage
+    spec:
+      image: zefhemel/silverbullet
+      tagfilter: '^\d+(\.\d+)*-slim$'
+      versionfilter:
+        kind: regex/semver
+        regex: '^(\d+(?:\.\d+)*)-slim$'
+  apt-cacher-ng:
+    kind: dockerimage
+    spec:
+      image: sameersbn/apt-cacher-ng
+      tagfilter: '^\d+(\.\d+)*-\d{8}$'
+      versionfilter:
+        kind: regex/semver
+        regex: '^(\d+(?:\.\d+)*)-'
+  it-tools:
+    kind: dockerimage
+    spec:
+      image: corentinth/it-tools
+      tagfilter: '^\d{4}\.\d+\.\d+-[0-9a-f]{7,}$'
+      versionfilter:
+        kind: regex/time
+        regex: '^(\d{4}\.\d+\.\d+)-'
+        pattern: '2006.1.2'
+  angie:
+    kind: dockerimage
+    spec:
+      image: docker.angie.software/angie
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  victoria-metrics:
+    kind: dockerimage
+    spec:
+      image: victoriametrics/victoria-metrics
+      tagfilter: '^v\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  crawl4ai:
+    kind: dockerimage
+    spec:
+      image: unclecode/crawl4ai
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  coredns:
+    kind: dockerimage
+    spec:
+      image: rancher/mirrored-coredns-coredns
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  argo-workflow-controller:
+    kind: dockerimage
+    spec:
+      image: quay.io/argoproj/workflow-controller
+      tagfilter: '^v\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  argo-argocli:
+    kind: dockerimage
+    spec:
+      image: quay.io/argoproj/argocli
+      tagfilter: '^v\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  phpldapadmin:
+    kind: dockerimage
+    spec:
+      image: phpldapadmin/phpldapadmin
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  otelcol:
+    kind: dockerimage
+    spec:
+      image: otel/opentelemetry-collector-contrib
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  openldap:
+    kind: dockerimage
+    spec:
+      image: osixia/openldap
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  openbao:
+    kind: dockerimage
+    spec:
+      image: openbao/openbao
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  cdash:
+    kind: dockerimage
+    spec:
+      image: kitware/cdash
+      tagfilter: '^v\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  grafana-tempo:
+    kind: dockerimage
+    spec:
+      image: grafana/tempo
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  grafana-loki:
+    kind: dockerimage
+    spec:
+      image: grafana/loki
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  grafana:
+    kind: dockerimage
+    spec:
+      image: grafana/grafana
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  gitea-runner:
+    kind: dockerimage
+    spec:
+      image: gitea/runner
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  gitea:
+    kind: dockerimage
+    spec:
+      image: gitea/gitea
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  wg-easy:
+    kind: dockerimage
+    spec:
+      image: ghcr.io/wg-easy/wg-easy
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  reloader:
+    kind: dockerimage
+    spec:
+      image: ghcr.io/stakater/reloader
+      tagfilter: '^v\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  zot:
+    kind: dockerimage
+    spec:
+      image: ghcr.io/project-zot/zot
+      tagfilter: '^v\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  litellm:
+    kind: dockerimage
+    spec:
+      image: ghcr.io/berriai/litellm
+      tagfilter: '^v\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  basic-memory:
+    kind: dockerimage
+    spec:
+      image: ghcr.io/basicmachines-co/basic-memory
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  fusion:
+    kind: dockerimage
+    spec:
+      image: ghcr.io/0x2e/fusion
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  gitea-mcp-server:
+    kind: dockerimage
+    spec:
+      image: docker.gitea.com/gitea-mcp-server
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  git-pages:
+    kind: dockerimage
+    spec:
+      image: codeberg.org/git-pages/git-pages
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  external-secrets:
+    kind: dockerimage
+    spec:
+      image: ghcr.io/external-secrets/external-secrets
+      tagfilter: '^v\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  inspektor-gadget:
+    kind: dockerimage
+    spec:
+      image: ghcr.io/inspektor-gadget/inspektor-gadget
+      tagfilter: '^v\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  inspektor-gadget-top-tcp:
+    kind: dockerimage
+    spec:
+      image: ghcr.io/inspektor-gadget/gadget/top_tcp
+      tagfilter: '^v\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
+  action-checkout:
+    kind: gittag
+    spec:
+      url: https://github.com/actions/checkout.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v([0-9]+)$'
+  action-setup-buildx:
+    kind: gittag
+    spec:
+      url: https://github.com/docker/setup-buildx-action.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v([0-9]+)$'
+  action-login:
+    kind: gittag
+    spec:
+      url: https://github.com/docker/login-action.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v([0-9]+)$'
+  action-build-push:
+    kind: gittag
+    spec:
+      url: https://github.com/docker/build-push-action.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v([0-9]+)$'
+  ansible-posix:
+    kind: gittag
+    spec:
+      url: https://github.com/ansible-collections/ansible.posix.git
+      lsremote: true
+      versionfilter:
+        kind: semver
+  ansible-kubernetes-core:
+    kind: gittag
+    spec:
+      url: https://github.com/ansible-collections/kubernetes.core.git
+      lsremote: true
+      versionfilter:
+        kind: semver
+  crd-argo-workflows:
+    kind: gittag
+    spec:
+      url: https://github.com/argoproj/argo-workflows.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v([0-9]+\.[0-9]+\.[0-9]+)$'
+  crd-external-secrets:
+    kind: gittag
+    spec:
+      url: https://github.com/external-secrets/external-secrets.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v([0-9]+\.[0-9]+\.[0-9]+)$'
+
+targets:
+  postgres:
+    kind: file
+    sourceid: postgres
+    spec:
+      files:
+        - shoggoth/chart/templates/cdash.yaml
+        - shoggoth/chart/templates/redmine.yaml
+      matchpattern: 'image: postgres:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: postgres:{{ source "postgres" }}'
+  redmine:
+    kind: file
+    sourceid: redmine
+    dependson:
+      - target#postgres
+    spec:
+      file: shoggoth/chart/templates/redmine.yaml
+      matchpattern: 'image: redmine:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: redmine:{{ source "redmine" }}'
+  docker-dind:
+    kind: file
+    sourceid: docker-dind
+    spec:
+      file: shoggoth/chart/templates/slave-dind.yaml
+      matchpattern: 'image: docker:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: docker:{{ source "docker-dind" }}'
+  silverbullet:
+    kind: file
+    sourceid: silverbullet
+    spec:
+      file: shoggoth/chart/templates/basic-memory.yaml
+      matchpattern: 'image: zefhemel/silverbullet:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: zefhemel/silverbullet:{{ source "silverbullet" }}'
+  apt-cacher-ng:
+    kind: file
+    sourceid: apt-cacher-ng
+    spec:
+      file: shoggoth/chart/templates/apt-cache.yaml
+      matchpattern: 'image: sameersbn/apt-cacher-ng:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: sameersbn/apt-cacher-ng:{{ source "apt-cacher-ng" }}'
+  it-tools:
+    kind: file
+    sourceid: it-tools
+    spec:
+      file: shoggoth/chart/templates/it-tools.yaml
+      matchpattern: 'image: corentinth/it-tools:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: corentinth/it-tools:{{ source "it-tools" }}'
+  angie:
+    kind: file
+    sourceid: angie
+    spec:
+      files:
+        - shoggoth/chart/templates/web-external.yaml
+        - shoggoth/chart/templates/web-internal.yaml
+      matchpattern: 'image: docker\.angie\.software/angie:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: docker.angie.software/angie:{{ source "angie" }}'
+  victoria-metrics:
+    kind: file
+    sourceid: victoria-metrics
+    spec:
+      file: shoggoth/chart/templates/victoria-metrics.yaml
+      matchpattern: 'image: victoriametrics/victoria-metrics:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: victoriametrics/victoria-metrics:{{ source "victoria-metrics" }}'
+  crawl4ai:
+    kind: file
+    sourceid: crawl4ai
+    spec:
+      file: shoggoth/chart/templates/crawl4ai.yaml
+      matchpattern: 'image: unclecode/crawl4ai:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: unclecode/crawl4ai:{{ source "crawl4ai" }}'
+  coredns:
+    kind: file
+    sourceid: coredns
+    spec:
+      file: shoggoth/chart/templates/dns.yaml
+      matchpattern: 'image: rancher/mirrored-coredns-coredns:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: rancher/mirrored-coredns-coredns:{{ source "coredns" }}'
+  argo-workflow-controller:
+    kind: file
+    sourceid: argo-workflow-controller
+    spec:
+      file: shoggoth/chart/templates/argo-workflows.yaml
+      matchpattern: 'image: quay\.io/argoproj/workflow-controller:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: quay.io/argoproj/workflow-controller:{{ source "argo-workflow-controller" }}'
+  argo-argocli:
+    kind: file
+    sourceid: argo-argocli
+    dependson:
+      - target#argo-workflow-controller
+    spec:
+      file: shoggoth/chart/templates/argo-workflows.yaml
+      matchpattern: 'image: quay\.io/argoproj/argocli:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: quay.io/argoproj/argocli:{{ source "argo-argocli" }}'
+  phpldapadmin:
+    kind: file
+    sourceid: phpldapadmin
+    spec:
+      file: shoggoth/chart/templates/phpldapadmin.yaml
+      matchpattern: 'image: phpldapadmin/phpldapadmin:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: phpldapadmin/phpldapadmin:{{ source "phpldapadmin" }}'
+  otelcol:
+    kind: file
+    sourceid: otelcol
+    spec:
+      file: shoggoth/chart/templates/otelcol.yaml
+      matchpattern: 'image: otel/opentelemetry-collector-contrib:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: otel/opentelemetry-collector-contrib:{{ source "otelcol" }}'
+  openldap:
+    kind: file
+    sourceid: openldap
+    spec:
+      file: shoggoth/chart/templates/openldap.yaml
+      matchpattern: 'image: osixia/openldap:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: osixia/openldap:{{ source "openldap" }}'
+  openbao:
+    kind: file
+    sourceid: openbao
+    spec:
+      file: shoggoth/chart/templates/openbao.yaml
+      matchpattern: 'image: openbao/openbao:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: openbao/openbao:{{ source "openbao" }}'
+  cdash:
+    kind: file
+    sourceid: cdash
+    dependson:
+      - target#postgres
+    spec:
+      file: shoggoth/chart/templates/cdash.yaml
+      matchpattern: 'image: kitware/cdash:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: kitware/cdash:{{ source "cdash" }}'
+  grafana-tempo:
+    kind: file
+    sourceid: grafana-tempo
+    spec:
+      file: shoggoth/chart/templates/tempo.yaml
+      matchpattern: 'image: grafana/tempo:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: grafana/tempo:{{ source "grafana-tempo" }}'
+  grafana-loki:
+    kind: file
+    sourceid: grafana-loki
+    spec:
+      file: shoggoth/chart/templates/loki.yaml
+      matchpattern: 'image: grafana/loki:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: grafana/loki:{{ source "grafana-loki" }}'
+  grafana:
+    kind: file
+    sourceid: grafana
+    spec:
+      file: shoggoth/chart/templates/grafana.yaml
+      matchpattern: 'image: grafana/grafana:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: grafana/grafana:{{ source "grafana" }}'
+  gitea-runner:
+    kind: file
+    sourceid: gitea-runner
+    spec:
+      file: shoggoth/chart/templates/gitea.yaml
+      matchpattern: 'image: gitea/runner:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: gitea/runner:{{ source "gitea-runner" }}'
+  gitea:
+    kind: file
+    sourceid: gitea
+    dependson:
+      - target#gitea-runner
+    spec:
+      file: shoggoth/chart/templates/gitea.yaml
+      matchpattern: 'image: gitea/gitea:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: gitea/gitea:{{ source "gitea" }}'
+  wg-easy:
+    kind: file
+    sourceid: wg-easy
+    spec:
+      file: shoggoth/chart/templates/wireguard.yaml
+      matchpattern: 'image: ghcr\.io/wg-easy/wg-easy:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: ghcr.io/wg-easy/wg-easy:{{ source "wg-easy" }}'
+  reloader:
+    kind: file
+    sourceid: reloader
+    spec:
+      file: shoggoth/chart/templates/reloader.yaml
+      matchpattern: 'image: ghcr\.io/stakater/reloader:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: ghcr.io/stakater/reloader:{{ source "reloader" }}'
+  zot:
+    kind: file
+    sourceid: zot
+    spec:
+      file: shoggoth/chart/templates/registry.yaml
+      matchpattern: 'image: ghcr\.io/project-zot/zot:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: ghcr.io/project-zot/zot:{{ source "zot" }}'
+  litellm:
+    kind: file
+    sourceid: litellm
+    spec:
+      file: shoggoth/chart/templates/litellm.yaml
+      matchpattern: 'image: ghcr\.io/berriai/litellm:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: ghcr.io/berriai/litellm:{{ source "litellm" }}'
+  basic-memory:
+    kind: file
+    sourceid: basic-memory
+    dependson:
+      - target#silverbullet
+    spec:
+      file: shoggoth/chart/templates/basic-memory.yaml
+      matchpattern: 'image: ghcr\.io/basicmachines-co/basic-memory:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: ghcr.io/basicmachines-co/basic-memory:{{ source "basic-memory" }}'
+  fusion:
+    kind: file
+    sourceid: fusion
+    spec:
+      file: shoggoth/chart/templates/fusion.yaml
+      matchpattern: 'image: ghcr\.io/0x2e/fusion:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: ghcr.io/0x2e/fusion:{{ source "fusion" }}'
+  gitea-mcp-server:
+    kind: file
+    sourceid: gitea-mcp-server
+    spec:
+      file: shoggoth/chart/templates/mcp-gitea.yaml
+      matchpattern: 'image: docker\.gitea\.com/gitea-mcp-server:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: docker.gitea.com/gitea-mcp-server:{{ source "gitea-mcp-server" }}'
+  git-pages:
+    kind: file
+    sourceid: git-pages
+    spec:
+      file: shoggoth/chart/templates/git-pages.yaml
+      matchpattern: 'image: codeberg\.org/git-pages/git-pages:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: codeberg.org/git-pages/git-pages:{{ source "git-pages" }}'
+  external-secrets:
+    kind: file
+    sourceid: external-secrets
+    spec:
+      file: shoggoth/chart/templates/external-secrets.yaml
+      matchpattern: 'image: ghcr\.io/external-secrets/external-secrets:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: ghcr.io/external-secrets/external-secrets:{{ source "external-secrets" }}'
+  zot-k3s:
+    kind: file
+    sourceid: zot
+    spec:
+      file: make/k3s.mk
+      matchpattern: '(ctr images pull ghcr\.io/project-zot/zot:)v[0-9.]+'
+      replacepattern: '${1}{{ source "zot" }}'
+  action-checkout:
+    kind: file
+    sourceid: action-checkout
+    spec:
+      file: .github/workflows/docker-tools.yml
+      matchpattern: 'uses: actions/checkout@(v[0-9.]+)'
+      replacepattern: 'uses: actions/checkout@{{ source "action-checkout" }}'
+  action-setup-buildx:
+    kind: file
+    sourceid: action-setup-buildx
+    dependson:
+      - target#action-checkout
+    spec:
+      file: .github/workflows/docker-tools.yml
+      matchpattern: 'uses: docker/setup-buildx-action@(v[0-9.]+)'
+      replacepattern: 'uses: docker/setup-buildx-action@{{ source "action-setup-buildx" }}'
+  action-login:
+    kind: file
+    sourceid: action-login
+    dependson:
+      - target#action-setup-buildx
+    spec:
+      file: .github/workflows/docker-tools.yml
+      matchpattern: 'uses: docker/login-action@(v[0-9.]+)'
+      replacepattern: 'uses: docker/login-action@{{ source "action-login" }}'
+  action-build-push:
+    kind: file
+    sourceid: action-build-push
+    dependson:
+      - target#action-login
+    spec:
+      file: .github/workflows/docker-tools.yml
+      matchpattern: 'uses: docker/build-push-action@(v[0-9.]+)'
+      replacepattern: 'uses: docker/build-push-action@{{ source "action-build-push" }}'
+  ansible-posix:
+    kind: file
+    sourceid: ansible-posix
+    spec:
+      file: ansible/requirements.yml
+      matchpattern: '(  - name: ansible\.posix\n    version: )[0-9.]+'
+      replacepattern: '${1}{{ source "ansible-posix" }}'
+  ansible-kubernetes-core:
+    kind: file
+    sourceid: ansible-kubernetes-core
+    dependson:
+      - target#ansible-posix
+    spec:
+      file: ansible/requirements.yml
+      matchpattern: '(  - name: kubernetes\.core\n    version: )[0-9.]+'
+      replacepattern: '${1}{{ source "ansible-kubernetes-core" }}'
+  gadget-tag:
+    kind: file
+    sourceid: inspektor-gadget
+    spec:
+      file: shoggoth/chart/values.yaml
+      matchpattern: '(image: ghcr\.io/inspektor-gadget/inspektor-gadget\n  tag: )v[0-9.]+'
+      replacepattern: '${1}{{ source "inspektor-gadget" }}'
+  gadget-image:
+    kind: file
+    sourceid: inspektor-gadget-top-tcp
+    dependson:
+      - target#gadget-tag
+    spec:
+      file: shoggoth/chart/values.yaml
+      matchpattern: 'gadgetImage: ghcr\.io/inspektor-gadget/gadget/top_tcp:(v[0-9.]+)'
+      replacepattern: 'gadgetImage: ghcr.io/inspektor-gadget/gadget/top_tcp:{{ source "inspektor-gadget-top-tcp" }}'
+  crd-argo-workflows:
+    kind: yaml
+    sourceid: crd-argo-workflows
+    spec:
+      file: shoggoth/crd/versions.yaml
+      key: $.'argo-workflows'
+  crd-external-secrets:
+    kind: yaml
+    sourceid: crd-external-secrets
+    dependson:
+      - target#crd-argo-workflows
+    spec:
+      file: shoggoth/crd/versions.yaml
+      key: $.'external-secrets'

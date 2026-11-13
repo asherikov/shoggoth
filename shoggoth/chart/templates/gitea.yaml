@@ -176,7 +176,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: gitea
-        image: gitea/gitea:1.27.3
+        image: gitea/gitea:28.3.0
         imagePullPolicy: IfNotPresent
         env:
         - name: SHOGGOTH_DOMAIN
@@ -354,7 +354,7 @@ spec:
           readOnly: true
       containers:
       - name: runner
-        image: gitea/runner:4.1.0
+        image: gitea/runner:6.0.0
         imagePullPolicy: IfNotPresent
         ports:
         - name: cache

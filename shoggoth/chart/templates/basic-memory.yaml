@@ -74,7 +74,7 @@ spec:
       initContainers: []
       containers:
       - name: basic-memory
-        image: ghcr.io/basicmachines-co/basic-memory:0.23.2
+        image: ghcr.io/basicmachines-co/basic-memory:1.0.0
         imagePullPolicy: IfNotPresent
         command:
         - basic-memory
@@ -182,7 +182,7 @@ spec:
       initContainers: []
       containers:
       - name: silverbullet
-        image: zefhemel/silverbullet:2.11.1-slim
+        image: zefhemel/silverbullet:2.12.1-slim
         imagePullPolicy: IfNotPresent
         env:
         - name: SB_HOSTNAME

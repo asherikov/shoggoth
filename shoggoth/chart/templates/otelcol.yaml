@@ -79,7 +79,7 @@ spec:
       initContainers: []
       containers:
       - name: otelcol
-        image: otel/opentelemetry-collector-contrib:0.161.0
+        image: otel/opentelemetry-collector-contrib:0.165.0
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0

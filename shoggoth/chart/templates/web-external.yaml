@@ -68,7 +68,7 @@ spec:
       serviceAccountName: web-external
       containers:
       - name: angie
-        image: docker.angie.software/angie:1.11.6
+        image: docker.angie.software/angie:1.12.4
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: {{ .Values.network.webExternal.hostPort }}

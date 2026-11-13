@@ -550,7 +550,7 @@ spec:
           mountPath: /data/python_cache
       containers:
       - name: angie
-        image: docker.angie.software/angie:1.11.6
+        image: docker.angie.software/angie:1.12.4
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 80

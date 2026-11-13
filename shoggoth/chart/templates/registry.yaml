@@ -173,7 +173,7 @@ spec:
           mountPath: /var/lib/zot
       containers:
       - name: registry
-        image: ghcr.io/project-zot/zot:v2.1.21
+        image: ghcr.io/project-zot/zot:v2.1.23
         imagePullPolicy: IfNotPresent
         args:
         - serve

@@ -40,7 +40,7 @@ data:
 
     [server]
     pages = "tcp/:80"
-    caddy = "-"
+    proxy = "-"
     metrics = "tcp/:9253"
 
     [storage]
@@ -105,7 +105,7 @@ spec:
       initContainers: []
       containers:
       - name: git-pages
-        image: codeberg.org/git-pages/git-pages:0.9.1
+        image: codeberg.org/git-pages/git-pages:0.10.1
         imagePullPolicy: IfNotPresent
         env:
         - name: SHOGGOTH_DOMAIN

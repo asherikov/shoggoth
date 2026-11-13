@@ -1812,3 +1812,280 @@ in the docs/ tree.
   examples for both shoggoth-relevant CRD families (Argo, External
   Secrets). Using any other tool would require writing custom CRD
   mapping from scratch.
+
+# Repository Maintenance
+
+## Dependency update tooling
+
+The requirement that decided this: a bump tool must rewrite version numbers in
+the mounted files and nothing else. No clone, no branch, no commit, no push, no
+pull request — the developer reviews `git diff` locally and commits. Everything
+below is judged against that single constraint first and feature breadth
+second.
+
+### Selected
+
+- **[Updatecli](https://github.com/updatecli/updatecli)** (Apache 2.0) — v0.123.0, `make update`
+  - + its designed flow *is* the requirement: a pipeline is `sources` (read a
+    version from a registry) feeding `targets` (write it into a file). There is
+    no commit step in the model.
+  - + `scms: {local: {disabled: true}}` disables the local-git
+    auto-configuration outright.
+  - + no credentials of any kind: every source is a public read.
+  - + no preconditions on the repo state: no token, no pristine tree, no
+    branch, no upstream to be in sync with. Works on a dirty tree
+    mid-refactor.
+  - + `file` targets use `matchpattern`/`replacepattern`, so a bump is a
+    surgical regex replacement rather than a YAML re-serialisation — the
+    comment-heavy `values.yaml` and `ansible/requirements.yml` come out
+    byte-identical apart from the tag.
+  - + `file.content = reg.ReplaceAllString(...)` is a *global* replacement, so
+    the three identical `external-secrets` lines and the two `angie` lines
+    across two files are one target each, not three and two.
+  - + `os.Create` truncates in place, so file ownership and mode survive and
+    the container runs as the invoking uid.
+  - + the manifest lives in `shoggoth/updatecli.yaml` while every path in it is
+    repo-root-relative. `options.relativepaths` is therefore left unset: the
+    default `workingdirectory` resolves them against the process working
+    directory, which the make target pins to the repo root with `-w`. Setting
+    `manifest` would anchor them next to the manifest and force a `../` onto
+    forty paths.
+  - - **both published images declare `VOLUME /tmp`**, and docker initialises
+    that anonymous volume root-owned, so a container running as the invoking
+    uid cannot create `$TMPDIR/updatecli` and dies with
+    `mkdir /tmp/updatecli: permission denied` before it has read a single
+    manifest. `pkg/core/tmp/main.go` builds the path from `os.TempDir()`,
+    which honours `$TMPDIR`, so the target passes
+    `-e TMPDIR=/work/.tmp` — the repo's gitignored scratch directory. The
+    directory survives the run, because `tmp.Clean()` only fires under
+    `--clean`; keeping it under `.tmp` is what keeps the litter out of
+    `git status`. The default image is the `-slim` variant, which is
+    `FROM scratch` with one static binary: no shell, no git, no package
+    manager, so nothing in the pipeline can reach a remote by accident. (The
+    non-slim image pins `USER updatecli`, uid 1000, which would break the
+    in-place file rewrite for any other uid.)
+  - - **the honest cost: 41 `sources` + 42 `targets` (655 lines) for this
+    tree**, against Renovate's two-line `extends` plus two `customManagers`.
+    One source per image is not optional — a source emits one version, and a
+    target consumes exactly one `sourceid`.
+  - - **no submodule support, and no way to bolt it on.** A submodule pointer
+    is a gitlink (mode `160000`) recorded in the superproject's index and
+    tree, not in any file, so a `file` target has nothing to match against;
+    `.gitmodules` carries only `path` and `url`, never a commit SHA; and no
+    file in the Updatecli repository mentions "submodule" at all. Neither
+    published image ships git, which also rules out the `shell` resource —
+    it would need the binary and would mutate `.git/modules/`, outside the
+    "files only" constraint. The two CRD submodules
+    (`shoggoth/crd/argo-workflows`, `shoggoth/crd/external-secrets`) are
+    therefore pinned in `shoggoth/crd/versions.yaml` with the `yaml`
+    resource (`file` + `key`, `value` defaulting to the source output), and
+    the `update` target checks each submodule out to the tag it names. That
+    keeps the version bump inside the constraint and leaves the git
+    operation to the make target, where it is visible and reviewable; the
+    alternative — vendoring the CRDs and downloading them from a `make`
+    target — was rejected because it hides CRD schema changes inside a
+    generated file instead of a submodule bump.
+  - - no Ansible Galaxy datasource. The two collections are read with
+    `gittag` + `lsremote` against `ansible-collections/*.git` instead, which
+    works because those repos' git tags match the Galaxy versions exactly
+    (`2.2.2`, `6.6.0`); `kubernetes.core` publishes no GitHub releases at all,
+    so `githubrelease` is not even an option.
+  - - the four GitHub Action pins need `gittag` + `regex/semver` with
+    `regex: '^v([0-9]+)$'`: GitHub *releases* do not carry the moving major
+    tags (`v7`, `v4`), only the full versions, so `githubrelease` would report
+    nothing to do.
+  - - `gittag` has **no `tagfilter` field** — only `versionfilter`. Tag
+    restriction has to be expressed as a `versionfilter` regex, which is a
+    different mental model from `dockerimage`'s two-stage
+    `tagfilter` → `versionfilter`.
+  - - `tagfilter` must be written by hand per image. Updatecli's own heuristic
+    (`getTagFilterFromValue`) is wrong for this tree: it turns `18-alpine` into
+    `^\d*-alpine$`, which matches `19-alpine` but not `18.1-alpine`, so a patch
+    bump would be reported as a major bump. The rule adopted here is that the
+    filter is derived from the *shape* of the current pin — one or more numeric
+    components plus a literal prefix/suffix and nothing else — which is what
+    keeps `latest`, `main`, `-nightly`, `-rc`, `-dev`, `-s390x`, `-amd64`, bare
+    major tags (`28`, `6`) and other moving tags out of the candidate set.
+  - - registry quirks have to be known, not discovered. go-containerregistry
+    pages with `defaultPageSize = 1000`, so ghcr returns everything in one
+    request; Docker Hub caps a repository's tag list at 1000 entries, which
+    already evicted `grafana/tempo:3.0.3` — the pin is unfindable even though
+    the filter still correctly selects `3.1.1`.
+  - - `GetVersion()` returns `OriginalVersion`, and `replaceall` is applied
+    only in the `regex`, `regex/semver` and `regex/time` branches — not in
+    `semver`. That is why `18-alpine` needs no `replaceall`: `regex/semver`
+    remaps the extracted `18.7` back to the full original tag `18.7-alpine`
+    while comparing only `18.7`.
+  - - `file` targets hard-fail on any listed file that does not match
+    (`no line matched in file %q for pattern %q`) unless `searchpattern` is
+    set, so each target's file list has to name exactly the files holding that
+    pin. There is no glob-and-hope mode worth using.
+  - - a capture group is what the changelog reports as the current version;
+    with the prefix in group 1 the multi-line targets (`ansible.posix`,
+    `kubernetes.core`, `gadget.tag`) report the prefix instead of the version.
+    Harmless here — no scm means no changelog — but it is a real paper cut.
+- ~~**[Renovate](https://github.com/renovatebot/renovate)**~~ (AGPL-3.0) —
+  replaced by Updatecli
+  - + by far the least config for the coverage: `config:recommended` +
+    `group:all` plus two `customManagers` (chart templates and `make/*.mk`)
+    handles all 36 image references, the Actions and the Galaxy collections
+    out of the box, including per-ecosystem datasources this tree would
+    otherwise hand-roll.
+  - + `rangeStrategy: "pin"` and per-`packageRules` exclusions are one line
+    each.
+  - - **local mode has no "update files without committing" mode.* Renovate
+  - - it needs a GitHub token (read-only scope suffices, but it must exist and
+    must be in the environment), because Renovate reads `renovate.json`
+    through the platform API rather than from the working tree.
+  - - it requires a pristine tree on the base branch, in sync with upstream:
+    `syncGit()` resets the mounted tree to `origin/<base branch>` and would
+    otherwise delete untracked files. `renovate.json` itself must be committed
+    and pushed, or the run silently falls back to the default config — which
+    *does* create branches and PRs.
+  - - the container is ~1 GB with Node and git, against Updatecli's
+    ~120 MB with neither.
+- <https://github.com/dependabot/dependabot-core> (MIT)
+  - + the reference implementation, and the same `config:recommended`-style
+    breadth as Renovate for far less config.
+  - - designed for the hosted GitHub service: it authenticates as a GitHub App
+    and its only output is a pull request.
+  - - no Ansible Galaxy manager.
+- <https://github.com/crazy-max/diun> (MIT)
+  - + the best tag *watching* available: 20+ registries, per-image filters,
+    notifications to everything.
+  - - watch-only by design. It has no file target, so it can tell you a pin is
+    stale but cannot rewrite it.
+- <https://github.com/fluxcd/flux2> + Image Automation (Apache 2.0)
+  - + the GitOps-native answer: `ImagePolicy` selects a tag and
+    `ImageUpdateAutomation` commits it back to the repo.
+  - - it commits and pushes by design. It also needs a running controller
+    inside the cluster, so a bump becomes a cluster operation rather than a
+    local one, and it only covers images the cluster actually reconciles (not
+    `make/k3s.mk` or the Actions).
+- <https://github.com/argoproj-labs/argocd-image-updater> (Apache 2.0)
+  - + same idea, tighter Argo CD integration, writes commit messages and PRs.
+  - - same objection: its output is a commit (optionally a PR), and it needs a
+    running Argo CD.
+
+## Chart validation
+
+`make/lint.mk` carries eleven `helm_lint_*` targets. The finding that decides
+everything below: **only three are generic validation** (`chart`, `render`,
+`dupes`). The other eight encode invariants that exist only because of how this
+chart is written, so the question is not which tool replaces them but which tool
+can express a `--set` toggle or a two-render comparison.
+
+| target | what it needs | off-the-shelf? |
+|---|---|---|
+| `helm_lint_chart` | template parse, `Chart.yaml` metadata | yes — any renderer |
+| `helm_lint_render` | render succeeds, non-empty | absorbed by any renderer |
+| `helm_lint_dupes` | duplicate mapping keys in the render | kubeconform `-strict` |
+| `helm_lint_netpol` | `podSelector` resolves to real pods | kube-linter `dangling-networkpolicy*` |
+| `helm_lint_roledef` | `roleRef` resolves in the same render | kube-linter CEL, conftest |
+| `helm_lint_gadget_scope` | one string, three spellings, equal | kube-linter CEL, conftest |
+| `helm_lint_inspektor` | gated job absent from embedded config | kube-linter CEL, conftest |
+| `helm_lint_gates` | each `services.<k>.enabled=false` removes ≥1 resource | **conftest only** |
+| `helm_lint_rollout` | ConfigMap change changes the pod template | **conftest only** |
+| `helm_lint_collision` | cluster-scoped names distinct across instances | **conftest only** |
+| `helm_lint_embedded` | `config.yaml` block scalars parse | none |
+
+- **[kube-linter](https://github.com/stackrox/kube-linter)** (Apache-2.0) — v0.8.3, 2026-03-10
+  - + **renders a Helm chart itself, in-process.** `pkg/lintcontext/parse_yaml.go`
+    calls `helmEngine.Engine{LintMode: true}.Render(...)`; the package imports
+    `helm.sh/helm/v3/pkg/chartutil` and contains no `exec.Command`. No `helm`
+    binary, so it adds no prerequisite and works offline.
+  - + 63 built-in checks, plus `schema-validation` — a bundled kubeconform
+    template (`schemaLocations`, `cache`, `skipKinds`, `rejectKinds`,
+    `kubernetesVersion`, `strict`, `ignoreMissingSchemas`), off by default.
+  - + **extensible via CEL.** The `cel-expression` template takes a user-written
+    expression with `object` (current) and `objects` (every object in the
+    context) bound; a non-empty string is a violation. The other 71 templates
+    are compiled-in Go, so this is the only escape hatch.
+  - - `lint` has **no `--values`, `--set` or `--namespace`** — only `--config`,
+    `--fail-if-no-objects-found`, `--verbose`, `--format`, `--output` and the
+    deprecated `--fail-on-invalid-resource`.
+  - - release name and namespace are **hardcoded** (`test-release` / `default`)
+    and only `values.yaml` defaults are used. Harmless here — all 72 templates
+    use `.Release.Namespace`, every `.Values.<top>` they reference exists in
+    `values.yaml`, and `shoggoth.yaml` sets no `services` keys — but it breaks
+    the moment the instance config starts toggling services.
+  - - **cannot compare two renders.** `objects` is scoped to one lint context
+    and the CEL binding exposes the K8s object only, not its source file, so
+    there is nothing to partition on. Rendering each variant under a different
+    release name does not work either: `shoggoth.fullname` derives from
+    `.Release.Name`, so every resource name changes and the comparison collapses.
+- **[kubeconform](https://github.com/yannh/kubeconform)** (Apache-2.0) — v0.8.0, 2026-06-04
+  - + `-strict` rejects additional properties *and duplicated keys*, which is
+    exactly what `helm_lint_dupes` was written for.
+  - + CRD schemas from datreeio/CRDs-catalog. The chart's only non-core kinds
+    are `ExternalSecret` and `SecretStore` at `external-secrets.io/v1` and
+    `PushSecret` at `external-secrets.io/v1alpha1`; all three are present.
+  - - **does not render.** Helm support is only the third-party
+    `jtyr/kubeconform-helm` plugin; the supported pattern is piping
+    `helm template` in, which costs a second render.
+  - - does not cover server-side admission validation (CRD CEL rules).
+- **[conftest](https://github.com/open-policy-agent/conftest)** (Apache-2.0) — v0.71.1
+  - + **the only candidate that can compare renders.** `--combine` builds
+    `input` as `[{path, contents}, ...]`, so a policy partitions on the source
+    file — the tag kube-linter lacks. This is what makes `gates`, `rollout` and
+    `collision` expressible at all.
+  - + `--data` loads `.json`/`.yaml` under the directory prefix, so `values.yaml`
+    or a base render can be a constant.
+  - + `conftest verify` unit-tests a policy against a committed fixture render.
+    The make checks have no test that is not the chart itself.
+  - - zero built-ins; everything is hand-written Rego.
+  - - `-n` **defaults to `["main"]`** and `check()` skips modules whose package
+    path is not an exact match, so `package shoggoth.*` runs zero rules silently
+    without `-n 'shoggoth.*'`.
+  - - without `--combine` a multi-doc stream is split and each document is
+    evaluated alone, so a policy written for the combined shape sees one object
+    and silently passes.
+- Skipped: **kubeval** v0.16.1 (last release 2021-03-30) and **datree** 1.9.19
+  (2023-07-23) are unmaintained. **pluto** v5.24.5 finds deprecated APIs, which
+  this chart does not use. **polaris** v10.2.6 and **kube-score** v1.20.0
+  overlap kube-linter's check set and render nothing natively.
+
+### Composition
+
+kube-linter accepts files as well as directories, and a plain multi-doc `.yaml`
+goes through `loadObjectsFromYAMLFile` → `loadObjectsFromReader`, which loops
+over a `yaml.NewYAMLReader`: **all documents land in one lint context**, so the
+cross-object checks (`dangling-service`, `mismatching-selector`,
+`dangling-networkpolicy`) see the whole render. An explicitly-passed file loads
+even without a `.yaml` extension. There is **no manifest-dump mode** — only
+JSON/SARIF/plain *result* formatters — so kube-linter's render cannot be
+forwarded to conftest; the render has to come from `helm template` and feed both:
+
+```make
+helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) --namespace lint \
+	$(SHOGGOTH_HELM_VALUES_LINT) > ${LINT_RENDER}
+kube-linter lint ${LINT_RENDER} --config make/kube-linter.yaml
+conftest test --combine -p policy -n 'shoggoth.*' ${LINT_RENDER}
+```
+
+**Never point kube-linter at the directory.** `contextsByDir` merges every
+`.yaml` file in a directory into one context, so `base.yaml` and `gate-*.yaml`
+under `${LINT_TMP_DIR}` would merge into a single render — duplicate object
+names, and the `dangling-*` checks comparing against the wrong render.
+
+### Noise
+
+Default kube-linter checks are not a drop-in gate. Of the 35 podspec-bearing
+templates of 72: `resources:` in 31, `livenessProbe` in 31, `readinessProbe` in
+32, `readOnlyRootFilesystem: true` in **5**, `runAsNonRoot: true` in **5**,
+`allowPrivilegeEscalation: false` in 4. `values.yaml` has no `global`,
+`resources`, `securityContext` or `podSecurityContext` key, so
+`no-read-only-root-fs`, `run-as-non-root` and `privilege-escalation-container`
+each fire on ~30 objects and need an explicit include/exclude list in a
+`.kube-linter.yaml`. `hostNetwork: true` (3), `privileged: true` (3) and
+`hostPath` (12) are intentional for wireguard, dind and the registry and need
+`ignore-check.kube-linter.io/<check>` annotations. `latest-tag` passes: the four
+`latest` hits are a runner label, a doc comment, a PodSecurity name and an nginx
+MIME type, not an image tag.
+
+### Status
+
+Nothing is selected. None of it has been executed — this container has
+`yamllint` and `python3` only, with no `helm`, `kubectl`, `yq`, `kubeconform`,
+`kube-linter`, `conftest`, `go` or `docker`, and installing is not permitted.
+Every claim above is verified against upstream source at the pinned tags.

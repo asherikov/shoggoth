@@ -180,7 +180,7 @@ spec:
         volumeMounts: []
       containers:
       - name: litellm
-        image: ghcr.io/berriai/litellm:v1.102.0
+        image: ghcr.io/berriai/litellm:v1.109.1
         imagePullPolicy: IfNotPresent
         args:
         - --config
@@ -206,6 +206,20 @@ spec:
         # uvicorn's default info, which is sparse enough to keep.
         - name: LITELLM_LOG
           value: WARNING
+        # Boot with no master key. This proxy has no per-client auth model:
+        # the slave image, basic-memory and setup-client.sh each call it with
+        # their own static literal key, and before the v1.109.1 bump it ran
+        # with no master key at all — every request accepted, the deployment
+        # being VPN-only behind web-internal, which is its access control.
+        # v1.109.x instead refuses to boot in that state (litellm commit
+        # fe480533, "refuse to start with an unset, empty, or publicly known
+        # master key"), so the sanctioned override restores the pre-update
+        # behaviour. A real LITELLM_MASTER_KEY is not a drop-in replacement:
+        # with one set, only the master key itself and DB-provisioned virtual
+        # keys are accepted, which would 401 every existing client until they
+        # are re-keyed.
+        - name: LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY
+          value: 'true'
         - name: SHOGGOTH_DOMAIN
           value: {{ .Values.identity.domain }}
         # Headroom guardrail endpoint. Mirrors the `api_base` value

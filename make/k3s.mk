@@ -29,7 +29,7 @@ host_install_nixos:
 
 pull_registry_image:
 	echo "Pulling registry image on ${HOST} (bypassing containerd mirror)..."
-	${K3S_SSH} 'sudo k3s ctr images pull ghcr.io/project-zot/zot:v2.1.21'
+	${K3S_SSH} 'sudo k3s ctr images pull ghcr.io/project-zot/zot:v2.1.23'
 
 
 # The whole control-node setup, in the order it has to happen: ansible-core

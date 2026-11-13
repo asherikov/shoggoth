@@ -67,7 +67,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
       - name: phpldapadmin
-        image: phpldapadmin/phpldapadmin:2.3.11
+        image: phpldapadmin/phpldapadmin:2.3.12
         imagePullPolicy: IfNotPresent
         command:
         - /bin/bash

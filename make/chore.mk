@@ -225,3 +225,37 @@ skills:
 	${MAKE} get_skill NAME=memory-lifecycle	URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-lifecycle/
 	${MAKE} get_skill NAME=memory-ingest	URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-ingest/
 	${MAKE} get_skill NAME=memory-metadata-search URL=https://raw.githubusercontent.com/basicmachines-co/basic-memory-skills/refs/heads/main/memory-metadata-search/
+
+
+# update — bump every pinned version in this tree, in place, and stop there.
+
+UPDATECLI_IMAGE?=updatecli/updatecli:v0.123.0-slim
+UPDATECLI_CONFIG?=shoggoth/updatecli.yaml
+UPDATECLI_WORKDIR?=/work
+
+# The two CRD submodules updatecli cannot reach. A submodule pointer is a gitlink
+# (mode 160000) recorded in the superproject's index, not file content, so there is
+# nothing on disk for a `file` target to match: updatecli bumps the tag in
+# shoggoth/crd/versions.yaml instead, and the loop below checks the submodule out
+# to it. Each name is both a key of that file and a directory under shoggoth/crd/.
+CRD_SUBMODULES?=argo-workflows external-secrets
+
+.PHONY: update
+
+update:
+	mkdir -p .tmp
+	docker run --rm --user "$$(id -u):$$(id -g)" \
+		-v $(CURDIR):$(UPDATECLI_WORKDIR) \
+		-w $(UPDATECLI_WORKDIR) \
+		-e TMPDIR=$(UPDATECLI_WORKDIR)/.tmp \
+		$(UPDATECLI_IMAGE) \
+		pipeline apply \
+		--config $(UPDATECLI_WORKDIR)/$(UPDATECLI_CONFIG) \
+		--commit=false \
+		--push=false
+	set -e; for m in $(CRD_SUBMODULES); do \
+		v=$$(yq ".$$m" shoggoth/crd/versions.yaml); \
+		echo ">>>>>>>>>>>> shoggoth/crd/$$m -> $$v"; \
+		git -C shoggoth/crd/$$m fetch --tags --quiet; \
+		git -C shoggoth/crd/$$m checkout --quiet --detach "$$v"; \
+	done
