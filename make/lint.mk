@@ -1,9 +1,8 @@
 # offline chart validation.
 
-.PHONY: helm_lint helm_lint_chart helm_lint_render helm_lint_dupes \
-        helm_lint_gates helm_lint_collision helm_lint_roledef \
-        helm_lint_gadget_scope helm_lint_embedded helm_lint_netpol \
-        helm_lint_rollout helm_lint_inspektor
+.PHONY: helm_lint helm_lint_chart helm_lint_render helm_lint_kube_linter \
+        helm_lint_gates helm_lint_collision helm_lint_netpol \
+        helm_lint_rollout helm_lint_embedded helm_lint_inspektor
 
 # Values for the offline renders. This is just the instance config: the
 # checks render to a file and never apply anything, so there is nothing here
@@ -11,12 +10,54 @@
 # what distinguish lint output from a real install.
 SHOGGOTH_HELM_VALUES_LINT = $(SHOGGOTH_HELM_VALUES)
 
+# kube-linter's own config, kept beside the make fragments that consume it
+# rather than at the repo root, so `.kube-linter.yaml` is not left lying
+# around for kube-linter to pick up implicitly when someone runs it by hand
+# against the chart directory.
+KUBE_LINTER_CONFIG?=make/kube-linter.yaml
+
+# kube-linter is not a host install. It runs from its own container, so
+# docker is the prerequisite and the version is pinned here rather than in a
+# package list.
+#
+# The `-alpine` tag and not the plain one, and this is not a preference. The
+# plain `v0.8.3` image is `FROM scratch` — the binary and nothing else, no
+# /etc/ssl — while kubeconform fetches its JSON schemas over HTTPS from
+# raw.githubusercontent.com. Go builds its root pool from the paths in
+# crypto/x509/root_linux.go (certFiles, then certDirectories), so on the
+# scratch image every schema fetch fails with "x509: certificate signed by
+# unknown authority" and all 275 objects come back invalid. The alpine base
+# ships /etc/ssl/certs/ca-certificates.crt, which is what makes the fetch
+# work. Both manifests were pulled and their layers listed to confirm this:
+# the scratch image has one layer (the binary) and no ssl entries at all,
+# the alpine image has the alpine base plus the binary and both cert paths.
+KUBE_LINTER_IMAGE?=stackrox/kube-linter:v0.8.3-alpine
+
+# Where the repo is mounted inside the container, and the arguments as the
+# container sees them.
+#
+# kube-linter resolves its arguments with filepath.Abs — pkg/pathutil/path.go
+# — and config.Load splits the --config path the same way, so an absolute
+# HOST path means nothing inside. The mount puts $(CURDIR) at
+# $(KUBE_LINTER_WORKDIR) and -w sets the working directory there, which
+# makes a relative path resolve correctly with no help at all; the patsubst
+# covers the one case that needs help, an absolute $(K3S_TMP_DIR) spelled
+# out under the repo. The case it does NOT cover is a $(K3S_TMP_DIR)
+# outside the repo: that tree is not mounted, so the render prerequisite
+# never appears and the target fails on a missing file. `.tmp`, the
+# default, is inside.
+KUBE_LINTER_WORKDIR?=/lint
+KUBE_LINTER_RENDER=$(patsubst $(CURDIR)/%,%,$(LINT_RENDER))
+KUBE_LINTER_OFF=$(patsubst $(CURDIR)/%,%,$(LINT_INSPEKTOR_OFF))
+KUBE_LINTER_CFG=$(patsubst $(CURDIR)/%,%,$(KUBE_LINTER_CONFIG))
+
 # Where the lint scratch lives: the helm renders above, and the ansible/
 # role wrapper playbook that ansible_lint_syntax generates below.
 LINT_TMP_DIR=${K3S_TMP_DIR}/lint
 LINT_RENDER=${LINT_TMP_DIR}/render.yaml
 LINT_COLLISION_A=${LINT_TMP_DIR}/collision-a.yaml
 LINT_COLLISION_B=${LINT_TMP_DIR}/collision-b.yaml
+LINT_INSPEKTOR_OFF=${LINT_TMP_DIR}/inspektor-off.yaml
 
 # Everything a render depends on. A change to any of these re-renders.
 # files/ is listed through `find` rather than $(wildcard .../**): the chart's
@@ -32,10 +73,9 @@ CHART_SOURCES=$(SHOGGOTH_CHART_ROOT)/Chart.yaml \
 ${LINT_TMP_DIR}:
 	mkdir -p $@
 
-helm_lint: helm_lint_chart helm_lint_render helm_lint_dupes \
-           helm_lint_gates helm_lint_collision helm_lint_roledef \
-           helm_lint_gadget_scope helm_lint_embedded helm_lint_netpol \
-           helm_lint_rollout helm_lint_inspektor
+helm_lint: helm_lint_chart helm_lint_render helm_lint_kube_linter \
+           helm_lint_gates helm_lint_collision helm_lint_netpol \
+           helm_lint_rollout helm_lint_embedded helm_lint_inspektor
 
 # `helm lint` catches Go-template parse errors and malformed chart
 # metadata, and reports both itself.
@@ -66,25 +106,78 @@ ${LINT_COLLISION_B}: ${CHART_SOURCES} $(SHOGGOTH_CONFIG) | ${LINT_TMP_DIR}
 		> $@.tmp
 	mv $@.tmp $@
 
+# The gadget-disabled render. helm_lint_inspektor needs it, and it is a
+# prerequisite of its own rather than an inline render so that a change to
+# the chart re-renders it exactly like the others.
+${LINT_INSPEKTOR_OFF}: ${CHART_SOURCES} $(SHOGGOTH_CONFIG) | ${LINT_TMP_DIR}
+	helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) \
+		--namespace lint \
+		$(SHOGGOTH_HELM_VALUES_LINT) \
+		--set services.gadget.enabled=false \
+		> $@.tmp
+	mv $@.tmp $@
+
 helm_lint_render: ${LINT_RENDER}
 	wc -l < ${LINT_RENDER}
 
-# Regression guard for the duplicate-label-key bug fixed in
-# argo-webhook-receiver, maintenance-secret-writer, sandbox-spawner,
-# external-secrets-webhooks, and reloader — every template was emitting
-# `app.kubernetes.io/part-of: shoggoth` literally after invoking
-# `shoggoth.labels`, producing invalid YAML 1.2 (duplicate mapping keys)
-# that breaks kubeconform -strict and any strict YAML 1.2 parser.
+# The whole chart, checked against 63 built-in rules, four CEL checks of our
+# own and the Kubernetes JSON schemas. One binary, one render, and it
+# replaces three shell targets that did the same work with yq, join, sed and
+# grep: the duplicate-key guard, the roleRef resolver, and both halves of
+# the gadget scope check. All three are now CEL in make/kube-linter.yaml,
+# where the reason each one exists is a comment rather than a pipeline.
 #
-# The config enables key-duplicates and NOTHING else. `extends: default`
-# would drag in every default rule, so an unrelated `colons` violation
-# (too many spaces after a colon) exits non-zero and would be reported
-# here as a duplicate-key regression.
+# WHY A FILE AND NOT THE CHART DIRECTORY. kube-linter renders Helm charts
+# in-process, and it hardcodes ReleaseOptions{Name: "test-release",
+# Namespace: "default"} with no values file — so `kube-linter lint
+# $(SHOGGOTH_CHART_ROOT)` would lint a chart rendered with none of this
+# instance's settings, and every service gate would render at its default.
+# The render is done by helm here, where the values are the real ones, and
+# the FILE is what kube-linter reads: every document lands in one lint
+# context, which is what makes the cross-object CEL checks mean anything.
 #
-# yamllint prints the offending lines itself and exits non-zero, so there
-# is nothing to catch and re-word. A missing yamllint says so.
-helm_lint_dupes: ${LINT_RENDER}
-	yamllint -d '{rules: {key-duplicates: enable}}' ${LINT_RENDER}
+# A directory would be wrong even if the values problem did not exist.
+# kube-linter merges every .yaml under a directory into one context, so
+# pointing it at ${LINT_TMP_DIR} would fold the collision and gate renders
+# into this one and the checks would see a cluster that does not exist.
+#
+# Duplicate mapping keys are caught here too, by the schema check with
+# strict: true — kubeconform switches to yaml.UnmarshalStrict for the whole
+# document, which is what reports them. That is what absorbed the old
+# yamllint-based helm_lint_dupes, whose entire reason for existing was the
+# duplicate-label-key bug in five templates.
+#
+# Twelve of kube-linter's default-on checks are excluded in the config, each
+# with the design fact that explains it. They are the checks written for a
+# generic multi-tenant cluster — no read-only root fs, no NET_RAW drop, no
+# host mounts, no host network — which fire on every third-party image this
+# chart runs and on the two host-level daemons it exists to deploy. A gate
+# that reports a hundred deliberate choices is a gate nobody reads.
+#
+# `--fail-if-no-objects-found` is not passed: the render is asserted
+# non-empty by `wc -l` in helm_lint_render, and a zero there would be a
+# render failure the helm template above already exited on.
+#
+# The container rather than a host binary, for the same reason `update`
+# runs updatecli in one: the version is pinned next to the check that
+# depends on it, and nobody has to install anything to run `make
+# helm_lint`. The mount is read-only because kube-linter writes nothing —
+# kubeconform only creates a cache directory when `cache:` is set, and the
+# config deliberately does not set it — and `--user` keeps a container
+# process from being able to leave root-owned files in the tree even if
+# that ever changed. If a `cache:` is ever added to the config, this mount
+# has to lose its `:ro`.
+#
+# The container needs outbound HTTPS: the schema check fetches 18 schemas
+# from raw.githubusercontent.com and the CRDs-catalog on every run, since
+# no cache is configured. On a host whose docker network is locked down,
+# that is where this target fails, and the failure names the URL.
+helm_lint_kube_linter: ${LINT_RENDER}
+	docker run --rm --user "$$(id -u):$$(id -g)" \
+		-v $(CURDIR):$(KUBE_LINTER_WORKDIR):ro \
+		-w $(KUBE_LINTER_WORKDIR) \
+		$(KUBE_LINTER_IMAGE) \
+		lint $(KUBE_LINTER_RENDER) --config $(KUBE_LINTER_CFG)
 
 # A union gate spanning a service's own workloads makes `make stop
 # SERVICE=<x>` a silent no-op: `or (x) (y)` still renders while y is on,
@@ -164,78 +257,18 @@ helm_lint_collision: ${LINT_COLLISION_A} ${LINT_COLLISION_B}
 		> ${LINT_TMP_DIR}/collision-shared.names
 	diff /dev/null ${LINT_TMP_DIR}/collision-shared.names
 
-# The rename moved each ClusterRole and its ClusterRoleBinding together,
-# and `ClusterRoleBinding.roleRef` is immutable server-side — so the two
-# must move in lockstep or the binding is stuck pointing at a name that no
-# longer exists. Kubernetes does not validate a roleRef target at
-# admission: the binding is created, then grants nothing, and the bound
-# ServiceAccount loses every rule the ClusterRole carried. A name-only
-# check cannot see this, so the roleRef of every rendered binding is
-# resolved against the ClusterRoles the SAME render defines.
-#
-# The Kubernetes built-in aggregate roles (admin, edit, view, cluster-admin)
-# and the system: ones are created by the cluster, not by this chart, so a
-# binding to one is not a dangling reference.
-#
-# `join -v 1` prints the bindings whose roleRef target no ClusterRole in
-# the same render defines, and `diff` against an empty file fails on them.
-# The extractions are asserted non-empty by `grep -c ''`, which prints the
-# number of lines and exits non-zero on an empty file: a successful render
-# always carries both ClusterRoles and ClusterRoleBindings, so an empty
-# extraction means the extraction failed and there is nothing to resolve.
-helm_lint_roledef: ${LINT_COLLISION_A} ${LINT_COLLISION_B}
-	yq -r 'select(.kind == "ClusterRole") | .metadata.name' ${LINT_COLLISION_A} \
-		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/collision-a.roles
-	yq -r 'select(.kind == "ClusterRole") | .metadata.name' ${LINT_COLLISION_B} \
-		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/collision-b.roles
-	yq -r 'select(.kind == "ClusterRoleBinding" and .roleRef.kind == "ClusterRole") | .roleRef.name + " " + .metadata.name' \
-		${LINT_COLLISION_A} \
-		| sed -E '/^---$$/d; /^(admin|edit|view|cluster-admin|system:)/d' \
-		| sort -u -k1,1 > ${LINT_TMP_DIR}/collision-a.rolebindings
-	yq -r 'select(.kind == "ClusterRoleBinding" and .roleRef.kind == "ClusterRole") | .roleRef.name + " " + .metadata.name' \
-		${LINT_COLLISION_B} \
-		| sed -E '/^---$$/d; /^(admin|edit|view|cluster-admin|system:)/d' \
-		| sort -u -k1,1 > ${LINT_TMP_DIR}/collision-b.rolebindings
-	grep -c '' ${LINT_TMP_DIR}/collision-a.roles
-	grep -c '' ${LINT_TMP_DIR}/collision-b.roles
-	grep -c '' ${LINT_TMP_DIR}/collision-a.rolebindings
-	grep -c '' ${LINT_TMP_DIR}/collision-b.rolebindings
-	join -v 1 -t' ' ${LINT_TMP_DIR}/collision-a.rolebindings ${LINT_TMP_DIR}/collision-a.roles \
-		> ${LINT_TMP_DIR}/collision-a.unresolved
-	join -v 1 -t' ' ${LINT_TMP_DIR}/collision-b.rolebindings ${LINT_TMP_DIR}/collision-b.roles \
-		> ${LINT_TMP_DIR}/collision-b.unresolved
-	cat ${LINT_TMP_DIR}/collision-a.unresolved ${LINT_TMP_DIR}/collision-b.unresolved \
-		> ${LINT_TMP_DIR}/collision.unresolved
-	diff /dev/null ${LINT_TMP_DIR}/collision.unresolved
-
-# The gadget instance's `name` label, its `otel-metrics-name` and otelcol's
-# keep-regex are one string written out in three places: gadget.yaml renders
-# `tcp:<name>` into the annotation, and otelcol-config.yaml renders the
-# anchored regex that keeps only that scope. Nothing derives one from the
-# other, so a rename in either file fails nowhere -- the scrape succeeds, the
-# keep action matches nothing, and the series disappear. The three spellings
-# are asserted equal in the render.
-helm_lint_gadget_scope: ${LINT_RENDER}
-	yq -r 'select(.kind == "ConfigMap" and .metadata.labels.type == "gadget-instance") | .metadata.labels.name' ${LINT_RENDER} \
-		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/gadget-scope.names
-	grep -c '' ${LINT_TMP_DIR}/gadget-scope.names
-	yq -r 'select(.kind == "ConfigMap" and .metadata.labels.type == "gadget-instance") | .data["operator.otel-metrics.otel-metrics-name"]' ${LINT_RENDER} \
-		| sed '/^---$$/d' | sed 's|^tcp:||' | sort -u > ${LINT_TMP_DIR}/gadget-scope.metrics
-	diff ${LINT_TMP_DIR}/gadget-scope.names ${LINT_TMP_DIR}/gadget-scope.metrics
-	yq -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_RENDER} \
-		| sed -n 's/.*regex: "\^\(.*\)$$"/\1/p' | sort -u > ${LINT_TMP_DIR}/gadget-scope.regex
-	diff ${LINT_TMP_DIR}/gadget-scope.names ${LINT_TMP_DIR}/gadget-scope.regex
-
 # Six ConfigMaps carry a whole YAML document inside a block scalar: the
 # collector pipeline, the gadget daemon's own config, and four service
 # templates. Nothing parses those blocks until the process that reads them
 # starts and exits, and a broken block scalar is otherwise invisible -- the
-# ConfigMap is valid YAML whatever its data values are, so helm_lint_dupes
-# and the render stay green while the collector or the daemon crash-loops on
-# a config parse error. Every ConfigMap that has a `config.yaml` key is
-# extracted and parsed here, so a new one is covered the moment it exists.
-# The same single-rule config as helm_lint_dupes, for the same reason: an
-# unrelated `colons` violation is not a duplicate-key regression.
+# ConfigMap is valid YAML whatever its data values are, so the render and
+# the schema validation stay green while the collector or the daemon
+# crash-loops on a config parse error. Every ConfigMap that has a
+# `config.yaml` key is extracted and parsed here, so a new one is covered
+# the moment it exists. The config enables key-duplicates and NOTHING else:
+# `extends: default` would drag in every default rule, so an unrelated
+# `colons` violation (too many spaces after a colon) exits non-zero and
+# would be reported here as a duplicate-key regression.
 #
 # The failures are collected rather than propagated: a `for` loop's exit
 # status is the last command's, so a broken block in the middle of the list
@@ -263,32 +296,37 @@ helm_lint_embedded: ${LINT_RENDER}
 # and nothing pinned the two sets together: a pod-label rename leaves every
 # policy admitting pods that no longer exist, and a deleted `podSelector`
 # entry silently stops admitting a consumer -- both with every helm_lint_*
-# target green. The forward direction resolves each admitted `app` label and
-# each policy's own target against the pod templates of the same render; the
-# reverse direction compares the admitted set against the expected table
-# below, which is what catches a removal. A service whose policy is gated off
-# renders no policy at all, so its row simply does not appear and is not
-# compared.
+# target green. The reverse direction compares the admitted set against the
+# expected table below, which is what catches a removal, and it is the half
+# that stays here.
+#
+# The FORWARD direction -- every admitted `app` label and every policy's own
+# target resolved against the pod templates of the same render -- moved to
+# kube-linter's dangling-networkpolicy and
+# dangling-networkpolicypeer-podselector, both added via checks.include in
+# make/kube-linter.yaml. They are built-in checks that resolve a
+# podSelector against the pods of the same render, which is exactly the
+# forward half, and running them costs nothing extra: helm_lint_kube_linter
+# already passes this render to kube-linter.
+#
+# What they do NOT do is compare against a table of what SHOULD be admitted,
+# so the reverse direction stays: a policy that admits nobody is not a
+# dangling peer, and a policy that admits the wrong pods is not one either.
+# The expected table is the only thing in the repo that records the
+# intended graph, so a removal from it fails here even though the
+# remaining entries all resolve.
+#
+# A service whose policy is gated off renders no policy at all, so its row
+# simply does not appear and is not compared -- the same policy applies to
+# the forward direction, where a gated-off policy is not a dangling peer
+# because its target pods are gone by the gate that removed it. That is why
+# neither check runs against the gate renders.
 NETPOL_INGRESS_EXPECTED = victoria-metrics:otelcol,tempo,grafana,web-internal loki:otelcol,grafana tempo:otelcol,grafana
 
 helm_lint_netpol: ${LINT_RENDER}
-	yq -r 'select(.kind == "DaemonSet" or .kind == "Deployment" or .kind == "StatefulSet") | select(.spec.template.metadata.labels.app != null) | .spec.template.metadata.labels.app' ${LINT_RENDER} \
-		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/netpol-apps.txt
-	grep -c '' ${LINT_TMP_DIR}/netpol-apps.txt
-	yq -r 'select(.kind == "NetworkPolicy") | .spec.podSelector.matchLabels.app' ${LINT_RENDER} \
-		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/netpol-targets.txt
-	grep -c '' ${LINT_TMP_DIR}/netpol-targets.txt
-	comm -23 ${LINT_TMP_DIR}/netpol-targets.txt ${LINT_TMP_DIR}/netpol-apps.txt \
-		> ${LINT_TMP_DIR}/netpol-orphan.txt
-	diff /dev/null ${LINT_TMP_DIR}/netpol-orphan.txt
 	yq -r 'select(.kind == "NetworkPolicy") | .spec.podSelector.matchLabels.app as $$t | .spec.ingress[] | .from[] | .podSelector.matchLabels.app | $$t + " " + .' ${LINT_RENDER} \
 		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/netpol-admits.txt
 	grep -c '' ${LINT_TMP_DIR}/netpol-admits.txt
-	awk '{ print $$2 }' ${LINT_TMP_DIR}/netpol-admits.txt | sort -u \
-		> ${LINT_TMP_DIR}/netpol-admitted.txt
-	comm -23 ${LINT_TMP_DIR}/netpol-admitted.txt ${LINT_TMP_DIR}/netpol-apps.txt \
-		> ${LINT_TMP_DIR}/netpol-dangling.txt
-	diff /dev/null ${LINT_TMP_DIR}/netpol-dangling.txt
 	for e in $(NETPOL_INGRESS_EXPECTED); do \
 		t=$${e%%:*}; s=$${e#*:}; \
 		for x in $$(echo $$s | tr ',' ' '); do echo "$$t $$x"; done; \
@@ -325,24 +363,44 @@ helm_lint_rollout: ${LINT_RENDER}
 # that exists only while services.gadget.enabled is true. helm_lint_gates
 # cannot see an ungated job: it compares only the kind/name ids of each
 # key's own resources, and otelcol-config renders byte-identically in both
-# renders. This renders with the gadget off and asserts the job is gone from
-# the embedded config.
-helm_lint_inspektor: ${LINT_RENDER}
+# renders. So the job's guard moved into a CEL check
+# (inspektor-job-gated in make/kube-linter.yaml), and what is left here is
+# the part CEL cannot do for itself: prove the check is not vacuous.
+#
+# A check that returns "" on a render where the job is correctly absent is
+# indistinguishable from a check that never ran -- which is the whole
+# difficulty with this one, because the pass case and the broken case look
+# identical to kube-linter. Two greps close it: the job is asserted PRESENT
+# in the full render, and otelcol-config is asserted PRESENT in the
+# gadget-off one, so the check had both a job to find and a render to look
+# for it in. Rename the Service back, or un-gate the job, and the first
+# grep still passes while kube-linter reports the violation.
+#
+# --do-not-auto-add-defaults is what makes this a gate rather than a
+# second full lint: only the custom checks and the two netpol checks run.
+# The built-ins would otherwise fire on a partial cluster -- dangling-service
+# alone flags every Service whose pods the toggle removed -- and none of
+# that is a regression. Custom checks are always enabled regardless of the
+# flag, which is what keeps this from silently becoming a no-op: if the
+# config ever lost the inspektor-job-gated entry, kube-linter would exit 0
+# with nothing checked, and the two greps above would still pass.
+#
+# Same container invocation as helm_lint_kube_linter, and the same
+# read-only mount for the same reason.
+helm_lint_inspektor: ${LINT_RENDER} ${LINT_INSPEKTOR_OFF}
 	yq -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_RENDER} \
 		| grep 'job_name: inspektor' > ${LINT_TMP_DIR}/inspektor-on.txt
 	grep -c '' ${LINT_TMP_DIR}/inspektor-on.txt
-	helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) \
-		--namespace lint \
-		$(SHOGGOTH_HELM_VALUES_LINT) \
-		--set services.gadget.enabled=false \
-		> ${LINT_TMP_DIR}/inspektor-off.yaml.tmp
-	mv ${LINT_TMP_DIR}/inspektor-off.yaml.tmp ${LINT_TMP_DIR}/inspektor-off.yaml
-	yq -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_TMP_DIR}/inspektor-off.yaml \
+	yq -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_INSPEKTOR_OFF} \
 		> ${LINT_TMP_DIR}/inspektor-off.conf
 	grep -c '' ${LINT_TMP_DIR}/inspektor-off.conf
-	grep 'job_name: inspektor' ${LINT_TMP_DIR}/inspektor-off.conf \
-		> ${LINT_TMP_DIR}/inspektor-off.txt || true
-	diff /dev/null ${LINT_TMP_DIR}/inspektor-off.txt
+	docker run --rm --user "$$(id -u):$$(id -g)" \
+		-v $(CURDIR):$(KUBE_LINTER_WORKDIR):ro \
+		-w $(KUBE_LINTER_WORKDIR) \
+		$(KUBE_LINTER_IMAGE) \
+		lint $(KUBE_LINTER_OFF) \
+			--config $(KUBE_LINTER_CFG) \
+			--do-not-auto-add-defaults
 
 # ---------------------------------------------------------------------------
 # ansible/ offline validation
@@ -395,8 +453,9 @@ ANSIBLE_ROLES = $(patsubst ansible/roles/%,%, \
 # that touches the ansible/ tree at all: there is no CI here (see
 # ansible/README.md), so whatever is not checked locally is not checked.
 #
-# A missing ansible-playbook says so and skips, exactly the way
-# helm_lint_dupes treats a missing yamllint. ansible-core is a control-node
+# A missing ansible-playbook says so and skips, exactly the way the schema
+# check inside helm_lint_kube_linter's config absorbs the missing-yamllint
+# case helm_lint_dupes used to handle. ansible-core is a control-node
 # prerequisite, not something this target installs.
 #
 # ANSIBLE_CONFIG is spelled out here rather than reusing the Makefile's

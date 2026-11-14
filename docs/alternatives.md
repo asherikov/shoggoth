@@ -91,6 +91,33 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
 - <https://github.com/authelia/authelia> — SSO / 2FA / OIDC provider; works with any reverse proxy via forward-auth
 - <https://github.com/goauthentik/authentik> — full identity management with flows and policies
 - <https://github.com/keycloak/keycloak> — enterprise SSO / IdP (heavy but feature-complete OIDC/SAML)
+- <https://github.com/kanidm/kanidm> — identity management platform (Rust, MPL-2.0): OIDC provider, passkeys+TOTP, self-service WebUI, RADIUS, read-only LDAPS gateway, two-node replication
+- <https://github.com/dexidp/dex> — federated OIDC IdP (CNCF, Apache-2.0): protocol translation only, not a user store; LDAP/OIDC/GitHub/SAML connectors; v2.46.x, 2026
+- <https://github.com/glauth/glauth> — minimal Go LDAP server (MIT), dev/homelab: config-file/SQL/LDAP-proxy backends; no OIDC
+
+### SSO under direct access
+
+Constraint: CoreDNS rewrites the apex to web-internal and every `*.<domain>` to `<name>.<ns>.svc.cluster.local` (dns.yaml), so subdomains resolve straight to their own Service; `Service/grafana` and `Service/victoria-metrics` even shadow their angie vhosts. Only apex, `api`, `python-cache`, `build-cache` traverse a proxy — all public or machine-facing (`api` injects service tokens). SSO must be per-application OIDC; forward-auth protects nothing.
+
+| Consumer | Today | SSO path |
+|---|---|---|
+| Gitea | LDAP bind | OIDC auth source (`add-oauth`, `openidConnect`), group claim |
+| Grafana | anonymous + local admin | generic OAuth |
+| Argo Workflows | none | OIDC SSO (upstream Makefile wires a dex issuer) |
+| OpenBao | `auth/ldap` | JWT auth + OIDC discovery (optional) |
+| LiteLLM | master key | UI SSO documented; agents keep keys |
+| wg-easy | password + 2FA | generic OIDC (below) |
+| Redmine, CDash, phpLDAPadmin | LDAP | stays LDAP (no OIDC in core) |
+
+- Authelia (Apache-2.0): certified OIDC provider (open beta: code+PKCE, refresh tokens, LDAP-backed claims incl. groups) + forward-auth + passkeys/TOTP/WebAuthn; LDAP backend reads the existing OpenLDAP — no account migration, four wirings untouched; one Go binary, no DB/Redis; static clients in `configuration.yml` (no client admin UI); no federation (no GitHub/Google connectors); not a directory.
+- Authentik: OIDC/SAML/LDAP/RADIUS, flows/policies; needs PostgreSQL (+Redis), ≥2 cores/2 GB; replaces or syncs OpenLDAP, moving auth logic out of the chart; nothing here needs SAML/SCIM/policies.
+- Kanidm: OIDC-native, passkeys, self-service, RADIUS — but Redmine/CDash need every filter rewritten for its read-only LDAPS gateway (`spn=` DNs, compiled attribute map, `uid`/`mail`/`sn` exposure unguaranteed), phpLDAPadmin is lost, no official chart (community `kaniop` operator), provisioning moves to API/CLI; LDAP→Kanidm sync over `syncprov` is the migration path. Worth it only if identity becomes a managed service, not an auth source.
+- Dex: OIDC bridge only, no MFA/portal; redundant behind Kanidm (second OIDC hop) and dominated by Authelia in front of OpenLDAP; earns its place only for federation (GitHub/Google) or kube-apiserver OIDC — neither needed.
+- Glauth: LDAP-only, no memberOf generation in its sample config — not an SSO candidate.
+
+wg-easy: `OAUTH_PROVIDERS=oidc` + `OAUTH_OIDC_SERVER/CLIENT_ID/CLIENT_SECRET/NAME`; PKCE, `client_secret_post`, scopes `openid email profile`; docs name Authelia/Authentik with a worked Authelia client (`authorization_policy: one_factor`, `require_pkce: true`). Redirect must be the web-external HTTPS URL (in-VPN UI is plain HTTP; outside access also needs the IdP exposed via web-external). `OAUTH_AUTO_REGISTER` off — auto-registered users get admin; use `OAUTH_ALLOWED_DOMAINS`. No LDAP.
+
+Verdict: Authelia in front of the existing OpenLDAP — new `authelia` Deployment/Service (wildcard DNS resolves it), LDAP backend at `openldap:389`, passkeys + TOTP; clients for git (`/user/oauth2/authelia/callback`), grafana (`/login/generic_oauth`), argo (`/oauth2/callback`), litellm, wg-easy (web-external redirect), openbao-JWT optional; IdP origin HTTPS with the in-cluster CA (`setup-client.sh`); Redmine/CDash/phpLDAPadmin stay LDAP; forward-auth skipped (proxy-fronted names are public or machine-facing).
 
 ## LDAP directory
 
@@ -154,6 +181,7 @@ Chosen and alternative services for the Shoggoth stack (see `shoggoth/docker-com
   - - Windows-centric; use RSAT or third-party tools for management (no web UI)
   - - DNS server requirement conflicts with existing Unbound setup
   - - overkill unless Windows domain integration is specifically needed
+- Replacement path if the directory is ever swapped for Kanidm: LDAP→Kanidm sync over `syncprov` (overlay already loaded here) plus Kanidm's read-only LDAPS gateway for the consumers that stay on LDAP — see SSO under direct access.
 
 ## APT cache
 
@@ -1844,7 +1872,7 @@ second.
     across two files are one target each, not three and two.
   - + `os.Create` truncates in place, so file ownership and mode survive and
     the container runs as the invoking uid.
-  - + the manifest lives in `shoggoth/updatecli.yaml` while every path in it is
+  - + the manifest lives in `make/updatecli.yaml` while every path in it is
     repo-root-relative. `options.relativepaths` is therefore left unset: the
     default `workingdirectory` resolves them against the process working
     directory, which the make target pins to the repo root with `-w`. Setting
@@ -1969,10 +1997,10 @@ second.
 
 ## Chart validation
 
-`make/lint.mk` carries eleven `helm_lint_*` targets. The finding that decides
-everything below: **only three are generic validation** (`chart`, `render`,
-`dupes`). The other eight encode invariants that exist only because of how this
-chart is written, so the question is not which tool replaces them but which tool
+`make/lint.mk` carries nine `helm_lint_*` targets. The finding that decides
+everything below: **only two are generic validation** (`chart`, `render`). The
+other seven encode invariants that exist only because of how this chart is
+written, so the question is not which tool replaces them but which tool
 can express a `--set` toggle or a two-render comparison.
 
 | target | what it needs | off-the-shelf? |
@@ -2060,8 +2088,10 @@ forwarded to conftest; the render has to come from `helm template` and feed both
 helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) --namespace lint \
 	$(SHOGGOTH_HELM_VALUES_LINT) > ${LINT_RENDER}
 kube-linter lint ${LINT_RENDER} --config make/kube-linter.yaml
-conftest test --combine -p policy -n 'shoggoth.*' ${LINT_RENDER}
 ```
+
+The same render also feeds the `yq` targets in `make/lint.mk` — that is the
+whole reason the render is a file with a stable name rather than a pipe.
 
 **Never point kube-linter at the directory.** `contextsByDir` merges every
 `.yaml` file in a directory into one context, so `base.yaml` and `gate-*.yaml`
@@ -2085,7 +2115,135 @@ MIME type, not an image tag.
 
 ### Status
 
-Nothing is selected. None of it has been executed — this container has
-`yamllint` and `python3` only, with no `helm`, `kubectl`, `yq`, `kubeconform`,
-`kube-linter`, `conftest`, `go` or `docker`, and installing is not permitted.
-Every claim above is verified against upstream source at the pinned tags.
+**kube-linter is selected and wired in** (`make/kube-linter.yaml`,
+`make helm_lint_kube_linter`, `make helm_lint_inspektor`); conftest is not.
+Nothing was executed while choosing — this container has `yamllint` and
+`python3` only, with no `helm`, `kubectl`, `yq`, `kubeconform`, `kube-linter`,
+`conftest`, `go` or `docker`, and installing is not permitted. Every claim
+above was verified against upstream source at the pinned tags, and the
+implementation was verified the same way: the CEL checks simulated in Python
+against all 50 cached renders plus four mutations, the schema URLs confirmed
+live, the strict-mode and duplicate-key walks clean. A CEL compile error
+would surface on the first real `make helm_lint_kube_linter` run, loudly.
+
+It runs from its own container — `stackrox/kube-linter:v0.8.3-alpine`, pinned
+in `make/lint.mk` — so kube-linter is not a host install and docker is the
+prerequisite. The `-alpine` tag is load-bearing: the plain `v0.8.3` image is
+`FROM scratch` and carries no CA bundle, while kubeconform fetches its schemas
+over HTTPS and Go builds its root pool from `crypto/x509/root_linux.go`'s
+`certFiles`/`certDirectories`. Both images' manifests were pulled and their
+layers listed to confirm it — the scratch image has one layer and no `ssl`
+entries, the alpine image has the alpine base with
+`etc/ssl/certs/ca-certificates.crt`.
+
+**The first real run failed, and the failure was not in the checks.**
+`make helm_lint_kube_linter` aborted at registration with
+`unknown object kind: ConfigMap` for the three ConfigMap-scoped CEL checks.
+`scope.objectKinds` is validated against kube-linter's compiled-in registry
+(`pkg/objectkinds`), which holds 25 names — the workload, RBAC and networking
+kinds. `ConfigMap` is not one of them, and neither is `Secret`: kube-linter
+registers only kinds that carry a pod spec or a workload identity, and the
+plain config kinds were never added. Registering one is a Go change
+(`objectkinds.RegisterObjectKind`, as the cert-manager example in
+`docs/custom_resource_template_test.go` does); the config file has no field
+for it, so a ConfigMap-scoped check is unreachable from YAML. The failure is
+at least loud — it happens before a single document is read, never as a
+silently disabled check.
+
+The fix was to scope those three to `Any`, the only config-level escape, and
+move the filtering into the expression, where it already was in substance:
+each guards on something unique to its object before it dereferences
+anything. `otelcol-config` is the only object of that name in the render and
+`type: gadget-instance` the only such label, both verified against the
+current 278-document render, and the guards are kind-independent so they do
+not depend on TypeMeta surviving the decode. Re-verified after the change:
+544 object evaluations across the base and gadget-off renders, zero
+evaluation errors and zero fires, then four mutations each fired exactly
+once. `dangling-clusterrole-ref` keeps its `ClusterRoleBinding` scope, which
+is one of the 25, and still evaluates against 10 objects rather than all 278.
+
+**Then the run failed again, and this one was a real bug.** With the scope
+fixed, kube-linter got further and reported
+`invalid argument to has() macro` on `has(object.data["config.yaml"])`. That
+is a *parse-time* rejection: `cel/macro.go`'s `HasMacroExpander` accepts only
+`ast.SelectKind` and rejects everything else, so `has()` takes a field
+selection and nothing else — not an index expression, and not a call. The
+idiomatic map-key presence test is `"key" in map`, which cel-go documents as
+"test whether a value exists in a list, or a key exists in a map". Three
+occurrences, in three checks, all written by the same mistake.
+
+It was missed because the Python harness that stood in for cel-go modelled
+`has()` as a generic key-path lookup and therefore accepted any argument
+shape; cel-go does not, and the failure is at compile time so it never
+reached the evaluation the harness was checking. The harness now carries a
+`validate_has_args` pass that enforces cel-go's rule against the expressions
+as written in `make/kube-linter.yaml`, regression-tested against the
+pre-fix expression. Everything else in the expressions type-checks:
+`object.data["config.yaml"]` is `dyn` and `isAssignable(dyn, string)` is true,
+so `.contains()` resolves; and `in` on a map is key membership at runtime
+because `inAggregate` dispatches on `traits.ContainerType`, which both lists
+and maps implement.
+
+The lesson generalises past this one bug: a Python stand-in for a real
+evaluator is only as good as the restrictions it reproduces, and it
+reproduced none of cel-go's. Every claim in this section about the CEL
+checks is now backed by a check that reads the config file itself, not a
+hand translation of it.
+
+**Then the run failed a third time, and the cause was in the Makefile.**
+Eleven errors: six schema-validation failures — three Services
+(`registry`, `web-external`, `wireguard`) with `/spec/ports/0/port` null and
+`targetPort` failing its `oneOf`, and the same three Deployments with a null
+`containerPort` and null probe ports — and five probe-port findings,
+`liveness-port`/`readiness-port` on `dns`'s coredns container over 8181 and
+`readiness-port`/`startup-port` on `external-secrets-cert-controller` and
+`external-secrets-webhook` over 8081.
+
+The six were not the chart's. `make/lint.mk` referenced `SHOGGOTH_HELM_VALUES`
+and nothing ever defined it, so every lint render ran `helm template` with no
+`--values` at all — and `make` does not warn about an undefined variable
+referenced in a recipe, it expands it to the empty string. With no values
+file, every default in `values.yaml` renders, and every default there is an
+empty string: `network.*.hostPort: ""` gives `port: `, which is YAML null and
+exactly what the schema rejected; `identity.domain`/`dnsIp`/`instanceDir` empty
+gave the `dns` Service `clusterIP: None`, hostPaths under
+`/var/lib/rancher/k3s/storage//`, and seven containers with empty-string env
+values. So the gate had been validating a render that describes nothing
+deployable — `make helm_lint_kube_linter` was, in effect, linting a broken
+manifest that gets shipped to nobody. `SHOGGOTH_HELM_VALUES = --values
+$(SHOGGOTH_CONFIG)` is now defined in the `Makefile`; the lint targets cannot
+reuse `SHOGGOTH_HELM_COMMON_ARGS` because that also carries `--namespace
+$(INSTANCE)` and they render into namespace `lint`.
+
+The five probe-port findings are the other half, and they are not
+values-dependent: three containers take `--healthz-addr=:8081` (or listen on
+8181) and probe that port in a `readinessProbe`/`livenessProbe`/`startupProbe`
+without declaring it in `ports:`. kube-linter's `readiness-port`,
+`liveness-port` and `startup-port` checks compare a probe's port against the
+declared containerPorts and report an undeclared one whether or not anything
+is listening, so all five are real declarations missing — the processes do
+listen. `external-secrets.yaml` was internally inconsistent about it: the main
+`external-secrets` controller declared `containerPort: 8081 / name: ready`
+while `cert-controller` and `webhook`, which take the same
+`--healthz-addr=:8081` flag, did not. All three now declare it, and coredns
+declares 8181.
+
+The consequence for everything above: every count in this section — the
+278-document render, 41 ConfigMaps, 10 ClusterRoleBindings, 61 containers and
+the "55 of 61" tallies, 18 kinds, the 544 object evaluations and 259 of the
+CEL evaluations — was measured against the no-values render. Those numbers
+described a manifest with null ports, a null clusterIP, doubled slashes in
+hostPaths and seven empty env values. They need re-measuring against the real
+render; `make helm_lint_render` regenerates it, and this container has no
+`helm` to do it. Nothing here claims the gate is green.
+
+What moved and what stayed:
+
+| invariant | now |
+|---|---|
+| `dupes` — duplicate mapping keys | kubeconform `strict: true` inside the schema check |
+| `roledef` — `roleRef` resolves | `dangling-clusterrole-ref`, CEL |
+| `gadget_scope` — one string, three spellings | `gadget-scope-name-matches-metrics` + `gadget-scope-keep-regex`, CEL |
+| `inspektor` — gated job absent | `inspektor-job-gated`, CEL, plus two non-vacuity greps |
+| `netpol` forward half | built-in `dangling-networkpolicy` / `dangling-networkpolicypeer-podselector` |
+| `gates`, `rollout`, `collision`, `embedded`, `chart`, `render` | stayed in `make/lint.mk` |

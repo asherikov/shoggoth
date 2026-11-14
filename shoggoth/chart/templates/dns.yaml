@@ -118,6 +118,16 @@ spec:
         - containerPort: 53
           protocol: TCP
           name: dns-tcp
+        # Both probes below hit 8181, CoreDNS's readiness endpoint. The port
+        # is declared here for the same reason the ESO controller below
+        # declares its own health port: kube-linter's readiness-port and
+        # liveness-port checks compare a probe's port against the declared
+        # containerPorts, and an undeclared one is reported whether or not
+        # the process is listening. CoreDNS does listen on 8181, so this is
+        # a declaration, not a fix.
+        - containerPort: 8181
+          protocol: TCP
+          name: health
         volumeMounts:
         - name: config
           mountPath: /etc/coredns

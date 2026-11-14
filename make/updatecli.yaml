@@ -5,7 +5,7 @@
 # disabled and the apply flags below belt-and-brace it, so a run only ever edits
 # the working tree and leaves the commit to the developer. See docs/alternatives.md.
 #
-# This file lives in shoggoth/ but every path below is REPO-ROOT-relative, so
+# This file lives in make/ but every path below is REPO-ROOT-relative, so
 # `options.relativepaths` is deliberately left unset: the default
 # "workingdirectory" resolves them against the process working directory, which
 # the make target pins to the repo root with `-w`. Setting "manifest" would

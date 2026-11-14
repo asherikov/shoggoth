@@ -3,6 +3,22 @@ INSTANCE?=shoggoth
 SHOGGOTH_CONFIG?=shoggoth/${INSTANCE}.yaml
 SHOGGOTH_CHART_ROOT?=$(CURDIR)/shoggoth/chart
 
+# The `--values` half of the instance config, for callers that spell
+# `--namespace` themselves. SHOGGOTH_HELM_COMMON_ARGS (make/chore.mk) is the
+# same idea but also carries `--namespace $(INSTANCE)`, which the lint targets
+# cannot use: they render into namespace `lint` and must not inherit the
+# instance's.
+#
+# This variable has to be defined, and leaving it undefined is silent. `helm
+# template` with no `--values` renders every default in values.yaml, and every
+# default there is empty, so the result is a render that validates nothing
+# that gets deployed: the three hostNetwork Services render `port:` with
+# nothing after it, which is YAML null and is rejected by the schema; the dns
+# Service loses its pinned clusterIP; and every hostPath lands under
+# /var/lib/rancher/k3s/storage// with an empty instanceDir. That is exactly
+# the render `make helm_lint_kube_linter` was checking until this was added.
+SHOGGOTH_HELM_VALUES = --values $(SHOGGOTH_CONFIG)
+
 SHOGGOTH_CFG = $(shell yq -r '$(1)' $(SHOGGOTH_CONFIG) 2>/dev/null)
 DOMAIN?=$(call SHOGGOTH_CFG,.identity.domain)
 WEB_EXT_PORT?=$(call SHOGGOTH_CFG,.network.webExternal.hostPort)

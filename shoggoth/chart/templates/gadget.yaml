@@ -446,8 +446,8 @@ metadata:
     app: gadget
     app.kubernetes.io/component: gadget
 # roleRef is immutable server-side, so this must name the ClusterRole above
-# exactly — helm_lint_roledef resolves it against the same render for that
-# reason.
+# exactly — the dangling-clusterrole-ref check in make/kube-linter.yaml
+# resolves it against the same render for that reason.
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

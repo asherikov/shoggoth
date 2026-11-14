@@ -67,6 +67,7 @@ lists the minimum; newer is fine unless called out.
 | yq          | mikefarah v4 | The `Makefile` reads every configuration value out of `shoggoth/<instance>.yaml` through yq. The Python `yq` package is a *different* tool with a different CLI — install mikefarah's release (https://github.com/mikefarah/yq). |
 | envsubst    | gettext   | Used by `make host_install_nixos` to render `shoggoth.nix` and `ports.nix`. Bundled with most distros; on Alpine it is in the `gettext` package. |
 | ansible-core | ≥ 2.22.0 | Older versions not compatible with the latest python. |
+| docker       | any recent | Runs kube-linter as a container (`stackrox/kube-linter:v0.8.3-alpine`) for `make helm_lint_kube_linter` and `make helm_lint_inspektor`, so kube-linter itself is not a host install; also used by `make update`. The `-alpine` tag is required, not a preference: the plain `v0.8.3` image is `FROM scratch` with no CA bundle, and the schema check fetches its JSON schemas over HTTPS. The container needs outbound network for that, and the repo is mounted read-only — it writes nothing. |
 | host kernel  | ≥ 5.10   | Required for Inspektor Gadget |
 
 Comparison
@@ -925,7 +926,8 @@ on a resource that is no longer supposed to exist.
 label set. `shoggoth.labelsWithMap` overrides individual keys — the
 `part-of=external-secrets` on the ESO-owned objects — so the rendered YAML
 cannot contain duplicate keys; emitting the key literally after the helper
-duplicates it and breaks `kubeconform -strict`. The helper's own doc block
+duplicates it, and `make helm_lint_kube_linter`'s schema check loads every
+document strictly and reports the duplicate. The helper's own doc block
 in `templates/_helpers.tpl` lists the accepted override keys.
 
 **Pod DNS.** A pod that must resolve `<service>.<shoggoth-domain>` needs
@@ -980,11 +982,12 @@ picks how the content is treated:
 Two invariants the glob form depends on, both of which fail silently:
 basenames must be unique across the whole glob (`base` is applied to every
 match, so two files sharing a name emit one key twice and the second wins —
-`make helm_lint_dupes` turns that into a failure), and a glob that matches
-nothing renders an empty `data:` rather than an error, so a path typo shows
-up as an empty ConfigMap and only a render diff catches it. `make/lint.mk`
-therefore lists `files/` in `CHART_SOURCES`: an edit to a file there must
-invalidate the offline render exactly like a template edit.
+`make helm_lint_kube_linter` turns that into a failure, because its schema
+check loads every document with `yaml.UnmarshalStrict`), and a glob that
+matches nothing renders an empty `data:` rather than an error, so a path
+typo shows up as an empty ConfigMap and only a render diff catches it.
+`make/lint.mk` therefore lists `files/` in `CHART_SOURCES`: an edit to a
+file there must invalidate the offline render exactly like a template edit.
 
 
 References

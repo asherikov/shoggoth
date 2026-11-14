@@ -230,7 +230,7 @@ skills:
 # update — bump every pinned version in this tree, in place, and stop there.
 
 UPDATECLI_IMAGE?=updatecli/updatecli:v0.123.0-slim
-UPDATECLI_CONFIG?=shoggoth/updatecli.yaml
+UPDATECLI_CONFIG?=make/updatecli.yaml
 UPDATECLI_WORKDIR?=/work
 
 # The two CRD submodules updatecli cannot reach. A submodule pointer is a gitlink
