@@ -1,0 +1,641 @@
+{{- /*
+  templates/authelia-config.yaml — the Authelia portal's configuration.yml.
+
+  WHY IT IS A SEPARATE FILE FROM authelia.yaml
+  A Deployment cannot checksum the ConfigMap that defines it: `include` of
+  the checksum annotation re-enters the template that is being rendered,
+  which Helm refuses. Splitting the config out lets the Deployment carry
+  `checksum/config` over this file, so an edit here rolls the pod. The
+  same constraint produced web-external.yaml / web-external-config.yaml.
+
+  WHY THE DATA KEY IS `configuration.yml` AND NOT `config.yaml`
+  The chart's yamllint duplicate-key check is scoped to the key `config.yaml`
+  (make/lint.mk). Authelia's own entrypoint expects
+  X_AUTHELIA_CONFIG=/config/configuration.yml, so the volume is mounted at
+  /config/configuration.yml and the key has to match the mount path.
+
+  THE TWO BRACE ESCAPES BELOW ARE THE POINT OF THIS FILE
+  The Authelia image supports a Go-template filter over its own config
+  (X_AUTHELIA_CONFIG_FILTERS=template, set in authelia.yaml). That filter
+  is what turns `{{ secret ... }}` and `{{- fileContent ... | nindent 14 }}`
+  into file reads — Authelia's own templating, evaluated by the Authelia
+  process, NOT by Helm. Every such action below is wrapped in Helm's
+  literal-brace escape (`{{ `...` }}`) so Helm emits the text verbatim and
+  Authelia evaluates it. Dropping the escape makes Helm evaluate it and
+  emit `<no value>`: the YAML stays valid, the pod starts, and the portal
+  fails later with a config error that points at the wrong file.
+
+  The filter is used for exactly two shapes of value, and only because the
+  alternative does not exist:
+
+    identity_providers.oidc.jwks[].key
+      A list item. The `_FILE` convention is rejected for list items
+      (Authelia's IsSecretKey refuses keys containing `[]`), so a PEM
+      cannot reach this key through an environment variable at all.
+      `fileContent ... | nindent 14` embeds the PEM at the right
+      indentation under a `- key: |` block scalar.
+
+    identity_providers.oidc.clients[].client_secret
+      Same reason: list item, no `_FILE`. `secret` is `fileContent` with
+      trailing newlines stripped, which is what a base64 secret needs.
+      One call per client — grafana, gitea, redmine, cdash and openbao each
+      read their own key of the authelia-secrets Secret, which is the same
+      Secret the client Deployment mounts. OpenBao's reader is not a
+      Deployment: the openbao-bootstrap Job reads the same key back out of
+      OpenBao KV and POSTs it into the auth/oidc mount config, so the value
+      exists in exactly one place for the provider and for the mount.
+
+  Everything else secret is NOT templated: it arrives as a `_FILE`
+  environment variable pointing at a file in the authelia-secrets Secret
+  (see authelia.yaml). That is deliberate. The `env` template function
+  excludes AUTHELIA_ and X_AUTHELIA_ variables ending in KEY, SECRET,
+  PASSWORD, TOKEN or CERTIFICATE_CHAIN — the exact set Authelia's secrets
+  page enumerates as `_FILE`-loadable — so a config written with
+  `{{ env "AUTHELIA_SESSION_SECRET" }}` would render empty, and the
+  failure is silent. The `_FILE` env form is the documented path.
+
+  NO SECRET VALUE IS IN THIS FILE. The keys that carry one either take a
+  `_FILE` env var or one of the two fileContent/secret calls above.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authelia-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: authelia
+data:
+  configuration.yml: |
+    ---
+    server:
+      # Authelia terminates TLS itself: the shoggoth-server Secret (the same
+      # pair web-external serves) is mounted at /tls. The Service publishes
+      # 443 and targets 9091, so authelia.<domain> is HTTPS end to end and
+      # the in-cluster CA that setup-client.sh installs validates it.
+      address: 'tcp://:9091/'
+      tls:
+        certificate: /tls/tls.crt
+        key: /tls/tls.key
+
+    # There is deliberately no top-level `default_redirection_url`. The global
+    # form and the `session.cookies` block below are mutually exclusive:
+    # 4.39.28's validator rejects the pair outright
+    # (internal/configuration/validator/session.go pushes
+    # errFmtSessionLegacyRedirectionURL when both are set), the error is fatal,
+    # and the pod never starts — "session: option 'cookies' must be configured
+    # with the per cookie option 'default_redirection_url' but the global one is
+    # configured which is not supported". The per-cookie value below is the
+    # supported form and is already where every client's callback redirect
+    # lands, so dropping the global key changes nothing a user sees.
+    log:
+      level: 'info'
+
+    session:
+      # Set by AUTHELIA_SESSION_SECRET_FILE in authelia.yaml.
+      secret: ''
+      # One cookie per domain the portal is reached by. `domain` must contain
+      # a period and match authelia_url, which is why it is the bare domain
+      # and not `authelia.<domain>`: the same session cookie has to cover the
+      # portal and every client's callback (grafana.<domain> here).
+      cookies:
+        - domain: {{ .Values.identity.domain | quote }}
+          authelia_url: 'https://authelia.{{ .Values.identity.domain }}'
+          default_redirection_url: 'https://authelia.{{ .Values.identity.domain }}/'
+          # The one policy the chart exposes as a value (values.yaml:
+          # authelia.session). Idle timeout and absolute expiry; the
+          # defaults are 5m/1h, which would log an operator out mid-task and
+          # still leave a month-long remember_me cookie behind.
+          inactivity: {{ .Values.authelia.session.inactivity | quote }}
+          expiration: {{ .Values.authelia.session.expiration | quote }}
+
+    storage:
+      # Set by AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE in authelia.yaml.
+      # Required: the local provider encrypts row values with it.
+      encryption_key: ''
+      local:
+        # SQLite, on the authelia-data PVC (authelia.yaml). The volume is
+        # what makes the OIDC opaque identifiers — and therefore the `sub`
+        # claim every client receives — survive a restart; the mount has to
+        # exist before the process starts, which a bound volume does.
+        path: '/var/lib/authelia/db.sqlite3'
+
+    notifier:
+      # Exactly one notifier is required and there is no SMTP server in this
+      # deployment, so notifications go to a file in the same emptyDir.
+      filesystem:
+        filename: '/var/lib/authelia/notification.txt'
+
+    authentication_backend:
+      ldap:
+        # Plain LDAP inside the cluster: the pod's resolver is the namespace
+        # CoreDNS (shoggoth.podDnsConfig), so the short name resolves, and
+        # openldap:389 is what every other LDAP client in the chart uses.
+        address: 'ldap://openldap:389'
+        implementation: 'custom'
+        base_dn: {{ include "shoggoth.ldapBaseDn" . | quote }}
+        additional_users_dn: 'ou=people'
+        additional_groups_dn: 'ou=groups'
+        users_filter: '(&({username_attribute}={input})(objectClass=inetOrgPerson))'
+        groups_filter: '(&(member={dn})(objectClass=groupOfNames))'
+        group_search_mode: 'filter'
+        # Bind as the service account the directory was built for. The
+        # password is NOT in this file: AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE
+        # points at the openldap-ldapauth-password Secret, the same value
+        # gitea and redmine bind with, so there is no second LDAP credential
+        # to rotate.
+        user: 'uid=ldapauth,ou=people,{{ include "shoggoth.ldapBaseDn" . }}'
+        password: ''
+        attributes:
+          username: 'uid'
+          mail: 'mail'
+          display_name: 'cn'
+          # Maps the directory's `sn` onto the OIDC `family_name` claim, which
+          # the redmine_sso_suite plugin reads as its lastname. Without it the
+          # claim is absent and the plugin falls back to '-' for every
+          # SSO-provisioned account.
+          #
+          # `given_name` is mapped for CDash, not for Redmine: the
+          # redmine_sso_suite plugin does not read it, but CDash's bundled
+          # OIDC driver builds the display name as
+          # given_name + ' ' + family_name (PingIdentity\Provider::
+          # mapUserToObject) and reads the two keys straight out of the
+          # userinfo response, so an unmapped claim becomes an empty
+          # firstname and a PHP undefined-index warning on every login.
+          # Authelia omits a claim whose attribute is unresolvable or empty
+          # (internal/oidc/claims.go hydrateClaim), which is why the seed
+          # entries in openldap.yaml carry a `givenName` — the mapping alone
+          # would produce nothing.
+          given_name: 'givenName'
+          family_name: 'sn'
+          group_name: 'cn'
+          member_of: 'memberOf'
+          distinguished_name: 'distinguishedName'
+
+      # Password reset is not offered: the chart manages every account
+      # password through OpenBao and the directory, and Authelia's LDAP
+      # backend would need write access to the directory to change one.
+      # Disabling it is what makes
+      # identity_validation.reset_password.jwt_secret optional, so no sixth
+      # secret is seeded.
+      #
+      # The key is a sibling of `ldap`, not a top-level block: the validator
+      # reads authentication_backend.password_reset.disable to decide whether
+      # that JWT secret is required, and a top-level `password_reset` is a
+      # key the schema does not have.
+      password_reset:
+        disable: true
+
+    access_control:
+      # The portal itself has no rules, so the default policy must be one of
+      # the two that do not require a rule to match: deny would lock the
+      # portal out of itself, one_factor is the weaker of the two and is the
+      # same policy every OIDC client below uses, so reaching the portal and
+      # authorizing a client cannot disagree about how strong the login has
+      # to be.
+      default_policy: 'one_factor'
+
+    # 2FA is not implemented in this deployment and never will be: the portal
+    # exists so a user signs in once, not to add a second factor. It is
+    # therefore switched off at both ends. `one_factor` above and on every
+    # client means no policy ever asks for a second factor; the three blocks
+    # here take the methods away as well, because a policy alone leaves the
+    # registration UI in place and Authelia has no single switch for that.
+    #
+    # Each `disable: true` makes the validator return early and the router
+    # skip the method entirely (internal/server/handlers.go registers a
+    # second factor's routes only when its flag is false), so there is
+    # nothing to enrol and no menu item to offer:
+    #   totp      one-time passwords
+    #   webauthn  security keys as a second factor — and passkey login with
+    #             them, because those routes are registered inside the same
+    #             guard
+    #   duo_api   Duo mobile push
+    # Re-enabling 2FA is these three blocks plus the policies, nothing else:
+    # a secret already enrolled survives a disable as a storage row, and
+    # one_factor means the portal stops asking for it either way.
+    totp:
+      disable: true
+    webauthn:
+      disable: true
+    duo_api:
+      disable: true
+
+    identity_providers:
+      oidc:
+        # Set by AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE in
+        # authelia.yaml. Required by the provider: the nonce claim is an
+        # HMAC over it, and the OIDC discovery document is only served once
+        # the provider is fully configured.
+        hmac_secret: ''
+        jwks:
+          # The RSA keypair that signs ID tokens. One key, no rotation
+          # ceremony: the key is seeded once into OpenBao
+          # (authelia/oidc-jwks-key in openbao.yaml) and every client's
+          # discovery document re-reads the JWKS on its own schedule.
+          #
+          # Authelia's own templating, escaped for Helm: fileContent reads
+          # the PEM mounted at /config/secrets/oidc-jwks-key and nindent
+          # puts it at the indentation the `key: |` block scalar needs.
+          # `secret` cannot be used here: it strips the trailing newline
+          # the PEM parser is happy without, but nindent is what makes the
+          # block scalar well-formed.
+          #
+          # THE INDENTATION IS LOAD-BEARING, TWICE. The action line sits at
+          # 14 spaces because the ConfigMap's block scalar content has to
+          # be more indented than the `key` mapping it belongs to (that key
+          # starts at column 12), and nindent carries the same 14 into the
+          # file Authelia finally reads. Drop either 14 and BOTH parses
+          # break: the rendered ConfigMap is no longer valid YAML, and even
+          # if it were, the PEM would land at a column that ends the block
+          # scalar.
+          - key: |
+{{ `              {{- fileContent "/config/secrets/oidc-jwks-key" | nindent 14 }}` }}
+        # WHY THIS BLOCK EXISTS, AND WHICH CLIENTS ARE IN IT
+        # Authelia 4.39.28's default claims strategy is constructed with an
+        # EMPTY, NON-NIL ID-token allowlist — NewDefaultCustomClaimsStrategy
+        # sets `claimsIDToken: []string{}` (internal/oidc/claims.go) — and
+        # isClaimAllowed treats only `nil` as "allow all":
+        #
+        #   func isClaimAllowed(claim string, allowed []string) bool {
+        #       if allowed == nil { return true }
+        #       return utils.IsStringInSlice(claim, allowed)
+        #   }
+        #
+        # HydrateIDTokenClaims passes that empty slice, so with no policy
+        # configured EVERY scoped claim is filtered out of the ID token. The
+        # token still carries iss/aud/exp/sub, still validates and still
+        # verifies against the JWKS, which is what makes the failure silent
+        # rather than loud. HydrateUserInfoClaims passes `nil`, so the
+        # userinfo endpoint does still return the claims.
+        #
+        # That asymmetry only bites a client that reads the ID token instead
+        # of the userinfo response, or that reads it first. Gitea and CDash
+        # call the userinfo endpoint and nothing else (Gitea's go-oidc
+        # UserInfo, Laravel Socialite's AbstractProvider), so they are
+        # unaffected and deliberately have no policy. Three clients do read
+        # the ID token and therefore have one.
+        #
+        # Redmine's redmine_sso_suite plugin reads it: oidc_client.rb
+        # #claims_from_token_response returns the decoded ID-token payload
+        # whenever it has `sub` — which Authelia always issues — and only
+        # falls back to fetch_userinfo when it does not. Without a policy the
+        # plugin therefore sees a token with no `email` at all,
+        # user_provisioner.rb derives `mail: ''` from it, and every SSO login
+        # dies in create_user with "Email cannot be blank" — an error that
+        # names a field the directory does have (openldap.yaml seeds `mail`
+        # for every account), because the claim was dropped while shaping the
+        # token, not missing from the directory.
+        #
+        # The redmine list is exactly the claims the plugin maps — settings.rb's
+        # claim_email/claim_login/claim_firstname/claim_lastname resolve to
+        # email/preferred_username/given_name/family_name — plus
+        # email_verified, which user_provisioner.rb#email_verified? gates
+        # find_existing_user's match-an-existing-account-by-email on. It
+        # resolves to true unconditionally (expression/activation_user.go
+        # AttributeUserEmailVerified), so a pre-existing Redmine account is
+        # matched rather than duplicated. hydrateClaim issues a claim only
+        # when its scope is granted AND its attribute resolves: the redmine
+        # client's scopes are openid/profile/email and the LDAP attribute
+        # block above maps uid/givenName/sn, so all five land in the token.
+        #
+        # OpenBao reads it too, and its reason is a hard error rather than a
+        # wrong value. processToken (path_oidc.go) starts from the ID-token
+        # payload and then merges the /userinfo response into the same map —
+        # but that merge is best-effort and explicitly non-fatal: "a failure
+        # to fetch additional information from this endpoint will not
+        # invalidate the authorization flow", and the only trace it leaves is
+        # a warn log. The role's user_claim and groups_claim are read from
+        # whatever survived, and createIdentity (path_login.go) turns a
+        # missing one into `claim %q not found in token`, which fails the
+        # login. So a policy is what makes the claims load-bearing rather
+        # than dependent on a second HTTP call that OpenBao will not fail
+        # over. The two claims are the role's user_claim
+        # (preferred_username) and groups_claim (groups), and the latter is
+        # what bound_claims matches on to restrict the mount to the
+        # directory's admins group.
+        claims_policies:
+          redmine:
+            id_token:
+              - 'email'
+              - 'email_verified'
+              - 'preferred_username'
+              - 'given_name'
+              - 'family_name'
+          openbao:
+            id_token:
+              - 'preferred_username'
+              - 'groups'
+          # Grafana needs one too, and for a reason the three clients above
+          # do not share: its `role_attribute_path` is resolved against the
+          # ID token BEFORE the userinfo endpoint, so a claim the ID token
+          # drops is a claim Grafana never asks userinfo about.
+          #
+          # SocialGenericOAuth.collectUserInfoData
+          # (pkg/login/social/connectors/generic_oauth.go) builds its data
+          # sources in the order ID token, API, access token, and
+          # extractRoleAndOrgs fills the role from the FIRST source that
+          # yields a non-empty one. With no policy the ID token carries no
+          # scoped claims at all, and the chart's
+          # GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH —
+          # "contains(groups[*], 'admins') && 'GrafanaAdmin' || 'Viewer'" —
+          # still resolves against it: `groups[*]` projects to null,
+          # `contains` type-checks its subject as array-or-string only and
+          # errors, so searchRole falls back to the `{"groups":[]}` it
+          # marshals itself, where `contains([], 'admins')` is false and
+          # `false || 'Viewer'` is the string 'Viewer'. The role is pinned
+          # to Viewer from a token that has no groups in it, and the
+          # userinfo response — which HydrateUserInfoClaims fills with
+          # `allowed = nil` and therefore does carry `groups` — is never
+          # consulted for the role.
+          #
+          # The result is exactly the reported symptom: an SSO login that
+          # succeeds and is read-only, with the groups otherwise correct,
+          # because extractUserGroups loops all three sources and only the
+          # first non-empty one wins while extractRoleAndOrgs does not.
+          #
+          # `groups` is the only claim needed. `preferred_username` and
+          # `email` are deliberately absent: extractLogin finds no
+          # `login`/`username` field in the userinfo JSON and
+          # postProcessUserInfo defaults the login to the email, so the
+          # userinfo response supplies both and nothing reads them from the
+          # ID token.
+          grafana:
+            id_token:
+              - 'groups'
+        # CONSENT MODE IS 'implicit' ON ALL FIVE CLIENTS, AND THE SPELLING IS
+        # THE WHOLE POINT. `auto` looks like the value that means "do not
+        # ask", and it is not: it is a legacy alias that Authelia rewrites to
+        # `explicit`, so a client configured with it gets a consent screen on
+        # every single login.
+        #
+        # Two independent places make that rewrite, which is why the symptom
+        # is not a one-off. validateOIDCClientConsentMode matches the empty
+        # string and `auto` together and, when defaults are being set — which
+        # they are for every client here, because none of them uses the
+        # authelia_bearer_authz scope — replaces the value outright:
+        #
+        #   case utils.IsStringInSlice(config.Clients[c].ConsentMode,
+        #                                []string{"", auto}):
+        #       ...
+        #       config.Clients[c].ConsentMode = explicit
+        #
+        # (internal/configuration/validator/identity_providers.go; it would
+        # pick pre-configured instead only if pre_configured_consent_duration
+        # were set, and no client here sets it). NewClientConsentPolicy then
+        # agrees from the other direction: it has cases for implicit,
+        # pre-configured and explicit and NO case for auto, so its default
+        # branch returns ClientConsentModeExplicit
+        # (internal/oidc/client_policy.go). `auto` survives neither the
+        # validator nor the policy constructor.
+        #
+        # `implicit` is the mode that grants. The source comment on the
+        # constant is "the client does implicitly assume consent, and does
+        # not allow pre-configured consent sessions", and the handler matches:
+        # handleOAuth2AuthorizationConsentModeImplicit* calls
+        # oidc.ConsentGrantImplicit and returns (consent, false) — never a
+        # redirect to /consent/openid — so the authorization endpoint carries
+        # straight on to issuing the code. No user interaction at all.
+        #
+        # `pre-configured` is the other non-prompting-looking mode and is
+        # wrong here for the opposite reason: it only auto-grants when every
+        # requested scope is pre-configured, and GetConsentResponseBody sets
+        # PreConfiguration: true for it (internal/oidc/client.go), which
+        # renders the pre-configuration form. It is a mode for a server that
+        # wants an operator to pre-approve a scope list, not for a client
+        # that should never be asked.
+        #
+        # One override survives `implicit`, and it does not apply to anything
+        # in this deployment. handleOAuth2AuthorizationConsent checks
+        # oidc.RequesterRequiresExplicitConsent BEFORE the mode switch
+        # (internal/handlers/handler_oauth2_authorization_consent_core.go),
+        # and that returns true when the request carries prompt=consent or
+        # prompt=login, or when an authorization-code flow requests the
+        # offline / offline_access / authelia_bearer_authz scope
+        # (internal/oidc/util.go). The redmine_sso_suite plugin's
+        # authorization_url sends exactly response_type, client_id,
+        # redirect_uri, scope, state, code_challenge and code_challenge_method
+        # (lib/redmine_sso_suite/oidc_client.rb) — no prompt parameter and no
+        # offline scope, and its default scopes are 'openid profile email' —
+        # and gitea, grafana and cdash do not request refresh tokens either.
+        # OpenBao's authorization request is built by hashicorp/cap
+        # (oidc/request.go AuthCodeOpts), which sets response_type,
+        # client_id, redirect_uri, scope, state, nonce and the PKCE
+        # code_challenge and nothing else — no prompt, no offline scope.
+        # So nothing forces the screen back on.
+        clients:
+          # Grafana is the first of the five clients. The redirect URI is
+            # plain HTTP on purpose: grafana.<domain> resolves straight to
+            # the grafana Service (dns.yaml rewrites the subdomain), and the
+            # TLS terminator for the dashboard path is Authelia itself, so
+            # there is no HTTPS listener for a callback to land on. Authelia
+            # accepts an http redirect_uri — it only requires an absolute
+            # URL — and the OAuth flow is protected by the authorization
+            # code plus the client secret, not by the callback's scheme.
+            # Grafana reaches Authelia over the cluster network, where
+            # tls_skip_verify_insecure covers the in-cluster CA.
+          - client_id: 'grafana'
+            client_name: 'Grafana'
+            # Authelia's own templating, escaped for Helm. A list item, so
+            # the `_FILE` convention is not available; the value is the
+            # authelia/client-grafana-secret key of the same Secret the
+            # Grafana Deployment mounts as its client secret.
+            client_secret: '{{ `{{ secret "/config/secrets/grafana-client-secret" }}` }}'
+            redirect_uris:
+              - 'http://grafana.{{ .Values.identity.domain }}/login/generic_oauth'
+            scopes:
+              - 'openid'
+              - 'groups'
+              - 'profile'
+              - 'email'
+            grant_types:
+              - 'authorization_code'
+            response_types:
+              - 'code'
+            authorization_policy: 'one_factor'
+            consent_mode: 'implicit'
+            # Puts `groups` in the ID token. Not cosmetic: Grafana resolves
+            # role_attribute_path against the ID token before it calls
+            # userinfo, so without it every SSO login is pinned to Viewer
+            # from a token that carries no groups — see the claims_policies
+            # block above for the mechanism.
+            claims_policy: 'grafana'
+          # Gitea and Redmine are the second and third clients. Both call
+          # back over plain HTTP for the reason the grafana entry describes:
+          # dns.yaml rewrites the subdomain to the Service, and neither runs
+          # a TLS listener. The callback paths are fixed by upstream, not
+          # chosen here:
+          #   gitea  setting.AppURL + "user/oauth2/" + <source name> + "/callback"
+          #          (services/auth/source/oauth2/providers.go, createProvider)
+          #          — so the auth source gitea-init.sh registers has to be
+          #          named `authelia` for this URI to be the one gitea uses.
+          #   redmine /sso/oauth/callback (redmine_sso_suite's config/routes.rb)
+          # Authelia accepts an http redirect_uri — it only requires an
+          # absolute URL — and the flow is protected by the authorization code
+          # plus the client secret, not by the callback's scheme.
+          #
+          # There is no argo-workflows client: argo-server runs
+          # `--auth-mode server` with no authentication at all, so it has
+          # nothing to log in with (see argo-workflows.yaml).
+          - client_id: 'gitea'
+            client_name: 'Gitea'
+            # A list item, so the `_FILE` convention is not available; the
+            # same template-filter read the grafana secret uses. The value is
+            # the authelia/client-gitea-secret key of the Secret that
+            # gitea-init.sh also mounts as its OAuth source secret.
+            client_secret: '{{ `{{ secret "/config/secrets/gitea-client-secret" }}` }}'
+            redirect_uris:
+              - 'http://git.{{ .Values.identity.domain }}/user/oauth2/authelia/callback'
+            scopes:
+              - 'openid'
+              - 'groups'
+              - 'profile'
+              - 'email'
+            grant_types:
+              - 'authorization_code'
+            response_types:
+              - 'code'
+            authorization_policy: 'one_factor'
+            consent_mode: 'implicit'
+          # Redmine is the third client and the one that differs from the
+          # two above: its SSO button comes from the redmine_sso_suite
+          # plugin (submodule under shoggoth/data/redmine/plugins), which
+          # runs its own authorization-code + PKCE flow over Net::HTTP with
+          # default verification — no insecure-skip option exists, which is
+          # why the chart builds the pod a CA bundle instead (redmine.yaml).
+          # `groups` is deliberately absent from the scopes: the plugin maps
+          # email, preferred_username, given_name and family_name only and
+          # has no group or role sync, so the claim would be issued into a
+          # token nothing reads. Everything else is the same one-value-two-
+          # readers arrangement as grafana: this template filter and the
+          # redmine Deployment's SSO_CLIENT_SECRET both read the same key of
+          # the same Secret.
+          #
+          # token_endpoint_auth_method is the one non-default field here, and
+          # it is load-bearing: the token endpoint enforces it strictly
+          # (authelia/oauth2-provider's doAuthenticateClientSecret rejects any
+          # mismatch with ErrInvalidClient). The plugin authenticates by
+          # posting client_id and client_secret in the request BODY
+          # (oidc_client.rb exchange_code), not with HTTP Basic, so the
+          # default client_secret_basic would fail every token exchange with
+          # `invalid_client` — a login that reaches the consent screen and
+          # then dies at the callback.
+          - client_id: 'redmine'
+            client_name: 'Redmine'
+            client_secret: '{{ `{{ secret "/config/secrets/redmine-client-secret" }}` }}'
+            redirect_uris:
+              - 'http://redmine.{{ .Values.identity.domain }}/sso/oauth/callback'
+            scopes:
+              - 'openid'
+              - 'profile'
+              - 'email'
+            grant_types:
+              - 'authorization_code'
+            response_types:
+              - 'code'
+            authorization_policy: 'one_factor'
+            consent_mode: 'implicit'
+            token_endpoint_auth_method: 'client_secret_post'
+            # The reason this client has a claims policy and the other three
+            # do not: see the claims_policies block above. The plugin reads
+            # the ID token, so the claims it maps have to be allowed into
+            # that token rather than left to the userinfo endpoint.
+            claims_policy: 'redmine'
+          # CDash is the fourth client, and the second one that needs
+          # client_secret_post for the reason the redmine entry describes:
+          # CDash has no Authelia driver, so the flow is driven by the
+          # generic OIDC driver it bundles for PingIdentity
+          # (config/services.php's `pingidentity` block), which posts the
+          # credentials in the form body too
+          # (Laravel\Socialite\Two\AbstractProvider::getTokenFields).
+          #
+          # The redirect path is APP_URL + '/auth/pingidentity/callback' —
+          # fixed by CDash's routes/web.php, not chosen here — and the
+          # endpoints are explicit because Authelia is not a PingOne issuer
+          # (cdash.yaml sets all three). The button appears next to the
+          # LDAP form on /login, which stays enabled: the slave account
+          # still signs in with a password and mints its API token.
+          #
+          # `groups` is deliberately absent from the scopes, same reasoning
+          # as redmine: the driver maps name, email and nothing else
+          # (mapUserToObject reads given_name and family_name), and CDash
+          # has no group-to-role sync of its own.
+          - client_id: 'cdash'
+            client_name: 'CDash'
+            client_secret: '{{ `{{ secret "/config/secrets/cdash-client-secret" }}` }}'
+            redirect_uris:
+              - 'http://cdash.{{ .Values.identity.domain }}/auth/pingidentity/callback'
+            scopes:
+              - 'openid'
+              - 'profile'
+              - 'email'
+            grant_types:
+              - 'authorization_code'
+            response_types:
+              - 'code'
+            authorization_policy: 'one_factor'
+            consent_mode: 'implicit'
+            token_endpoint_auth_method: 'client_secret_post'
+          # OpenBao is the fifth client, and the only one whose redirect URI
+          # is neither fixed by an upstream route nor deliberately plain
+          # because there is no TLS listener: the path is the UI's Ember
+          # route for the OIDC callback. ui/app/adapters/role-jwt.js builds
+          # it as window.location.origin + router.urlFor(
+          # 'vault.cluster.oidc-callback', {auth_path}), the route is
+          # '/auth/*auth_path/oidc/callback' (ui/app/router.js), the UI's
+          # rootURL is '/ui/' (ui/config/environment.js) and the cluster
+          # name is hardcoded to 'vault' (ui/app/routes/vault.js). The mount
+          # path therefore appears twice — once as the dynamic segment and
+          # once as the literal 'oidc' that names the flow — and the whole
+          # URI is http://openbao.<domain>/ui/vault/auth/oidc/oidc/callback.
+          #
+          # OpenBao compares that string for EQUALITY against the role's
+          # allowed_redirect_uris: validRedirect (path_oidc.go) is a
+          # slices.Contains over the configured list, with the port-agnostic
+          # loopback exception that does not apply here. The role written by
+          # the openbao-bootstrap Job must therefore carry this exact value
+          # and nothing else, which is why the two files name the same
+          # string.
+          #
+          # The scheme is http because openbao.<domain> resolves straight to
+          # the openbao Service (dns.yaml rewrites the subdomain), which
+          # serves the UI and the API on 80 with tls_disable — there is no
+          # TLS listener for a callback to land on, and the deployment is
+          # VPN-only anyway.
+          #
+          # `groups` is in the scopes because it is the role's groups_claim,
+          # and `email` is deliberately absent: createIdentity
+          # (path_login.go) reads user_claim (preferred_username) and
+          # groups_claim (groups) and nothing else, so an email claim would
+          # be issued into a token no code reads. The claims_policy
+          # reference is what gets those two into the ID token at all — see
+          # the claims_policies block above.
+          #
+          # token_endpoint_auth_method is left at the default
+          # client_secret_basic, and this is the one client where that is a
+          # decision rather than an omission. x/oauth2's RetrieveToken does
+          # not hardcode a style: it reads AuthStyle from the endpoint,
+          # which discovery leaves unset (AuthStyleUnknown), and then tries
+          # client_secret_basic first and retries in the request body on any
+          # error (internal/token.go, "So just try both ways"). Authelia's
+          # doAuthenticateClientSecret accepts either, so the default works
+          # and there is nothing to override — unlike redmine and cdash,
+          # whose drivers post the credentials in the body only.
+          - client_id: 'openbao'
+            client_name: 'OpenBao'
+            client_secret: '{{ `{{ secret "/config/secrets/openbao-client-secret" }}` }}'
+            redirect_uris:
+              - 'http://openbao.{{ .Values.identity.domain }}/ui/vault/auth/oidc/oidc/callback'
+            scopes:
+              - 'openid'
+              - 'profile'
+              - 'groups'
+            grant_types:
+              - 'authorization_code'
+            response_types:
+              - 'code'
+            authorization_policy: 'one_factor'
+            consent_mode: 'implicit'
+            claims_policy: 'openbao'
+{{- end }}

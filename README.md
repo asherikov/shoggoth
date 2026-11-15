@@ -168,6 +168,10 @@ configurable domain, set to `s.local` by default.
 - User and secret management:
   - `openldap.` — OpenLDAP directory for centralized authentication
     <https://github.com/osixia/docker-openldap>.
+  - `authelia.` — SSO portal and OIDC provider
+    <https://www.authelia.com/> in front of the OpenLDAP directory; adoption is
+    partial -- only for the services that require authentication and support
+    SSO.
   - `phpldapadmin.` — OpenLDAP web interface
     <https://github.com/leenooks/phpLDAPadmin>.
   - `openbao.` — secret management <https://openbao.org/>.
@@ -255,9 +259,12 @@ Three LDAP accounts exist, each serving a distinct role:
 
 | Account    | Purpose                                                                                          |     |
 |------------|--------------------------------------------------------------------------------------------------|-----|
-| `admin`    | OpenLDAP administrator (`cn=admin`); used for LDAP management and as Grafana’s local admin login |     |
+| `admin`    | OpenLDAP administrator (`cn=admin`); LDAP management and Grafana’s admin login — same password   |     |
 | `ldapauth` | Service bind account — services that authenticate users via LDAP bind as this account            |     |
 | `slave`    | CI/automation account — reserved for slave containers and workflows                              |     |
+
+The entries themselves, and the two groups below, are seeded by the `data.ldif`
+key of `shoggoth/chart/templates/openldap.yaml`.
 
 ### Password management
 
@@ -277,27 +284,157 @@ admin password is resolved in order of priority:
 
 Two groups are used to control access:
 
-- **admins** — members are granted the `shoggoth-admin` policy in OpenBao,
-  giving full access to the secret store. The `cn=admin` directory admin is the
-  initial member. Add human admin users to this group.
+- **admins** — members become Gitea admins (`-admin-group admins`), Grafana
+  server admins (`role_attribute_path`) and OpenBao `shoggoth-admin` holders
+  (the `authelia` role's `bound_claims`). The `cn=admin` directory admin is the
+  initial member. Add human admin users to this group. The OpenBao mapping
+  changed engine rather than disappearing: the LDAP engine that read this group
+  left the binary with OpenBao 2.7 (openbao GH-3882) and the OIDC engine that
+  replaced it reads the same claim — see *OpenBao integration* below.
 - **shoggoth-auth** — service bind accounts that authenticate users on behalf of
   applications. `ldapauth` is the initial member. This group has no OpenBao
   policy mapping.
 
+Both groups are seeded next to the accounts in
+`shoggoth/chart/templates/openldap.yaml`, and the memberof overlay that keeps
+`memberOf` current is configured by the same file's `post_start` script.
+
 ### OpenBao integration
 
-Members of the `admins` group are mapped to the `shoggoth-admin` policy,
-granting full access to OpenBao’s secret store. This allows human operators in
-`admins` to log in to OpenBao using their LDAP credentials.
+OpenBao is the secret store and the credential source for every service in the
+chart. The `shoggoth-admin` policy grants full access to the secret store —
+every kv-v2 sub-path under `secret/`, not just `data/*`, because `metadata/*`
+is the only path a LIST can succeed on and therefore the only thing that makes
+the UI's secret browser show anything — and it is reachable through two
+independent login paths:
+
+- a token, minted once by the `openbao-bootstrap` Job into the
+  `shoggoth-openbao-admin-token` Secret — renewable, with no parent, and
+  re-minted only when the stored token no longer validates in the current
+  OpenBao. This is how operators and scripts sign in; the root token stays
+  where it always was, in the `openbao-unseal-key` Secret beside the unseal
+  key.
+- the `auth/oidc` mount the same Job writes, pointed at Authelia, with the
+  `authelia` role carrying the same `shoggoth-admin` policy and admitting the
+  directory's `admins` group (`bound_claims: {groups: ["admins"]}`), so an
+  Authelia login and a token login land on the same policy.
+
+The login page's method list, why `auth/token` and `auth/oidc` are tuned into
+the unauthenticated mount listing, and every field of the role are documented
+in Phase B.5 and Phase E of the `openbao-bootstrap` script in
+`shoggoth/chart/templates/openbao.yaml`; the matching client entry and claims
+policy are in `shoggoth/chart/templates/authelia-config.yaml`.
 
 ### Services
 
 | Service | Auth method               | Notes                                                                   |
 |---------|---------------------------|-------------------------------------------------------------------------|
-| Gitea   | LDAP (bind as `ldapauth`) | On-the-fly account creation; `admins` group members become Gitea admins |
-| Redmine | LDAP (bind as `ldapauth`) | On-the-fly account creation; auto-configured via entrypoint             |
-| CDash   | LDAP (bind as `ldapauth`) | Configured by chart env vars                                            |
-| OpenBao | LDAP (bind as `ldapauth`) | `admins` → `shoggoth-admin` policy                                      |
+| Gitea   | LDAP + OIDC via Authelia  | LDAP for git over SSH/HTTPS; OIDC source `authelia` for the web UI, `admins` group members become Gitea admins |
+| Redmine | LDAP + OIDC via Authelia | LDAP bind as `ldapauth` with on-the-fly account creation; the web login page also offers an Authelia SSO button (`redmine_sso_suite` plugin, env-configured, no group sync) |
+| CDash   | LDAP + OIDC via Authelia | LDAP bind as `ldapauth` with on-the-fly account creation; the web login page also offers an Authelia SSO button (bundled `pingidentity` Socialite driver, env-configured, no group sync) |
+| OpenBao | OIDC via Authelia | `auth/oidc` mount written by `openbao-bootstrap`, role `authelia` with `bound_claims: {groups: ["admins"]}` → `shoggoth-admin`; `shoggoth-openbao-admin-token` Secret carries a token for operators and scripts, root token in `openbao-unseal-key` |
+| Grafana | OIDC via Authelia         | `admins` group members become Grafana server admins; local admin login kept |
+| Argo Workflows | None | No authentication at all: `--auth-mode server` with no login page, so every request to `argo.<domain>` is authorized as the `argo-server` ServiceAccount — see `shoggoth/chart/templates/argo-workflows.yaml` |
+| LiteLLM | None | No authentication at all: no master key is set, so every request is accepted and the bearer token each client sends is never validated — see `shoggoth/chart/templates/litellm.yaml` |
+
+### SSO
+
+[Authelia](https://www.authelia.com/) is the SSO portal and OIDC provider in
+front of the OpenLDAP directory: it authenticates users against the same
+accounts — one factor, the LDAP password — and issues OIDC tokens to the
+services that speak it. It does not replace the directory — Gitea, Redmine and
+CDash keep binding to `openldap:389` as `ldapauth` directly.
+
+There is deliberately no second factor anywhere. The portal exists so a user
+signs in once, not to add a factor on top of the VPN, and a second factor that
+no service can check is theatre: the OIDC clients below accept whatever the
+portal vouches for. `totp`, `webauthn` and `duo_api` are therefore each set to
+`disable: true` in `authelia-config.yaml`, which makes Authelia's validators
+return early and its router skip the methods entirely — no registration UI, no
+menu item, and no passkey login, because those routes are registered inside
+the same guard as second-factor WebAuthn. Every `authorization_policy` is
+`one_factor` for the same reason. Re-enabling 2FA means undoing the three
+`disable` blocks and switching the policies back; a secret already enrolled
+survives a disable as a storage row.
+
+The portal is reached at `authelia.<domain>`, where the pod terminates TLS
+itself with the same certificate the external proxy serves, so the in-cluster
+CA that `setup-client.sh --install-ca-cert` installs validates it. Sessions
+last 15 minutes of inactivity and expire 12 hours after login (chart values
+`authelia.session.*`). Its SQLite storage is on the `authelia-data` PVC, and
+what makes that worth a volume is the OIDC opaque identifiers: the `sub` claim
+every client keys its account link on is resolved out of that database, so an
+`emptyDir` minted a new `sub` for every user on every boot. See
+`shoggoth/chart/templates/authelia.yaml`.
+
+Five services are wired as OIDC clients: Grafana, Gitea, Redmine, CDash and
+OpenBao. The client registrations, their scopes, consent modes and claims
+policies live in `shoggoth/chart/templates/authelia-config.yaml`; the secrets
+they need are seeded into OpenBao by the `openbao-bootstrap` Job and projected
+by `shoggoth/chart/templates/authelia-secrets.yaml`. Adding a client means
+adding one entry to the `clients` list, one seeded path, and the matching
+settings on the consuming service.
+
+All five clients are registered with `consent_mode: 'implicit'`, and the
+spelling is the whole point: `auto` is a legacy alias that Authelia rewrites to
+`explicit` in two independent places, so a client configured with it gets a
+consent screen on every login. `pre-configured` is the other
+non-prompting-looking mode and is wrong here for the opposite reason — it only
+auto-grants a pre-approved scope list. The mechanism is documented next to the
+`consent_mode` key in `authelia-config.yaml`.
+
+Argo Workflows is deliberately not one of them. `argo-server` runs
+`--auth-mode server`, the mode with no authentication at all: the UI shows no
+login page and every request to `argo.<domain>` — including a browser session
+from anyone who can reach it — is authorized as the `argo-server`
+ServiceAccount. That is a deliberate trade for a VPN-only deployment, not an
+oversight, and the SSO pieces an earlier revision wired for it were removed
+rather than left half-configured. See
+`shoggoth/chart/templates/argo-workflows.yaml`.
+
+Each client differs in how it reaches the portal, and the differences are the
+part worth knowing before adding a sixth. The mechanism behind each one is
+documented in the template that configures it:
+
+| Client  | How it reaches Authelia                                                                | Where the mechanism is documented |
+|---------|----------------------------------------------------------------------------------------|-----------------------------------|
+| Grafana | Generic OAuth connector; `tls_skip_verify_insecure` covers the in-cluster CA            | `grafana.yaml`                    |
+| Gitea   | goth `openidConnect` provider; the CA is mounted into the pod's system trust store      | `gitea.yaml`                      |
+| Redmine | `redmine_sso_suite` plugin, env-configured; a CA bundle is built for Ruby's OpenSSL     | `redmine.yaml`                    |
+| CDash   | Bundled PingIdentity Socialite driver; a CA bundle is built for PHP curl                | `cdash.yaml`                      |
+| OpenBao | `auth/oidc` mount written by the bootstrap Job; `oidc_discovery_ca_pem` carries the CA  | `openbao.yaml`                    |
+
+Three of the five read the ID token rather than the userinfo response, which is
+why they carry a claims policy in `authelia-config.yaml`: Authelia's default
+strategy puts an empty, non-nil allowlist on the ID token and filters every
+scoped claim out of it, while the userinfo endpoint still returns them. Redmine
+would fail with "Email cannot be blank" without its policy, OpenBao's
+`createIdentity` hard-errors on a missing claim, and Grafana needs `groups` in
+the token because it resolves `role_attribute_path` against the ID token before
+it calls userinfo — without it every SSO login is pinned to Viewer from a token
+that carries no groups. Gitea and CDash read userinfo only and deliberately have
+no policy.
+
+Grafana is the one client whose role mapping depends on that ordering, and the
+one whose local `admin` login is a separate mechanism — see *Password
+management* above and `shoggoth/chart/templates/grafana.yaml`.
+
+CDash is the one client of the five that cannot skip the consent screen: its
+bundled driver appends `prompt=login` to the authorization URL as a literal
+string, and Authelia reads that parameter before it consults the client's
+consent mode. This deployment accepts the extra click; the analysis is in
+`shoggoth/chart/templates/cdash.yaml`.
+
+LiteLLM is *not* an OIDC client, and it has no authentication at all: no master
+key is set, so every request is accepted and the bearer token each client
+sends (`OPENAI_API_KEY`, defaulting to the literal `ai` from `setup-client.sh`)
+is never validated. Its UI SSO needs both a master key and a database URL, and
+introducing a master key would retire every static token until each client is
+re-keyed — a worse trade than leaving the proxy open, VPN-only behind
+web-internal. v1.109.x refuses to boot without a master key, which the chart
+answers with the explicit
+`LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY=true` override. See
+`shoggoth/chart/templates/litellm.yaml`.
 
 Client Configuration
 ====================
@@ -437,7 +574,12 @@ firefox http://redmine.s.local
 ```
 
 Install plugins by cloning them into the `shoggoth/data/redmine/plugins` directory
-and restarting the service.
+and restarting the service. The directory is a gitignore whitelist, so a plugin
+that should survive a redeploy has to be listed there (or added as a submodule,
+which is how `redmine_sso_suite` is wired — see the SSO section). The SSO plugin
+needs no further steps: its settings come from the chart's environment
+variables, and `REDMINE_PLUGINS_MIGRATE` in the image entrypoint has nothing to
+run because the plugin ships no migrations.
 
 ### Redmine MCP Server (AI Agent Integration)
 
@@ -767,21 +909,20 @@ Known issues
   `'CallToolResult'` and `'DecisionsResponse'` in place of `'list'`): upstream
   bug <https://github.com/BerriAI/litellm/issues/48719>, still open. The OTel
   callback's `set_attributes` reads `response_obj.get("id")`
-  (`litellm/integrations/opentelemetry.py:2476` in v1.102.0) guarded only by a
+  (`litellm/integrations/opentelemetry.py` in v1.102.0) guarded only by a
   truthiness check, and the whole method body sits in one `try/except` that
   logs at ERROR and calls `handle_callback_failure`.
 
   Three response shapes reach that line without a `.get()`. Two of them are
   ours, both on the MCP gateway: `tools/list` passes a *list* of tool dicts
-  (`litellm/proxy/_experimental/mcp_server/server.py:2380` — `result=[tool.
+  (`litellm/proxy/_experimental/mcp_server/server.py` — `result=[tool.
   model_dump(...) for tool in all_tools]` into `async_success_handler`), and
   `tools/call` passes an MCP `CallToolResult`. So every slave-test `mcp` check
   and every agent MCP session against the gateway emits one of these errors.
   The third, `/v1/decisions` (`DecisionsResponse`), is not deployed here.
   `v1.102.0` has no guard at all — no dict check and no `CallToolResult`
   handling — and the same line is unfixed on `main` and through `v1.109.0rc1`,
-  so bumping the image does not help. The fix referenced by the
-  Troubleshooting entry above, PR
+  so bumping the image does not help. The fix proposed in the issue, PR
   [\#26713](https://github.com/BerriAI/litellm/pull/26713), was closed
   unmerged on 2026-08-30 and never reached a release.
 

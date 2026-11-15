@@ -238,6 +238,15 @@ data:
     olcAccess: {2}to * by users read by * none
 
   data.ldif: |
+    # The three accounts the README's Accounts table documents. `admin` is the
+    # directory's cn=admin equivalent AND the value every service binds Grafana's
+    # local login with (openldap/admin-password is the same OpenBao path
+    # grafana-admin-password.yaml projects); `ldapauth` is the bind account
+    # gitea, redmine, cdash and authelia authenticate users with;
+    # `slave` is the CI/automation account. givenName and sn are not
+    # decoration: authelia-config.yaml maps them onto the given_name and
+    # family_name claims, which CDash's OIDC driver reads to build its display
+    # name and the redmine_sso_suite plugin reads as its firstname/lastname.
     dn: ou=people,{{ include "shoggoth.ldapBaseDn" . }}
     changetype: add
     objectClass: organizationalUnit
@@ -254,6 +263,7 @@ data:
     objectClass: posixAccount
     uid: admin
     cn: Admin
+    givenName: Admin
     sn: Shoggoth
     uidNumber: 10000
     gidNumber: 10000
@@ -266,6 +276,7 @@ data:
     objectClass: posixAccount
     uid: ldapauth
     cn: LDAP Auth
+    givenName: LDAP
     sn: Shoogoth
     uidNumber: 10001
     gidNumber: 10001
@@ -278,12 +289,26 @@ data:
     objectClass: posixAccount
     uid: slave
     cn: Slave
+    givenName: Slave
     sn: Shoggoth
     uidNumber: 10002
     gidNumber: 10002
     homeDirectory: /home/slave
     mail: slave@{{ .Values.identity.domain }}
 
+    # The two access-control groups the README's Group memberships section
+    # documents. `admins` is the operator group: gitea maps it onto site-admin
+    # (-admin-group admins in gitea.yaml), grafana's role_attribute_path
+    # promotes it to GrafanaAdmin, and the openbao-bootstrap Job's auth/oidc
+    # role admits it through bound_claims. `shoggoth-auth` is the service bind
+    # group and has no OpenBao policy mapping.
+    #
+    # Membership is by `member`, and the memberof overlay below reflects it onto
+    # each user's `memberOf` — which is what gitea's LDAP admin-filter and
+    # authelia's groups_filter read. Add a human admin by adding their DN to
+    # cn=admins; a directory seeded before a givenName/sn change needs the
+    # attribute added by hand, because data.ldif is applied with `ldapadd -c`
+    # below, which skips entries that already exist.
     dn: cn=admins,ou=groups,{{ include "shoggoth.ldapBaseDn" . }}
     changetype: add
     objectClass: groupOfNames

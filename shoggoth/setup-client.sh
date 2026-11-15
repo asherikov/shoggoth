@@ -211,7 +211,7 @@ install_ca_certificate() {
 }
 
 update_hosts() {
-    services="argo dns apt-cache registry litellm git build-cache git-pages redmine python-cache grafana otelcol api slave-term"
+    services="argo dns apt-cache registry litellm git build-cache git-pages redmine python-cache authelia grafana otelcol api slave-term"
     hosts_entries="${HOST_IP} ${DOMAIN}
 "
 

@@ -205,7 +205,7 @@ spec:
       labels:
         app: grafana
       annotations:
-        secret.reloader.stakater.com/reload: grafana-admin-password
+        secret.reloader.stakater.com/reload: grafana-admin-password,authelia-secrets
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
@@ -217,16 +217,146 @@ spec:
         env:
         - name: GF_SECURITY_ADMIN_USER
           value: admin
-        - name: GF_SECURITY_ADMIN_PASSWORD__FILE
-          value: /run/secrets/admin_password
+        # WHY THIS IS $__file{} AND NOT A __FILE ENV SUFFIX
+        # Grafana 13.3.1 has no generic "read the value from this file" env
+        # convention. pkg/setting/expanders.go registers exactly one
+        # fileExpander, and it fires only on the `$__file{...}` syntax inside
+        # an ini VALUE: applyEnvVariableOverrides (setting.go:1082) first
+        # writes the env var's literal text into [security] admin_password —
+        # that key exists in conf/defaults.ini, so the first pass applies it —
+        # and only then does expandConfig (setting.go:1432) run the
+        # expanders. So GF_SECURITY_ADMIN_PASSWORD set to
+        # `$__file{/run/secrets/admin_password}` is expanded to the file's
+        # contents, TrimSpace'd, before readSecuritySettings reads
+        # AdminPassword (setting.go:2144).
+        #
+        # The obvious `GF_SECURITY_ADMIN_PASSWORD__FILE` spelling does NOT
+        # work: the second pass of applyEnvVariableOverrides creates a new
+        # `admin_password__file` key in [security], nothing ever reads that
+        # key, and `admin_password` keeps its defaults.ini value of `admin`.
+        # The mount is therefore not wired to the password at all, and the
+        # only thing that sets it is the postStart hook below — which cannot
+        # fail loudly (see the hook), so a silent CLI failure leaves the
+        # default `admin` password in place with nothing to trace it to.
+        #
+        # The consequence of the file expander is that a missing or unreadable
+        # file is fatal at startup rather than silently defaulting, which is
+        # the intended behaviour: the kubelet holds the container in
+        # ContainerCreating until the Secret exists anyway.
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: '$__file{/run/secrets/admin_password}'
         - name: GF_SERVER_HTTP_PORT
           value: '80'
+        # WHY root_url IS SET HERE, AND WHY NOTHING ELSE SETS IT
+        # Grafana derives the OAuth redirect_uri from [server] root_url and
+        # from nothing else. pkg/login/social/connectors/common.go
+        # createOAuthConfig builds it as
+        #   strings.TrimSuffix(cfg.AppURL, "/") + social.SocialBaseUrl + name
+        # with SocialBaseUrl = "/login/" and name = "generic_oauth"
+        # (pkg/login/social/social.go), so the value sent to Authelia is
+        # AppURL + "/login/generic_oauth". There is no
+        # auth.generic_oauth.redirect_url in 13.3.1: no connector reads one,
+        # the ini key is never populated, and setting it would change
+        # nothing. root_url is the only lever, which is also what the
+        # upstream docs tell you to set for the callback URL to be right.
+        #
+        # Left unset, conf/defaults.ini interpolates
+        # root_url = %(protocol)s://%(domain)s:%(http_port)s/ out of
+        # [server], and with http_port overridden to 80 by the variable
+        # above that evaluates to http://localhost:80/ (go-ini expands
+        # %(...)s in Key.String, gopkg.in/ini.v1 key.go transformValue).
+        # Grafana would then send
+        # redirect_uri=http://localhost:80/login/generic_oauth and Authelia
+        # would answer invalid_request — "the 'redirect_uri' parameter does
+        # not match any of the OAuth 2.0 Client's pre-registered
+        # 'redirect_uris'" — because authelia-config.yaml registers
+        # http://grafana.<domain>/login/generic_oauth. Authelia compares the
+        # absolute URL string and rewrites nothing, so the two have to agree
+        # exactly, scheme included.
+        #
+        # This is the same arrangement as the other three clients: gitea
+        # sets GITEA__server__ROOT_URL (gitea.yaml) and CDash sets APP_URL
+        # for the identical reason, because each of them appends a fixed
+        # upstream callback path to its own base URL. The value has to stay
+        # plain HTTP: grafana.<domain> resolves straight to the grafana
+        # Service (dns.yaml rewrites the subdomain) and the pod has no TLS
+        # listener, which is why the registered URI in authelia-config.yaml
+        # is http as well. It is outside the authelia gate below because it
+        # is a property of the deployment, not of the OIDC provider, and
+        # because it references no Secret.
+        - name: GF_SERVER_ROOT_URL
+          value: http://grafana.{{ .Values.identity.domain }}
         - name: GF_AUTH_ANONYMOUS_ENABLED
           value: 'true'
         - name: GF_AUTH_ANONYMOUS_ORG_ROLE
           value: Viewer
         - name: GF_AUTH_LDAP_ENABLED
           value: 'false'
+        {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+        # Authelia is the OIDC provider. The whole block is gated on it,
+        # not just the ENABLED flag: CLIENT_SECRET references the
+        # authelia-secrets Secret, which only exists while Authelia is
+        # deployed, and a secretKeyRef pointing at a missing Secret is a
+        # CreateContainerConfigError for this pod — the one failure mode
+        # that takes the dashboards down with it.
+        - name: GF_AUTH_GENERIC_OAUTH_ENABLED
+          value: 'true'
+        - name: GF_AUTH_GENERIC_OAUTH_NAME
+          value: Authelia
+        - name: GF_AUTH_GENERIC_OAUTH_CLIENT_ID
+          value: grafana
+        - name: GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: authelia-secrets
+              key: grafana-client-secret
+        - name: GF_AUTH_GENERIC_OAUTH_SCOPES
+          value: openid groups profile email
+        - name: GF_AUTH_GENERIC_OAUTH_AUTH_URL
+          value: https://authelia.{{ .Values.identity.domain }}/api/oidc/authorization
+        - name: GF_AUTH_GENERIC_OAUTH_TOKEN_URL
+          value: https://authelia.{{ .Values.identity.domain }}/api/oidc/token
+        - name: GF_AUTH_GENERIC_OAUTH_API_URL
+          value: https://authelia.{{ .Values.identity.domain }}/api/oidc/userinfo
+        # Grafana evaluates this against the ID token, then UserInfo, then
+        # the access token, and the first of the three to yield a non-empty
+        # role wins — so the ID token has to carry `groups`, which is what
+        # the `grafana` claims policy in authelia-config.yaml exists for.
+        # Without it the ID token has no scoped claims at all, this
+        # expression still resolves against it (`groups[*]` projects to
+        # null, `contains` rejects a null subject, searchRole retries
+        # against the `{"groups":[]}` it marshals itself, and
+        # `false || 'Viewer'` is the string 'Viewer'), the role is pinned
+        # to Viewer, and the userinfo response that does carry `groups` is
+        # never consulted. authelia-config.yaml documents that chain in
+        # full next to the policy.
+        #
+        # With the claim present, Authelia resolves the directory's groups
+        # into `groups` when the groups scope is requested, and `admins`
+        # is the operator group the README documents — so the expression
+        # promotes exactly that group to GrafanaAdmin and leaves everyone
+        # else a Viewer. A conditional expression is what makes it a role
+        # mapping: this key is the one that resolves to a role, while
+        # groups_attribute_path below has to resolve to the array itself.
+        - name: GF_AUTH_GENERIC_OAUTH_ROLE_ATTRIBUTE_PATH
+          value: "contains(groups[*], 'admins') && 'GrafanaAdmin' || 'Viewer'"
+        # The array form of the same claim, for Grafana's group sync.
+        - name: GF_AUTH_GENERIC_OAUTH_GROUPS_ATTRIBUTE_PATH
+          value: groups
+        # Required for the GrafanaAdmin role above to mean server
+        # administrator: without it the same expression only grants
+        # organization administrator.
+        - name: GF_AUTH_GENERIC_OAUTH_ALLOW_ASSIGN_GRAFANA_ADMIN
+          value: 'true'
+        # Authelia's certificate is issued by the in-cluster CA, which
+        # Grafana has no reason to trust: it is a private CA whose only
+        # purpose is the VPN-only <domain> namespace. Mounting the CA into
+        # this pod (or populating a system trust store) is the alternative;
+        # this is the smaller change and the traffic never leaves the
+        # cluster network.
+        - name: GF_AUTH_GENERIC_OAUTH_TLS_SKIP_VERIFY_INSECURE
+          value: 'true'
+        {{- end }}
         - name: GF_LOG_LEVEL
           value: warn
         - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
@@ -264,19 +394,54 @@ spec:
               - /bin/sh
               - -c
               - |
-                set -o pipefail
-
+                # WHY THIS HOOK EXISTS AT ALL
+                # GF_SECURITY_ADMIN_PASSWORD above is only read when the admin
+                # user is CREATED: readSecuritySettings hands AdminPassword to
+                # the user service on first boot, and a data volume that
+                # already has that user keeps whatever hash it has. This hook
+                # is the rotation path for that case — it re-applies the
+                # mounted value on every pod start, which is also how a
+                # rotated openldap/admin-password reaches an existing Grafana.
+                #
+                # WHY ITS EXIT CODE CANNOT BE TRUSTED, AND WHY THERE IS NO
+                # SUCCESS-MARKER CHECK BESIDE IT
+                # resetPasswordCommand
+                # (pkg/cmd/grafana-cli/commands/reset_password_command.go)
+                # ends in an unconditional `return nil`, so ErrAdminCannotBe
+                # Found, ErrMustBeAdmin and every "failed to update user
+                # password" exit 0. And LegacyService.Update
+                # (pkg/services/user/userimpl/legacy_user.go) returns
+                # ErrNewPasswordSameAsOld when the hashed password is
+                # unchanged, so on every restart after the first the CLI
+                # errors while being a no-op. A marker file gating the exit
+                # code on "the reset succeeded" would therefore crash-loop
+                # the pod on its second start, which is worse than a hook
+                # whose failure is silent. What the hook does guarantee is
+                # that a real CLI failure is not swallowed by a pipeline —
+                # see below.
                 LOG=/var/log/shoggoth-grafana-init.log
 
                 main() {
                     echo "=== grafana-init start $(date -Iseconds) ==="
-                    grafana cli --homepath /usr/share/grafana admin reset-admin-password "$(tr -d '\n\r' < /run/secrets/admin_password)"
+                    # Captured into a variable, NOT piped into tee: with
+                    # `grafana cli ... | tee -a "${LOG}"` the pipeline's exit
+                    # status is tee's, and busybox ash's `set -o pipefail`
+                    # support is not something to bet a password reset on.
+                    # The output is echoed here and appended to the log by
+                    # the caller, so `kubectl logs` still shows it.
+                    OUT=$(grafana cli --homepath /usr/share/grafana admin reset-admin-password "$(tr -d '\n\r' < /run/secrets/admin_password)" 2>&1)
                     rc=$?
+                    echo "${OUT}"
                     echo "=== grafana-init exit ${rc} $(date -Iseconds) ==="
-                    exit "${rc}"
+                    return "${rc}"
                 }
 
-                main 2>&1 | tee -a "${LOG}"
+                main >"${LOG}.new" 2>&1
+                rc=$?
+                cat "${LOG}.new"
+                cat "${LOG}.new" >>"${LOG}"
+                rm -f "${LOG}.new"
+                exit "${rc}"
 
         resources:
           requests:

@@ -18,14 +18,38 @@
   the network via GITEA_INSTANCE_URL, not through a shared mount, so the two
   Deployments have no storage coupling to preserve.
 
-  `gitea-bootstrap` seeds the admin user and writes the install lock over
-  LDAP; `gitea-render-config` renders app.ini from a template. Both receive
-  credentials from ExternalSecrets, never inline.
+  BOOTSTRAP: THE POSTSTART HOOK, NOT A SEPARATE WORKLOAD. There is no
+  `gitea-bootstrap` and no `gitea-render-config` in this chart — those names
+  survived from an earlier layout and match nothing that exists. Everything
+  the gitea Deployment needs beyond its GITEA__* env is done by the
+  `gitea-init` ConfigMap's init.sh, run as the gitea container's own
+  postStart hook (see `lifecycle` below), which:
+    - waits for `gitea admin auth list` to answer,
+    - registers the LDAP source (`add-ldap`, or `update-ldap` on later
+      starts) — the "plain login" path,
+    - registers the Authelia source (`add-oauth`, or `update-oauth`), gated
+      on services.authelia,
+    - seeds the `admin` account and applies its password.
+  Credentials reach it as container env from ExternalSecrets, never inline.
 
-  ${SHOGGOTH_ADMIN_PASSWORD}, ${LDAP_BIND_DN}, ${LDAP_BIND_PASSWORD},
-  ${LDAP_HOST}, ${USER_FILTER} and the bare shell vars are resolved at pod
-  start by those scripts, so they stay literal here — nothing expands them
-  on the way through Helm.
+  The install lock is set through GITEA__security__INSTALL_LOCK on the
+  Deployment rather than in init.sh, because `gitea admin` cannot run at all
+  while it is false — the hook and the lock are therefore ordered by
+  necessity, not by choice.
+
+  THIRD AUTH SOURCE: AUTHELIA. The same init.sh also registers an
+  `openidConnect` auth source named `authelia` (`gitea admin auth add-oauth`,
+  updated idempotently on every pod start), gated on services.authelia. The
+  source lives in gitea's own database, so it is a CLI call and not a
+  GITEA__* setting, and it needs two things the LDAP source does not: the
+  client secret from the authelia-secrets ExternalSecret, and the in-cluster
+  CA in the pod's trust store (goth's openidConnect discovery has no
+  insecure option — see the volumeMounts at the bottom of this file).
+
+  ${SHOGGOTH_ADMIN_PASSWORD}, ${SHOGGOTH_DOMAIN}, ${LDAP_BIND_DN},
+  ${LDAP_BIND_PASSWORD}, ${LDAP_HOST}, ${USER_FILTER} and the bare shell vars
+  are resolved at pod start by that script, so they stay literal here —
+  nothing expands them on the way through Helm.
 
   Deployment/gitea and Service/git share the `services.gitea` gate and so move
   together: the Service selects `app: gitea`, so one without the other is
@@ -129,9 +153,128 @@ data:
             -synchronize-users
     fi
     echo "shoggoth: === gitea ldap init complete ==="
+{{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+    echo "shoggoth: Registering Authelia as an OIDC authentication source"
+    # The discovery URL is HTTPS, and Authelia's certificate is issued by the
+    # in-cluster CA. goth's openidConnect provider fetches the discovery
+    # document with the default HTTP client
+    # (providers/openidConnect: getOpenIDConfig -> p.Client() ->
+    # goth.HTTPClientWithFallBack(nil) -> http.DefaultClient) and has no
+    # insecure option, so the CA has to be in this pod's system trust store:
+    # the shoggoth-ca Secret is mounted by subPath at
+    # /etc/ssl/certs/shoggoth-ca.crt, which crypto/x509 scans. Reaching
+    # Authelia over plaintext instead is not an option — the portal has no
+    # plaintext listener (see authelia.yaml).
+    AUTHELIA_DISCOVERY="https://authelia.{{ .Values.identity.domain }}/.well-known/openid-configuration"
+    # `-name authelia` is not cosmetic: gitea builds the callback URL as
+    # setting.AppURL + "user/oauth2/" + <source name> + "/callback"
+    # (services/auth/source/oauth2/providers.go, createProvider), so the name
+    # has to match the redirect_uri registered in authelia-config.yaml.
+    # `-admin-group admins` maps the directory's `admins` group (the LDAP
+    # group the README documents, and the one grafana's role attribute path
+    # uses) onto gitea's site-admin flag; everyone else is a normal user.
+    # `-skip-local-2fa` is right because the login the user just completed at
+    # Authelia is the only authentication this deployment has: Authelia's
+    # authorization_policy for this client is one_factor and totp/webauthn/
+    # duo_api are disabled outright, so there is no second factor for gitea
+    # to fall back on, and a local prompt would be a prompt nothing can
+    # satisfy.
+    # `add-oauth` is not a database write. models/auth/source.go CreateSource
+    # inserts the row and then immediately calls Source.RegisterSource() ->
+    # RegisterProviderWithGothic -> CreateGothProvider -> openidConnect.New,
+    # which fetches the discovery document above over the same default HTTP
+    # client. A failed fetch deletes the row it just inserted ("remove the
+    # AuthSource in case of errors while registering configuration",
+    # models/auth/source.go) and exits non-zero, so under `set -eu` this
+    # script aborts before the admin account is seeded at the bottom — and the
+    # postStart wrapper has no `set -e`, so the container keeps running and
+    # the failure is invisible: a Gitea that looks healthy with no Authelia
+    # source and no SSO button. The readiness gate above only proves gitea can
+    # read its own config and database, so it says nothing about Authelia
+    # being up yet, and nothing retries until the pod restarts. A `helm
+    # upgrade` restarts every pod in the release, which makes that race the
+    # normal case rather than the exception, so the registration is retried
+    # here instead of being attempted exactly once. Re-reading the source list
+    # each attempt is what makes the retry safe in both directions: a row that
+    # survived from an earlier start is updated, and one that the rollback
+    # deleted is added again.
+    OAUTH_REGISTERED=0
+    for OAUTH_ATTEMPT in $(seq 1 30); do
+        OAUTH_EXISTING="$(su-exec git gitea admin auth list 2>/dev/null \
+            | awk -v name="authelia" '$2 == name {print $1; exit}')"
+        if [ -n "${OAUTH_EXISTING}" ]; then
+            if su-exec git gitea admin auth update-oauth --id "${OAUTH_EXISTING}" \
+                -name authelia \
+                -provider openidConnect \
+                -key gitea \
+                -secret "${GITEA_OAUTH_CLIENT_SECRET}" \
+                -auto-discover-url "${AUTHELIA_DISCOVERY}" \
+                -scopes openid,groups,profile,email \
+                -group-claim-name groups \
+                -admin-group admins \
+                -skip-local-2fa; then
+                OAUTH_REGISTERED=1
+            fi
+        else
+            if su-exec git gitea admin auth add-oauth \
+                -name authelia \
+                -provider openidConnect \
+                -key gitea \
+                -secret "${GITEA_OAUTH_CLIENT_SECRET}" \
+                -auto-discover-url "${AUTHELIA_DISCOVERY}" \
+                -scopes openid,groups,profile,email \
+                -group-claim-name groups \
+                -admin-group admins \
+                -skip-local-2fa; then
+                OAUTH_REGISTERED=1
+            fi
+        fi
+        if [ "${OAUTH_REGISTERED}" -eq 1 ]; then
+            break
+        fi
+        if [ "${OAUTH_ATTEMPT}" -lt 30 ]; then
+            echo "shoggoth: authelia unreachable, attempt ${OAUTH_ATTEMPT}" >&2
+            sleep 2
+        fi
+    done
+    if [ "${OAUTH_REGISTERED}" -ne 1 ]; then
+        echo "shoggoth: ERROR: authelia source not registered" >&2
+        exit 1
+    fi
+    echo "shoggoth: === gitea authelia oauth init complete ==="
+{{- end }}
     echo "shoggoth: Setting local admin password"
-    su-exec git gitea admin user change-password --username admin --password "${SHOGGOTH_ADMIN_PASSWORD}" --must-change-password=false 2>/dev/null \
-        || echo "shoggoth: admin user not found yet (will be created on first web login)"
+    # The admin account is seeded here rather than by the installer page:
+    # GITEA__security__INSTALL_LOCK=true (see the Deployment env) means Gitea
+    # never serves /install, so there is no web path that creates the first
+    # account, and a lock without an account would leave nobody able to log
+    # in at all. `create` is made idempotent by falling back to
+    # `change-password`: on the first pod start the account does not exist, on
+    # every later start it does and the password is re-applied from the Secret
+    # (which is also how a rotated openldap-admin-password propagates).
+    #
+    # The email is the same address the directory seeds for `admin`
+    # (openldap.yaml), which is what keeps an LDAP-synchronised account from
+    # ever claiming it — and `admin` is excluded from the source's
+    # user_filter, so the local account and the directory entry never collide.
+    #
+    # A failure here is fatal, and deliberately so: the old `|| echo` fallback
+    # hid it, which is how the "admin user not found yet" case survived into a
+    # deployment where the password was never applied at all.
+    if su-exec git gitea admin user create \
+        --username admin \
+        --email "admin@${SHOGGOTH_DOMAIN}" \
+        --password "${SHOGGOTH_ADMIN_PASSWORD}" \
+        --admin \
+        --must-change-password=false 2>/dev/null; then
+        echo "shoggoth: admin user created"
+    else
+        su-exec git gitea admin user change-password \
+            --username admin \
+            --password "${SHOGGOTH_ADMIN_PASSWORD}" \
+            --must-change-password=false
+        echo "shoggoth: admin password updated"
+    fi
 
 ---
 apiVersion: v1
@@ -171,7 +314,7 @@ spec:
       labels:
         app: gitea
       annotations:
-        secret.reloader.stakater.com/reload: openldap-ldapauth-password,openldap-admin-password
+        secret.reloader.stakater.com/reload: openldap-ldapauth-password,openldap-admin-password,authelia-secrets
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
@@ -197,6 +340,17 @@ spec:
             secretKeyRef:
               name: openldap-admin-password
               key: password
+        {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+        # The OIDC client secret init.sh passes to `add-oauth`. Not a
+        # GITEA__* setting on purpose: gitea stores an OAuth2 source in its
+        # own database (models/auth/oauth2.go), so there is no app.ini key
+        # for it — the value only ever reaches the CLI.
+        - name: GITEA_OAUTH_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: authelia-secrets
+              key: gitea-client-secret
+        {{- end }}
         - name: OTEL_TRACES_EXPORTER
           value: otlp
         - name: GITEA__overall__APP_NAME
@@ -235,6 +389,81 @@ spec:
         # otherwise falls back to [security].
         - name: GITEA__security__ALLOWED_HOST_LIST
           value: private
+        # WHY THE INSTALL LOCK IS SET HERE AND NOWHERE ELSE
+        # Every `gitea admin ...` call in init.sh goes through initDB, and
+        # initDB's first statement is `setting.MustInstalled()`, which is
+        # `log.Fatal` unless [security] INSTALL_LOCK is true
+        # (modules/setting/setting.go). While the lock is false, the readiness
+        # gate at the top of init.sh therefore can never pass: it retries
+        # `gitea admin auth list` thirty times over sixty seconds, prints
+        # "shoggoth: ERROR: Gitea not ready after 60s: Unable to load config
+        # file for a installed Gitea instance...", and exits 1. The postStart
+        # wrapper has no `set -e`, so the container keeps running and the
+        # failure is silent — which is how a deployment ends up with no LDAP
+        # source ("plain login rejected") and no Authelia button ("no sso")
+        # on a Gitea that otherwise looks healthy.
+        #
+        # The lock also gates the HTTP surface: cmd/web.go calls
+        # `serveInstall` when `!setting.InstallLock`, which registers
+        # install.Routes() and NOTHING else. So with the lock false there is
+        # no login page to fail on in the first place, and no route an OAuth
+        # callback could land on.
+        #
+        # The image's `environment-to-ini` is `gitea config edit-ini
+        # --in-place --apply-env` (docker/root/usr/local/bin), so this value
+        # is written into app.ini on EVERY container start. That is what makes
+        # it apply to a fresh PVC — the s6 setup only renders app.ini from
+        # /etc/templates/app.ini when the file is absent, and that template's
+        # `INSTALL_LOCK = $INSTALL_LOCK` resolves to false — and what repairs
+        # an existing volume where the installer page was never completed.
+        #
+        # The consequence is that /install is never served, so the first
+        # account has to come from somewhere else: init.sh seeds it (see the
+        # `gitea admin user create` at the bottom of that script).
+        #
+        # SECRET_KEY is deliberately absent. An empty value is not fatal —
+        # loadSecurityFrom substitutes gitea's documented default
+        # (modules/setting/security.go) — and inventing a per-install value
+        # here would invalidate every session on each pod restart.
+        - name: GITEA__security__INSTALL_LOCK
+          value: 'true'
+        # WHY OPENID SIGN-IN IS OFF, AND WHY IT IS SET RATHER THAN LEFT ALONE
+        # The "Sign in with OpenID" button is the one thing the sign-in page
+        # offers besides the password form and the Authelia OAuth2 source:
+        # templates/user/auth/external_auth_methods.tmpl renders it under
+        # `{{`{{if .EnableOpenIDSignIn}}`}}` and links it to /user/login/openid,
+        # the page that asks the user to type an OpenID URI. That flag is
+        # `[openid] ENABLE_OPENID_SIGNIN` (modules/setting/service.go,
+        # MustBool(false)) and nothing in this deployment has ever written
+        # it — the chart, the image's app.ini template and Gitea's installer
+        # are all silent on [openid] — so the default is false and the button
+        # should not exist here.
+        #
+        # Setting it explicitly rather than trusting that default is what
+        # makes the value survive an app.ini that already carries
+        # ENABLE_OPENID_SIGNIN = true. The s6 setup renders app.ini from
+        # /etc/templates/app.ini only when the file is absent, so a volume
+        # created before this key was pinned keeps whatever it had, and
+        # `environment-to-ini` (`gitea config edit-ini --in-place
+        # --apply-env`, docker/root/usr/local/bin) is the only thing that
+        # rewrites it on every container start —
+        # modules/setting/config_env.go EnvironmentToConfig maps
+        # GITEA__<section>__<key> onto `[section] key = value`, which is the
+        # same mechanism GITEA__security__INSTALL_LOCK above relies on.
+        #
+        # There is no admin-UI equivalent: templates/admin/config.tmpl only
+        # prints a check or a cross for this setting, and no route saves the
+        # config file outside the installer, so an env var is the only lever.
+        #
+        # The scope is deliberately narrow. ENABLE_OPENID_SIGNUP is a
+        # separate key that already defaults to false and is left alone, and
+        # /user/login/openid itself stays registered
+        # (routers/web/web.go) — only the link to it goes away, so the route
+        # becomes unreachable through the UI rather than being removed.
+        # Dropping the flag also removes the OpenID panel from user settings
+        # (templates/user/settings/security/security.tmpl).
+        - name: GITEA__openid__ENABLE_OPENID_SIGNIN
+          value: 'false'
         - name: GITEA__admin__USER_DISABLED_FEATURES
           value: deletion
         - name: GITEA__actions__DEFAULT_ACTIONS_URL
@@ -290,6 +519,20 @@ spec:
         - name: gitea-init
           mountPath: /shoggoth/git/gitea
           readOnly: true
+        {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+        # The in-cluster CA, added to this pod's trust store so goth's
+        # openidConnect discovery of Authelia's HTTPS endpoint validates.
+        # subPath rather than a directory mount: a whole-directory mount of
+        # shoggoth-ca would replace /etc/ssl/certs and take the system
+        # bundle with it. crypto/x509 reads every non-directory file in
+        # /etc/ssl/certs, so one file dropped in by subPath is additive.
+        # SSL_CERT_FILE would be the alternative and is wrong for the same
+        # reason — it replaces the roots instead of extending them.
+        - name: ca-cert
+          mountPath: /etc/ssl/certs/shoggoth-ca.crt
+          subPath: shoggoth-ca.crt
+          readOnly: true
+        {{- end }}
       volumes:
       - name: gitea-init
         configMap:
@@ -298,6 +541,14 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: gitea-data
+      {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+      - name: ca-cert
+        secret:
+          secretName: shoggoth-ca
+          items:
+          - key: ca.crt
+            path: shoggoth-ca.crt
+      {{- end }}
       serviceAccountName: gitea
 {{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}

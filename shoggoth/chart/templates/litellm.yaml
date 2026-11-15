@@ -218,6 +218,16 @@ spec:
         # with one set, only the master key itself and DB-provisioned virtual
         # keys are accepted, which would 401 every existing client until they
         # are re-keyed.
+        #
+        # NO OIDC CLIENT IS REGISTERED FOR THIS SERVICE, and the reason is the
+        # same master key: v1.109.1's UI SSO needs BOTH LITELLM_MASTER_KEY and
+        # DATABASE_URL to be set — show_missing_vars_in_env() short-circuits
+        # the /sso/key/generate route otherwise, so the button cannot work
+        # without a master key. Setting one would retire every static token
+        # setup-client.sh hands out until each client is re-keyed, which is a
+        # worse trade than keeping the proxy on keys, so the chart keeps
+        # key-based auth and answers the boot refusal with the override above
+        # rather than with a master key that cannot be rolled out.
         - name: LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY
           value: 'true'
         - name: SHOGGOTH_DOMAIN

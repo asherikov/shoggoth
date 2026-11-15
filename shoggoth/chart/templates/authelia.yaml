@@ -1,0 +1,282 @@
+{{- /*
+  templates/authelia.yaml — the Authelia SSO portal (ServiceAccount, Service,
+  Deployment).
+
+  GATE: services.authelia.enabled. Everything below, including the config
+  split out into authelia-config.yaml and the ExternalSecret in
+  authelia-secrets.yaml, disappears when the flag is false.
+
+  WHAT IT CONSUMES
+    ConfigMap authelia-config    (this chart, authelia-config.yaml)
+    Secret authelia-secrets       (ESO projection, authelia-secrets.yaml)
+    Secret openldap-ldapauth-password (existing, the LDAP bind account)
+    Secret shoggoth-server        (written by the openbao-bootstrap Job)
+
+  THE POD IS TLS-TERMINATING AND PLAIN-HTTP-FREE
+  There is no plaintext listener anywhere: server.address is the TLS
+  listener on 9091 and the Service maps 443 to it. That is what lets the
+  redirect URI in authelia-config.yaml be http while the portal itself is
+  HTTPS — the client talks plain HTTP to grafana, and grafana talks HTTPS to
+  authelia. Adding a second, plaintext Service or a web-internal vhost here
+  would be the one change that reintroduces a cleartext path.
+
+  WHY THE PROBES ARE HTTPS
+  httpGet carries `scheme: HTTPS` because there is no plaintext port to
+  probe. The port is the declared containerPort 9091 (kube-linter checks
+  that probes reference a declared containerPort, so the name and the
+  number must both stay in sync with the Service's targetPort).
+
+  WHY THERE IS A PVC
+  The portal's state is not recreatable by logging in again, which is what
+  the emptyDir an earlier revision mounted here assumed. The OIDC opaque
+  identifiers are the part a login cannot repair: Store.GetSubject
+  (internal/oidc/store.go) resolves a user's `sub` through
+  LoadUserOpaqueIdentifierBySignature("openid", sector, username) and, when
+  that row is missing, NewUserOpaqueIdentifier mints a fresh random UUID
+  (internal/model/user_opaque_identifier.go, uuid.NewRandom) and saves it to
+  the local SQLite storage. An emptyDir at /var/lib/authelia drops the whole
+  database at every pod start, so the portal issues a NEW sub for every user
+  on every boot — and a client that keyed its local account on the old one
+  no longer matches. That is the Gitea symptom: its OAuth link row is
+  external_login_user.external_id = gothUser.UserID = the `sub` claim (goth's
+  openidConnect provider, UserIdClaims is ["sub"]), written by
+  externalaccount.LinkAccountToUser on the create-or-link page, so a changed
+  sub makes an already-linked user look unknown and gitea asks to create or
+  link an account again after every reboot. Enrolled second factors would be
+  lost the same way, which is a latent cost rather than a current one — totp
+  and webauthn are disabled here.
+
+  The PVC is also what makes the storage path durable in the sense the
+  emptyDir only faked. The image runs as root (PUID=0/PGID=0, no USER
+  directive) and the entrypoint chowns /config, but nothing in the image
+  creates or chowns a data directory of the chart's choosing, so the mount
+  has to exist before the process starts — a bound volume does, and the
+  local-path provisioner's directory is root-owned, so the same root
+  context that writes the SQLite file can write it there.
+
+  helm.sh/resource-policy: keep, matching gitea-data and every other PVC in
+  the chart: `helm uninstall` stops the workload and preserves the
+  identifiers, and a reinstall adopts the claim because shoggoth.labels
+  survives the uninstall, so Helm's ownership check still passes.
+
+  The encryption key is NOT in this volume. AUTHELIA_STORAGE_ENCRYPTION_KEY_
+  FILE points at the authelia-secrets Secret (see the env below), so it is
+  stable across reboots and an existing database keeps decrypting; rotating
+  it would orphan every encrypted row, TOTP secrets included.
+
+  WHY enableServiceLinks IS FALSE
+  The Service above is named `authelia`, so kubelet injects eight AUTHELIA_*
+  variables into this pod (pkg/kubelet/envvars/envvars.go, unconditionally for
+  the first port): AUTHELIA_SERVICE_HOST, AUTHELIA_SERVICE_PORT,
+  AUTHELIA_SERVICE_PORT_HTTPS, AUTHELIA_PORT, and the four
+  AUTHELIA_PORT_443_TCP{,_PROTO,_PORT,_ADDR}. Authelia's environment loader
+  reads that exact prefix — getEnvConfigMap builds its key map from
+  AUTHELIA_ + the uppercased config key — so AUTHELIA_PORT is not noise to it.
+  It lands on the deprecated top-level `port` key (deprecated in 4.30.0,
+  auto-mapped to server.port), and server.port next to the server.address
+  this chart sets is fatal: "error occurred performing deprecation mapping
+  for keys 'server.host', 'server.port', and 'server.path' to new key
+  server.address: the new key already exists with value 'tcp://:9091/' but
+  the deprecated keys and the new key can't both be configured". The pod
+  dies before it serves anything, with a message that names keys this file
+  does not contain. The other seven variables are only
+  "configuration environment variable not expected" warnings. Nothing here
+  reads a service link — openldap is reached through the pod's resolver
+  (shoggoth.podDnsConfig) and the clients through the Service's ClusterIP —
+  so the whole injected set is switched off rather than worked around.
+  KUBERNETES_SERVICE_HOST/PORT are unaffected: kubelet injects those for the
+  master service regardless of this flag.
+
+  WHY NOT readOnlyRootFilesystem / runAsNonRoot
+  The chart's PodSecurity profile is `privileged` (see
+  _helpers.tpl:shoggoth.podSecurityProfile) and kube-linter's
+  run-as-non-root / no-read-only-root-fs checks are excluded by design in
+  make/kube-linter.yaml — the upstream image runs as root and writes its
+  SQLite file, so a non-root context would break it rather than harden it.
+*/}}
+{{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: authelia
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: authelia
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authelia
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: authelia
+spec:
+  selector:
+    app: authelia
+  ports:
+  # 443, not 9091: this is the URL the browser is given
+  # (authelia.<domain>) and the one setup-client.sh adds to /etc/hosts, so
+  # the port has to be the HTTPS port the clients are configured with. The
+  # in-cluster listeners (grafana's OAuth env, argo's issuer) talk to
+  # authelia:443 too.
+  - name: https
+    port: 443
+    targetPort: 9091
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: authelia-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: authelia
+  annotations:
+    # Kept across `helm uninstall` — see the header: the claim holds the
+    # OIDC opaque identifiers, which are the `sub` every client keys its
+    # local account on, and losing them re-prompts every user on every
+    # service.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      # The database is a handful of rows — one opaque identifier per user,
+      # plus TOTP/WebAuthn rows if 2FA is ever re-enabled. 1Gi is three
+      # orders of magnitude more than that, and it is the smallest size the
+      # local-path provisioner will bind without complaint.
+      storage: 1Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authelia
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
+    app.kubernetes.io/component: authelia
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: authelia
+  template:
+    metadata:
+      labels:
+        app: authelia
+      annotations:
+        # The pod restarts when either its config or its secrets change.
+        # The config half is the checksum of the ConfigMap in
+        # authelia-config.yaml — it cannot be inlined here because a
+        # Deployment cannot checksum the file that defines it.
+        checksum/config: {{ include (print $.Template.BasePath "/authelia-config.yaml") . | sha256sum }}
+    spec:
+      {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
+      # See the header: the Service's own name is a valid Authelia config
+      # prefix, and the injected AUTHELIA_PORT collides with server.address.
+      enableServiceLinks: false
+      containers:
+      - name: authelia
+        image: authelia/authelia:4.39.28
+        imagePullPolicy: IfNotPresent
+        env:
+        # The Go-template filter over Authelia's own configuration.yml,
+        # which is what makes the two fileContent/secret calls in
+        # authelia-config.yaml work. Without it the file is read verbatim,
+        # the template text stays in the YAML, and Authelia fails to parse
+        # the jwks key and the client secret.
+        - name: X_AUTHELIA_CONFIG_FILTERS
+          value: template
+        - name: X_AUTHELIA_CONFIG
+          value: /config/configuration.yml
+        # The four scalar secrets. Each is the documented `_FILE` form of a
+        # key that is required but empty in authelia-config.yaml. The env
+        # template function would refuse to read these names (it excludes
+        # AUTHELIA_ and X_AUTHELIA_ variables ending in KEY, SECRET,
+        # PASSWORD, TOKEN or CERTIFICATE_CHAIN), which is exactly why they
+        # are passed as `_FILE` paths and not as `env` function calls.
+        - name: AUTHELIA_SESSION_SECRET_FILE
+          value: /config/secrets/session-secret
+        - name: AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE
+          value: /config/secrets/storage-encryption-key
+        - name: AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE
+          value: /config/secrets/oidc-hmac-secret
+        # The LDAP bind password: the existing openldap-ldapauth-password
+        # Secret, mounted at a path of its own. Reused rather than seeded a
+        # second time — it is the same directory account gitea and redmine
+        # bind as, so rotating it once rotates it for all three.
+        - name: AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE
+          value: /run/secrets/ldap_password
+        ports:
+        - containerPort: 9091
+          name: https
+        volumeMounts:
+        - name: config
+          mountPath: /config/configuration.yml
+          subPath: configuration.yml
+          readOnly: true
+        # The ESO projection: four scalar secrets by file path (the `_FILE`
+        # env vars above) plus the two the config reads through the template
+        # filter.
+        - name: secrets
+          mountPath: /config/secrets
+          readOnly: true
+        - name: ldap-password
+          mountPath: /run/secrets/ldap_password
+          subPath: password
+          readOnly: true
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+        - name: data
+          mountPath: /var/lib/authelia
+        resources:
+          requests:
+            memory: 128Mi
+            cpu: 50m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 9091
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 9091
+            scheme: HTTPS
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 6
+      volumes:
+      - name: config
+        configMap:
+          name: authelia-config
+      - name: secrets
+        secret:
+          secretName: authelia-secrets
+      - name: ldap-password
+        secret:
+          secretName: openldap-ldapauth-password
+      # The same pair web-external serves, written to a runtime Secret by
+      # the openbao-bootstrap Job (Phase D of openbao.yaml). Mounting it
+      # here rather than issuing a second certificate is what makes the
+      # portal's cert chain validate against the CA setup-client.sh
+      # already installs.
+      - name: tls
+        secret:
+          secretName: shoggoth-server
+      - name: data
+        persistentVolumeClaim:
+          claimName: authelia-data
+      serviceAccountName: authelia
+{{- end }}

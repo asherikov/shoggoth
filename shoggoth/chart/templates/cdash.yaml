@@ -11,6 +11,22 @@
   ServiceAccount. The PushSecret in cdash-api-token-push.yaml mirrors that
   Secret into OpenBao, so the pod never holds an OpenBao credential.
   web-internal picks the token up on its next restart.
+
+  SSO: when `authelia` is enabled the Deployment also registers the `cdash`
+  OIDC client (authelia-config.yaml) and gets the `PINGIDENTITY_*` env block
+  below. CDash has no Authelia driver, so the client is wired through the
+  generic OIDC driver CDash bundles for PingIdentity: config/services.php
+  takes explicit auth/token/user endpoint paths, which is all an Authelia
+  (non-PingOne) issuer needs. `CDASH_AUTHENTICATION_PROVIDER=ldap` is
+  unchanged — the LDAP form and the SSO button are both on /login, and the
+  slave account still signs in with a password.
+
+  The env block and the `cdash-ca-bundle` initContainer are gated on the same
+  flag and have to appear and disappear together: the authorization redirect
+  happens in the browser, but the token exchange and the userinfo call are
+  PHP curl requests from inside the pod to authelia.<domain>, which serves
+  the in-cluster CA's certificate. Without the bundle those calls fail TLS
+  verification and the login page 500s instead of showing the button.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "cdash")) }}
 apiVersion: v1
@@ -391,9 +407,49 @@ spec:
         app: cdash
         app.kubernetes.io/component: cdash
       annotations:
-        secret.reloader.stakater.com/reload: cdash-db-password,cdash-app-key,openldap-ldapauth-password,openldap-slave-password
+        secret.reloader.stakater.com/reload: cdash-db-password,cdash-app-key,openldap-ldapauth-password,openldap-slave-password,authelia-secrets
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
+      {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+      # Builds the trust store CDash's PHP needs for its calls to Authelia.
+      # PHP's curl and openssl extensions both go through OpenSSL's
+      # X509_STORE_set_default_paths, which loads the default cert FILE
+      # (/etc/ssl/cert.pem, or $SSL_CERT_FILE) as one PEM bundle and the
+      # default cert DIR only as a hash-dir lookup whose filenames are
+      # <subject_hash>.N — so the gitea-style subPath mount of a single
+      # shoggoth-ca.crt is invisible here. Appending the CA to the image's
+      # own bundle instead keeps the public roots.
+      #
+      # Same image as the app container on purpose: the layer is already on
+      # the node, so this costs no pull and no second image to track. The
+      # image is Debian with ca-certificates installed
+      # (/etc/ssl/certs/ca-certificates.crt) and runs as www-data, which is
+      # fine — the emptyDir below is world-writable.
+      initContainers:
+      - name: cdash-ca-bundle
+        image: kitware/cdash:v5.6.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -eu
+          cat /etc/ssl/certs/ca-certificates.crt /shoggoth-ca/ca.crt > /etc/shoggoth-ca/ca-certificates.crt
+        volumeMounts:
+        - name: shoggoth-ca
+          mountPath: /shoggoth-ca/ca.crt
+          subPath: ca.crt
+          readOnly: true
+        - name: ca-bundle
+          mountPath: /etc/shoggoth-ca
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+      {{- end }}
       containers:
       - name: cdash
         image: kitware/cdash:v5.6.0
@@ -458,6 +514,90 @@ spec:
             secretKeyRef:
               name: openldap-slave-password
               key: password
+        {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+        # Socialite login through Authelia, via the generic OIDC driver
+        # CDash bundles for PingIdentity — there is no Authelia driver, and
+        # this one is driven entirely by config, so it fits any issuer that
+        # publishes authorization/token/userinfo endpoints. The button shows
+        # up next to the LDAP form on /login because
+        # username_password_authentication_enabled defaults to true.
+        #
+        # The redirect is APP_URL + '/auth/pingidentity/callback'
+        # (config/services.php), which is what authelia-config.yaml registers
+        # for this client — the two have to stay in step.
+        #
+        # Socialite posts client_id and client_secret in the token request
+        # body (AbstractProvider::getTokenFields, no Basic auth), which is
+        # why the client is registered with
+        # token_endpoint_auth_method: client_secret_post.
+        #
+        # THIS IS THE ONE CLIENT THAT CANNOT SKIP THE CONSENT SCREEN, and the
+        # reason is a hardcoded string in the driver rather than anything
+        # Authelia-side. getAuthUrl appends
+        # `&acr_values=Single_Factor&prompt=login` to the authorization URL as
+        # a literal (resources/providers/PingIdentity/Provider.php, the
+        # socialiteproviders/pingidentity package CDash vendors from its own
+        # tree): no PINGIDENTITY_* variable reaches it and there is no config
+        # that turns it off. Authelia reads that parameter BEFORE it consults
+        # the client's consent mode — RequesterRequiresExplicitConsent
+        # (internal/oidc/util.go) returns true when `prompt` contains `login`
+        # or `consent`, and handleOAuth2AuthorizationConsent
+        # (internal/handlers/handler_oauth2_authorization_consent_core.go)
+        # then picks the explicit handler regardless of the mode:
+        #
+        #   if oidc.RequesterRequiresExplicitConsent(requester) && mode !=
+        #       oidc.ClientConsentModeExplicit {
+        #
+        # With no `consent_id` in the query that handler generates a fresh
+        # consent challenge, so the screen appears on EVERY login, not only
+        # the first. `consent_mode: 'implicit'` on this client is therefore
+        # correct but insufficient: it is the mode the other four clients use
+        # successfully, and they are unaffected because none of them sends
+        # `prompt` at all. Nothing on the Authelia side bypasses the check
+        # either — `consent_mode` has three values and `implicit` is already
+        # the most permissive. The only ways out are to accept the extra
+        # click, or to stop the Authelia at all with a proxy that rewrites the
+        # authorization query string, which costs https://authelia.<domain>
+        # for that hop and adds a web-internal dependency to CDash's login.
+        # This deployment accepts the click.
+        #
+        # The `acr_values` half of the same string is harmless: Authelia only
+        # advertises `acr_values_supported` in discovery (internal/oidc/
+        # types.go) and never parses it from the request.
+        #
+        # ONE-WAY DOOR ON THE ACCOUNT: OAuthController matches the account by
+        # email and then calls recordExternalLogin(), which sets
+        # `password_login_disabled` — so once a user signs in through the SSO
+        # button, the LDAP password form no longer works for that account.
+        # That is CDash's own behaviour and is not overridden here.
+        - name: PINGIDENTITY_ENABLE
+          value: 'true'
+        - name: PINGIDENTITY_CLIENT_ID
+          value: 'cdash'
+        - name: PINGIDENTITY_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: authelia-secrets
+              key: cdash-client-secret
+        # No trailing slash: the provider concatenates instance_uri with each
+        # endpoint path below.
+        - name: PINGIDENTITY_DOMAIN
+          value: 'https://authelia.{{ .Values.identity.domain }}'
+        - name: PINGIDENTITY_AUTH_ENDPOINT
+          value: '/api/oidc/authorization'
+        - name: PINGIDENTITY_TOKEN_ENDPOINT
+          value: '/api/oidc/token'
+        - name: PINGIDENTITY_USER_ENDPOINT
+          value: '/api/oidc/userinfo'
+        - name: PINGIDENTITY_DISPLAY_NAME
+          value: 'Sign in with Authelia'
+        # The CA trust for the token exchange and the userinfo call — both
+        # PHP curl requests to authelia.<domain> with default verification and
+        # no bypass option. Points at the bundle the cdash-ca-bundle
+        # initContainer builds, for the reason described there.
+        - name: SSL_CERT_FILE
+          value: '/etc/shoggoth-ca/ca-certificates.crt'
+        {{- end }}
         - name: OTEL_TRACES_EXPORTER
           value: otlp
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -487,6 +627,13 @@ spec:
           mountPath: /run/secrets/cdash_db_password
           subPath: password
           readOnly: true
+        {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+        # The bundle, not the CA: see the cdash-ca-bundle initContainer.
+        # Read-only because only the initContainer writes it.
+        - name: ca-bundle
+          mountPath: /etc/shoggoth-ca
+          readOnly: true
+        {{- end }}
         lifecycle:
           postStart:
             exec:
@@ -536,6 +683,19 @@ spec:
       - name: db-password
         secret:
           secretName: cdash-db-password
+      {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+      # The CA the initContainer appends, and the emptyDir the combined
+      # bundle is written to. The app container mounts only the emptyDir —
+      # it has no use for the bare CA.
+      - name: shoggoth-ca
+        secret:
+          secretName: shoggoth-ca
+          items:
+          - key: ca.crt
+            path: ca.crt
+      - name: ca-bundle
+        emptyDir: {}
+      {{- end }}
       serviceAccountName: cdash
 ---
 {{- if (include "shoggoth.isServiceEnabled" (list . "cdash-db")) }}

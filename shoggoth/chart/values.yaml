@@ -64,6 +64,29 @@ gitea:
 ldap:
   baseDn: ""
 
+# Authelia — the SSO/OIDC portal in front of the existing OpenLDAP directory.
+# Rendered by templates/authelia.yaml, templates/authelia-config.yaml and
+# templates/authelia-secrets.yaml, gated on `services.authelia.enabled`.
+#
+# The session policy is the only tunable. The LDAP bind account, the TLS pair
+# and the OIDC clients are not: the bind account is the directory's own
+# service account, the pair is the one the openbao-bootstrap Job already
+# writes, and the clients are dictated by whatever consumes them (grafana in
+# the first cut).
+authelia:
+  session:
+    # Idle timeout: how long an unattended portal session survives without
+    # a request. Short on purpose — the portal is reached over the VPN from
+    # machines the chart does not control, and an idle session is the one
+    # thing a borrowed laptop can inherit. Authelia's own default is 5m;
+    # 15m is long enough to not re-authenticate between two dashboards.
+    inactivity: "15m"
+    # Absolute expiry, measured from login. 12h is a working day: it bounds
+    # how long a leaked cookie is worth, which is what a 1M remember_me
+    # default would not. It is not capped by inactivity — a session in
+    # continuous use still dies at 12h and re-authenticates.
+    expiration: "12h"
+
 # Per-service enable flags. Each key is spelled the same as the `app:` label of
 # the workload it gates, so a `--set services.<key>.enabled=false` maps
 # one-to-one. A "false" flag emits *no* resources for that service.
@@ -86,6 +109,7 @@ services:
   argo-workflow-controller:   { enabled: true }
   argo-webhook-receiver:      { enabled: true }
   apt-cache:                  { enabled: true }
+  authelia:                   { enabled: true }
   basic-memory:               { enabled: true }
   basic-memory-ui:            { enabled: true }
   cdash:                      { enabled: true }

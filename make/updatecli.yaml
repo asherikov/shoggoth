@@ -229,6 +229,16 @@ sources:
       tagfilter: '^\d+(\.\d+){2}$'
       versionfilter:
         kind: semver
+  authelia:
+    kind: dockerimage
+    spec:
+      # No `v` prefix: Authelia's tags are bare `X.Y.Z` (4.39.28 exists,
+      # v4.39.28 does not), so the filter is the same shape as
+      # crawl4ai's and not the `^v` one victoria-metrics uses.
+      image: authelia/authelia
+      tagfilter: '^\d+(\.\d+){2}$'
+      versionfilter:
+        kind: semver
   fusion:
     kind: dockerimage
     spec:
@@ -538,6 +548,13 @@ targets:
       file: shoggoth/chart/templates/basic-memory.yaml
       matchpattern: 'image: ghcr\.io/basicmachines-co/basic-memory:([A-Za-z0-9][A-Za-z0-9._-]*)'
       replacepattern: 'image: ghcr.io/basicmachines-co/basic-memory:{{ source "basic-memory" }}'
+  authelia:
+    kind: file
+    sourceid: authelia
+    spec:
+      file: shoggoth/chart/templates/authelia.yaml
+      matchpattern: 'image: authelia/authelia:([A-Za-z0-9][A-Za-z0-9._-]*)'
+      replacepattern: 'image: authelia/authelia:{{ source "authelia" }}'
   fusion:
     kind: file
     sourceid: fusion

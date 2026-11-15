@@ -13,3 +13,6 @@
 [submodule "shoggoth/argo-workflows"]
 	path = shoggoth/crd/argo-workflows
 	url = https://github.com/argoproj/argo-workflows.git
+[submodule "shoggoth/data/redmine/plugins/redmine_sso_suite"]
+	path = shoggoth/data/redmine/plugins/redmine_sso_suite
+	url = https://github.com/redmineshop/redmine_sso_suite

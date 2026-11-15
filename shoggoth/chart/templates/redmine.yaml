@@ -28,6 +28,16 @@
   `SECRET_KEY_BASE`, so the `secret-key-base` volume has to be mounted for
   the hook as well as for the image entrypoint.
 
+  A third key in that same ConfigMap, `sso_suite_zeitwerk.rb`, is not run by
+  that hook and is not mounted where it ends up either: a `redmine-zeitwerk-fix`
+  initContainer copies it into a writable emptyDir and the app container mounts
+  it from there at `config/initializers/`, because it has to exist before the
+  boot it repairs and the image's entrypoint chowns `config/` before it execs
+  rails. The key's own comment and the initContainer's give the mechanism in
+  full; the short form is that the `plugins` volume is mounted unconditionally,
+  so the vendored `redmine_sso_suite` plugin is always present and always eager
+  loaded, and the workaround therefore cannot be gated on anything.
+
   ${SHOGGOTH_ADMIN_PASSWORD}, ${SECRET_KEY_BASE}, ${REDMINE_SECRET_KEY_BASE_FILE},
   ${LDAP_BIND_DN}, ${LDAP_BIND_PASSWORD}, ${LDAP_HOST} and the bare shell vars
   are resolved at pod start by those scripts — they stay literal here, because
@@ -316,6 +326,63 @@ data:
     end
     print new_key
 
+  sso_suite_zeitwerk.rb: |
+    # WHY THIS FILE EXISTS
+    #
+    # Redmine 7.0.3 loads every plugin's lib/ into the main Zeitwerk
+    # autoloader with eager loading enabled (lib/redmine/plugin_loader.rb,
+    # add_autoload_paths: it builds a Rails::Engine::Configuration, adds
+    # 'lib' with eager_load: true, and pushes each all_eager_load_paths entry
+    # into Rails.autoloaders.main). Zeitwerk therefore expects
+    # plugins/redmine_sso_suite/lib/redmine_sso_suite/version.rb to define
+    # RedmineSsoSuite::Version.
+    #
+    # It defines VERSION instead — the gem convention — and the plugin's own
+    # init.rb uses it as RedmineSsoSuite::VERSION. In development and test
+    # that mismatch is invisible, because Zeitwerk only reads the file when
+    # the constant is first referenced or when the tree is eager loaded, and
+    # the test environment does not eager load. Production does
+    # (config.eager_load = true), so the boot reaches
+    # Zeitwerk::Loader::EagerLoad#actual_eager_load_dir, asks for
+    # RedmineSsoSuite::Version, and dies:
+    #
+    #   uninitialized constant RedmineSsoSuite::Version (NameError)
+    #   Did you mean?  RedmineSsoSuite::VERSION
+    #
+    # raised out of bin/rails before the server ever listens. That is the
+    # whole crash — nothing is wrong with the plugin's behaviour, only with
+    # the file name Zeitwerk derived a constant from.
+    #
+    # init.rb already require_relative's version.rb itself, so the constant
+    # is defined before anything can reference it and the autoload Zeitwerk
+    # sets for Version is never triggered. do_not_eager_load is Zeitwerk's
+    # documented opt-out for exactly this case — a file whose constant name
+    # does not match its path. It is consulted when the eager load walks the
+    # tree rather than at autoloader setup, so it works from an initializer
+    # and does not care about the order initializers run in.
+    #
+    # The plugins hostPath volume is mounted unconditionally — the SSO_* env
+    # vars are the only authelia-gated part of this plugin — so this
+    # workaround is deliberately ungated too: the plugin is always there,
+    # and with it the crash. The other two vendored plugins need no entry:
+    # kanban's lib/kanban/constants.rb defines Kanban::Constants, and
+    # redmine_forgejo_webhook has no lib/ at all.
+    #
+    # HOW THIS FILE REACHES config/initializers/: it is not mounted there.
+    # A ConfigMap volume is read-only at the kubelet
+    # (configMapVolume.GetAttributes().ReadOnly, ORed into every mount of the
+    # volume in pkg/kubelet/kubelet_pods.go), and the image's
+    # docker-entrypoint.sh chowns config/ before it execs rails. The chown
+    # fails on a read-only file, find exits non-zero, and `set -Eeo pipefail`
+    # ends the entrypoint before `exec gosu redmine … rails server` — the pod
+    # logs "chown: config/initializers/sso_suite_zeitwerk.rb: Read-only file
+    # system" and never boots. So the redmine-zeitwerk-fix initContainer
+    # copies this key into a writable emptyDir, and the app container mounts
+    # that file from there.
+    Rails.autoloaders.main.do_not_eager_load(
+        Rails.root.join('plugins/redmine_sso_suite/lib/redmine_sso_suite/version.rb')
+    )
+
 ---
 {{- if (include "shoggoth.isServiceEnabled" (list . "redmine-db")) }}
 apiVersion: v1
@@ -451,9 +518,93 @@ spec:
       labels:
         app: redmine
       annotations:
-        secret.reloader.stakater.com/reload: redmine-db-password,redmine-secret-key-base,openldap-ldapauth-password
+        secret.reloader.stakater.com/reload: redmine-db-password,redmine-secret-key-base,openldap-ldapauth-password,authelia-secrets
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
+      # Installs the Zeitwerk workaround from the redmine-init ConfigMap into a
+      # writable volume, because a ConfigMap mount cannot serve as the file
+      # itself: configMapVolume.GetAttributes() reports ReadOnly, and the
+      # kubelet ORs that into every mount of the volume
+      # (pkg/kubelet/kubelet_pods.go: mount.ReadOnly || mustMountRO), so
+      # readOnly: false on the volumeMount changes nothing. The image's
+      # docker-entrypoint.sh runs _fix_permissions() — find config log
+      # public/*assets tmp … '!' -user redmine -exec chown redmine:redmine {}
+      # + — and that chown is the one action in there with no error guard (the
+      # chmod next to it is 'chmod 644 "$@" 2>/dev/null || :'). On a read-only
+      # mount it fails, find exits non-zero, `set -Eeo pipefail` takes the
+      # entrypoint down, and `exec gosu redmine … rails server` never runs:
+      # the pod logs the chown error and nothing else. Hence a copy into an
+      # emptyDir, owned and moded here so the find has nothing left to do.
+      #
+      # Ungated, like the mount: the plugins volume is unconditional, so the
+      # Zeitwerk crash exists with or without authelia.
+      #
+      # Same image as the app container on purpose: the layer is already on
+      # the node, so this costs no pull and no second image to track.
+      initContainers:
+      - name: redmine-zeitwerk-fix
+        image: redmine:7.0.3-alpine3.24
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          cp /shoggoth/redmine/sso_suite_zeitwerk.rb /zeitwerk-fix/sso_suite_zeitwerk.rb
+          chown redmine:redmine /zeitwerk-fix/sso_suite_zeitwerk.rb
+          chmod 0644 /zeitwerk-fix/sso_suite_zeitwerk.rb
+        volumeMounts:
+        - name: init-script
+          mountPath: /shoggoth/redmine/sso_suite_zeitwerk.rb
+          subPath: sso_suite_zeitwerk.rb
+          readOnly: true
+        - name: zeitwerk-fix
+          mountPath: /zeitwerk-fix
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+      {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+      # Builds the trust store the redmine_sso_suite plugin needs. Ruby's
+      # OpenSSL does not scan /etc/ssl/certs the way Go's crypto/x509 does:
+      # X509_STORE_set_default_paths loads the default cert FILE
+      # (/etc/ssl/cert.pem, or $SSL_CERT_FILE) as one PEM bundle, and the
+      # default cert DIR only as a hash-dir lookup whose filenames are
+      # <subject_hash>.N — so the gitea-style subPath mount of a single
+      # shoggoth-ca.crt is invisible here. Appending the CA to the image's
+      # own bundle instead keeps the public roots, which is what the
+      # entrypoint's `bundle check || bundle install` needs the day this
+      # plugin grows a gem dependency.
+      #
+      # Same image as the app container on purpose: the layer is already on
+      # the node, so this costs no pull and no second image to track.
+      - name: redmine-ca-bundle
+        image: redmine:7.0.3-alpine3.24
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          cat /etc/ssl/certs/ca-certificates.crt /shoggoth-ca/ca.crt > /etc/shoggoth-ca/ca-certificates.crt
+        volumeMounts:
+        - name: shoggoth-ca
+          mountPath: /shoggoth-ca/ca.crt
+          subPath: ca.crt
+          readOnly: true
+        - name: ca-bundle
+          mountPath: /etc/shoggoth-ca
+        resources:
+          requests:
+            memory: 32Mi
+            cpu: 50m
+          limits:
+            memory: 64Mi
+            cpu: 200m
+      {{- end }}
       containers:
       - name: redmine
         image: redmine:7.0.3-alpine3.24
@@ -509,6 +660,53 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
+        {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+        # redmine_sso_suite plugin (submodule
+        # shoggoth/data/redmine/plugins/redmine_sso_suite). The plugin reads
+        # these in an after_initialize hook (DemoEnvConfig.apply_if_needed!)
+        # and writes them into Redmine's settings table, so the "Sign in with
+        # SSO" button appears without anyone clicking through
+        # Administration → Plugins, and the values are re-applied from the
+        # env on every boot.
+        #
+        # REDMINE_PUBLIC_HOST/PROTOCOL also set Setting.host_name and
+        # Setting.protocol, which nothing in this chart set before. That is
+        # not incidental: the plugin builds its callback URL as
+        # "#{Setting.protocol}://#{Setting.host_name}/sso/oauth/callback"
+        # (Settings.callback_url), so without them the redirect_uri
+        # registered in authelia-config.yaml would not match what the plugin
+        # sends, and Redmine would build its links from the request Host.
+        #
+        # SSO_PUBLIC_ISSUER_URL is deliberately unset: the browser and the
+        # pod reach the portal at the same https://authelia.<domain> (dns.yaml
+        # rewrites the subdomain to the Service), so the split-issuer
+        # fallback would only add a second value to keep in sync.
+        #
+        # enforce_sso_for_non_admin stays at its '0' default: the SSO button
+        # is additive to the LDAP password login, and the local admin account
+        # keeps working as the break-glass path.
+        - name: SSO_AUTO_CONFIGURE
+          value: '1'
+        - name: SSO_ISSUER_URL
+          value: 'https://authelia.{{ .Values.identity.domain }}'
+        - name: SSO_CLIENT_ID
+          value: 'redmine'
+        - name: SSO_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: authelia-secrets
+              key: redmine-client-secret
+        - name: REDMINE_PUBLIC_HOST
+          value: 'redmine.{{ .Values.identity.domain }}'
+        - name: REDMINE_PUBLIC_PROTOCOL
+          value: 'http'
+        # The CA trust for the plugin's HTTPS calls to Authelia — discovery,
+        # token, userinfo and JWKS, all with default verification and no
+        # bypass option. Points at the bundle the redmine-ca-bundle
+        # initContainer builds, for the reason described there.
+        - name: SSL_CERT_FILE
+          value: '/etc/shoggoth-ca/ca-certificates.crt'
+        {{- end }}
         volumeMounts:
         - name: files
           mountPath: /usr/src/redmine/files
@@ -524,6 +722,21 @@ spec:
           mountPath: /shoggoth/redmine/slave_token_init.rb
           subPath: slave_token_init.rb
           readOnly: true
+        # Ungated on authelia, unlike the SSO_* env vars: the plugins volume
+        # above mounts all three vendored plugins regardless, so
+        # redmine_sso_suite is present and breaks the eager load either way.
+        #
+        # From the zeitwerk-fix emptyDir, NOT from the ConfigMap key the Ruby
+        # lives in: a ConfigMap volume is mounted read-only by the kubelet no
+        # matter what the volumeMount says, and the image's entrypoint chowns
+        # config/ before it execs rails — the chown fails on a read-only file
+        # and kills the boot before it starts. See the initContainer. The file
+        # is therefore deliberately not readOnly here either: it has to be
+        # chown-able, and the initContainer has already put the right owner
+        # and mode on it.
+        - name: zeitwerk-fix
+          mountPath: /usr/src/redmine/config/initializers/sso_suite_zeitwerk.rb
+          subPath: sso_suite_zeitwerk.rb
         - name: db-password
           mountPath: /run/secrets/redmine_db_password
           subPath: password
@@ -532,6 +745,13 @@ spec:
           mountPath: /run/secrets/redmine_secret_key_base
           subPath: secret-key-base
           readOnly: true
+        {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+        # The bundle, not the CA: see the redmine-ca-bundle initContainer.
+        # Read-only because only the initContainer writes it.
+        - name: ca-bundle
+          mountPath: /etc/shoggoth-ca
+          readOnly: true
+        {{- end }}
         lifecycle:
           postStart:
             exec:
@@ -583,12 +803,31 @@ spec:
         hostPath:
           path: /var/lib/rancher/k3s/storage/{{ .Values.identity.instanceDir }}/redmine-plugins
           type: DirectoryOrCreate
+      # Where the redmine-zeitwerk-fix initContainer installs the initializer
+      # the app container mounts at config/initializers/. Writable, because
+      # the image's entrypoint chowns config/ before it execs rails and the
+      # chown has to succeed; see the initContainer's comment.
+      - name: zeitwerk-fix
+        emptyDir: {}
       - name: db-password
         secret:
           secretName: redmine-db-password
       - name: secret-key-base
         secret:
           secretName: redmine-secret-key-base
+      {{- if (include "shoggoth.isServiceEnabled" (list . "authelia")) }}
+      # The CA the initContainer appends, and the emptyDir the combined
+      # bundle is written to. The app container mounts only the emptyDir —
+      # it has no use for the bare CA.
+      - name: shoggoth-ca
+        secret:
+          secretName: shoggoth-ca
+          items:
+          - key: ca.crt
+            path: ca.crt
+      - name: ca-bundle
+        emptyDir: {}
+      {{- end }}
       serviceAccountName: redmine
 ---
 apiVersion: v1

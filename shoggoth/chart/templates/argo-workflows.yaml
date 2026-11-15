@@ -1330,6 +1330,24 @@ data:
 # argo-server — REST + UI endpoint. Server-mode auth: callers pass a ServiceAccount
 # token; the server validates against the k8s API. shoggoth uses bearer
 # tokens from gitea-slave-token / gitea-runner-token for workflow triggers.
+#
+# WHY THERE IS NO SSO CLIENT FOR argo, AND WHY server MODE IS NOT AN OVERSIGHT
+# `--auth-mode server` is the mode with no authentication at all: GetMode
+# (server/auth/mode.go) falls through to it for every request that is not a
+# client-mode bearer token, so the UI shows no login page and every request —
+# including a browser session from anyone who can reach argo.<domain> — is
+# authorized as the `argo-server` ServiceAccount, which can submit, delete and
+# exec any workflow in the cluster.
+#
+# That is a deliberate trade, not a gap. The deployment is VPN-only, and the
+# alternative was an SSO login that gated only the UI while the webhook and
+# CLI paths kept running unauthenticated in server mode anyway — a login page
+# that hides nothing. The `sso` block of
+# argo-workflow-controller-configmap, the `--auth-mode sso` flag, the
+# `authelia-secrets`/`sso` Secret grants on the `argo-workflow-server` Role,
+# the Authelia client, the OpenBao seed paths and the ExternalSecret
+# projections were all removed, so there is no half-wired SSO to re-enable by
+# accident: restoring it means putting those pieces back together.
 apiVersion: v1
 kind: Service
 metadata:

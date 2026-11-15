@@ -422,12 +422,20 @@ data:
         cdash/api-token \
         ca/passphrase \
         wireguard/admin-password \
-        grafana/admin-password \
         ssh/slave-private-key \
         ssh/slave-public-key \
         gitea/runner-token \
         gitea/slave-token \
-        redmine/slave-token
+        redmine/slave-token \
+        authelia/session-secret \
+        authelia/storage-encryption-key \
+        authelia/oidc-hmac-secret \
+        authelia/oidc-jwks-key \
+        authelia/client-grafana-secret \
+        authelia/client-gitea-secret \
+        authelia/client-redmine-secret \
+        authelia/client-cdash-secret \
+        authelia/client-openbao-secret
     do
         if bao_get_value "$path" >/dev/null 2>&1; then
             SKIPPED=$((SKIPPED + 1))
@@ -453,6 +461,16 @@ data:
                 bao_put_value "$path" "$PRIV"
                 ;;
             openldap/admin-password)
+                # This path is the directory admin's password AND Grafana's
+                # local admin password: grafana-admin-password.yaml's
+                # ExternalSecret reads it rather than a path of its own, so
+                # the one value the operator already knows (and the one
+                # admin-password.txt overrides on first run) is the one
+                # Grafana's login form accepts. There is therefore no
+                # grafana/admin-password entry in the list above — seeding a
+                # second random value there is what made Grafana's local
+                # login unauthenticatable, and the override below is what
+                # makes the two agree on a first run.
                 if [ -f "${PRIVATE_DIR}/admin-password.txt" ]; then
                     OVERRIDE=$(tr -d '\n\r' < "${PRIVATE_DIR}/admin-password.txt")
                     bao_put_value "$path" "${OVERRIDE}"
@@ -460,6 +478,24 @@ data:
                 else
                     bao_put_value "$path" "$(openssl rand -base64 32 | tr -d '\n\r')"
                 fi
+                ;;
+            authelia/oidc-jwks-key)
+                # The RSA keypair that signs Authelia's OIDC ID tokens,
+                # consumed through the template filter as
+                # `fileContent "/config/secrets/oidc-jwks-key" | nindent 14`
+                # (a jwks entry is a list item, so the `_FILE` convention
+                # cannot reach it). PKCS#8 PEM, 2048 bits: the same key size
+                # the Phase D server certificate uses, and the only size
+                # authelia's JWKS loader is exercised with here.
+                #
+                # Trailing newline stripped with the ssh/slave-private-key
+                # idiom: the ConfigMap embeds the PEM in a block scalar, and
+                # an extra blank line at the end of the value is invisible
+                # until the PEM parser rejects the key.
+                openssl genrsa -out /tmp/authelia-jwks.pem 2048 2>/dev/null
+                PRIV=$(cat /tmp/authelia-jwks.pem; printf x); PRIV="${PRIV%x}"
+                bao_put_value "$path" "${PRIV}"
+                rm -f /tmp/authelia-jwks.pem
                 ;;
             *)
                 rm -f /tmp/kk /tmp/kk.pub 2>/dev/null || true
@@ -526,6 +562,54 @@ data:
         log "Phase B.5: WARN disable auth/ldap: curl failed (rc=${code}); err=$(head -c 200 /tmp/bao-ldap-disable-err.txt | tr '\n' ' ')"
     fi
 
+    # === Phase B.5: expose auth/token in the unauthenticated mount listing ===
+    # The UI login page asks for the mount list WITHOUT a token
+    # (GET /v1/sys/internal/ui/mounts, see ui/app/adapters/auth-method.js),
+    # and that endpoint hands a mount to an unauthenticated caller only when
+    # the mount's ``listing_visibility`` is ``unauth``
+    # (internal/vault/logical_system.go, hasAccess). Nothing in this
+    # deployment sets it, so the list comes back empty — and the UI then
+    # falls back to the six hardcoded entries in
+    # ui/app/helpers/supported-auth-backends.js: token, userpass, ldap, jwt,
+    # oidc, radius. That array is what the login page's "Method" dropdown
+    # renders (ui/app/components/auth-form.js, authMethods/methodsToShow), so
+    # the page advertises five methods that are not configured, three of
+    # which cannot be mounted in this image at all: ldap and radius left the
+    # binary with openbao GH-3882 (see the auth/ldap removal above), and
+    # userpass/jwt/oidc are simply not enabled.
+    #
+    # Making the one real mount visible gives the UI a non-empty list, which
+    # switches the page from that dropdown to a tab bar of mounted methods
+    # plus an "Other" tab; the hardcoded six then sit behind "Other" instead
+    # of on the landing view.
+    #
+    # auth/token is the mount to use because it is always present and it is
+    # the path every Vault and OpenBao deployment has, so disclosing its
+    # existence to an unauthenticated caller reveals nothing. The tune is a
+    # partial update (handleTuneWriteCommon keeps every field the request
+    # omits), so no TTL or description is disturbed, and it is idempotent —
+    # a POST on a config value, not a create. auth/token is also not in
+    # untunableMounts (internal/vault/mount.go), so the request is accepted.
+    # It is cosmetic: a failure costs the dropdown and nothing else, so it
+    # is logged rather than fatal, matching the auth/ldap removal above.
+    phase "Phase B.5: exposing auth/token in the unauthenticated mount listing"
+    if code=$(curl -sS --max-time 10 -o /tmp/bao-token-tune.json -w '%{http_code}' \
+        -X POST "${OPENBAO_ADDR}/v1/sys/auth/token/tune" \
+        -H "X-Vault-Token: ${ROOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d '{"listing_visibility":"unauth"}' 2>/tmp/bao-token-tune-err.txt); then
+        case "${code}" in
+            200|204)
+                log "Phase B.5: auth/token listing_visibility=unauth (HTTP ${code})"
+                ;;
+            *)
+                log "Phase B.5: WARN tune auth/token HTTP ${code}: $(head -c 400 /tmp/bao-token-tune.json)"
+                ;;
+        esac
+    else
+        log "Phase B.5: WARN tune auth/token: curl failed (rc=${code}); err=$(head -c 200 /tmp/bao-token-tune-err.txt | tr '\n' ' ')"
+    fi
+
     # === Phase B.5: shoggoth-admin policy + token for operators ===
     # The LDAP auth backend that mapped the directory's admins group onto
     # this policy is gone with the plugin (see above), so operators get a
@@ -533,13 +617,55 @@ data:
     # ESO tokens below: mint once, keep it while THIS OpenBao still accepts
     # it, re-mint otherwise. The root token stays where it was, in the
     # openbao-unseal-key Secret.
+    #
+    # WHY THE POLICY NAMES EVERY KV-v2 SUB-PATH AND NOT JUST data/*
+    # secret/ is a kv-v2 mount (Phase A), and a kv-v2 mount is not one path
+    # but seven, each registered separately in the backend:
+    #   path_data.go      data/     Update/Create/Read/Delete/Patch
+    #   path_metadata.go  metadata/ Update/Create/Read/Delete/List/Scan/Patch
+    #   path_delete.go    delete/ and undelete/
+    #   path_destroy.go   destroy/
+    #   path_subkeys.go   subkeys/
+    #   path_config.go    config    mount tuning, deliberately NOT granted
+    # metadata/ is the ONLY one of them with a logical.ListOperation handler,
+    # so it is the only path a LIST can succeed on. `list` on data/* is
+    # therefore a no-op capability: there is no list handler to authorize.
+    # Scan rides the same paths (ScanCapability, policy.go) and upstream's
+    # own ACL test writes the pair as
+    #   path "foo/metadata/*" { capabilities = ["list","scan"] }
+    # so the two are granted together here.
+    # A policy that grants only data/* authenticates fine — the login, the
+    # role and token_policies all work — and then 403s the UI's secret
+    # browser, which lists through LIST secret/metadata, leaving an operator
+    # who signed in through SSO looking at an empty store. The UI also reads
+    # metadata/* when it opens a secret (version history, custom_metadata,
+    # the cas_required check before a write), so granting only the list
+    # capability there is not enough either.
+    #
+    # This Job is a plain chart resource, not a Helm hook, so `helm upgrade`
+    # does not re-run one that has already completed: the object exists and
+    # Helm leaves it in place. An install that already carries the
+    # data/*-only policy therefore needs the Job deleted for the next
+    # deploy to recreate it — the whole script is idempotent, which is why
+    # that is the supported path rather than a hand-applied policy:
+    #   kubectl delete job openbao-bootstrap -n <namespace>
+    SHOGGOTH_ADMIN_POLICY="$(printf '%s\n' \
+        'path "secret/data/*" { capabilities = ["create","read","update","delete","list","patch"] }' \
+        'path "secret/metadata/*" { capabilities = ["create","read","update","delete","list","scan","patch"] }' \
+        'path "secret/detailed-metadata/*" { capabilities = ["read","list","scan"] }' \
+        'path "secret/delete/*" { capabilities = ["update"] }' \
+        'path "secret/undelete/*" { capabilities = ["update"] }' \
+        'path "secret/destroy/*" { capabilities = ["update"] }' \
+        'path "secret/subkeys/*" { capabilities = ["read"] }' \
+        'path "sys/*" { capabilities = ["read","list"] }')"
     phase "Phase B.5: provisioning shoggoth-admin policy + token"
     POLICY_BODY=/tmp/bao-acl.json
+    ACL_BODY=$(jq -c -n --arg policy "${SHOGGOTH_ADMIN_POLICY}" '{policy: $policy}')
     if ! code=$(curl -sS --max-time 10 -o "${POLICY_BODY}" -w '%{http_code}' \
         -X POST "${OPENBAO_ADDR}/v1/sys/policies/acl/shoggoth-admin" \
         -H "X-Vault-Token: ${ROOT_TOKEN}" \
         -H "Content-Type: application/json" \
-        -d '{"policy":"path \"secret/data/*\" { capabilities = [\"create\",\"read\",\"update\",\"delete\",\"list\"] }\npath \"sys/*\" { capabilities = [\"read\",\"list\"] }"}' 2>/tmp/bao-acl-err.txt); then
+        -d "${ACL_BODY}" 2>/tmp/bao-acl-err.txt); then
         die "POST /v1/sys/policies/acl/shoggoth-admin: curl failed (rc=${code}); err=$(cat /tmp/bao-acl-err.txt)"
     fi
     if [ "${code}" != "200" ] && [ "${code}" != "204" ]; then
@@ -864,6 +990,227 @@ data:
     k8s_put_secret_from_file       shoggoth-ca    "${CERT_DIR}/ca.crt"     ca.crt
     k8s_put_secret_tls_from_files shoggoth-server "${CERT_DIR}/server.crt" "${CERT_DIR}/server.key"
     log "Phase D: done (wrote shoggoth-ca + shoggoth-server K8s Secrets)"
+
+    # === Phase E: Authelia as the OIDC auth backend (auth/oidc) ===
+    # Phase B.5 removed the LDAP backend that mapped the directory's admins
+    # group onto shoggoth-admin and left the token method in its place,
+    # which is not something an operator types into a browser. This phase
+    # restores a browser login by pointing the OIDC auth engine at
+    # Authelia, which is a standard OIDC provider
+    # (identity_providers.oidc in authelia-config.yaml).
+    #
+    # The engine is BUILT IN, not a plugin to fetch:
+    # internal/helper/builtinplugins/registry.go registers "oidc" with the
+    # same credJWT.Factory as "jwt", so the mount is available the moment
+    # the binary is. That is the difference from the ldap/radius/kerberos
+    # trio openbao GH-3882 moved out of the image (see Phase B.5), and the
+    # reason this phase has no catalog entry to check.
+    #
+    # WHY THIS PHASE NEEDS NO AUTHELIA REACHABILITY
+    # The one discovery fetch that a config write performs
+    # (pathConfigWrite -> createProvider -> oidc.NewProvider) is a request
+    # from the OpenBao SERVER pod, not from here, and it is made non-fatal
+    # by skip_jwks_validation below. So this phase needs neither a wait loop
+    # nor a DNS change to this Job's pod — which matters because the Job is
+    # dispatched at install time and Authelia's first pod may not be ready
+    # yet. The pod that must reach https://authelia.<domain> is the server,
+    # and it already can: it carries shoggoth.podDnsConfig, so the
+    # namespace CoreDNS (dns.yaml) rewrites the name to the authelia
+    # Service, and oidc_discovery_ca_pem below is what makes the TLS
+    # verification of that connection pass.
+    phase "Phase E: enabling the Authelia OIDC auth backend"
+
+    if code=$(curl -sS --max-time 10 -o /tmp/bao-oidc-mount.json -w '%{http_code}' \
+        -X POST "${OPENBAO_ADDR}/v1/sys/auth/oidc" \
+        -H "X-Vault-Token: ${ROOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d '{"type":"oidc","description":"Authelia OIDC"}' 2>/tmp/bao-oidc-mount-err.txt); then
+        case "${code}" in
+            200|204)
+                log "Phase E: auth/oidc mounted (HTTP ${code})"
+                ;;
+            400|409)
+                # Mounting a path that is already mounted is how a re-run
+                # reports the mount the first run made. The status differs
+                # by code path (internal/vault/auth.go codes the duplicate
+                # as 409, the sys endpoint wraps it as 400), so the body is
+                # what decides and not the number.
+                if grep -q 'already in use' /tmp/bao-oidc-mount.json 2>/dev/null; then
+                    log "Phase E: auth/oidc already mounted (HTTP ${code})"
+                else
+                    die "POST /v1/sys/auth/oidc HTTP ${code}: $(head -c 400 /tmp/bao-oidc-mount.json)"
+                fi
+                ;;
+            *)
+                die "POST /v1/sys/auth/oidc HTTP ${code}: $(head -c 400 /tmp/bao-oidc-mount.json); curlerr=$(head -c 200 /tmp/bao-oidc-mount-err.txt | tr '\n' ' ')"
+                ;;
+        esac
+    else
+        die "POST /v1/sys/auth/oidc: curl failed (rc=${code}); err=$(head -c 200 /tmp/bao-oidc-mount-err.txt | tr '\n' ' ')"
+    fi
+
+    # Expose the mount in the unauthenticated listing, for the same reason
+    # as auth/token in Phase B.5: the login page asks for the mount list
+    # WITHOUT a token (ui/app/adapters/auth-method.js) and a mount reaches
+    # that caller only when listing_visibility is unauth
+    # (internal/vault/logical_system.go, hasAccess). It is also what turns
+    # the page from the hardcoded six-entry "Method" dropdown into a tab
+    # bar: auth-form.js's methodsToShow filters the fetched list down to
+    # the types supported-auth-backends.js knows, and that array has an
+    # `oidc` entry, so a non-empty list puts the mounted method on the
+    # landing view and pushes token/userpass/ldap/jwt/radius behind "Other".
+    #
+    # A partial update (handleTuneWriteCommon keeps every field the request
+    # omits) and a POST on a config value, so it is idempotent, and auth/
+    # oidc is not in untunableMounts (internal/vault/mount.go). Cosmetic:
+    # without it the OIDC method is still reachable behind "Other", so a
+    # failure is a warning rather than a stop — the same treatment the
+    # auth/token tune gets.
+    if code=$(curl -sS --max-time 10 -o /tmp/bao-oidc-tune.json -w '%{http_code}' \
+        -X POST "${OPENBAO_ADDR}/v1/sys/auth/oidc/tune" \
+        -H "X-Vault-Token: ${ROOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d '{"listing_visibility":"unauth"}' 2>/tmp/bao-oidc-tune-err.txt); then
+        case "${code}" in
+            200|204)
+                log "Phase E: auth/oidc listing_visibility=unauth (HTTP ${code})"
+                ;;
+            *)
+                log "Phase E: WARN tune auth/oidc HTTP ${code}: $(head -c 400 /tmp/bao-oidc-tune.json)"
+                ;;
+        esac
+    else
+        log "Phase E: WARN tune auth/oidc: curl failed (rc=${code}); err=$(head -c 200 /tmp/bao-oidc-tune-err.txt | tr '\n' ' ')"
+    fi
+
+    # The mount's config. Two of the five values are the reason this phase
+    # sits after Phase D:
+    #
+    #   oidc_discovery_ca_pem — the shoggoth CA. Authelia terminates TLS
+    #     with the shoggoth-server pair (authelia.yaml) and the OpenBao
+    #     image's system roots do not contain this private CA. cap builds
+    #     its HTTP client from this PEM (path_config.go createCAContext ->
+    #     OverrideRootCAs) and reuses it for the discovery fetch and for
+    #     every later token and userinfo call. The same cert also covers
+    #     the name: Phase D's server.crt carries DNS:*.s.local, so
+    #     authelia.<domain> verifies against this CA without needing
+    #     override_allowed_server_names.
+    #
+    #   oidc_client_secret — the authelia/client-openbao-secret key, the
+    #     same value the template filter in authelia-config.yaml writes
+    #     into the provider's client table. One key, two readers, exactly
+    #     the arrangement the other four clients have (see
+    #     authelia-secrets.yaml).
+    #
+    # skip_jwks_validation is what keeps the write from depending on
+    # Authelia being up. Without it an unreachable issuer makes
+    # pathConfigWrite answer "error checking oidc discovery URL" and leave
+    # the config unwritten; with it the failure is a warning on the
+    # response and the config is stored. The provider is re-resolved
+    # lazily at login time (backend.go getProvider), it is cached, and a
+    # failed createProvider leaves the cache empty so the next attempt
+    # retries — so a Job that ran before Authelia's first ready pod costs
+    # one login attempt, not the feature.
+    OPENBAO_CLIENT_SECRET="$(bao_get_value "authelia/client-openbao-secret" 2>/dev/null || true)"
+    if [ -z "${OPENBAO_CLIENT_SECRET}" ]; then
+        die "authelia/client-openbao-secret is missing from OpenBao KV — Phase B seeds it before this phase runs"
+    fi
+    OIDC_CONFIG_BODY=$(jq -c -n \
+        --arg discovery_url "https://authelia.${SHOGGOTH_DOMAIN}" \
+        --arg client_id     "openbao" \
+        --arg client_secret "${OPENBAO_CLIENT_SECRET}" \
+        --arg ca_pem        "$(cat "${CERT_DIR}/ca.crt")" \
+        --arg default_role  "authelia" \
+        '{oidc_discovery_url:      $discovery_url,
+          oidc_client_id:          $client_id,
+          oidc_client_secret:      $client_secret,
+          oidc_discovery_ca_pem:   $ca_pem,
+          default_role:            $default_role,
+          skip_jwks_validation:    true}')
+    OIDC_CONFIG_RESP=/tmp/bao-oidc-config.json
+    if ! code=$(curl -sS --max-time 15 -o "${OIDC_CONFIG_RESP}" -w '%{http_code}' \
+        -X POST "${OPENBAO_ADDR}/v1/auth/oidc/config" \
+        -H "X-Vault-Token: ${ROOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "${OIDC_CONFIG_BODY}" 2>/tmp/bao-oidc-config-err.txt); then
+        die "POST /v1/auth/oidc/config: curl failed (rc=${code}); err=$(cat /tmp/bao-oidc-config-err.txt)"
+    fi
+    if [ "${code}" != "200" ] && [ "${code}" != "204" ]; then
+        die "POST /v1/auth/oidc/config HTTP ${code}: $(head -c 400 ${OIDC_CONFIG_RESP})"
+    fi
+    log "Phase E: auth/oidc config written (issuer=https://authelia.${SHOGGOTH_DOMAIN}, default_role=authelia)"
+
+    # The role the login page lands on.
+    #
+    # default_role above is what makes the UI's blank Role field work. The
+    # field's placeholder is "Default" and the alert under it reads "Leave
+    # blank to sign in with the default role if one is configured"
+    # (ui/app/templates/components/auth-jwt.hbs). A blank field reaches the
+    # server as role:null — auth-jwt.js's roleName is null and role-jwt.js
+    # forwards it verbatim — and field_data.go's TypeLowerCaseString case
+    # decodes a nil through mapstructure.WeakDecode, which leaves the
+    # destination at its zero value, so d.Get("role").(string) is "" and
+    # path_oidc.go resolves that to config.DefaultRole, answering
+    # "missing role" when there is none.
+    #
+    # allowed_redirect_uris is the one string the browser supplies and the
+    # server compares for EQUALITY: validRedirect (path_oidc.go) is a
+    # slices.Contains over the list, loopback handling aside, so a
+    # near-miss is a silent "unauthorized redirect_uri" warn and a login
+    # that goes nowhere. The path is the UI's own — rootURL '/ui/', the
+    # cluster name hardcoded to 'vault' (ui/app/routes/vault.js), and the
+    # route '/auth/*auth_path/oidc/callback' (ui/app/router.js) — which is
+    # why the mount path appears twice in it. The openbao client in
+    # authelia-config.yaml lists the same URI; the two files cannot drift
+    # without one of them failing loudly.
+    #
+    # bound_claims is the authorization rule and it is the rule the removed
+    # LDAP backend had: only the directory's admins group gets in.
+    # validateBoundClaims normalises both sides to lists (claims.go
+    # normalizeList) and accepts any actual value equal to any expected
+    # one, so a member of admins passes and anyone else fails with
+    # `claim "groups" does not match any associated bound claim values`.
+    # It runs on the merged claims after createIdentity, so `groups` has
+    # to be present for the membership test to happen at all — which is
+    # what groups_claim and the claims policy in authelia-config.yaml
+    # guarantee.
+    #
+    # bound_audiences states on the role what the engine already enforces:
+    # cap's VerifyIDToken requires the token's aud to contain the client
+    # id, and path_login.go refuses a role with no bound audiences at all
+    # when the token carries one. It is not decoration — it is the
+    # constraint that keeps this role from being usable by a token minted
+    # for some other client.
+    #
+    # token_policies is shoggoth-admin, the policy Phase B.5 mints the
+    # operator token with, so an Authelia login ends up with exactly the
+    # access the token method gives. No TTL, period, num_uses or type
+    # overrides: the mount's system defaults apply, and the deprecated
+    # policies/ttl/max_ttl spellings are avoided in favour of the token_*
+    # ones (path_role.go still accepts the old names, with a deprecation
+    # warning on every read).
+    OIDC_ROLE_BODY=$(jq -c -n \
+        --arg redirect_uri "http://openbao.${SHOGGOTH_DOMAIN}/ui/vault/auth/oidc/oidc/callback" \
+        '{user_claim:            "preferred_username",
+          groups_claim:          "groups",
+          bound_claims:          {groups: ["admins"]},
+          bound_audiences:       ["openbao"],
+          oidc_scopes:           ["profile", "groups"],
+          allowed_redirect_uris: [$redirect_uri],
+          token_policies:        ["shoggoth-admin"]}')
+    OIDC_ROLE_RESP=/tmp/bao-oidc-role.json
+    if ! code=$(curl -sS --max-time 15 -o "${OIDC_ROLE_RESP}" -w '%{http_code}' \
+        -X POST "${OPENBAO_ADDR}/v1/auth/oidc/role/authelia" \
+        -H "X-Vault-Token: ${ROOT_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "${OIDC_ROLE_BODY}" 2>/tmp/bao-oidc-role-err.txt); then
+        die "POST /v1/auth/oidc/role/authelia: curl failed (rc=${code}); err=$(cat /tmp/bao-oidc-role-err.txt)"
+    fi
+    if [ "${code}" != "200" ] && [ "${code}" != "204" ]; then
+        die "POST /v1/auth/oidc/role/authelia HTTP ${code}: $(head -c 400 ${OIDC_ROLE_RESP})"
+    fi
+    log "Phase E: auth/oidc role 'authelia' written (groups=admins, token_policies=shoggoth-admin)"
+    log "Phase E: complete"
 
     log "all phases complete"
 ---
