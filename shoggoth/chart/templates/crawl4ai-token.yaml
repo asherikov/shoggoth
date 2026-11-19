@@ -28,6 +28,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: crawl4ai-token
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 type: Opaque
 data:
   # base64 of openssl rand -hex 32

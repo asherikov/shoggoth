@@ -57,7 +57,8 @@ Example:
 {{- $root := index . 0 -}}
 {{- $overrides := index . 1 -}}
 helm.sh/chart: {{ printf "%s-%s" $root.Chart.Name $root.Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
-{{ include "shoggoth.selectorLabels" $root }}
+app.kubernetes.io/name: {{ include "shoggoth.name" $root }}
+app.kubernetes.io/instance: {{ $root.Release.Name }}
 {{- if $root.Chart.AppVersion }}
 app.kubernetes.io/version: {{ $root.Chart.AppVersion | quote }}
 {{- end }}

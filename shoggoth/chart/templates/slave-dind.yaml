@@ -18,6 +18,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: slave-dind
     app.kubernetes.io/component: slave-dind
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 data:
   entrypoint.sh: |
     #!/usr/bin/env sh
@@ -71,7 +73,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: slave-dind
+    kube-diagrams.io/icon: diagrams.onprem.container.Docker
     app.kubernetes.io/component: slave-dind
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -84,6 +89,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: slave-dind
         app.kubernetes.io/component: slave-dind
+        shoggoth.io/group: workflow
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: gitea-slave-token,ssh-slave-private-key
     spec:
@@ -265,5 +272,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: slave-dind
     app.kubernetes.io/component: slave-dind
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 automountServiceAccountToken: false
 {{- end }}

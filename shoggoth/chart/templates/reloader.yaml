@@ -4,6 +4,10 @@
 
   Used by ESO to drive pod-restart events on secret/configmap data
   changes without reload-state from a custom controller.
+
+  Grouped with the operator it serves (`shoggoth.io/group: eso`): the
+  secrets it watches are the ones ESO reconciles, and no other workload
+  in the release depends on it.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "reloader")) }}
 apiVersion: v1
@@ -15,6 +19,8 @@ metadata:
     {{- /* part-of=external-secrets (not shoggoth) — see shoggoth.labelsWithMap. */ -}}
     {{- include "shoggoth.labelsWithMap" (list . (dict "partOf" "external-secrets")) | nindent 4 }}
     app: reloader
+    shoggoth.io/group: eso
+    shoggoth.io/exposure: internal
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -23,6 +29,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    shoggoth.io/group: eso
+    shoggoth.io/exposure: internal
 rules:
 - apiGroups:
   - ''
@@ -72,6 +80,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    shoggoth.io/group: eso
+    shoggoth.io/exposure: internal
 subjects:
 - kind: ServiceAccount
   name: reloader
@@ -89,6 +99,8 @@ metadata:
   labels:
     {{- include "shoggoth.labelsWithMap" (list . (dict "partOf" "external-secrets")) | nindent 4 }}
     app: reloader
+    shoggoth.io/group: eso
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   revisionHistoryLimit: 2
@@ -100,6 +112,8 @@ spec:
     metadata:
       labels:
         app: reloader
+        shoggoth.io/group: eso
+        shoggoth.io/exposure: internal
         app.kubernetes.io/part-of: external-secrets
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
     spec:

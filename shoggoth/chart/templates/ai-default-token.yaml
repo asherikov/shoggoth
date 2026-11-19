@@ -4,7 +4,7 @@
   K8s Secret.
 
   Consumers: the litellm ``wait-bootstrap`` init container waits on
-  ``externalsecret/ai-default-token``; the resulting Secret is
+  ``externalsecret/ai-default-token-pull``; the resulting Secret is
   referenced by ``secretKeyRef`` in litellm.yaml and (transitively) by
   every AI consumer routing through it.
 
@@ -23,11 +23,13 @@
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: ai-default-token
+  name: ai-default-token-pull
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: ai-default-token
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   secretStoreRef:
     name: shoggoth-openbao

@@ -7,6 +7,15 @@
   ServiceAccount each carry their own `services.redmine-db.enabled` guard,
   so either workload can be toggled on its own.
 
+  The redmine-db `app:` label is on the pods and nowhere else: the legacy
+  label is what gives a workload its `Application:` box in the applications
+  view (make/clusterviz-views.yaml), and the database is plumbing that view
+  hides — it keeps its place in the cluster view. The Service and StatefulSet
+  selectors read the pod template labels, not the controller's own metadata,
+  so dropping the label from the three metadata blocks moves nothing
+  functional, and the pods stay selectable by `kubectl get pods -l
+  app=redmine-db` exactly as before.
+
   Secrets arrive via ExternalSecrets, never inline, and the pods depend on
   them natively — no init container waits for them:
 
@@ -52,7 +61,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: redmine
     app.kubernetes.io/component: redmine
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -73,7 +85,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: redmine
     app.kubernetes.io/component: redmine
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -94,7 +109,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: redmine
     app.kubernetes.io/component: redmine
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -115,7 +133,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: redmine
     app.kubernetes.io/component: redmine
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 data:
   init.sh: |
     #!/bin/sh
@@ -393,6 +414,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: redmine
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: redmine-db
@@ -411,6 +434,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: redmine
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   serviceName: redmine-db
   replicas: 1
@@ -421,6 +446,8 @@ spec:
     metadata:
       labels:
         app: redmine-db
+        shoggoth.io/group: workflow
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
@@ -491,7 +518,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: redmine
     app.kubernetes.io/component: redmine
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: redmine
@@ -507,7 +537,11 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: redmine
+    kube-diagrams.io/icon: diagrams.azure.devops.Boards
     app.kubernetes.io/component: redmine
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -517,6 +551,8 @@ spec:
     metadata:
       labels:
         app: redmine
+        shoggoth.io/group: workflow
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: redmine-db-password,redmine-secret-key-base,openldap-ldapauth-password,authelia-secrets
     spec:
@@ -837,7 +873,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: redmine
     app.kubernetes.io/component: redmine
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 ---
 {{- if (include "shoggoth.isServiceEnabled" (list . "redmine-db")) }}
 apiVersion: v1
@@ -848,5 +887,7 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: redmine
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 {{- end }}
 {{- end }}

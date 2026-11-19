@@ -11,6 +11,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: loki
     app.kubernetes.io/component: loki
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 data:
   config.yaml: |
     auth_enabled: false
@@ -95,6 +97,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: loki
     app.kubernetes.io/component: loki
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: loki
@@ -115,6 +119,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: loki
     app.kubernetes.io/component: loki
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -136,7 +142,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: loki
+    kube-diagrams.io/icon: diagrams.onprem.logging.Loki
     app.kubernetes.io/component: loki
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -148,6 +157,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: loki
         app.kubernetes.io/component: loki
+        shoggoth.io/group: telemetry
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []
@@ -215,6 +226,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: loki
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   podSelector:
     matchLabels:

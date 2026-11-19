@@ -40,8 +40,8 @@ network:
     hostPort: "80"
 
 ai:
-  defaultModel: openai/MiniMax-M3
-  defaultApi: https://api.minimax.io/v1
+  defaultModel: openai/step-5-preview
+  defaultApi: https://api.stepfun.ai/step_plan/v1/
   # Path to the token FILE inside the openbao-init Job container, not to a K8s
   # Secret. The Job mounts the host's synced copy of shoggoth/data/private at
   # /shoggoth/private (chart/templates/openbao.yaml), and openbao-bootstrap

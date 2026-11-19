@@ -24,7 +24,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
 data:
   angie.conf.tmpl: |
     load_module modules/ngx_otel_module.so;
@@ -248,7 +250,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
 data:
   index.html: |
     <!DOCTYPE html>
@@ -295,6 +299,7 @@ data:
             <li><a href="http://litellm.{{ .Values.identity.domain }}/">ai</a> - LLM proxy (LiteLLM → LocalAI)</li>
             <li><a href="http://localai.{{ .Values.identity.domain }}/">localai</a> - Local LLM model server web UI</li>
             <li><a href="http://basic-memory-ui.{{ .Values.identity.domain }}/">basic-memory</a> - Notes UI (SilverBullet) for the Basic Memory knowledge base</li>
+            <li><a href="http://silverbullet.{{ .Values.identity.domain }}/">silverbullet</a> - Personal notes (SilverBullet), separate from the read-only Basic Memory space</li>
             <li><a href="http://git-pages.{{ .Values.identity.domain }}/">git-pages</a> - Static site hosting</li>
             <li><a href="http://it-tools.{{ .Values.identity.domain }}/">it-tools</a> - Online tools for developers (timezone, date, ical and geo-coordinates converters)</li>
             <li><a href="http://fusion.{{ .Values.identity.domain }}/">fusion</a> - RSS feed reader (no authentication, VPN only)</li>
@@ -324,7 +329,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: web-internal
@@ -340,7 +347,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: web-internal
@@ -356,7 +365,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: web-internal
@@ -372,7 +383,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: web-internal
@@ -388,7 +401,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -409,7 +424,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -430,7 +447,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
 data:
   {{- include "shoggoth.filesData" (list . "files/web-internal/plugin/*" false) | nindent 2 }}
 ---
@@ -441,7 +460,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
+    kube-diagrams.io/icon: diagrams.onprem.network.Nginx
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -451,6 +473,7 @@ spec:
     metadata:
       labels:
         app: web-internal
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: gitea-slave-token,redmine-slave-token,cdash-api-token,argo-webhook-receiver-token
     spec:
@@ -629,5 +652,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-internal
     app.kubernetes.io/component: web-internal
+    shoggoth.io/exposure: internal
 {{- end }}

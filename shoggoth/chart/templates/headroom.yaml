@@ -12,6 +12,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: headroom
     app.kubernetes.io/component: headroom
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -22,6 +24,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: headroom
     app.kubernetes.io/component: headroom
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -44,6 +48,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: headroom
     app.kubernetes.io/component: headroom
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: headroom
@@ -62,6 +68,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: headroom
     app.kubernetes.io/component: headroom
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   revisionHistoryLimit: 2
@@ -74,6 +82,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: headroom
         app.kubernetes.io/component: headroom
+        shoggoth.io/group: ai
+        shoggoth.io/exposure: internal
     spec:
       serviceAccountName: headroom
       automountServiceAccountToken: false

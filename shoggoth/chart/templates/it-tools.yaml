@@ -20,6 +20,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: it-tools
     app.kubernetes.io/component: it-tools
+    shoggoth.io/exposure: internal
 ---
 apiVersion: v1
 kind: Service
@@ -30,6 +31,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: it-tools
     app.kubernetes.io/component: it-tools
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: it-tools
@@ -47,6 +49,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: it-tools
     app.kubernetes.io/component: it-tools
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -58,6 +61,7 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: it-tools
         app.kubernetes.io/component: it-tools
+        shoggoth.io/exposure: internal
     spec:
       serviceAccountName: it-tools
       # A static SPA talks to no Kubernetes API.

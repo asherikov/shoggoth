@@ -11,6 +11,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: localai
     app.kubernetes.io/component: localai
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -33,6 +35,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: localai
     app.kubernetes.io/component: localai
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -55,6 +59,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: localai
     app.kubernetes.io/component: localai
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -77,6 +83,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: localai
     app.kubernetes.io/component: localai
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 data:
   # Use the `url:` form (no gallery `id`) so preload works with
   # AUTOLOAD_GALLERIES=false. The URL is `file://` (not http://) because
@@ -107,6 +115,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: localai
     app.kubernetes.io/component: localai
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 data:
   # The model descriptor preload-models.yaml points at via
   # `url: file:///models/nomic-embed-text-v1.5.yaml`. It lives here rather
@@ -138,6 +148,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: localai
     app.kubernetes.io/component: localai
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: localai
@@ -154,7 +166,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: localai
+    kube-diagrams.io/icon: diagrams.azure.aimachinelearning.AzureOpenai
     app.kubernetes.io/component: localai
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -166,6 +181,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: localai
         app.kubernetes.io/component: localai
+        shoggoth.io/group: ai
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []

@@ -8,7 +8,7 @@ Subcommands
 -----------
   wait-bootstrap   init container (tools image): wait for the K8s
                    externalsecrets the git-cred sidecar reads
-                   (gitea-slave-token, ssh-slave-private-key) to
+                   (gitea-slave-token-pull, ssh-slave-private-key) to
                    reach the Ready condition.
   init-perms       init container (tools image): chown+chmod the
                    git-cred emptyDir before the sidecar starts.
@@ -70,7 +70,7 @@ import time
 
 # External-secrets the git-cred sidecar reads; the pod's RBAC
 # grants the sandbox SA `get` on these.
-WAIT_BOOTSTRAP_SECRETS = ("gitea-slave-token", "ssh-slave-private-key")
+WAIT_BOOTSTRAP_SECRETS = ("gitea-slave-token-pull", "ssh-slave-private-key-pull")
 WAIT_BOOTSTRAP_TIMEOUT_S = 600
 WAIT_BOOTSTRAP_POLL_S = 10
 

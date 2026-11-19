@@ -34,7 +34,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openldap
     app.kubernetes.io/component: openldap
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -55,7 +58,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openldap
     app.kubernetes.io/component: openldap
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -76,7 +82,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openldap
     app.kubernetes.io/component: openldap
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 data:
   init.sh: |
     #!/usr/bin/env bash
@@ -227,7 +236,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openldap
     app.kubernetes.io/component: openldap
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 data:
   config.ldif: |
     dn: olcDatabase={1}mdb,cn=config
@@ -361,7 +373,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openldap
     app.kubernetes.io/component: openldap
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 data:
   render.sh: |
     #!/usr/bin/env bash
@@ -398,7 +413,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openldap
     app.kubernetes.io/component: openldap
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: openldap
@@ -417,7 +435,11 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openldap
+    kube-diagrams.io/icon: diagrams.aws.security.DirectoryService
     app.kubernetes.io/component: openldap
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -427,6 +449,8 @@ spec:
     metadata:
       labels:
         app: openldap
+        shoggoth.io/group: auth
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: openldap-admin-password,openldap-config-admin-password,openldap-ldapauth-password,openldap-slave-password
     spec:
@@ -613,5 +637,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openldap
     app.kubernetes.io/component: openldap
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 {{- end }}

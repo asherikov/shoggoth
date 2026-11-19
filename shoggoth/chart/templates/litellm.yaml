@@ -20,6 +20,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: litellm
     app.kubernetes.io/component: litellm
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -42,6 +44,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: litellm
     app.kubernetes.io/component: litellm
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: litellm
@@ -58,7 +62,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: litellm
+    kube-diagrams.io/icon: diagrams.azure.aimachinelearning.AzureOpenai
     app.kubernetes.io/component: litellm
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -70,6 +77,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: litellm
         app.kubernetes.io/component: litellm
+        shoggoth.io/group: ai
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: gitea-slave-token,ai-default-token,crawl4ai-token
     spec:
@@ -310,6 +319,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: litellm
     app.kubernetes.io/component: litellm
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -320,6 +331,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: litellm
     app.kubernetes.io/component: litellm
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 rules:
 # No `secrets` rule and no `externalsecrets` rule: the wait loop used to
 # poll the ExternalSecret CRs (`kubectl get externalsecret <name>` →
@@ -365,6 +378,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: litellm
     app.kubernetes.io/component: litellm
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -383,6 +398,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: litellm
     app.kubernetes.io/component: litellm
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 data:
   config.yaml: |
     model_list:

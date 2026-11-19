@@ -15,11 +15,13 @@
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: ssh-slave-public-key
+  name: ssh-slave-public-key-pull
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: ssh-slave-public-key
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   secretStoreRef:
     name: shoggoth-openbao

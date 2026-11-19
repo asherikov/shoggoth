@@ -99,6 +99,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: gadget
     app.kubernetes.io/component: gadget
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -109,6 +111,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: gadget
     app.kubernetes.io/component: gadget
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 data:
   # The daemon's own configuration, mounted read-only at /etc/ig. Shape and
   # defaults are upstream's (charts/gadget/templates/configmap.yaml and
@@ -162,6 +166,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: gadget
     app.kubernetes.io/component: gadget
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   # `app: gadget`, the same label the DaemonSet's pods carry. Namespace-scoped,
   # so the two instances' Services do not collide the way upstream's
@@ -183,6 +189,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: gadget
     app.kubernetes.io/component: gadget
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   selector:
     matchLabels:
@@ -193,6 +201,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: gadget
         app.kubernetes.io/component: gadget
+        shoggoth.io/group: telemetry
+        shoggoth.io/exposure: internal
       annotations:
         # Unconfined, so the container can write /sys/fs/bpf and
         # /sys/kernel/debug/tracing. Without it the daemon fails with
@@ -406,6 +416,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: gadget
     app.kubernetes.io/component: gadget
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 rules:
   - apiGroups: [""]
     resources: ["nodes/configz"]
@@ -445,6 +457,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: gadget
     app.kubernetes.io/component: gadget
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 # roleRef is immutable server-side, so this must name the ClusterRole above
 # exactly — the dangling-clusterrole-ref check in make/kube-linter.yaml
 # resolves it against the same render for that reason.
@@ -466,6 +480,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: gadget
     app.kubernetes.io/component: gadget
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 rules:
   - apiGroups: [ "" ]
     resources: [ "secrets" ]
@@ -486,6 +502,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: gadget
     app.kubernetes.io/component: gadget
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -506,6 +524,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: gadget
     app.kubernetes.io/component: gadget-instance
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
     # The selector pkg/gadget-service/store/k8s-configmap-store watches, and
     # the `name` label is the entry name — the same string the otelcol
     # keep-regex in templates/otelcol.yaml matches.

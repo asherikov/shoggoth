@@ -3,7 +3,7 @@
   Gitea action-runner PAT into a K8s Secret.
 
   Consumers: the initContainer in gitea.yaml waits on
-  ``externalsecret/gitea-runner-token``; the resulting Secret is also
+  ``externalsecret/gitea-runner-token-pull``; the resulting Secret is also
   referenced by ``argo-workflows.yaml`` (workflow trigger token) and
   the action-runner registration flow.
 
@@ -21,11 +21,13 @@
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: gitea-runner-token
+  name: gitea-runner-token-pull
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: gitea-runner-token
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   secretStoreRef:
     name: shoggoth-openbao

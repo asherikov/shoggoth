@@ -25,6 +25,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-webhook-receiver
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -34,6 +36,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-webhook-receiver
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 rules:
 - apiGroups:
   - argoproj.io
@@ -64,6 +68,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-webhook-receiver
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 subjects:
 - kind: ServiceAccount
   name: argo-webhook-receiver
@@ -84,6 +90,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-webhook-receiver
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
   annotations:
     # NOT `helm.sh/resource-policy: keep`, and deliberately so.
     #

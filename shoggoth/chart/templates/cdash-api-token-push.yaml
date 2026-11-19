@@ -22,11 +22,13 @@
 apiVersion: external-secrets.io/v1alpha1
 kind: PushSecret
 metadata:
-  name: cdash-api-token
+  name: cdash-api-token-push
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: cdash-api-token
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   secretStoreRefs:
     - name: shoggoth-openbao-write

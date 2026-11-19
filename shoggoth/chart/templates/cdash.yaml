@@ -5,6 +5,15 @@
   `cdash-storage` (Laravel storage/uploads/logs, mounted by the cdash
   Deployment). Both use the `local-path` StorageClass.
 
+  The cdash-db Service, StatefulSet and ServiceAccount carry no legacy
+  `app:` label on their metadata — only on their pods, where the Service
+  and StatefulSet selectors match on it. The legacy label is what gives a
+  workload its `Application:` box in the applications view
+  (make/clusterviz-views.yaml), and the database is plumbing that view
+  hides: it keeps its place in the cluster view, and nothing functional
+  moves, because selectors read the pod template labels, not the
+  controller's own metadata.
+
   The `cdash-init` ConfigMap runs from the cdash container's postStart hook:
   it seeds the `slave` user and mints a FULL_ACCESS API token, then writes it
   to Secret/cdash-api-token through the Kubernetes API using the pod's own
@@ -38,6 +47,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: cdash
     app.kubernetes.io/component: cdash
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -60,6 +71,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: cdash
     app.kubernetes.io/component: cdash
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -82,6 +95,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: cdash
     app.kubernetes.io/component: cdash
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 data:
   entrypoint-wrapper.sh: |
     #!/usr/bin/env bash
@@ -101,6 +116,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: cdash
     app.kubernetes.io/component: cdash
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 data:
   init.sh: |
     #!/usr/bin/env bash
@@ -273,8 +290,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
-    app: cdash-db
     app.kubernetes.io/component: cdash
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: cdash-db
@@ -292,8 +310,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
-    app: cdash-db
     app.kubernetes.io/component: cdash
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   serviceName: cdash-db
   replicas: 1
@@ -306,6 +325,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: cdash-db
         app.kubernetes.io/component: cdash
+        shoggoth.io/group: workflow
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:
@@ -378,6 +399,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: cdash
     app.kubernetes.io/component: cdash
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: cdash
@@ -394,7 +417,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: cdash
+    kube-diagrams.io/icon: diagrams.aws.management.TrustedAdvisorChecklist
     app.kubernetes.io/component: cdash
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -406,6 +432,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: cdash
         app.kubernetes.io/component: cdash
+        shoggoth.io/group: workflow
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: cdash-db-password,cdash-app-key,openldap-ldapauth-password,openldap-slave-password,authelia-secrets
     spec:
@@ -706,8 +734,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
-    app: cdash-db
     app.kubernetes.io/component: cdash
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 {{- end }}
 ---
 {{- if (include "shoggoth.isServiceEnabled" (list . "cdash")) }}
@@ -720,5 +749,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: cdash
     app.kubernetes.io/component: cdash
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 {{- end }}
 {{- end }}

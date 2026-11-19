@@ -18,6 +18,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: otelcol
     app.kubernetes.io/component: otelcol
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 data:
   config.yaml: |
     receivers:

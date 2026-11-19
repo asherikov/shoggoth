@@ -32,6 +32,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: headroom-proxy-token
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 type: Opaque
 data:
   # base64("3cb595958ee9985fa8670eadaf892042547c2931ef72d511cf4375b6039aca6c")

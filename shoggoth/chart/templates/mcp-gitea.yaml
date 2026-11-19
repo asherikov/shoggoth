@@ -12,6 +12,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: mcp-gitea
     app.kubernetes.io/component: mcp-gitea
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: mcp-gitea
@@ -28,7 +30,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: mcp-gitea
+    kube-diagrams.io/icon: diagrams.azure.aimachinelearning.CognitiveServices
     app.kubernetes.io/component: mcp-gitea
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -40,6 +45,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: mcp-gitea
         app.kubernetes.io/component: mcp-gitea
+        shoggoth.io/group: ai
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []

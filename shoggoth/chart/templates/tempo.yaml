@@ -16,6 +16,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: tempo
     app.kubernetes.io/component: tempo
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 data:
   config.yaml: |
     stream_over_http_enabled: true
@@ -93,6 +95,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: tempo
     app.kubernetes.io/component: tempo
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: tempo
@@ -113,6 +117,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: tempo
     app.kubernetes.io/component: tempo
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -134,7 +140,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: tempo
+    kube-diagrams.io/icon: diagrams.onprem.tracing.Tempo
     app.kubernetes.io/component: tempo
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   serviceName: tempo
   replicas: 1
@@ -147,6 +156,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: tempo
         app.kubernetes.io/component: tempo
+        shoggoth.io/group: telemetry
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       terminationGracePeriodSeconds: 30
@@ -215,6 +226,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: tempo
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   podSelector:
     matchLabels:

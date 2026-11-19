@@ -65,7 +65,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: authelia
     app.kubernetes.io/component: authelia
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 data:
   configuration.yml: |
     ---

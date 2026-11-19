@@ -10,6 +10,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: wireguard
+    shoggoth.io/exposure: external
 data:
   entrypoint.sh: |
     #!/usr/bin/env bash
@@ -37,6 +39,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: wireguard
     app.kubernetes.io/component: wireguard
+    shoggoth.io/exposure: external
 spec:
   selector:
     app: wireguard
@@ -53,7 +56,9 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: wireguard
+    kube-diagrams.io/icon: diagrams.generic.network.VPN
     app.kubernetes.io/component: wireguard
+    shoggoth.io/exposure: external
 spec:
   replicas: 1
   strategy:
@@ -67,6 +72,7 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: wireguard
         app.kubernetes.io/component: wireguard
+        shoggoth.io/exposure: external
       annotations:
         secret.reloader.stakater.com/reload: wireguard-admin-password
     spec:
@@ -186,4 +192,5 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: wireguard
     app.kubernetes.io/component: wireguard
+    shoggoth.io/exposure: external
 {{- end }}

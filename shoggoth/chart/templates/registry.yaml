@@ -17,6 +17,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: registry
     app.kubernetes.io/component: registry
+    shoggoth.io/exposure: external
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -39,6 +40,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: registry
     app.kubernetes.io/component: registry
+    shoggoth.io/exposure: external
 spec:
   selector:
     app: registry
@@ -56,6 +58,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: registry
     app.kubernetes.io/component: registry
+    shoggoth.io/exposure: external
 data:
   config.json: |
     {
@@ -112,7 +115,9 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: registry
+    kube-diagrams.io/icon: diagrams.alibabacloud.compute.ContainerService
     app.kubernetes.io/component: registry
+    shoggoth.io/exposure: external
 spec:
   replicas: 1
   # Recreate, not the default RollingUpdate, because this pod is on the host
@@ -138,6 +143,7 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: registry
         app.kubernetes.io/component: registry
+        shoggoth.io/exposure: external
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet

@@ -13,6 +13,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: victoria-metrics
     app.kubernetes.io/component: victoria-metrics
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: victoria-metrics
@@ -30,6 +32,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: victoria-metrics
     app.kubernetes.io/component: victoria-metrics
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -51,7 +55,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: victoria-metrics
+    kube-diagrams.io/icon: diagrams.onprem.monitoring.Prometheus
     app.kubernetes.io/component: victoria-metrics
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -63,6 +70,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: victoria-metrics
         app.kubernetes.io/component: victoria-metrics
+        shoggoth.io/group: telemetry
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []
@@ -122,6 +131,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: victoria-metrics
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   podSelector:
     matchLabels:

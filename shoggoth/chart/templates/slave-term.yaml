@@ -16,6 +16,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: slave-term
     app.kubernetes.io/component: slave-term
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 ---
 # The /cache persistent storage is shared across all CI consumers
 # (gitea-runner job pods and slave-term). See templates/shared-cache.yaml
@@ -29,6 +31,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: slave-term
     app.kubernetes.io/component: slave-term
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: slave-term
@@ -71,7 +75,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: slave-term
+    kube-diagrams.io/icon: diagrams.onprem.ci.GithubActions
     app.kubernetes.io/component: slave-term
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -83,6 +90,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: slave-term
         app.kubernetes.io/component: slave-term
+        shoggoth.io/group: workflow
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: gitea-slave-token,ssh-slave-private-key
     spec:

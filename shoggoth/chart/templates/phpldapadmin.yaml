@@ -13,6 +13,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: phpldapadmin
     app.kubernetes.io/component: phpldapadmin
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 data:
   entrypoint.sh: |
     #!/usr/bin/env bash
@@ -33,6 +35,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: phpldapadmin
     app.kubernetes.io/component: phpldapadmin
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: phpldapadmin
@@ -49,7 +53,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: phpldapadmin
+    kube-diagrams.io/icon: diagrams.aws.security.DirectoryService
     app.kubernetes.io/component: phpldapadmin
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -61,6 +68,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: phpldapadmin
         app.kubernetes.io/component: phpldapadmin
+        shoggoth.io/group: auth
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: openldap-ldapauth-password
     spec:
@@ -139,4 +148,6 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: phpldapadmin
     app.kubernetes.io/component: phpldapadmin
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 {{- end }}

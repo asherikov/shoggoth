@@ -22,7 +22,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openbao
     app.kubernetes.io/component: openbao
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 data:
   openbao.hcl: |
     ui = true
@@ -49,7 +52,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openbao
     app.kubernetes.io/component: openbao
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 data:
   bootstrap.sh: |
     #!/usr/bin/env bash
@@ -1228,7 +1234,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openbao
     app.kubernetes.io/component: openbao
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: openbao
@@ -1245,7 +1254,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openbao
     app.kubernetes.io/component: openbao
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -1267,7 +1279,11 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openbao
+    kube-diagrams.io/icon: diagrams.onprem.security.Vault
     app.kubernetes.io/component: openbao
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 spec:
   serviceName: openbao
   replicas: 1
@@ -1278,6 +1294,8 @@ spec:
     metadata:
       labels:
         app: openbao
+        shoggoth.io/group: auth
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       securityContext:
@@ -1439,7 +1457,10 @@ metadata:
   name: openbao-bootstrap
   namespace: {{ .Release.Namespace }}
   labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
     app: openbao-bootstrap
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 spec:
   backoffLimit: 3
   activeDeadlineSeconds: 600
@@ -1447,6 +1468,8 @@ spec:
     metadata:
       labels:
         app: openbao-bootstrap
+        shoggoth.io/group: auth
+        shoggoth.io/exposure: internal
     spec:
       restartPolicy: OnFailure
       serviceAccountName: openbao-init
@@ -1531,7 +1554,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openbao
     app.kubernetes.io/component: openbao
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -1540,7 +1566,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openbao
     app.kubernetes.io/component: openbao
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
@@ -1553,7 +1582,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: openbao
     app.kubernetes.io/component: openbao
+    shoggoth.io/group: auth
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role

@@ -49,7 +49,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: grafana
     app.kubernetes.io/component: grafana
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 data:
   datasources.yaml: |
     apiVersion: 1
@@ -113,7 +116,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: grafana
     app.kubernetes.io/component: grafana
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 data:
   {{- include "shoggoth.filesData" (list . "files/grafana/dashboards/shoggoth.json" false) | nindent 2 }}
 ---
@@ -124,7 +130,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: grafana
     app.kubernetes.io/component: grafana
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 data:
   {{- include "shoggoth.filesData" (list . "files/grafana/dashboards/shoggoth_service.json" false) | nindent 2 }}
 ---
@@ -135,7 +144,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: grafana
     app.kubernetes.io/component: grafana
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 data:
   {{- include "shoggoth.filesData" (list . "files/grafana/dashboards/shoggoth_ai.json" false) | nindent 2 }}
 ---
@@ -146,7 +158,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: grafana
     app.kubernetes.io/component: grafana
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 data:
   {{- include "shoggoth.filesData" (list . "files/grafana/dashboards/shoggoth_service_map.json" false) | nindent 2 }}
 ---
@@ -157,7 +172,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: grafana
     app.kubernetes.io/component: grafana
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: grafana
@@ -173,7 +191,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: grafana
     app.kubernetes.io/component: grafana
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -194,7 +215,11 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: grafana
+    kube-diagrams.io/icon: diagrams.onprem.monitoring.Grafana
     app.kubernetes.io/component: grafana
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -204,6 +229,8 @@ spec:
     metadata:
       labels:
         app: grafana
+        shoggoth.io/group: telemetry
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: grafana-admin-password,authelia-secrets
     spec:
@@ -499,5 +526,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: grafana
     app.kubernetes.io/component: grafana
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 {{- end }}

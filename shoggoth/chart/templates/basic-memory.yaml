@@ -18,6 +18,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: basic-memory
     app.kubernetes.io/component: basic-memory
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -41,6 +43,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: basic-memory
     app.kubernetes.io/component: basic-memory
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: basic-memory
@@ -57,7 +61,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: basic-memory
+    kube-diagrams.io/icon: diagrams.azure.aimachinelearning.CognitiveServices
     app.kubernetes.io/component: basic-memory
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -69,6 +76,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: basic-memory
         app.kubernetes.io/component: basic-memory
+        shoggoth.io/group: ai
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []
@@ -149,6 +158,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: basic-memory-ui
     app.kubernetes.io/component: basic-memory-ui
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: basic-memory-ui
@@ -165,7 +176,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: basic-memory-ui
+    kube-diagrams.io/icon: diagrams.azure.aimachinelearning.CognitiveServices
     app.kubernetes.io/component: basic-memory-ui
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -177,6 +191,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: basic-memory-ui
         app.kubernetes.io/component: basic-memory-ui
+        shoggoth.io/group: ai
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []

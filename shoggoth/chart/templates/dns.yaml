@@ -28,6 +28,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: dns
     app.kubernetes.io/component: dns
+    shoggoth.io/exposure: internal
 data:
   Corefile: |
     .:53 {
@@ -66,6 +67,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: dns
     app.kubernetes.io/component: dns
+    shoggoth.io/exposure: internal
 spec:
   clusterIP: {{ .Values.identity.dnsIp }}
   selector:
@@ -88,7 +90,9 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: dns
+    kube-diagrams.io/icon: diagrams.alibabacloud.web.Dns
     app.kubernetes.io/component: dns
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   strategy:
@@ -102,6 +106,7 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: dns
         app.kubernetes.io/component: dns
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       containers:

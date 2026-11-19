@@ -53,6 +53,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
   annotations:
     workflows.argoproj.io/description: |
         ServiceAccount used by Argo Workflows to spawn workflow pods and to
@@ -107,6 +109,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 rules:
 - apiGroups:
   - ''
@@ -142,10 +146,10 @@ rules:
   resources:
   - externalsecrets
   resourceNames:
-  - gitea-slave-token
-  - ssh-slave-private-key
+  - gitea-slave-token-pull
+  - ssh-slave-private-key-pull
   - openbao-unseal-key
-  - gitea-runner-token
+  - gitea-runner-token-pull
   verbs:
   - get
 - apiGroups:
@@ -164,6 +168,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -188,6 +194,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 rules:
 - apiGroups:
   - ''
@@ -255,6 +263,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -263,6 +273,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -288,6 +300,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -296,6 +310,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 rules:
 - apiGroups:
   - argoproj.io
@@ -314,6 +330,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -360,6 +378,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 rules:
 - apiGroups:
   - argoproj.io
@@ -415,10 +435,10 @@ rules:
   resources:
   - externalsecrets
   resourceNames:
-  - gitea-slave-token
-  - ssh-slave-private-key
+  - gitea-slave-token-pull
+  - ssh-slave-private-key-pull
   - openbao-unseal-key
-  - gitea-runner-token
+  - gitea-runner-token-pull
   verbs:
   - get
 ---
@@ -430,6 +450,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -441,7 +463,8 @@ subjects:
 ---
 # Required by the wait-bootstrap initContainer in the argo-workflow-controller
 # Deployment, which waits for the three ExternalSecrets the workflows
-# reference (gitea-slave-token, ssh-slave-private-key, gitea-runner-token)
+# reference (gitea-slave-token-pull, ssh-slave-private-key-pull,
+# gitea-runner-token-pull)
 # and for the openbao-unseal-key Secret before the git-cred sidecar starts
 # reading the corresponding K8s Secrets. The wait is `kubectl wait`, not a
 # polling loop, so the Role below needs list + watch on the externalsecrets,
@@ -457,6 +480,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 rules:
 # `kubectl wait` does an internal LIST + WATCH, not just GET: the initial
 # LIST establishes the resourceVersion, the subsequent WATCH streams
@@ -484,10 +509,10 @@ rules:
   resources:
   - externalsecrets
   resourceNames:
-  - gitea-slave-token
-  - ssh-slave-private-key
+  - gitea-slave-token-pull
+  - ssh-slave-private-key-pull
   - openbao-unseal-key
-  - gitea-runner-token
+  - gitea-runner-token-pull
   verbs:
   - get
   - list
@@ -501,6 +526,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -530,6 +557,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -560,6 +589,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 rules:
 - apiGroups:
   - external-secrets.io
@@ -595,6 +626,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -615,6 +648,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 rules:
 - apiGroups:
   - ''
@@ -632,6 +667,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -650,7 +687,10 @@ metadata:
   name: argo-workflow-controller
   namespace: {{ .Release.Namespace }}
   labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
     app: argo-workflow-controller
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   # The wait-bootstrap init container below has a 600s budget: ONE
@@ -672,6 +712,8 @@ spec:
     metadata:
       labels:
         app: argo-workflow-controller
+        shoggoth.io/group: workflow
+        shoggoth.io/exposure: internal
     spec:
       serviceAccountName: argo-workflow-controller
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
@@ -725,13 +767,13 @@ spec:
           # toggle nobody was looking at.
           ES=()
 {{- if (include "shoggoth.isServiceEnabled" (list . "gitea")) }}
-          ES+=("externalsecret/gitea-slave-token")
+          ES+=("externalsecret/gitea-slave-token-pull")
 {{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "secret-store")) }}
-          ES+=("externalsecret/ssh-slave-private-key")
+          ES+=("externalsecret/ssh-slave-private-key-pull")
 {{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}
-          ES+=("externalsecret/gitea-runner-token")
+          ES+=("externalsecret/gitea-runner-token-pull")
 {{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "openbao")) }}
           # openbao-unseal-key cannot join the wait below: it is a Secret
@@ -1123,6 +1165,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 data:
   resourceRateLimit: |
     limit: 32
@@ -1260,7 +1304,7 @@ data:
                 {"name": "SHOGGOTH_NAMESPACE", "value": "{{ .Release.Namespace }}"}
               ],
               "command": ["bash", "-c"],
-              "args": ["set -euo pipefail\nNS=\"{{ .Release.Namespace }}\"\nTIMEOUT=\"600s\"\n# Wait for the externalsecrets the git-cred sidecar reads via\n# secretKeyRef to be Ready (= the K8s Secret is populated).\n# Without this wait the workflow pod can start before the\n# external-secrets controller has synced, the kubelet sees an\n# empty Secret data field, and SSH_ID_RSA reaches the sidecar as\n# \"\" — bootstrap.sh then fatal()s on the empty-key check and the\n# git-cred container CrashLoopBackOffs while ssh-add -l in the main\n# container returns \"The agent has no identities.\".\n# Mirrors the controller's wait-bootstrap (which protects the\n# argo-workflow-controller Deployment itself) so workflow pods have\n# the same gate. RBAC for the `argo` SA is granted by the\n# `argo-workflow-pod-bootstrap-wait` RoleBinding.\n# Each wait carries the same `services.<x>.enabled` guard as the\n# ExternalSecret it waits for. $waitGitea / $waitSecretStore are\n# hoisted to the top of this document.\n{{ if $waitGitea }}kubectl wait --for=condition=Ready --timeout=\"${TIMEOUT}\" -n \"${NS}\" externalsecret/gitea-slave-token || { echo \"FAIL: externalsecret/gitea-slave-token not Ready after ${TIMEOUT}\"; exit 1; }\necho \"wait-bootstrap: externalsecret/gitea-slave-token Ready\"\n{{ end }}{{ if $waitSecretStore }}kubectl wait --for=condition=Ready --timeout=\"${TIMEOUT}\" -n \"${NS}\" externalsecret/ssh-slave-private-key || { echo \"FAIL: externalsecret/ssh-slave-private-key not Ready after ${TIMEOUT}\"; exit 1; }\necho \"wait-bootstrap: externalsecret/ssh-slave-private-key Ready\"\n{{ end }}"],
+              "args": ["set -euo pipefail\nNS=\"{{ .Release.Namespace }}\"\nTIMEOUT=\"600s\"\n# Wait for the externalsecrets the git-cred sidecar reads via\n# secretKeyRef to be Ready (= the K8s Secret is populated).\n# Without this wait the workflow pod can start before the\n# external-secrets controller has synced, the kubelet sees an\n# empty Secret data field, and SSH_ID_RSA reaches the sidecar as\n# \"\" — bootstrap.sh then fatal()s on the empty-key check and the\n# git-cred container CrashLoopBackOffs while ssh-add -l in the main\n# container returns \"The agent has no identities.\".\n# Mirrors the controller's wait-bootstrap (which protects the\n# argo-workflow-controller Deployment itself) so workflow pods have\n# the same gate. RBAC for the `argo` SA is granted by the\n# `argo-workflow-pod-bootstrap-wait` RoleBinding.\n# Each wait carries the same `services.<x>.enabled` guard as the\n# ExternalSecret it waits for. $waitGitea / $waitSecretStore are\n# hoisted to the top of this document.\n{{ if $waitGitea }}kubectl wait --for=condition=Ready --timeout=\"${TIMEOUT}\" -n \"${NS}\" externalsecret/gitea-slave-token-pull || { echo \"FAIL: externalsecret/gitea-slave-token-pull not Ready after ${TIMEOUT}\"; exit 1; }\necho \"wait-bootstrap: externalsecret/gitea-slave-token-pull Ready\"\n{{ end }}{{ if $waitSecretStore }}kubectl wait --for=condition=Ready --timeout=\"${TIMEOUT}\" -n \"${NS}\" externalsecret/ssh-slave-private-key-pull || { echo \"FAIL: externalsecret/ssh-slave-private-key-pull not Ready after ${TIMEOUT}\"; exit 1; }\necho \"wait-bootstrap: externalsecret/ssh-slave-private-key-pull Ready\"\n{{ end }}"],
               "resources": {
                 "requests": {"memory": "32Mi", "cpu": "50m"},
                 "limits": {"memory": "64Mi", "cpu": "200m"}
@@ -1356,6 +1400,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: argo-server
@@ -1372,7 +1418,10 @@ metadata:
   name: argo-server
   namespace: {{ .Release.Namespace }}
   labels:
+    {{- include "shoggoth.labels" . | nindent 4 }}
     app: argo-server
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -1382,6 +1431,8 @@ spec:
     metadata:
       labels:
         app: argo-server
+        shoggoth.io/group: workflow
+        shoggoth.io/exposure: internal
     spec:
       serviceAccountName: argo-server
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
@@ -1553,6 +1604,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 data:
   {{- include "shoggoth.filesData" (list . "files/argo/templates/*" false) | nindent 2 }}
 ---
@@ -1564,6 +1617,8 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: argo-workflows
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 data:
   {{- include "shoggoth.filesData" (list . "files/argo/bindings/*" false) | nindent 2 }}
 {{- end }}

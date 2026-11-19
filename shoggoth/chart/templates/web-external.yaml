@@ -16,6 +16,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: web-external
     app.kubernetes.io/component: web-external
+    shoggoth.io/exposure: external
 spec:
   selector:
     app: web-external
@@ -32,7 +33,9 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: web-external
+    kube-diagrams.io/icon: diagrams.onprem.network.Nginx
     app.kubernetes.io/component: web-external
+    shoggoth.io/exposure: external
 spec:
   replicas: 1
   strategy:
@@ -62,6 +65,7 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: web-external
         app.kubernetes.io/component: web-external
+        shoggoth.io/exposure: external
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -150,4 +154,5 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: web-external
     app.kubernetes.io/component: web-external
+    shoggoth.io/exposure: external
 {{- end }}

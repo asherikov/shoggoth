@@ -29,6 +29,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: otelcol
     app.kubernetes.io/component: otelcol
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: otelcol
@@ -51,7 +53,10 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: otelcol
+    kube-diagrams.io/icon: diagrams.onprem.aggregator.Fluentd
     app.kubernetes.io/component: otelcol
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 spec:
   selector:
     matchLabels:
@@ -73,6 +78,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: otelcol
         app.kubernetes.io/component: otelcol
+        shoggoth.io/group: telemetry
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       serviceAccountName: otelcol
@@ -203,6 +210,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: otelcol
     app.kubernetes.io/component: otelcol
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -212,6 +221,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: otelcol
     app.kubernetes.io/component: otelcol
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 rules:
 - apiGroups:
   - ''
@@ -264,6 +275,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: otelcol
     app.kubernetes.io/component: otelcol
+    shoggoth.io/group: telemetry
+    shoggoth.io/exposure: internal
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole

@@ -15,6 +15,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: apt-cache
     app.kubernetes.io/component: apt-cache
+    shoggoth.io/exposure: external
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -37,6 +38,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: apt-cache
     app.kubernetes.io/component: apt-cache
+    shoggoth.io/exposure: external
 spec:
   selector:
     app: apt-cache
@@ -54,6 +56,7 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: apt-cache
     app.kubernetes.io/component: apt-cache
+    shoggoth.io/exposure: external
 data:
   # apt-cacher-ng has no severity levels; VerboseLog is its only verbosity
   # knob (0 keeps activity type, time and transfer sizes, drops the extended
@@ -71,7 +74,9 @@ metadata:
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: apt-cache
+    kube-diagrams.io/icon: diagrams.generic.os.Ubuntu
     app.kubernetes.io/component: apt-cache
+    shoggoth.io/exposure: external
 spec:
   replicas: 1
   selector:
@@ -83,6 +88,7 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: apt-cache
         app.kubernetes.io/component: apt-cache
+        shoggoth.io/exposure: external
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []

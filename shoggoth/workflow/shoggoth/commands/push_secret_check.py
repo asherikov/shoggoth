@@ -51,10 +51,10 @@ class PushSecretCheck:
     # again — the cdash container's postStart hook mints the token
     # and writes the K8s Secret itself.
     PUSH_SECRETS = (
-        "gitea-slave-token",
-        "gitea-runner-token",
-        "redmine-slave-token",
-        "cdash-api-token",
+        "gitea-slave-token-push",
+        "gitea-runner-token-push",
+        "redmine-slave-token-push",
+        "cdash-api-token-push",
     )
 
     # Small delay before querying so the controller has time to

@@ -17,11 +17,13 @@
 apiVersion: external-secrets.io/v1alpha1
 kind: PushSecret
 metadata:
-  name: gitea-slave-token
+  name: gitea-slave-token-push
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: gitea-slave-token
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   secretStoreRefs:
     - name: shoggoth-openbao-write

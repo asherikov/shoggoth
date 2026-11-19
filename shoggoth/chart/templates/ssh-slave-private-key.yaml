@@ -5,7 +5,7 @@
 
   Consumers: the ``wait-bootstrap`` init containers in slave-term.yaml,
   slave-dind.yaml, and argo-workflows.yaml all poll
-  ``externalsecret/ssh-slave-private-key`` before allowing the pod to
+  ``externalsecret/ssh-slave-private-key-pull`` before allowing the pod to
   start, and the ``SSH_ID_RSA`` env var is sourced from the resulting
   Secret via ``secretKeyRef``. Without the CR those loops never see
   ``Ready=True``, the pods stay in ``Init:0/2``, and the 10-minute init
@@ -25,11 +25,13 @@
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
-  name: ssh-slave-private-key
+  name: ssh-slave-private-key-pull
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app.kubernetes.io/component: ssh-slave-private-key
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   secretStoreRef:
     name: shoggoth-openbao

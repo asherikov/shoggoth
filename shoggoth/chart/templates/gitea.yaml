@@ -67,7 +67,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gitea
     app.kubernetes.io/component: gitea
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
   annotations:
     # Kept across `helm uninstall` so uninstalling stops the workloads but
     # preserves data. Reinstall adopts it: shoggoth.labels survives
@@ -88,7 +91,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gitea
     app.kubernetes.io/component: gitea
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 data:
   init.sh: |
     #!/bin/sh
@@ -284,7 +290,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gitea
     app.kubernetes.io/component: gitea
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: gitea
@@ -303,7 +312,11 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gitea
+    kube-diagrams.io/icon: diagrams.onprem.vcs.Gitea
     app.kubernetes.io/component: gitea
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -313,6 +326,8 @@ spec:
     metadata:
       labels:
         app: gitea
+        shoggoth.io/group: workflow
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: openldap-ldapauth-password,openldap-admin-password,authelia-secrets
     spec:
@@ -560,7 +575,11 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gitea-runner
+    kube-diagrams.io/icon: diagrams.onprem.ci.GithubActions
     app.kubernetes.io/component: gitea
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -570,6 +589,8 @@ spec:
     metadata:
       labels:
         app: gitea-runner
+        shoggoth.io/group: workflow
+        shoggoth.io/exposure: internal
       annotations:
         secret.reloader.stakater.com/reload: gitea-runner-token
     spec:
@@ -698,7 +719,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gitea
     app.kubernetes.io/component: gitea
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 {{- end }}
 {{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}
 ---
@@ -709,7 +733,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gitea-runner
     app.kubernetes.io/component: gitea
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 {{- end }}
 ---
 {{- if (include "shoggoth.isServiceEnabled" (list . "gitea-runner")) }}
@@ -720,7 +747,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gitea
     app.kubernetes.io/component: gitea
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 data:
   config.yaml: |
     log:
@@ -817,7 +847,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: gitea-runner
     app.kubernetes.io/component: gitea
+    shoggoth.io/group: workflow
+    shoggoth.io/exposure: internal
 spec:
   # Headless: job pods need to reach the runner's cache server by DNS name
   # (gitea-runner.{{ .Release.Namespace }}.svc.cluster.local). A headless Service

@@ -27,6 +27,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: crawl4ai
     app.kubernetes.io/component: crawl4ai
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   selector:
     app: crawl4ai
@@ -44,6 +46,8 @@ metadata:
     {{- include "shoggoth.labels" . | nindent 4 }}
     app: crawl4ai
     app.kubernetes.io/component: crawl4ai
+    shoggoth.io/group: ai
+    shoggoth.io/exposure: internal
 spec:
   replicas: 1
   selector:
@@ -55,6 +59,8 @@ spec:
         {{- include "shoggoth.selectorLabels" . | nindent 8 }}
         app: crawl4ai
         app.kubernetes.io/component: crawl4ai
+        shoggoth.io/group: ai
+        shoggoth.io/exposure: internal
     spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers: []

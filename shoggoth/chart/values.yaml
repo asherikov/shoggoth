@@ -91,12 +91,6 @@ authelia:
 # the workload it gates, so a `--set services.<key>.enabled=false` maps
 # one-to-one. A "false" flag emits *no* resources for that service.
 #
-# Seven services carry a second `app:` label inside another service's template
-# (argo-server, argo-workflow-controller, basic-memory-ui, cdash-db,
-# gitea-runner, openbao-bootstrap, redmine-db). Each pair had no per-label
-# toggle, so Phase 4 gave them one — `redmine-db` now has
-# something to switch off on its own.
-#
 # Every key here matches the `app:` label verbatim — the value key under
 # .services.* is spelled the same way. Templates do not access keys via the dot
 # path (`services.<key>.enabled`) because Go templates parse `-` as subtraction;

@@ -17,6 +17,8 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "shoggoth.labels" . | nindent 4 }}
+    app: web-external
+    shoggoth.io/exposure: external
 data:
   angie.conf: |
     load_module modules/ngx_otel_module.so;
