@@ -6,7 +6,7 @@ import sys
 import time
 import uuid
 
-from ..agent import Agent, _normalise_diff_path
+from ..agent import Agent
 from ..git import Git
 from ..util import die, log, normalize_for_branch
 from .base import CommandBase
@@ -387,62 +387,37 @@ class PrUpdateCommand(CommandBase):
                         "falling back to body-only review")
                     # ``review_md`` was rendered with the inline
                     # flag (``inline_comments_enabled is True``),
-                    # so each finding's body became a placeholder
-                    # (``see inline comment``) and the full text
-                    # lives only in the inline-comment payload
-                    # Gitea rejected. Regenerate the body without
-                    # the flag so the placeholders become full
-                    # text — the fallback must carry the finding
-                    # text, not the placeholder.
+                    # so every anchored finding's line lost its
+                    # full text (the text lives only in the
+                    # inline-comment payload Gitea rejected).
+                    # Regenerate the body without the flag so the
+                    # findings carry full text — the fallback
+                    # must not leave location-only lines behind.
                     if review_data is not None:
                         review_md = self.agent._format_review_json(
                             review_data, pr_title, pr_url)
                     result = self.gitea.post_pr_review_chunked(
                         pr_repo, pr_number, review_md)
-                elif isinstance(result, dict):
-                    # Review posted with inline comments.
-                    # Post a follow-up issue comment with
-                    # a clickable index of the inline
-                    # comments — the review body has
-                    # "see inline comment" placeholders
-                    # (Gitea doesn't expose per-comment
-                    # URLs in the POST response and doesn't
-                    # support editing a posted review body),
-                    # so the follow-up provides the actual
-                    # links. Best-effort: if the fetch
-                    # fails, the inline comments are still
-                    # posted; only the follow-up links are
-                    # missing.
-                    review_id = result.get("id")
-                    if review_id:
-                        # ``pull_request_url`` from the
-                        # POST response is the canonical
-                        # PR URL Gitea uses internally —
-                        # use it as the base for
-                        # constructing per-comment URLs
-                        # (format:
-                        # ``{pull_request_url}#issuecomment-{id}``).
-                        # Avoids reconstructing the URL
-                        # from ``pr_repo``/``pr_number``
-                        # (which could differ in trailing
-                        # slash, query params, etc.) and
-                        # guarantees the ``#issuecomment-``
-                        # fragment resolves to the right
-                        # comment.
-                        pr_url = result.get(
-                            "pull_request_url", "")
-                        self._post_review_followup_with_links(
-                            pr_repo, pr_number, pr_url,
-                            review_id, review_data,
-                            inline_comments, otlp)
+                # No follow-up comment on the inline path. A
+                # clickable index of the inline comments used to
+                # be posted as a second comment here (Gitea's
+                # POST-reviews response carries no per-comment
+                # ids, so the index needed a follow-up GET), but
+                # its header re-rendered the verdict and summary
+                # the review body already carries — the review
+                # thread held two comments with the same
+                # information and only one unique payload (the
+                # link list). The review body's location list
+                # plus the inline comments at their diff anchors
+                # are the complete result; the index was noise.
             else:
                 # ``pr_sha`` is empty (or ``inline_comments``
                 # empty), so the inline post was skipped — but the
                 # ``review_md`` was already rendered with the
-                # inline flag set, so any finding that did have a
-                # path/line is a placeholder whose full text lives
-                # only in the inline-comment payload that will
-                # never go anywhere. Regenerate without the flag so
+                # inline flag set, so every anchored finding's
+                # line lost its full text (it lives only in the
+                # inline-comment payload that will never go
+                # anywhere). Regenerate without the flag so
                 # the body carries full text.
                 if review_data is not None:
                     review_md = self.agent._format_review_json(
@@ -463,147 +438,6 @@ class PrUpdateCommand(CommandBase):
             f"pr-review: session done elapsed={time.time() - t0:.1f}s "
             f"review_chars={len(review_md)}")
         self.agent.stop_session()
-
-    def _post_review_followup_with_links(self, pr_repo, pr_number,
-                                           pr_url, review_id,
-                                           review_data, inline_comments,
-                                           otlp):
-        """Post a follow-up issue comment with a clickable
-        index of the inline comments posted in the review.
-
-        The review body has "see inline comment"
-        placeholders (Gitea doesn't expose per-comment
-        URLs in the POST review response and doesn't
-        support editing a posted review body), so the
-        follow-up provides the actual links. Reviewers
-        see the inline comments at the right lines AND
-        a navigable index in the PR conversation.
-
-        Best-effort: if the comments fetch fails, the
-        inline comments are still posted (they're already
-        in Gitea by the time this runs) — only the
-        follow-up links are missing. The function logs
-        a warning and returns; the workflow continues.
-
-        ``pr_url`` is ``pull_request_url`` from the
-        POST review response — the canonical PR URL
-        Gitea uses internally. Used as the base for
-        constructing per-comment URLs in the format
-        ``{pr_url}#issuecomment-{id}`` (the same format
-        Gitea itself uses in
-        ``services/convert/pull_review.go`` via
-        ``comment.HTMLURL(ctx)``). Constructing the URL
-        from the canonical base (rather than
-        reconstructing it from ``pr_repo``/``pr_number``
-        or using ``html_url`` from the GET response)
-        guarantees the fragment resolves to the right
-        comment even if the PR URL formatting differs
-        (trailing slash, query params, etc.).
-
-        ``review_data`` is the parsed review JSON
-        (verdict, summary, findings); used to render the
-        follow-up header. ``inline_comments`` is the
-        list of inline comments we sent in the review
-        (each ``{path, new_position, body}``); used to
-        build the index. The per-comment ``id`` is
-        fetched from Gitea by matching on ``(path, line)``.
-        """
-        try:
-            comments = self.gitea.get_pr_review_comments(
-                pr_repo, pr_number, review_id)
-        except Exception as e:
-            log(f"pr-review: WARNING failed to fetch "
-                f"review comments for follow-up: {e}",
-                file=sys.stderr)
-            otlp._push_line(
-                f"pr-review: WARNING failed to fetch "
-                f"review comments for follow-up: {e}")
-            return
-        if not comments:
-            log(f"pr-review: WARNING no comments returned "
-                f"for review {review_id}; skipping follow-up",
-                file=sys.stderr)
-            otlp._push_line(
-                f"pr-review: WARNING no comments returned "
-                f"for review {review_id}; skipping follow-up")
-            return
-        # Build a map of (normalised_path, line) ->
-        # comment_id from the Gitea response. The
-        # response uses ``position`` (= ``LineNum``
-        # internally, the file line number) and
-        # ``path`` exactly as we sent them. The URL
-        # is then constructed as
-        # ``{pr_url}#issuecomment-{id}`` below —
-        # using the canonical ``pr_url`` from the
-        # POST response guarantees the fragment
-        # resolves to the right comment.
-        # Normalise the path the same way
-        # ``Agent._format_review_json`` normalises the
-        # path key it stashes on each inline comment,
-        # so the lookup matches the agent's normalised
-        # form even when Gitea returns the comment
-        # with a prefix (``./README.md``,
-        # ``/README.md``) the agent never reported.
-        id_map = {}
-        for c in comments:
-            path = _normalise_diff_path(c.get("path", ""))
-            line = c.get("position", 0)
-            cid = c.get("id", 0)
-            if path and line and cid:
-                id_map[(path, line)] = cid
-        # Build the follow-up body. The verdict and
-        # summary go in the header; the inline-comment
-        # index goes under a sub-heading. The full text
-        # of each finding is NOT duplicated here — it
-        # lives in the inline comments themselves (per
-        # the "no duplication" requirement).
-        rd = review_data or {}
-        verdict = rd.get("verdict") or ""
-        summary = (rd.get("summary")
-                   or rd.get("summary_md")
-                   or rd.get("body") or "")
-        parts = ["## Code review summary", ""]
-        if verdict:
-            parts.append(f"**Verdict:** {verdict}")
-            parts.append("")
-        if summary:
-            parts.append(summary.strip())
-            parts.append("")
-        parts.append("### Inline comments")
-        parts.append("")
-        parts.append("Click a link to jump to the comment:")
-        parts.append("")
-        for ic in inline_comments:
-            path = ic.get("path", "?")
-            line = ic.get("new_position", 0)
-            cid = id_map.get((path, line), 0)
-            label = f"`{path}:{line}`"
-            if cid and pr_url:
-                url = f"{pr_url}#issuecomment-{cid}"
-                parts.append(f"- [{label}]({url})")
-            else:
-                # No comment ID matched (the GET
-                # response didn't include this path/
-                # line) or no ``pr_url`` from the POST
-                # response — fall back to plain text
-                # so the line is still listed.
-                parts.append(f"- {label}")
-        followup_body = "\n".join(parts)
-        otlp._push_line(
-            f"pr-review: posting follow-up summary with "
-            f"{len(inline_comments)} inline comment link(s)")
-        result = self.gitea.post_pr_comment(
-            pr_repo, pr_number, followup_body)
-        if result is None:
-            log(f"pr-review: WARNING failed to post "
-                f"follow-up summary comment",
-                file=sys.stderr)
-            otlp._push_line(
-                "pr-review: WARNING failed to post "
-                "follow-up summary comment")
-        else:
-            otlp._push_line(
-                "pr-review: follow-up summary posted")
 
     def _resolve_task(self, branch):
         issues = self.redmine.list_issues(self.shoggoth.project)
@@ -1010,8 +844,27 @@ class PrUpdateCommand(CommandBase):
         except Exception as e:
             log(f"slash-command: command=/{command} failed: {e}",
                 file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Command `/{command}` failed: {e}")
+            if command == "do" and thread_path and thread_line:
+                # ``/do`` reports every failure in the review
+                # thread the trigger replied to (see
+                # ``_post_do_failure``), so the unexpected-
+                # exception path posts there too instead of
+                # falling back to a top-level comment.
+                self._post_do_failure(pr_repo, pr_number,
+                                      thread_path, thread_line)
+            else:
+                # One generic failure message per command: the
+                # per-mode detail (the exception, git stderr,
+                # the agent's exit code) stays in the Argo log,
+                # which is where an operator reads it. The PR
+                # thread carries exactly two messages per
+                # command — the success confirmation and this
+                # failure — and the ``die()`` below still
+                # surfaces the exception text in the workflow
+                # log and marks the step Failed.
+                self._post_slash_response(pr_repo, pr_number,
+                    f"`/{command}` failed. "
+                    f"See the workflow log for details.")
             # Fail the workflow, not just the command. The PR
             # comment above gives the user a clean pointer to the
             # reason; dying surfaces the same reason in the Argo
@@ -1057,9 +910,9 @@ class PrUpdateCommand(CommandBase):
         comment event per workflow, and
         ``payload.sender.login`` is the user who
         posted the slash command. Non-slash-command PR
-        comments (e.g. ``_pr_review``'s follow-up
-        summary) keep the plain ``post_pr_comment`` so
-        the bot's review summary is not misattributed to
+        comments (e.g. ``_pr_review``'s review body)
+        keep the plain ``post_pr_comment`` so the
+        bot's review is not misattributed to
         whichever user last commented.
         """
         result = self.gitea.post_pr_comment_attributed(
@@ -1073,6 +926,33 @@ class PrUpdateCommand(CommandBase):
             die(f"slash-command: {label} failed: workflow halted after "
                 f"posted failure response")
         return result
+
+    def _slash_failed(self, pr_repo, pr_number, command):
+        """Post the one generic failure comment for a slash command.
+
+        ``/squash``, ``/rebase`` and ``/drop`` post exactly two
+        messages over their lifetime: the success confirmation and
+        this failure. Every handled failure mode (a rejected
+        pre-flight push, a git command that failed, the agent
+        producing an unusable message, an unreadable permission
+        set, a drop whose range does not resolve) used to post its
+        own per-mode wording — sometimes with git stderr or a
+        multi-paragraph recovery recipe — which made the PR thread
+        the place to diff bot behaviour instead of the workflow
+        log. The detail stays in the Argo log, which this message
+        points at; the thread stays at two messages.
+
+        Fatal by construction (``_post_slash_response``'s
+        ``fatal=True``): every caller is a failure path that must
+        not let the workflow return success on a partial state.
+        """
+        run_url = params.shoggoth_argo_run_url
+        run_url_suffix = f" Argo run: {run_url}." if run_url else ""
+        self._post_slash_response(
+            pr_repo, pr_number,
+            f"`/{command}` failed. See the workflow log for details."
+            f"{run_url_suffix}",
+            fatal=True, command=command)
 
     def _slash_do(self, pr_repo, pr_number, pr_url,
                   thread_path=None, thread_line=None):
@@ -1142,6 +1022,33 @@ class PrUpdateCommand(CommandBase):
         ``_pr_comment`` discipline: failed/no-op
         runs leave the conversation unresolved for
         the next ``/do`` invocation).
+
+        No success comment is posted — same
+        discipline as ``_slash_review``'s review
+        request: the commit and the resolved
+        conversation are the visible outcome in the
+        PR thread, and the user who typed ``/do``
+        already knows they asked for it, so an
+        "Executed ..." confirmation adds noise
+        without information. Success is reported by
+        the conversation being RESOLVED (closed) once
+        a non-empty commit lands, and by nothing
+        else.
+
+        Failure is reported by exactly one message,
+        posted INTO the conversation the ``/do``
+        replied to (an inline review comment at the
+        ``(path, line)`` anchor, see
+        ``_post_do_failure``): agent timeout,
+        non-zero agent exit, or an unexpected
+        exception. The message is generic — the agent
+        output, the exit code and the exception stay
+        in the Argo log, which the message points at.
+        A ``/do`` with no unresolved comments at the
+        anchor posts nothing at all: there is nothing
+        to report that the already-resolved thread
+        does not already say, and the log line
+        carries the no-op for the workflow log.
         """
         # Conversation-identification gate. Gitea
         # defines a "conversation" only for inline
@@ -1170,15 +1077,15 @@ class PrUpdateCommand(CommandBase):
             # No unresolved comments at this anchor
             # (the conversation was the only one and
             # is now resolved, or the anchor doesn't
-            # match any review comment). Tell the
-            # user so they can pick a different
-            # thread.
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"`/do`: no unresolved review comments "
-                f"found in the conversation at "
-                f"`{thread_path}:{thread_line}`. "
-                f"Nothing to execute.")
+            # match any review comment). Nothing to
+            # execute, so nothing to report: the
+            # already-resolved thread says more than
+            # any comment this handler could post,
+            # and the log line below carries the no-op
+            # for the workflow log.
+            log(f"slash-do: no unresolved review comments in the "
+                f"conversation at {thread_path}:{thread_line}; "
+                f"nothing to execute")
             return
 
         # The body is the conversation's combined
@@ -1220,14 +1127,22 @@ class PrUpdateCommand(CommandBase):
                 prompt,
                 timeout=Agent.AGENT_TIMEOUT,
                 retry_label="pr-do")
-            if rc == 124:
-                anchor = (f"{thread_path}:{thread_line}"
-                          if thread_path and thread_line
-                          else "")
-                self._handle_timeout(
-                    pr_repo, pr_number, pr_url, [],
-                    caller="pr-do", context_label=anchor)
             if rc != 0:
+                # One failure path for both failure
+                # modes — the retry wrapper's timeout
+                # (rc == 124) and any other non-zero
+                # exit. One generic message, posted
+                # INTO the conversation this ``/do``
+                # was replying to (see
+                # ``_post_do_failure``); the agent
+                # output and the exit code stay in
+                # the workflow log. The ``finally``
+                # block below still pushes any
+                # pending commits and stops the agent
+                # session as the ``SystemExit`` from
+                # ``die()`` unwinds through it.
+                self._post_do_failure(pr_repo, pr_number,
+                                      thread_path, thread_line)
                 die(f"qwen agent exited with code {rc}")
 
             summary = self.agent.otlp.get_review_text().strip()
@@ -1275,10 +1190,55 @@ class PrUpdateCommand(CommandBase):
                     log(f"slash-do: WARNING resolve failed for "
                         f"comment {comment_id}")
             self.agent.stop_session()
-        self._post_slash_response(
-            pr_repo, pr_number,
-            f"Executed `/do` for the conversation at "
-            f"`{thread_path}:{thread_line}`.")
+
+    def _post_do_failure(self, pr_repo, pr_number, thread_path,
+                         thread_line):
+        """Post the one generic ``/do`` failure INTO the thread.
+
+        The message lands as an inline review comment on the
+        conversation the ``/do`` was replying to — an inline
+        comment at ``(thread_path, thread_line)`` inside a review
+        against the PR head, which is how Gitea renders a reply
+        in a code-comment conversation. A top-level PR comment
+        would strand the failure away from the conversation it
+        belongs to.
+
+        Gitea rejects the whole review with 422 when an inline
+        comment carries no ``commit_id``, and again when the
+        ``(path, position)`` no longer exists in the head diff
+        (the file was renamed or the lines moved since the
+        anchor comment was posted). Both cases fall back to a
+        plain attributed PR comment — a posted failure beats a
+        silently dropped one — and the workflow log records the
+        downgrade.
+
+        The body is generic by design: the agent output, the
+        exit code and any exception stay in the Argo log, which
+        the message points at. One failure message per ``/do``
+        invocation, matching the success side (no comment, the
+        resolved conversation is the outcome).
+        """
+        body = "`/do` failed. See the workflow log for details."
+        run_url = params.shoggoth_argo_run_url
+        if run_url:
+            body += f" Argo run: {run_url}."
+        head_sha = ((self.gitea._payload.get("pull_request") or {})
+                    .get("head") or {}).get("sha") or ""
+        if head_sha:
+            result = self.gitea.post_pr_review_with_inline(
+                pr_repo, pr_number, "", "COMMENT",
+                [{"path": thread_path, "body": body,
+                  "new_position": thread_line}],
+                head_sha)
+            if result is not None:
+                return
+            log(f"slash-do: inline failure post rejected; falling "
+                f"back to a PR comment", file=sys.stderr)
+        else:
+            log(f"slash-do: no head sha on the payload; posting "
+                f"failure as a PR comment", file=sys.stderr)
+        self.gitea.post_pr_comment_attributed(pr_repo, pr_number,
+                                              body)
 
     def _slash_review(self, pr_repo, pr_number, pr_url):
         """``/review`` — request a review from the slave user.
@@ -1351,30 +1311,30 @@ class PrUpdateCommand(CommandBase):
         followed by a single ``git commit`` with the generated
         message. The squashed branch is then force-pushed.
 
-        ccws note: this operates on the ccws repo (the one
-        holding the working branch). Sub-repos keep their per-PR
-        commit history; a full cross-repo squash would require a
-        separate per-sub-repo reset+recommit loop that this handler
-        does not implement. For standalone repos the repo is the
-        only repo and the squash is exact.
+        ccws note: this operates on the repository that holds the
+        working branch -- the workspace root for a PR against the
+        workspace itself, the sub-repository for a PR against one
+        of its sub-repositories, which is the only place the task
+        flow ever creates and pushes the branch (``wshandler branch
+        new`` / ``push`` never touch the workspace root). Squashing
+        a sub-repo PR therefore rewrites that sub-repo's branch
+        exactly; a PR against the workspace itself leaves the
+        sub-repositories' own history untouched. For standalone
+        repos the repo is the only repo and the squash is exact.
         """
-        repo_dir = self.shoggoth.repo_dir
+        repo_dir = self.shoggoth._resolve_working_repo_dir(pr_repo)
         pr_branch = self.shoggoth.working_branch
         pr_data = self.gitea.get_pr(pr_repo, pr_number)
         if not pr_data:
             log(f"slash-squash: get_pr returned no data",
                 file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Failed to get PR #{pr_number} info.",
-                fatal=True, command="squash")
+            self._slash_failed(pr_repo, pr_number, "squash")
             return
         base_ref = (pr_data.get("base") or {}).get("ref", "")
         if not base_ref:
             log(f"slash-squash: no base ref in PR data",
                 file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                "Failed to determine base branch.",
-                fatal=True, command="squash")
+            self._slash_failed(pr_repo, pr_number, "squash")
             return
 
         log(f"slash-squash: base={base_ref} branch={pr_branch} "
@@ -1385,17 +1345,13 @@ class PrUpdateCommand(CommandBase):
         if not base_sha:
             log(f"slash-squash: failed to resolve origin/{base_ref}",
                 file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Failed to resolve base ref `{base_ref}`.",
-                fatal=True, command="squash")
+            self._slash_failed(pr_repo, pr_number, "squash")
             return
 
         diff_text = self._pr_diff_for_prompt(repo_dir, pr_repo,
                                               pr_number, base_ref)
         if not diff_text:
-            self._post_slash_response(pr_repo, pr_number,
-                "Failed to compute PR diff for squash.",
-                fatal=True, command="squash")
+            self._slash_failed(pr_repo, pr_number, "squash")
             return
         if len(diff_text) > 80000:
             diff_text = diff_text[:80000] + "\n... (truncated)"
@@ -1420,28 +1376,27 @@ class PrUpdateCommand(CommandBase):
         if reset.returncode != 0:
             log(f"slash-squash: git reset --soft failed: "
                 f"{reset.stderr.strip()[:200]}", file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Failed to soft reset to base: "
-                f"{reset.stderr.strip()[:200]}",
-                fatal=True, command="squash")
+            self._slash_failed(pr_repo, pr_number, "squash")
             return
 
         cached = g.diff_cached_name_only(check=False)
         if not cached.stdout.strip():
             log(f"slash-squash: nothing staged after reset "
                 f"(branch already at base)")
-            self._post_slash_response(pr_repo, pr_number,
-                "No changes to squash (branch already at base).")
+            # No comment: nothing happened, and a
+            # "nothing to squash" message is a
+            # no-op report the branch itself
+            # already conveys. Same discipline as
+            # ``/do``'s no-op gate — the log line
+            # above carries it for the workflow
+            # log.
             return
 
         commit = g.commit(commit_msg, check=False)
         if commit.returncode != 0:
             log(f"slash-squash: git commit failed: "
                 f"{commit.stderr.strip()[:200]}", file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Failed to commit squashed changes: "
-                f"{commit.stderr.strip()[:200]}",
-                fatal=True, command="squash")
+            self._slash_failed(pr_repo, pr_number, "squash")
             return
 
         push = g.push("origin", pr_branch, force_with_lease=True,
@@ -1450,24 +1405,7 @@ class PrUpdateCommand(CommandBase):
             stderr = (push.stderr or "").strip()[:500]
             log(f"slash-squash: git push failed: {stderr}",
                 file=sys.stderr)
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"Failed to push squashed branch — the local "
-                f"branch is squashed (one commit on top of the "
-                f"base) but the remote is unchanged. Server said:"
-                f"\n\n```\n{stderr}\n```\n\n"
-                f"To finish the squash, push from a machine that "
-                f"has push access to `{pr_branch}`:\n\n"
-                f"```\n"
-                f"git fetch origin\n"
-                f"git checkout {pr_branch}\n"
-                f"git push --force-with-lease origin {pr_branch}\n"
-                f"```\n\n"
-                f"Or grant the shoggoth slave write permission on "
-                f"this repo and retry — the pre-flight check "
-                f"would then catch it before any destructive local "
-                f"op runs.",
-                fatal=True, command="squash")
+            self._slash_failed(pr_repo, pr_number, "squash")
             return
 
         log(f"slash-squash: successfully squashed {pr_branch}")
@@ -1483,7 +1421,7 @@ class PrUpdateCommand(CommandBase):
         Returns the commit message string (subject + body, separated
         by a blank line) on success, or ``None`` if the agent
         failed — in which case a failure response has already been
-        posted via ``_post_slash_response``.
+        posted via ``_slash_failed``.
 
         ``tool_profile`` defaults to ``"full"`` (the agent is free
         to inspect the workspace for context); ``cwd`` is the repo
@@ -1517,10 +1455,7 @@ class PrUpdateCommand(CommandBase):
                 cwd=repo_dir, retry_label="pr-squash")
             if rc != 0:
                 log(f"slash-squash: agent rc={rc}", file=sys.stderr)
-                self._post_slash_response(pr_repo, pr_number,
-                    f"Failed to generate squash commit message "
-                    f"(agent rc={rc}).",
-                    fatal=True, command="squash")
+                self._slash_failed(pr_repo, pr_number, "squash")
                 return None
             response_text = self.agent.otlp.get_review_text()
             data = self.agent._extract_agent_json(response_text,
@@ -1530,18 +1465,14 @@ class PrUpdateCommand(CommandBase):
                 log(f"slash-squash: failed to extract JSON from agent "
                     f"output (length={len(response_text) if response_text else 0})",
                     file=sys.stderr)
-                self._post_slash_response(pr_repo, pr_number,
-                    "Failed to parse squash commit message from agent.",
-                    fatal=True, command="squash")
+                self._slash_failed(pr_repo, pr_number, "squash")
                 return None
             subject = (data.get("subject") or "").strip()
             body = (data.get("body") or "").strip()
             if not subject:
                 log(f"slash-squash: agent returned empty subject",
                     file=sys.stderr)
-                self._post_slash_response(pr_repo, pr_number,
-                    "Agent generated an empty squash commit subject.",
-                    fatal=True, command="squash")
+                self._slash_failed(pr_repo, pr_number, "squash")
                 return None
             return f"{subject}\n\n{body}" if body else subject
         finally:
@@ -1563,26 +1494,25 @@ class PrUpdateCommand(CommandBase):
         rebase is aborted and a failure comment posted. The
         rebased branch is force-pushed on success.
 
-        ccws note: same caveat as ``_slash_squash`` — the ccws repo
-        is rebased; sub-repo branches are not.
+        ccws note: same resolution as ``_slash_squash`` -- the
+        branch that is rebased is the one the PR's repository
+        holds: the workspace root for a PR against the workspace
+        itself, the sub-repository for a PR against one of its
+        sub-repositories.
         """
-        repo_dir = self.shoggoth.repo_dir
+        repo_dir = self.shoggoth._resolve_working_repo_dir(pr_repo)
         pr_branch = self.shoggoth.working_branch
         pr_data = self.gitea.get_pr(pr_repo, pr_number)
         if not pr_data:
             log(f"slash-rebase: get_pr returned no data",
                 file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Failed to get PR #{pr_number} info.",
-                fatal=True, command="rebase")
+            self._slash_failed(pr_repo, pr_number, "rebase")
             return
         base_ref = (pr_data.get("base") or {}).get("ref", "")
         if not base_ref:
             log(f"slash-rebase: no base ref in PR data",
                 file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                "Failed to determine base branch.",
-                fatal=True, command="rebase")
+            self._slash_failed(pr_repo, pr_number, "rebase")
             return
 
         log(f"slash-rebase: base={base_ref} branch={pr_branch}")
@@ -1594,10 +1524,7 @@ class PrUpdateCommand(CommandBase):
         if fetch.returncode != 0:
             log(f"slash-rebase: fetch failed: "
                 f"{fetch.stderr.strip()[:200]}", file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Failed to fetch base branch: "
-                f"{fetch.stderr.strip()[:200]}",
-                fatal=True, command="rebase")
+            self._slash_failed(pr_repo, pr_number, "rebase")
             return
 
         # GIT_EDITOR=true prevents the rebase / rebase --continue
@@ -1633,10 +1560,7 @@ class PrUpdateCommand(CommandBase):
             g.rebase_abort(env=rebase_env, check=False)
             log(f"slash-rebase: conflict resolution failed; aborted",
                 file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                "Could not automatically resolve rebase conflicts. "
-                "Manual intervention required.",
-                fatal=True, command="rebase")
+            self._slash_failed(pr_repo, pr_number, "rebase")
             return
 
         self._push_force(pr_repo, pr_number, pr_branch, repo_dir,
@@ -1716,7 +1640,10 @@ class PrUpdateCommand(CommandBase):
         is harder to map back to "you typed a wrong
         SHA" than a per-SHA ``rev-parse --verify`` loop
         with a clear "SHA '<bad>' does not exist in this
-        repo" comment.
+        repo" line in the workflow log. The PR comment
+        is the generic ``/drop`` failure (see
+        ``_slash_failed``); the per-SHA detail lives in
+        the log.
         """
         if not shas:
             # Defensive: ``_handle_slash_command`` should
@@ -1725,29 +1652,22 @@ class PrUpdateCommand(CommandBase):
             # ``shas`` programmatically (e.g. a tests
             # path) could end up here. Fail loud rather
             # than running a no-op rebase.
-            self._post_slash_response(
-                pr_repo, pr_number,
-                "No SHAs supplied to /drop.",
-                fatal=True, command="drop")
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
 
-        repo_dir = self.shoggoth.repo_dir
+        repo_dir = self.shoggoth._resolve_working_repo_dir(pr_repo)
         pr_branch = self.shoggoth.working_branch
         pr_data = self.gitea.get_pr(pr_repo, pr_number)
         if not pr_data:
             log(f"slash-drop: get_pr returned no data",
                 file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Failed to get PR #{pr_number} info.",
-                fatal=True, command="drop")
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
         base_ref = (pr_data.get("base") or {}).get("ref", "")
         if not base_ref:
             log(f"slash-drop: no base ref in PR data",
                 file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                "Failed to determine base branch.",
-                fatal=True, command="drop")
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
 
         log(f"slash-drop: base={base_ref} branch={pr_branch} "
@@ -1760,10 +1680,7 @@ class PrUpdateCommand(CommandBase):
         if fetch.returncode != 0:
             log(f"slash-drop: fetch failed: "
                 f"{fetch.stderr.strip()[:200]}", file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Failed to fetch base branch: "
-                f"{fetch.stderr.strip()[:200]}",
-                fatal=True, command="drop")
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
 
         # Step 1: verify every SHA exists in the repo.
@@ -1776,14 +1693,9 @@ class PrUpdateCommand(CommandBase):
         missing = [s for s in shas
                    if g.rev_parse_verify_quiet(s, check=False).returncode != 0]
         if missing:
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"The following SHA(s) do not exist in this "
-                f"repo: `{'`, `'.join(missing)}`. Check that "
-                f"you copy-pasted the full SHA (or at least "
-                f"7 hex chars) and that the commits are on "
-                f"this PR's branch.",
-                fatal=True, command="drop")
+            log(f"slash-drop: SHA(s) do not exist in this repo: "
+                f"{missing}", file=sys.stderr)
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
 
         # Step 2: deduplicate (preserve first-seen order
@@ -1811,10 +1723,7 @@ class PrUpdateCommand(CommandBase):
         if merge_base.returncode != 0 or not merge_base.stdout.strip():
             log(f"slash-drop: merge-base failed: "
                 f"{merge_base.stderr.strip()[:200]}", file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Failed to compute merge-base with "
-                f"`origin/{base_ref}`.",
-                fatal=True, command="drop")
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
         merge_base_sha = merge_base.stdout.strip().splitlines()[0]
 
@@ -1832,27 +1741,14 @@ class PrUpdateCommand(CommandBase):
             elif is_ancestor_base == 0:
                 on_base.append(s)
         if not_on_branch:
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"The following SHA(s) are not on this PR's "
-                f"branch: `{'`, `'.join(not_on_branch)}`. Only "
-                f"commits introduced by the PR (i.e. between "
-                f"`{merge_base_sha[:12]}` and HEAD) can be "
-                f"dropped. Commits on the base branch are "
-                f"shared history and cannot be removed with a "
-                f"force-push to the PR branch.",
-                fatal=True, command="drop")
+            log(f"slash-drop: SHA(s) not on this PR's branch: "
+                f"{not_on_branch}", file=sys.stderr)
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
         if on_base:
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"The following SHA(s) are on the base "
-                f"branch and cannot be dropped with a PR "
-                f"force-push: `{'`, `'.join(on_base)}`. Use a "
-                f"`git revert` (which creates a new commit) "
-                f"if you need to undo a base-branch commit's "
-                f"effect on the PR.",
-                fatal=True, command="drop")
+            log(f"slash-drop: SHA(s) on the base branch: "
+                f"{on_base}", file=sys.stderr)
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
 
         # Step 3.5: ordering. The rebase needs to know
@@ -1874,10 +1770,7 @@ class PrUpdateCommand(CommandBase):
         if pr_log.returncode != 0:
             log(f"slash-drop: git log failed: "
                 f"{pr_log.stderr.strip()[:200]}", file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"Failed to enumerate PR commits: "
-                f"{pr_log.stderr.strip()[:200]}",
-                fatal=True, command="drop")
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
         pr_shas = set(pr_log.stdout.split())
         # Verify every user-supplied SHA appears in the
@@ -1889,13 +1782,11 @@ class PrUpdateCommand(CommandBase):
         # ``is_ancestor`` semantics unless the SHA IS
         # the merge-base, which step 3.6 below catches).
         if not set(full_shas).issubset(pr_shas):
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"Some SHA(s) are not in the PR's commit "
-                f"range (`{merge_base_sha[:12]}..HEAD`): "
-                f"`{'`, `'.join(set(full_shas) - pr_shas)}`. "
-                f"Only commits added by the PR can be dropped.",
-                fatal=True, command="drop")
+            log(f"slash-drop: SHA(s) not in the PR's commit range "
+                f"({merge_base_sha[:12]}..HEAD): "
+                f"{sorted(set(full_shas) - pr_shas)}",
+                file=sys.stderr)
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
 
         # 3.6: don't drop the merge-base. If a user
@@ -1918,21 +1809,13 @@ class PrUpdateCommand(CommandBase):
                 f"for {merge_base_sha[:12]}..HEAD; no "
                 f"commits to rebase",
                 file=sys.stderr)
-            self._post_slash_response(pr_repo, pr_number,
-                f"No PR-specific commits to rebase (the "
-                f"branch is already at `{merge_base_sha[:12]}`).",
-                fatal=True, command="drop")
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
         earliest_pr_commit = pr_log.stdout.splitlines()[0]
         if merge_base_sha in full_shas:
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"Cannot drop the merge-base commit "
-                f"(`{merge_base_sha[:12]}`). The merge-base "
-                f"is the last commit shared with the base "
-                f"branch; dropping it would require "
-                f"force-pushing onto `{base_ref}`.",
-                fatal=True, command="drop")
+            log(f"slash-drop: refusing to drop the merge-base "
+                f"commit {merge_base_sha[:12]}", file=sys.stderr)
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
         log(f"slash-drop: full_shas={full_shas} "
             f"merge_base={merge_base_sha[:12]} "
@@ -1974,15 +1857,10 @@ class PrUpdateCommand(CommandBase):
         parent = g.raw("rev-parse",
                         f"{earliest_pr_commit}^", check=False)
         if parent.returncode != 0 or not parent.stdout.strip():
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"Cannot rebase from `{earliest_pr_commit[:12]}` "
-                f"-- it is the first commit on this PR's branch "
-                f"(no parent to rebase onto). To remove the "
-                f"entire PR's commits, run ``/squash`` instead "
-                f"and push the result manually, or close the "
-                f"PR.",
-                fatal=True, command="drop")
+            log(f"slash-drop: no parent for the earliest PR commit "
+                f"{earliest_pr_commit[:12]} (rc="
+                f"{parent.returncode})", file=sys.stderr)
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
         upstream = parent.stdout.strip().splitlines()[0]
 
@@ -2179,22 +2057,7 @@ class PrUpdateCommand(CommandBase):
             stderr = (rebase.stderr or "").strip()[:500]
             log(f"slash-drop: rebase failed: {stderr}",
                 file=sys.stderr)
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"Drop failed during rebase. The rebase "
-                f"was aborted and the local branch is in "
-                f"its pre-drop state. Server said:\n\n"
-                f"```\n{stderr}\n```\n\n"
-                f"Common cause: a later commit on the "
-                f"branch depends on context the dropped "
-                f"commit(s) carried. Run "
-                f"``git rebase -i {upstream[:12]}`` from a "
-                f"machine with the working copy, resolve "
-                f"the conflict, and force-push, or remove "
-                f"the conflicting downstream commit first "
-                f"(e.g. by squashing it into an earlier "
-                f"commit).",
-                fatal=True, command="drop")
+            self._slash_failed(pr_repo, pr_number, "drop")
             return
 
         # Step 5: force-push. The branch now has the
@@ -2226,24 +2089,7 @@ class PrUpdateCommand(CommandBase):
             stderr = (push.stderr or "").strip()[:500]
             log(f"slash-{command}: push failed: {stderr}",
                 file=sys.stderr)
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"Failed to push rebased branch — the local "
-                f"branch is rebased (in front of the target) but "
-                f"the remote is unchanged. Server said:\n\n"
-                f"```\n{stderr}\n```\n\n"
-                f"To finish the rebase, push from a machine that "
-                f"has push access to `{pr_branch}`:\n\n"
-                f"```\n"
-                f"git fetch origin\n"
-                f"git checkout {pr_branch}\n"
-                f"git push --force-with-lease origin {pr_branch}\n"
-                f"```\n\n"
-                f"Or grant the shoggoth slave write permission on "
-                f"this repo and retry — the pre-flight check "
-                f"would then catch it before any destructive local "
-                f"op runs.",
-                fatal=True, command=command)
+            self._slash_failed(pr_repo, pr_number, command)
             return False
         log(f"slash-{command}: force-push of {pr_branch} OK")
         self._post_slash_response(pr_repo, pr_number, success_msg)
@@ -2291,30 +2137,13 @@ class PrUpdateCommand(CommandBase):
         if can_push is False:
             log(f"slash-{command}: preflight denied by Gitea API "
                 f"(no push permission on {pr_repo})", file=sys.stderr)
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"Push preflight failed — Gitea reports the "
-                f"authenticated user does not have write permission "
-                f"on `{pr_repo}`. Refusing to run destructive local "
-                f"ops (``git reset --soft`` / ``git commit`` / "
-                f"``git rebase``) on a branch that cannot be "
-                f"pushed. Grant push access (or have someone with "
-                f"push access run the command) and retry. The "
-                f"local branch has not been modified.",
-                fatal=True, command=command)
+            self._slash_failed(pr_repo, pr_number, command)
             return False
         if can_push is None:
             log(f"slash-{command}: preflight could not read "
                 f"permissions from Gitea API; failing closed",
                 file=sys.stderr)
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"Push preflight failed — could not read the "
-                f"authenticated user's permissions on `{pr_repo}` "
-                f"from the Gitea API. Refusing to run destructive "
-                f"local ops on a branch whose push state is "
-                f"unknown. Retry once the API is reachable.",
-                fatal=True, command=command)
+            self._slash_failed(pr_repo, pr_number, command)
             return False
 
         # Check 2: dry-run push (catches network / ref / branch-
@@ -2326,18 +2155,7 @@ class PrUpdateCommand(CommandBase):
             stderr = (dry_run.stderr or "").strip()[:500]
             log(f"slash-{command}: preflight push rejected: {stderr}",
                 file=sys.stderr)
-            self._post_slash_response(
-                pr_repo, pr_number,
-                f"Push preflight failed — the dry-run push was "
-                f"rejected (the actual ``git push`` would be "
-                f"rejected the same way, leaving the local branch "
-                f"in a state the remote could not absorb). Server "
-                f"said:\n\n"
-                f"```\n{stderr}\n```\n\n"
-                f"Fix the branch protection, pre-receive hook, or "
-                f"transport issue and retry. The local branch has "
-                f"not been modified.",
-                fatal=True, command=command)
+            self._slash_failed(pr_repo, pr_number, command)
             return False
         log(f"slash-{command}: preflight OK (Gitea push perm + "
             f"dry-run push)")
@@ -2574,57 +2392,36 @@ class PrUpdateCommand(CommandBase):
         return diff_text or None
 
     def _handle_timeout(self, pr_repo, pr_number, pr_url,
-                        resolved_comments, *, caller="pr-comment",
-                        context_label=""):
+                        resolved_comments):
         """Post a timeout message and ``die()``.
 
         ``resolved_comments`` is the per-comment progress
-        the caller has accumulated before the timeout
-        (``_pr_comment`` populates this with each comment
-        addressed; ``_slash_do`` passes an empty list).
+        ``_pr_comment`` accumulated before the timeout. The
+        message is per-comment framing ("Addressed N comment(s)
+        before timeout") because ``_pr_comment`` is the only
+        caller: ``/do`` used to route its timeout through here
+        with a per-conversation framing, and now posts its own
+        generic failure into the review thread instead (see
+        ``_post_do_failure``) — one failure message per command,
+        and the ``/do`` one has to land in the conversation.
 
-        ``caller`` selects the message wording:
-          - ``"pr-comment"`` (default) — the per-comment
-            framing ("Addressed N comment(s) before
-            timeout").
-          - ``"pr-do"`` — the per-conversation framing
-            ("timed out on /do for the conversation at
-            path:line; the conversation was left unresolved
-            for the next /do").
-        ``context_label`` is the anchor / context the
-        caller attaches (a path:line for ``/do``; empty
-        string for ``_pr_comment``). Kept separate from
-        ``caller`` so the wording can be reused with a
-        different anchor shape if a future caller adds one.
-
-        ``die()`` fires after the body is posted, so the
-        wording in the final line of ``timeout_msg`` is
-        the last thing the workflow template surfaces —
-        it must be accurate for both call sites.
+        ``die()`` fires after the body is posted, so the wording
+        in the final line of ``timeout_msg`` is the last thing
+        the workflow template surfaces — it must be accurate for
+        the call site.
         """
-        log(f"{caller}: handling timeout"
+        log(f"pr-comment: handling timeout"
             f"{(' resolved so far=' + str(len(resolved_comments))) if resolved_comments else ''}")
         self.agent.stop_session()
         resolved_count = len(resolved_comments) if resolved_comments else 0
         run_url = params.shoggoth_argo_run_url
         run_url_suffix = f" Argo run: {run_url}." if run_url else ""
         self._push_pending_commits()
-        if caller == "pr-do":
-            anchor_part = (f" for the conversation at {context_label}"
-                           if context_label else "")
-            timeout_msg = (
-                f"Agent timed out after {Agent.AGENT_TIMEOUT // 60} minutes"
-                f"{anchor_part}. No commits were produced and "
-                f"the conversation was left unresolved for the next "
-                f"/do invocation."
-                f"{run_url_suffix}"
-            )
-        else:
-            timeout_msg = (
-                f"Agent timed out after {Agent.AGENT_TIMEOUT // 60} minutes. "
-                f"Addressed {resolved_count} comment(s) before timeout. "
-                f"Committed changes have been pushed."
-                f"{run_url_suffix}"
-            )
+        timeout_msg = (
+            f"Agent timed out after {Agent.AGENT_TIMEOUT // 60} minutes. "
+            f"Addressed {resolved_count} comment(s) before timeout. "
+            f"Committed changes have been pushed."
+            f"{run_url_suffix}"
+        )
         self.gitea.post_pr_review_chunked(pr_repo, pr_number, timeout_msg)
         die(timeout_msg)

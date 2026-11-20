@@ -498,7 +498,7 @@ class DispatchCommand(CommandBase):
             # belongs to: the project itself for a plain repository,
             # the sub-repository it touches for a workspace.
             sub_repo = self._sandbox_sub_repo(repo_full_name, pr_number,
-                                              repo_type)
+                                              repo_type, project_repo)
             log(f"dispatch: sandbox: id={sandbox_id} "
                 f"repo={repo_full_name} "
                 f"project_repo={project_repo} "
@@ -579,14 +579,14 @@ class DispatchCommand(CommandBase):
             # per-container ``kubectl logs`` + the last live
             # snapshot fallback). Per the user's sandbox
             # error-feedback contract: the PR comment is a
-            # short, plain pointer (no diagnostic blob,
-            # no code block, no Argo-log redirection -- the
-            # user follows the pointer in the argo UI); the
-            # full diagnostic goes to the dispatcher's
-            # stdout (Argo captures it in the workflow
-            # log) where an operator or a future diagnostic
-            # tooling run can read it without a 30k char
-            # PR-comment size cap.
+            # short, plain pointer to the workflow log (no
+            # diagnostic blob, no code block -- the user
+            # follows the pointer in the argo UI); the full
+            # diagnostic goes to the dispatcher's stdout
+            # (Argo captures it in the workflow log) where
+            # an operator or a future diagnostic tooling run
+            # can read it without a 30k char PR-comment size
+            # cap.
             log(f"dispatch: sandbox: pod {e.sandbox_id} did "
                 f"not become Ready", file=sys.stderr)
             # Emit the FULL diagnostic to the dispatcher
@@ -597,49 +597,22 @@ class DispatchCommand(CommandBase):
             # here is a human/operator reading the log.
             log("dispatch: sandbox: diagnostic:\n"
                 f"{e.diagnostic}", file=sys.stderr)
-            try:
-                # Short, plain pointer. No diagnostic blob
-                # -- it's in the argo log. No Argo-log
-                # pointer -- this comment IS the PR-side
-                # pointer. The user (and any other
-                # participant subscribed to the PR) sees
-                # the failure category; the operator
-                # investigating dives into the argo log
-                # for the diagnostic.
-                self.gitea.post_pr_comment_attributed(
-                    self.gitea.get_repo_full_name(),
-                    self.gitea.get_pr_number(),
-                    f"Sandbox creation failed. "
-                    f"See the Argo workflow log for "
-                    f"details (pod "
-                    f"`sandbox-{e.sandbox_id}` in "
-                    f"namespace "
-                    f"`{params.shoggoth_namespace}`).")
-            except Exception:
-                # Dead Gitea must NOT mask the load-bearing
-                # die() below (the user wants the workflow
-                # Failed, not a silent success).
-                pass
+            # One generic failure comment for both bring-up
+            # failure modes (see ``_post_sandbox_failure``):
+            # the diagnostic blob above is the detail, the
+            # comment is the pointer.
+            self._post_sandbox_failure()
             die(f"sandbox: pod {e.sandbox_id} did not become "
                 f"Ready within the wait budget; diagnostic "
                 f"emitted to dispatcher's stdout (argo log)")
         except Exception as e:
             log(f"dispatch: sandbox: ERROR bringup failed: {e}",
                 file=sys.stderr)
-            # Best-effort: post an error PR comment so the user
-            # has a pointer in the PR thread. We deliberately
-            # swallow any exception from the post itself -- a
-            # dead Gitea at this point must NOT mask the
-            # load-bearing die() below (the user wants the
-            # workflow Failed, not a silent success).
-            try:
-                self.gitea.post_pr_comment_attributed(
-                    self.gitea.get_repo_full_name(),
-                    self.gitea.get_pr_number(),
-                    f"Sandbox failed to start: `{e}`\n\n"
-                    f"Check the workflow log for details.")
-            except Exception:
-                pass
+            # Best-effort: post the generic failure comment
+            # so the user has a pointer in the PR thread
+            # (same message as the not-Ready path -- the
+            # exception text stays in the log above).
+            self._post_sandbox_failure()
             # Fail the workflow, not just the command. The PR
             # comment above gives the user a clean pointer to
             # the reason; die() surfaces it in the Argo log
@@ -654,6 +627,36 @@ class DispatchCommand(CommandBase):
             # signal that ``argo-server`` translates to a
             # Failed workflow status in the UI.
             die(f"sandbox: bringup failed: {e}")
+
+    def _post_sandbox_failure(self):
+        """Post the one generic ``/sandbox`` failure comment.
+
+        Both bring-up failure modes (the pod never becoming
+        Ready, an exception during bring-up) report the same
+        way: one plain pointer to the workflow log, no
+        diagnostic blob and no per-mode wording. The detail
+        -- the ``kubectl describe`` / container-logs
+        diagnostic for the not-Ready case, the exception
+        text for the bring-up case -- stays in the
+        dispatcher's stdout, which Argo captures in the
+        workflow log and which is where an operator reads
+        it. The PR comment carries the failure category and
+        nothing else, so a failed ``/sandbox`` leaves
+        exactly one message in the thread.
+
+        The post is best-effort: a dead Gitea at this point
+        must NOT mask the caller's load-bearing ``die()``
+        (the user wants the workflow Failed, not a silent
+        success).
+        """
+        try:
+            self.gitea.post_pr_comment_attributed(
+                self.gitea.get_repo_full_name(),
+                self.gitea.get_pr_number(),
+                "Sandbox creation failed. "
+                "See the Argo workflow log for details.")
+        except Exception:
+            pass
 
     # ----- sandbox helpers -------------------------------------------
 
@@ -789,16 +792,35 @@ class DispatchCommand(CommandBase):
             f"StrictHostKeyChecking=accept-new ccws@{host}`\n"
         )
 
-    def _sandbox_sub_repo(self, pr_repo, pr_number, repo_type):
+    def _sandbox_sub_repo(self, pr_repo, pr_number, repo_type,
+                          project_repo):
         """The workspace sub-repository the PR touches, if any.
 
         A PR against a ccws workspace targets one of the workspace's
-        sub-repositories, and the PR's file paths name it. Mirrors the
-        worker's ``_resolve_review_repo_dir``: a PR that touches
-        exactly one sub-repository is scoped to it, a PR that touches
-        several is scoped to the workspace itself.
+        sub-repositories, and the PR's file paths name it. A PR
+        against a sub-repository of the workspace targets that
+        sub-repository itself: its file paths are relative to the
+        sub-repository's own root, so they name no workspace
+        sub-repository, and the PR's own repository is the one to
+        check out. Mirrors the worker's
+        ``_resolve_review_repo_dir``: a PR that touches exactly one
+        sub-repository is scoped to it, a PR that touches several is
+        scoped to the workspace itself.
         """
         if repo_type != REPO_TYPE_WORKSPACE:
+            return ""
+        if pr_repo and pr_repo != project_repo:
+            # The PR is against a sub-repository of the workspace:
+            # the PR's repository is the sub-repository to check the
+            # head ref out in.
+            name = pr_repo.rsplit("/", 1)[-1]
+            if name in self._workspace_sub_repos(project_repo):
+                log(f"dispatch: sandbox: PR is against sub-repo "
+                    f"{pr_repo}")
+                return name
+            log(f"dispatch: sandbox: PR repo {pr_repo} is not a "
+                f"sub-repo of {project_repo}; checking out at the "
+                f"workspace level")
             return ""
         files = self.gitea.get_pr_files(pr_repo, pr_number) or []
         prefixes = {f["path"].split("/", 1)[0]
@@ -809,6 +831,25 @@ class DispatchCommand(CommandBase):
             log(f"dispatch: sandbox: PR touches {len(prefixes)} "
                 f"sub-repos, checking out at the workspace level")
         return ""
+
+    def _workspace_sub_repos(self, project_repo):
+        """Directory names the workspace's repository list names.
+
+        The list's keys are the checkout directories -- ``name:``, or
+        ``path/name:`` for a nested one -- and the last path
+        component of a key identifies the repository it names.
+        """
+        content = self.gitea.get_file(project_repo, ".repos")
+        if not content:
+            return set()
+        names = set()
+        for line in content.splitlines():
+            if not line.startswith("    ") or line.startswith("     "):
+                continue
+            key = line.strip()
+            if key.endswith(":") and " " not in key:
+                names.add(key[:-1].rsplit("/", 1)[-1])
+        return names
 
     def _apply_sandbox_pod(self, sandbox_id, project_repo, repo_type,
                            pr_branch, pr_number, sub_repo):
@@ -829,7 +870,8 @@ class DispatchCommand(CommandBase):
             and its listed sub-repositories land in
             subdirectories of it), checks the PR's head ref out
             in the repository it belongs to, and then runs the
-            two servers side by side: ``sshd`` (as root) and
+            two servers side by side: ``sshd -i`` (one
+            connection, as the unprivileged ``ccws`` user) and
             ``ttyd --once tmux new-session bash`` (as the
             unprivileged ``ccws`` user, on the unprivileged
             container port the Service maps the user-facing
@@ -837,9 +879,10 @@ class DispatchCommand(CommandBase):
             exit ends the sandbox and the other is stopped with
             it. ttyd --once exits 0 when the browser disconnects,
             so the user's closing the tab ends the sandbox the
-            same way it did before. The pod's ``restartPolicy:
-            Never`` means there is no CrashLoopBackOff to avoid
-            in the first place.
+            same way it did before; ``sshd -i`` exits when its
+            one session ends, so an SSH logout ends it too. The
+            pod's ``restartPolicy: Never`` means there is no
+            CrashLoopBackOff to avoid in the first place.
 
         ``restartPolicy: Never`` + the ``cleanup`` sidecar is
         the cleanup contract (the pre-fix
@@ -1194,8 +1237,8 @@ class DispatchCommand(CommandBase):
                         },
                         "securityContext": {
                             # The container runs as the unprivileged
-                            # ccws user and needs no capability at
-                            # all: the SSH server is unprivileged
+                            # ccws user and needs almost no
+                            # capability: the SSH server is unprivileged
                             # too, so it binds an unprivileged port
                             # (SANDBOX_SSHD_PORT) and has no
                             # privileges to switch to another
@@ -1212,7 +1255,7 @@ class DispatchCommand(CommandBase):
                             # live in the account's own directory.
                             #
                             # ``allowPrivilegeEscalation: true`` is
-                            # the one exception, and it is PAM's:
+                            # the first exception, and it is PAM's:
                             # the daemon runs as ccws and cannot read
                             # /etc/shadow itself, so the password is
                             # verified through the setuid-root
@@ -1226,11 +1269,12 @@ class DispatchCommand(CommandBase):
                             # again").
                             #
                             # The escalation stays inside the
-                            # container: every capability is dropped
-                            # (a setuid binary reaches uid 0 with an
-                            # empty capability set), and the only
-                            # mounts are the read-only workflow
-                            # scripts and the git-cred emptyDir.
+                            # container: a setuid binary reaches uid 0
+                            # with exactly the capabilities below
+                            # and nothing else, and the only mounts
+                            # are the read-only workflow scripts, the
+                            # git-cred emptyDir and the read-write
+                            # /cache PVC.
                             #
                             # ``readOnlyRootFilesystem: false``: the
                             # container writes the shell's startup
@@ -1245,21 +1289,97 @@ class DispatchCommand(CommandBase):
                             "allowPrivilegeEscalation": True,
                             "readOnlyRootFilesystem": False,
                             "capabilities": {
-                                # Nothing is added back. The seven
-                                # capabilities the root sshd needed
-                                # (NET_BIND_SERVICE, DAC_OVERRIDE,
-                                # SYS_CHROOT, SETUID, SETGID, CHOWN,
-                                # AUDIT_WRITE) were all there for
-                                # the root daemon: binding 22,
-                                # reading /etc/shadow, OpenSSH's
+                                # The seven capabilities the root
+                                # sshd needed (NET_BIND_SERVICE,
+                                # DAC_OVERRIDE, SYS_CHROOT, SETUID,
+                                # SETGID, CHOWN, AUDIT_WRITE) were all
+                                # there for the root daemon: binding
+                                # 22, reading /etc/shadow, OpenSSH's
                                 # privilege separation (chroot into
-                                # /run/sshd, then setuid to ccws),
-                                # and the PTY's chown and audit
-                                # writes. An unprivileged daemon has
-                                # none of that work to do, and
-                                # ``drop: [ALL]`` with no ``add``
-                                # leaves the container with an
-                                # empty capability set.
+                                # /run/sshd, then setuid to ccws), and
+                                # the PTY's chown and audit writes.
+                                # An unprivileged daemon has none of
+                                # that work to do, and ``drop: [ALL]``
+                                # keeps the rest out.
+                                #
+                                # SETUID and SETGID come back for
+                                # sudo -- the second exception to
+                                # ``allowPrivilegeEscalation``. The
+                                # image grants ccws NOPASSWD
+                                # (``/etc/sudoers.d/ccws``), but the
+                                # sudoers plugin switches its real uid
+                                # to the sudoers uid while it opens
+                                # /etc/sudoers (setresuid) and sets
+                                # the runas user's group vector
+                                # (setgroups); with an empty bounding
+                                # set the first of those fails and
+                                # sudo dies with "unable to open
+                                # /etc/sudoers: Operation not
+                                # permitted" before it ever reads the
+                                # grant.
+                                #
+                                # CHOWN, FOWNER and DAC_OVERRIDE are
+                                # for apt, which does not tolerate a
+                                # root that holds only the sudo pair.
+                                # apt chowns
+                                # /var/lib/apt/lists/{partial,auxfiles}
+                                # and /var/cache/apt/archives/partial
+                                # to the _apt sandbox user and chmods
+                                # them (CHOWN, FOWNER); the download
+                                # methods then drop to _apt (SETUID,
+                                # SETGID) and write into the partial
+                                # directories, which apt keeps 0700
+                                # and _apt-owned; and the root process
+                                # renames and unlinks the finished
+                                # files out of them (DAC_OVERRIDE).
+                                # Without CHOWN every run logs "chown
+                                # to _apt:root of directory ...
+                                # failed" and falls back to
+                                # downloading unsandboxed as root;
+                                # without FOWNER the chmod fails as
+                                # well; and without DAC_OVERRIDE the
+                                # root process cannot move the files
+                                # out of the 0700 directories, so
+                                # ``apt-get update`` fails with
+                                # "Problem unlinking ..." and
+                                # ``apt-get install`` with "rename
+                                # failed, Permission denied
+                                # (.../partial/x.deb ->
+                                # .../archives/x.deb)", both rc=100.
+                                # Verified against the image's own
+                                # apt 2.8: the five below leave an
+                                # update, a download and a full
+                                # install (fetch, rename, dpkg
+                                # unpack, triggers) clean.
+                                #
+                                # The zero-capability alternative is
+                                # ``APT::Sandbox::User "root"`` in
+                                # apt.conf.d, which keeps the
+                                # privilege drop out entirely -- but
+                                # it downloads unsandboxed as root on
+                                # every update and needs an image
+                                # change to be automatic, so the
+                                # capabilities are the cheaper fix.
+                                #
+                                # The price of the three: the
+                                # elevated process is unconstrained
+                                # root *inside the container* --
+                                # CHOWN+FOWNER+DAC_OVERRIDE is the
+                                # classic set that reads, writes and
+                                # chowns any file in the image's
+                                # filesystem and in the writable
+                                # mounts. It does not escape the
+                                # container: still no SYS_ADMIN, no
+                                # NET_ADMIN, seccomp RuntimeDefault,
+                                # runAsUser 1000. sudo also warns
+                                # "unable to send audit message" on
+                                # every invocation, because the
+                                # kernel audit needs CAP_AUDIT_WRITE;
+                                # the warning is cosmetic -- the
+                                # command runs.
+                                "add": ["SETUID", "SETGID",
+                                        "CHOWN", "FOWNER",
+                                        "DAC_OVERRIDE"],
                                 "drop": ["ALL"],
                             },
                             "seccompProfile":
@@ -1284,6 +1404,18 @@ class DispatchCommand(CommandBase):
                             {"name": "workflow-scripts",
                              "mountPath": "/shoggoth/workflow-scripts",
                              "readOnly": True},
+                            # The shared build cache, at the same path
+                            # every other consumer mounts it: the
+                            # image's CCWS_CACHE=/cache/ccws/ and
+                            # PIP_CACHE_DIR=/cache/ccws/pip point
+                            # inside it, and /cache exists at runtime
+                            # only through this mount (it is a
+                            # BuildKit cache mount at build time). A
+                            # sandbox therefore shares the warm
+                            # pip/ccws/apt caches with CI instead of
+                            # re-downloading everything.
+                            {"name": "ci-cache",
+                             "mountPath": "/cache"},
                         ],
                     },
                     {
@@ -1381,6 +1513,20 @@ class DispatchCommand(CommandBase):
                          "path": f"/var/lib/rancher/k3s/storage/"
                                  f"{namespace}/workflow-scripts/",
                      }},
+                    # The shared build cache: the same PVC the CI
+                    # pods (the command-handler worker step and
+                    # slave-test), slave-term and slave-dind mount at
+                    # /cache, so every environment that runs the
+                    # ccws tooling shares one pip/ccws/apt cache.
+                    # ReadWriteOnce like every other consumer's --
+                    # the sandbox carries the same scheduling
+                    # exposure the worker pods already do, and the
+                    # volume is local-path's mode 0777, so the
+                    # unprivileged container can create
+                    # CCWS_CACHE's /cache/ccws inside it.
+                    {"name": "ci-cache",
+                     "persistentVolumeClaim": {
+                         "claimName": "shoggoth-shared-cache"}},
                 ],
             },
         }

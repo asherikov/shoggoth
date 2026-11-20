@@ -37,9 +37,9 @@ RUN mkdir -p /home/ccws/.ssh \
          printf '# /run and cannot bind a port below 1024.\n'; \
          printf '#\n'; \
          printf '# No Port directive: the port comes from the launcher\n'; \
-         printf '# (sandbox.py passes it as ``-o Port=...``), because\n'; \
-         printf '# OpenSSH collects Port directives into a list and would\n'; \
-         printf '# try to bind the same port twice.\n'; \
+         printf '# (sandbox.py writes it into its generated config),\n'; \
+         printf '# because OpenSSH collects Port directives into a list\n'; \
+         printf '# and would try to bind the same port twice.\n'; \
          printf '#\n'; \
          printf '# An unprivileged daemon cannot write the system login\n'; \
          printf '# records (utmp/wtmp/lastlog), so sshd logs "Attempt\n'; \
@@ -47,13 +47,12 @@ RUN mkdir -p /home/ccws/.ssh \
          printf '# every login. That is expected: a sandbox has no\n'; \
          printf '# system login records to keep.\n'; \
          printf '#\n'; \
-         printf '# The launcher passes the host key and the pid file on the\n'; \
-         printf '# command line too (-o HostKey=..., -o PidFile=...): the\n'; \
-         printf '# image and the mounted launcher are versioned separately,\n'; \
-         printf '# and a config naming a host key the unprivileged daemon\n'; \
-         printf '# cannot read leaves sshd with none at all ("no hostkeys\n'; \
-         printf '# available -- exiting"). The values below are the defaults\n'; \
-         printf '# the launcher repeats.\n'; \
+         printf '# The launcher repeats the host key and the pid file below\n'; \
+         printf '# in its generated config: the image and the mounted\n'; \
+         printf '# launcher are versioned separately, and a config naming\n'; \
+         printf '# a host key the unprivileged daemon cannot read leaves\n'; \
+         printf '# sshd with none at all ("no hostkeys available --\n'; \
+         printf '# exiting").\n'; \
          printf 'HostKey /home/ccws/.ssh/ssh_host_ed25519_key\n'; \
          printf 'PidFile /home/ccws/.ssh/sshd.pid\n'; \
          printf 'PermitRootLogin no\n'; \

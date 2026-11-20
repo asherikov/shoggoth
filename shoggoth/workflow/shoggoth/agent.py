@@ -22,10 +22,9 @@ def _normalise_diff_path(path):
     however, sometimes reports paths with a leading ``./``
     (``./README.md`` from a relative-path read) or a
     leading ``/`` (``/README.md`` from an absolute read).
-    Strip those so the inline-anchor lookup in
-    ``commands/pr_update.py:_post_review_followup_with_links``
-    keys the agent's normalised path against the GET
-    response consistently.
+    Strip those so the inline-anchor ``path`` sent to
+    Gitea in the review payload keys against the same form
+    the diff (and Gitea's own comment records) use.
     """
     if not path:
         return path
@@ -278,12 +277,11 @@ class Agent:
         text plus the ``path:line`` location, so reviewers
         see the context at the anchor without cross-
         referencing the rolled-up list. The review body
-        only shows a reference to the inline comment
-        (not the full text) for findings that were posted
-        inline — duplicating the full text in the body
-        would be noisy. Findings without a resolvable
-        path/line keep their full text in the body so
-        reviewers still see them.
+        shows only the ``path:line`` location for findings
+        that were posted inline — duplicating the full text
+        in the body would be noisy. Findings without a
+        resolvable path/line keep their full text in the
+        body so reviewers still see them.
         """
         if not isinstance(review_data, dict):
             return ("", []) if diff_text is not None else ""
@@ -326,13 +324,10 @@ class Agent:
                 if (diff_text is not None and path != "?"
                     and line is not None and line > 0):
                     norm_path = _normalise_diff_path(path)
-                    # Body shows only a reference; the
+                    # Body shows only the location; the
                     # full text lives in the inline
                     # comment.
-                    parts.append(
-                        f"- **[{sev}]** `{path}:{line}` — "
-                        f"see inline comment"
-                    )
+                    parts.append(f"- **[{sev}]** `{path}:{line}`")
                     parts.append("")
                     comment_body = (
                         f"**[{sev}]** at `{path}:{line}`\n\n{body}"

@@ -1,10 +1,14 @@
 {{- /*
   templates/shared-cache.yaml — single PVC shared across CI consumers.
 
-  Consumers: gitea-runner job pods (mount at /cache; slave:noble image's
-  CCWS_CACHE=/cache/ccws/ + PIP_CACHE_DIR=/cache/ccws/pip expect it),
-  slave-term interactive web terminal, Argo workflow pods (command-handler,
-  github-mirror-sync, slave-test) mount /cache from this PVC.
+  Consumers: everything that runs the ccws tooling mounts /cache from
+  this PVC -- the slave:noble image's CCWS_CACHE=/cache/ccws/ +
+  PIP_CACHE_DIR=/cache/ccws/pip expect it. That is the gitea-runner
+  job pods, the slave-term interactive web terminal, slave-dind, the
+  Argo workflow pods (command-handler's worker step, slave-test) and
+  the dispatch sandbox pods. github-mirror-sync is deliberately not
+  one: it runs the shoggoth_tools alpine image and has no ccws cache
+  to share.
 
   Capacity: 30Gi (covers pip wheels + ccws cache state with headroom).
   Bump via storageClass.resources.patch if a project outgrows this; do not

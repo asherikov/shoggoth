@@ -310,6 +310,17 @@ spec:
         value: "{{inputs.parameters.payload}}"
       - name: SHOGGOTH_DOMAIN
         value: "{{workflow.parameters.SHOGGOTH_DOMAIN}}"
+      # The GitHub org the Gitea mirror is built from. The
+      # dispatcher forwards it to the sandbox pod it applies,
+      # where sandbox.py keys the workspace repository list's
+      # URL rewrites off it: with the org unset the rewrites
+      # are empty, ``wshandler update`` clones the listed
+      # sub-repositories from their raw github.com URLs, and
+      # the PR's head ref -- which only the mirror carries --
+      # cannot be fetched. The worker step wires the same
+      # variable for the worker's own rewrites.
+      - name: SHOGGOTH_GITHUB_ORG
+        value: "{{workflow.parameters.SHOGGOTH_GITHUB_ORG}}"
       # Required by the Gitea client constructor (see
       # ``Gitea.__init__``); without it dispatch.py dies
       # with "GITEA_SERVER_URL is required for Gitea-using

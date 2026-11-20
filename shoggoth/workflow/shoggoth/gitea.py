@@ -712,32 +712,6 @@ class Gitea(HttpApiClient):
         return self.post(f"repos/{repo}/pulls/{pr_number}/reviews",
                           payload)
 
-    def get_pr_review_comments(self, repo, pr_number, review_id):
-        """Fetch all inline comments for a review.
-
-        Calls ``GET /repos/{repo}/pulls/{n}/reviews/{id}/comments``
-        (route registered in
-        ``routers/api/v1/repo/pull_review.go:158``, handler
-        ``GetPullReviewComments``). Returns a list of
-        comment dicts, each with at least ``id``, ``path``,
-        ``position`` (= the file line number, mapped from
-        ``LineNum`` in the response — see the
-        ``PullReviewComment`` struct), and ``html_url``
-        (format: ``{issue_url}#issuecomment-{id}``).
-
-        Used by the review follow-up to build a clickable
-        index of inline comments posted in a review — the
-        review body has "see inline comment" placeholders
-        (the review API doesn't expose per-comment URLs
-        in the POST response, and Gitea doesn't support
-        editing a posted review body), so the follow-up
-        comment provides the actual links.
-
-        Returns ``None`` on HTTP / network failure.
-        """
-        return self.get(
-            f"repos/{repo}/pulls/{pr_number}/reviews/{review_id}/comments")
-
     def post_pr_review_chunked(self, repo, pr_number, body, event="COMMENT",
                                chunk_size=60000):
         if len(body) <= chunk_size:
@@ -843,10 +817,10 @@ class Gitea(HttpApiClient):
         ``shoggoth/commands/pr_update.py`` via
         ``_post_slash_response`` (the ``/help`` / ``/do`` /
         ``/review`` / ``/squash`` / ``/rebase`` commands).
-        Non-slash-command callers (e.g. the pr-review follow-up
-        summary at ``pr_update.py:619``) keep the plain
-        ``post_pr_comment`` so the bot's review summary isn't
-        misattributed to whichever user last commented.
+        Non-slash-command callers (e.g. ``_pr_review``'s
+        review body) keep the plain ``post_pr_comment`` so
+        the bot's review isn't misattributed to whichever
+        user last commented.
 
         Empty ``sender`` (synthetic event, unrecognised
         payload) falls through to a plain ``post_pr_comment`` —

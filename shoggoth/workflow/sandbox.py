@@ -64,6 +64,7 @@ import os
 import pwd
 import shlex
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -151,6 +152,69 @@ SANDBOX_SSHD_CONFIG = "/etc/ssh/sshd_config"
 SANDBOX_SSHD_HOST_KEY = "/home/ccws/.ssh/ssh_host_ed25519_key"
 SANDBOX_SSHD_PID_FILE = "/home/ccws/.ssh/sshd.pid"
 
+# The per-sandbox config the launcher generates (see
+# ``_write_sshd_session_config``): the port, the host key and pid
+# file paths above, plus the environment the sessions get. The
+# image's config is included last and stays the source of truth
+# for the authentication policy.
+SANDBOX_SSHD_SESSION_CONFIG = os.path.join(
+    SANDBOX_HOME, ".ssh", "sshd_sandbox.conf")
+
+# The environment an SSH session may see (see
+# ``_ssh_session_setenv_pairs``). sshd does not pass its own
+# environment to a session, so this is the only way the
+# dockerfile- and pod-defined variables reach the user's shell.
+#
+# The image (shoggoth/dockerfiles/slave and its base) and the
+# sandbox pod's spec (``_apply_sandbox_pod`` in
+# shoggoth/commands/dispatch.py) own the values; this list decides
+# which of them a session may see, and a variable that is not on
+# it stays with the workflow whatever else the container happens
+# to carry. That is the point: a session is a user-facing
+# surface, so a credential that ever lands in the environment (a
+# token wired into the pod spec, say) must not reach it by
+# default. Gaining a variable in the image or the pod spec
+# therefore means deciding here, deliberately.
+#
+# Three groups are deliberately absent. The login machinery's own
+# variables -- PATH, HOME, USER, LOGNAME, SHELL, MAIL, TERM, LANG
+# and the LC_* family, the SSH_* set, and bash's
+# PWD/OLDPWD/SHLVL/_ -- are set by sshd, PAM, the client or the
+# login shell, and a SetEnv for any of them is either overridden
+# or fights the shell that owns it; PATH in particular, because
+# bash runs the session as a login shell and /etc/profile assigns
+# PATH unconditionally (restoring the image's PATH in sessions is
+# a profile.d job, not a SetEnv one). SSH_AUTH_SOCK is the
+# git-cred sidecar's agent: it carries the workflow's SSH
+# identity, and the user's own git access goes through the
+# credential cache instead.
+SANDBOX_SSH_SESSION_ENV_ALLOW = frozenset({
+    # build environment
+    "APT_INSTALL", "PIPX_INSTALL", "DEBIAN_FRONTEND",
+    "PIP_CACHE_DIR", "PIP_INDEX_URL", "PIP_TRUSTED_HOST",
+    "npm_config_cache", "PYTHONDONTWRITEBYTECODE",
+    "CCWS_CACHE", "WORKSPACE_DIR", "CLI_VERSION",
+    "CCACHE_REMOTE_STORAGE", "CCACHE_REMOTE_ONLY",
+    "BUILDCACHE_REMOTE",
+    # telemetry
+    "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "OTEL_EXPORTER_OTLP_TIMEOUT", "OTEL_SERVICE_NAME",
+    "QWEN_TELEMETRY_OTLP_PROTOCOL",
+    # the agent stack the sandbox exists to run. OPENAI_API_KEY is
+    # the image's litellm placeholder (see dockerfiles/slave), not
+    # a credential: a real key must never be wired into the
+    # environment for a session to pick up.
+    "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY",
+    "BM_MCP_URL",
+    # git behaviour
+    "GIT_TERMINAL_PROMPT",
+    # cluster context
+    "SANDBOX", "SHOGGOTH_DOMAIN", "SHOGGOTH_NAMESPACE",
+    "SHOGGOTH_GITHUB_ORG", "SHOGGOTH_SLAVE_USER", "SHOGGOTH_DNS_IP",
+    "GITEA_SSH_HOST", "GITEA_SERVER_URL", "REDMINE_SERVER",
+    "SANDBOX_TTYD_PORT", "SANDBOX_SSHD_PORT",
+})
+
 # How long the supervisor waits for the second server to stop
 # after the first one exited, before it kills it.
 SANDBOX_STOP_GRACE_S = 10
@@ -161,15 +225,18 @@ SANDBOX_STOP_GRACE_S = 10
 # materialized workspace instead of the account's home directory.
 SANDBOX_BASHRC_MARKER = "# ccws sandbox: start in the materialized workspace"
 
-# Note: the slave image's sshd_config locks the daemon to the
+# Note: the slave image's sshd_config locks the server to the
 # ``ccws`` user (``AllowUsers ccws`` in shoggoth/dockerfiles/slave)
-# and names the port the sandbox's sshd binds (SANDBOX_SSHD_PORT
-# above); the dispatcher's per-sandbox Service exposes the
-# user-facing port 22 and points it at that port. These literals
-# are kept in sync by hand -- no parametrization -- so the
-# constants that used to live here (SLAVE_USER, SLAVE_SSHD_PORT)
-# were dead code (referenced only by one log line) and have been
-# removed.
+# and deliberately carries no Port directive: the port belongs to
+# the launcher, which binds it itself in the one-shot accept loop
+# in ``_start_sshd`` -- and the one-shot server (``sshd -i``)
+# ignores any Port directive anyway, so a second one in the
+# generated config could not double-bind even in principle. The
+# dispatcher's per-sandbox Service exposes the user-facing port 22
+# and points it at that port. These literals are kept in sync by
+# hand -- no parametrization -- so the constants that used to live
+# here (SLAVE_USER, SLAVE_SSHD_PORT) were dead code (referenced
+# only by one log line) and have been removed.
 
 # Cleanup budgets (see ``cleanup`` below):
 #   MAX_LIFETIME  hard cap so a script bug in the detection logic
@@ -341,7 +408,7 @@ def _clone_url(repo):
         "cannot build clone URL")
 
 
-def _workspace_url_rewrites():
+def _workspace_url_rewrites(repo):
     """The URL rewrites for the workspace's repository list.
 
     A ccws workspace's list names GitHub URLs; the sandbox's git-cred
@@ -349,9 +416,15 @@ def _workspace_url_rewrites():
     host, so the list's URLs are rewritten to that host. (The worker
     rewrites them to the in-cluster SSH remote instead -- its git-cred
     sidecar provides an ssh-agent.)
+
+    The org comes from the environment, falling back to the owner of
+    ``repo`` -- the repository being materialized names it, and it is
+    the org whose mirror the workspace root itself is cloned from.
     """
     domain = os.environ.get("SHOGGOTH_DOMAIN", "")
     org = os.environ.get("SHOGGOTH_GITHUB_ORG", "")
+    if not org and repo and "/" in repo:
+        org = repo.split("/", 1)[0]
     if not domain or not org:
         return []
     org_re = org.replace(".", r"\.")
@@ -554,24 +627,21 @@ def _materialize_workspace_as_user(repo, repo_type, branch, pr_number,
     # workspace's dependencies.
     #
     # The installation is the workspace's own dependency install,
-    # which resolves the
-    # dependency list with rosdep and installs it with apt/pip. It
-    # needs the shared ``ci-cache`` PVC mounted at /cache -- the
-    # slave image's ``CCWS_CACHE=/cache/ccws/`` points there, and
-    # /cache itself only exists in the image as a build-time BuildKit
-    # cache mount, so it is not there at runtime. The sandbox pod
-    # deliberately does not mount that PVC: it is ReadWriteOnce, and
-    # the sandbox pod can be scheduled on a different node than the
-    # pod that already holds it, which leaves the sandbox pod stuck
-    # in ContainerCreating. The worker -- the CI actor that actually
-    # builds the code -- is the pod that mounts the PVC and installs
-    # the dependencies.
+    # which resolves the dependency list with rosdep and installs it
+    # with apt/pip. It needs the shared cache at /cache -- the slave
+    # image's ``CCWS_CACHE=/cache/ccws/`` points there, and /cache
+    # itself only exists in the image as a build-time BuildKit cache
+    # mount, so it is not there at runtime without the volume. The
+    # sandbox pod mounts that volume (the same ``ci-cache`` PVC the
+    # worker, slave-term and slave-dind carry), so the caches are
+    # shared; what the sandbox does not spend is the time.
     #
-    # Installing them here would also blow the budget: the
-    # resolution + install is minutes, and the dispatcher's wait for
-    # the sandbox to come up is 900 s.
+    # The resolution + install is minutes, and the dispatcher's wait
+    # for the sandbox to come up is 900 s. The worker -- the CI actor
+    # that actually builds the code -- is the pod that installs the
+    # dependencies.
     materialize(_clone_url(repo), dest, repo_type=repo_type,
-                url_rewrites=_workspace_url_rewrites(),
+                url_rewrites=_workspace_url_rewrites(repo),
                 install_deps=False, label="sandbox")
     log(f"sandbox: workspace materialized in "
         f"{int(time.time() - started)}s")
@@ -645,6 +715,111 @@ def sandbox(repo, repo_type, branch="", pr_number="", sub_repo=""):
     return _supervise(children)
 
 
+def _sshd_config_value(value):
+    """Quote a value for an sshd_config ``SetEnv`` token: double
+    quotes around it, with the quotes and backslashes inside
+    escaped. sshd_config strips the quotes when it parses the
+    token, so the session gets the value verbatim."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _ssh_session_setenv_pairs():
+    """The ``NAME=VALUE`` tokens of the sessions' ``SetEnv``
+    directive.
+
+    sshd builds a login session's environment from scratch -- the
+    passwd entry, PAM, the client and its own SSH_* variables --
+    and never passes its own environment on (verified: the
+    daemon's environment is empty by the time it listens), so
+    neither the image's ENV nor the pod's reaches the user's
+    shell. ``SetEnv`` is the server-side way back.
+
+    The names come from ``SANDBOX_SSH_SESSION_ENV_ALLOW`` and the
+    values from the environment, so a session sees the
+    dockerfile- and pod-defined variables and nothing else that
+    happens to be in the container's environment. A granted
+    variable that is not set is skipped, and so is a value with a
+    line break in it: sshd_config is line-based, and a line break
+    cannot be quoted into one line. An empty value carries
+    nothing, so it is skipped too.
+
+    The tokens ride on one directive, space-separated: sshd keeps
+    only the first ``SetEnv`` line of a config file and silently
+    drops the rest.
+    """
+    pairs = []
+    for name in sorted(SANDBOX_SSH_SESSION_ENV_ALLOW):
+        value = os.environ.get(name, "")
+        if not value or "\n" in value or "\r" in value:
+            continue
+        pairs.append(f"{name}={_sshd_config_value(value)}")
+    return pairs
+
+
+def _write_sshd_session_config():
+    """Write the per-sandbox sshd config; return its path.
+
+    The file carries what only this sandbox knows: where its host
+    key and pid file live (an unprivileged server needs both in
+    the account's own directory) and the environment its sessions
+    get. The image's config is included last: sshd_config keeps
+    the first value of each keyword, so these overrides win
+    without copying the authentication policy into a generated
+    file that would drift from the image's. Port is written but
+    never acted on: the one-shot listener in ``_start_sshd`` binds
+    the port itself and ``sshd -i`` ignores the directive
+    (verified -- a config naming an unbindable port 22 still
+    serves its session). It stays because the image deliberately
+    omits it and the two are versioned separately, so the file
+    remains a complete description of the server on its own.
+    HostKey accumulates and PidFile repeats the image's own paths,
+    which is harmless; the pid file is inert under the one-shot
+    mode too (``sshd -i`` writes none), and nothing reads it -- the
+    supervisor tracks the child's pid. Both are written out
+    because an older image's config might name a root-owned host
+    key or a pid file under /run, and neither is usable by an
+    unprivileged server.
+
+    The image's config has to exist: a missing ``Include`` target
+    is not an error, and sshd would come up on its compiled-in
+    defaults (password authentication on, no PAM) instead of the
+    policy the image ships.
+
+    A file rather than the command line: argv is world-readable
+    through /proc, and the session environment does not belong
+    there.
+    """
+    if not os.path.exists(SANDBOX_SSHD_CONFIG):
+        die(f"sandbox: SSH config {SANDBOX_SSHD_CONFIG} is missing; "
+            f"cannot generate {SANDBOX_SSHD_SESSION_CONFIG}")
+    pairs = _ssh_session_setenv_pairs()
+    lines = [
+        "# Generated by sandbox.py; do not edit.",
+        "#",
+        "# Per-sandbox overrides for the SSH server. sshd_config keeps",
+        "# the first value of each keyword, so everything above the",
+        "# Include below wins over the image's config, which stays the",
+        "# source of truth for the authentication policy.",
+        f"Port {SANDBOX_SSHD_PORT}",
+        f"HostKey {SANDBOX_SSHD_HOST_KEY}",
+        f"PidFile {SANDBOX_SSHD_PID_FILE}",
+    ]
+    if pairs:
+        lines.append("SetEnv " + " ".join(pairs))
+    lines.append(f"Include {SANDBOX_SSHD_CONFIG}")
+    try:
+        os.makedirs(os.path.dirname(SANDBOX_SSHD_SESSION_CONFIG),
+                    mode=0o700, exist_ok=True)
+        with open(SANDBOX_SSHD_SESSION_CONFIG, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except OSError as e:
+        die(f"sandbox: cannot write the SSH session config: {e}")
+    log(f"sandbox: sshd session config {SANDBOX_SSHD_SESSION_CONFIG} "
+        f"({len(pairs)} session variables)")
+    return SANDBOX_SSHD_SESSION_CONFIG
+
+
 def _ensure_sshd_host_key():
     """Make sure the sandbox has a host key of its own.
 
@@ -672,7 +847,7 @@ def _ensure_sshd_host_key():
 def _start_sshd():
     """Start the SSH server; return its pid.
 
-    The daemon runs as the unprivileged ``ccws`` user -- the same
+    The server runs as the unprivileged ``ccws`` user -- the same
     user its sessions run as, which is the only user an
     unprivileged sshd can serve: it has no privileges left to
     switch to another account, so the kernel refuses the switch
@@ -687,56 +862,96 @@ def _start_sshd():
     authorized_keys, and a key in the PR comment would be a
     credential in a place a credential does not belong.
 
-    The daemon listens on an unprivileged port (see
-    ``SANDBOX_SSHD_PORT``) and writes its pid file into the
-    account's own directory, because an unprivileged daemon cannot
-    write into /run.
+    One connection, one sandbox. The server serves exactly one
+    SSH connection and exits when that session ends -- the
+    ``--once`` semantics the web terminal has, so an SSH logout
+    ends the sandbox the same way closing the browser tab does,
+    and the supervisor stops the other server with it (see
+    ``_supervise``). The price is that every way a connection can
+    end is now a way the sandbox can end: a dropped network, a
+    laptop asleep through ClientAliveInterval*ClientAliveCountMax,
+    or an authentication failure, which consumes the one
+    connection because there is no second accept to retry on. The
+    workspace is materialized into the pod and lost with it, so an
+    uncommitted change dies with a dropped connection -- the same
+    exposure the web terminal's ``--once`` already carries on a
+    tab close.
 
-    The config is validated before the daemon is started, so a
+    The port is unprivileged (see ``SANDBOX_SSHD_PORT``) and bound
+    by the launcher's own accept loop below; the config's PidFile
+    is inert under the one-shot mode (``sshd -i`` writes none) and
+    nothing reads it -- the supervisor tracks the child's pid.
+
+    The config is validated before the server is started, so a
     misformatted sshd_config is reported instead of leaving a
     half-broken server behind that refuses every connection.
+
+    The daemon reads one config: the generated per-sandbox file
+    (``_write_sshd_session_config``), which includes the image's
+    own last. The image is versioned separately from these
+    scripts (they are mounted from the host into the pod), so the
+    generated file carries what this sandbox knows -- the port,
+    the host key and pid file paths, and the sessions'
+    environment -- and lets the image stay the source of truth
+    for the authentication policy. The host key is among them
+    because an older image's config might name a root-owned path
+    an unprivileged daemon cannot read ("no hostkeys available
+    -- exiting").
     """
-    # The paths the daemon needs are passed on the command line
-    # instead of being taken from the image's config. The image is
-    # versioned separately from these scripts (the scripts are
-    # mounted from the host into the pod), so the config in the
-    # image can be older than the code that generates the host key
-    # -- and a config naming a host key the unprivileged daemon
-    # cannot read leaves sshd with no host key at all: "no hostkeys
-    # available -- exiting." The command line wins over the config
-    # for the pid file and adds to the config's host key list, so the
-    # per-sandbox key is always the one the daemon serves.
-    sshd_options = [
-        "-o", f"Port={SANDBOX_SSHD_PORT}",
-        "-o", f"HostKey={SANDBOX_SSHD_HOST_KEY}",
-        "-o", f"PidFile={SANDBOX_SSHD_PID_FILE}",
-    ]
     pid = os.fork()
     if pid == 0:
         _drop_privileges()
         try:
             _ensure_sshd_host_key()
-            # ``sshd -t`` parses sshd_config and returns non-zero on a
+            _write_sshd_session_config()
+            # ``sshd -t`` parses the config and returns non-zero on a
             # parse error (or when the host key is missing). It runs
-            # with the same options as the daemon below, so it tests
+            # with the same config as the daemon below, so it tests
             # the configuration that is actually going to be used.
             test = subprocess.run(
-                ["/usr/sbin/sshd", "-t", "-f", SANDBOX_SSHD_CONFIG]
-                + sshd_options,
+                ["/usr/sbin/sshd", "-t", "-f",
+                 SANDBOX_SSHD_SESSION_CONFIG],
                 capture_output=True, text=True)
             if test.returncode != 0:
                 die(f"sandbox: sshd -t failed: "
                     f"{(test.stderr or test.stdout).strip()}")
-            # ``-D`` foreground (so the kubelet's PID 1 monitoring
-            # works); ``-e`` routes the auth log to stderr (the kubelet
+            # One connection, then the server is gone. sshd_config
+            # cannot express it: there is no MaxConnections
+            # directive (MaxSessions counts channels inside one
+            # connection, MaxStartups unauthenticated ones), and a
+            # daemon outlives every session it serves. ``sshd -i``
+            # is the inetd mode: it serves exactly one connection
+            # over stdin/stdout and exits when that session ends,
+            # for any reason -- a logout, a dropped network, or a
+            # peer that stops answering until ClientAlive gives up
+            # on it. The accept loop stands in for the inetd this
+            # container does not have: it binds the port, takes the
+            # one connection, and hands the socket to sshd as fd
+            # 0/1. The listener is closed before the exec so the
+            # port stops answering while the session runs -- a
+            # second connection attempt is refused immediately
+            # instead of queueing behind a session that will never
+            # read it -- and the socket is left open on fd 0/1 for
+            # sshd to serve.
+            listener = socket.socket(socket.AF_INET,
+                                     socket.SOCK_STREAM)
+            listener.setsockopt(socket.SOL_SOCKET,
+                                socket.SO_REUSEADDR, 1)
+            listener.bind(("", SANDBOX_SSHD_PORT))
+            listener.listen(1)
+            conn, _ = listener.accept()
+            listener.close()
+            os.dup2(conn.fileno(), 0)
+            os.dup2(conn.fileno(), 1)
+            # ``-i`` inetd mode (the connection is stdin/stdout);
+            # ``-e`` routes the auth log to stderr (the kubelet
             # captures stderr into the container log + the
-            # FallbackToLogsOnError termination message). The port is
-            # passed as ``-o Port=...``: sshd's ``-p`` is the *port*
-            # flag too, but ``-o`` keeps the override next to the
-            # config it belongs to.
+            # FallbackToLogsOnError termination message). ``-D`` is
+            # gone with the daemon: there is no listener loop to
+            # keep in the foreground, the session IS the process.
             os.execv("/usr/sbin/sshd",
-                     ["/usr/sbin/sshd", "-D", "-e",
-                      "-f", SANDBOX_SSHD_CONFIG] + sshd_options)
+                     ["/usr/sbin/sshd", "-i", "-e",
+                      "-f", SANDBOX_SSHD_SESSION_CONFIG])
         except OSError as e:
             log(f"sandbox: exec sshd failed: {e}")
             os._exit(1)
@@ -793,10 +1008,12 @@ def _supervise(children):
     -- the semantics the two-container layout had, where the
     kubelet stopped the surviving container when the first one
     exited. A user closing the browser tab ends the sandbox (ttyd
-    --once exits), exactly as it did before.
+    --once exits), exactly as it did before; an SSH logout ends it
+    the same way now (sshd -i exits when its one session does).
 
     Returns the exit code of the first server to exit: that is
-    the container's exit code.
+    the container's exit code. The one exception is the one-shot
+    SSH server's normal ending, mapped to 0 below.
     """
     # ``children`` maps a server's name to its pid; ``alive`` is the
     # reverse, so a pid can be looked up when it exits.
@@ -831,7 +1048,20 @@ def _supervise(children):
             kill_deadline = time.time() + SANDBOX_STOP_GRACE_S
     if first is None:
         return 0
-    return first[1]
+    name, code = first
+    if name == "sshd" and code == 255:
+        # The one-shot SSH server's normal ending. sshd -i exits
+        # 255 when the session ends with an SSH-level disconnect
+        # (a logout) and 0 when the connection dies underneath it
+        # (verified against the image's sshd, both cases), which is
+        # backwards from what the numbers suggest but is what the
+        # binary does. A logout is the sandbox ending the way it
+        # was designed to, so the container reports success rather
+        # than a failure nobody acted on; a genuine sshd fault is
+        # still visible in the container log (-e) and does not end
+        # with this code.
+        return 0
+    return code
 
 
 def _install_termination_handler(children):

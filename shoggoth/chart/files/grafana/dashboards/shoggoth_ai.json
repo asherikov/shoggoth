@@ -9,13 +9,25 @@
     "links": [],
     "panels": [
         {
+            "title": "LLM Gateway",
+            "type": "row",
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 0
+            },
+            "collapsed": false,
+            "panels": []
+        },
+        {
             "title": "LLM Request Rate",
             "type": "timeseries",
             "gridPos": {
                 "h": 9,
                 "w": 8,
                 "x": 0,
-                "y": 0
+                "y": 1
             },
             "datasource": {
                 "uid": "vm"
@@ -69,7 +81,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 8,
-                "y": 0
+                "y": 1
             },
             "datasource": {
                 "uid": "vm"
@@ -112,7 +124,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 16,
-                "y": 0
+                "y": 1
             },
             "datasource": {
                 "uid": "vm"
@@ -150,7 +162,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 0,
-                "y": 9
+                "y": 10
             },
             "datasource": {
                 "uid": "vm"
@@ -200,7 +212,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 8,
-                "y": 9
+                "y": 10
             },
             "datasource": {
                 "uid": "vm"
@@ -245,7 +257,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 16,
-                "y": 9
+                "y": 10
             },
             "datasource": {
                 "uid": "vm"
@@ -277,13 +289,25 @@
             }
         },
         {
+            "title": "LiteLLM Traces",
+            "type": "row",
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 19
+            },
+            "collapsed": false,
+            "panels": []
+        },
+        {
             "title": "LiteLLM Trace Rate",
             "type": "timeseries",
             "gridPos": {
                 "h": 9,
                 "w": 8,
                 "x": 0,
-                "y": 18
+                "y": 20
             },
             "datasource": {
                 "uid": "vm"
@@ -300,7 +324,7 @@
                     "refId": "B"
                 }
             ],
-            "description": "All LiteLLM spans by operation. LLM proxy and MCP gateway calls share the same span names and cannot be separated in span-metrics; use AI Traces below to inspect individual requests.",
+            "description": "All LiteLLM spans by operation. MCP gateway calls are separated by the tools/ span-name prefix and broken out in the MCP Gateway panels below; use AI Traces to inspect individual requests.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "reqps",
@@ -338,7 +362,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 8,
-                "y": 18
+                "y": 20
             },
             "datasource": {
                 "uid": "vm"
@@ -382,7 +406,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 16,
-                "y": 18
+                "y": 20
             },
             "datasource": {
                 "uid": "vm"
@@ -434,30 +458,42 @@
             }
         },
         {
-            "title": "MCP Client Call Rate",
+            "title": "MCP Gateway",
+            "type": "row",
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 29
+            },
+            "collapsed": false,
+            "panels": []
+        },
+        {
+            "title": "MCP Gateway Call Rate",
             "type": "timeseries",
             "gridPos": {
                 "h": 12,
                 "w": 8,
                 "x": 0,
-                "y": 27
+                "y": 30
             },
             "datasource": {
                 "uid": "vm"
             },
             "targets": [
                 {
-                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\"}[5m])) by (span_name)",
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"litellm\", span_name=~\"tools/.*\"}[5m])) by (span_name)",
                     "legendFormat": "{{span_name}}",
                     "refId": "A"
                 },
                 {
-                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\", status_code=\"ERROR\"}[5m])) by (span_name)",
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"litellm\", span_name=~\"tools/.*\", status_code=\"ERROR\"}[5m])) by (span_name)",
                     "legendFormat": "{{span_name}} errors",
                     "refId": "B"
                 }
             ],
-            "description": "MCP client hooks: span rate by operation",
+            "description": "MCP gateway spans per second by operation. Agents reach every MCP server (basic-memory, mcp-gitea, crawl4ai) through the litellm gateway, so the gateway's tools/list and tools/call spans are the only MCP call telemetry that exists; span-metrics carries no per-server dimension, so inspect individual requests in AI Traces below.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "reqps",
@@ -489,35 +525,35 @@
             }
         },
         {
-            "title": "MCP Client Duration (p50 / p95 / p99)",
+            "title": "MCP Gateway Duration (p50 / p95 / p99)",
             "type": "timeseries",
             "gridPos": {
                 "h": 12,
                 "w": 8,
                 "x": 8,
-                "y": 27
+                "y": 30
             },
             "datasource": {
                 "uid": "vm"
             },
             "targets": [
                 {
-                    "expr": "histogram_quantile(0.5, sum(rate(traces_spanmetrics_latency_bucket{service=\"basic-memory-mcp-client\"}[5m])) by (le, span_name))",
+                    "expr": "histogram_quantile(0.5, sum(rate(traces_spanmetrics_latency_bucket{service=\"litellm\", span_name=~\"tools/.*\"}[5m])) by (le, span_name))",
                     "legendFormat": "p50 {{span_name}}",
                     "refId": "A"
                 },
                 {
-                    "expr": "histogram_quantile(0.95, sum(rate(traces_spanmetrics_latency_bucket{service=\"basic-memory-mcp-client\"}[5m])) by (le, span_name))",
+                    "expr": "histogram_quantile(0.95, sum(rate(traces_spanmetrics_latency_bucket{service=\"litellm\", span_name=~\"tools/.*\"}[5m])) by (le, span_name))",
                     "legendFormat": "p95 {{span_name}}",
                     "refId": "B"
                 },
                 {
-                    "expr": "histogram_quantile(0.99, sum(rate(traces_spanmetrics_latency_bucket{service=\"basic-memory-mcp-client\"}[5m])) by (le, span_name))",
+                    "expr": "histogram_quantile(0.99, sum(rate(traces_spanmetrics_latency_bucket{service=\"litellm\", span_name=~\"tools/.*\"}[5m])) by (le, span_name))",
                     "legendFormat": "p99 {{span_name}}",
                     "refId": "C"
                 }
             ],
-            "description": "MCP client hooks: duration percentiles by operation",
+            "description": "MCP gateway span duration percentiles by operation",
             "fieldConfig": {
                 "defaults": {
                     "unit": "s",
@@ -533,30 +569,30 @@
             }
         },
         {
-            "title": "MCP Client Hook Activity",
+            "title": "MCP Gateway Activity",
             "type": "timeseries",
             "gridPos": {
                 "h": 12,
                 "w": 8,
                 "x": 16,
-                "y": 27
+                "y": 30
             },
             "datasource": {
                 "uid": "vm"
             },
             "targets": [
                 {
-                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\", span_name=~\"hook\\\\..+\"}[5m])) by (span_name)",
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"litellm\", span_name=~\"tools/call.*\"}[5m])) by (span_name)",
                     "legendFormat": "{{span_name}}",
                     "refId": "A"
                 },
                 {
-                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"basic-memory-mcp-client\", span_name=~\"mcp\\\\.call_tool\\\\..+\"}[5m])) by (span_name)",
-                    "legendFormat": "{{span_name}}",
+                    "expr": "sum(rate(traces_spanmetrics_calls_total{service=\"litellm\", span_name=\"tools/list\"}[5m]))",
+                    "legendFormat": "tools/list",
                     "refId": "B"
                 }
             ],
-            "description": "MCP client hooks and tool call activity",
+            "description": "Tool invocations (tools/call) and catalog listings (tools/list) per second. The gateway names tools/call spans after the tool, so each tool plots as its own series; tools/list is a single series.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "reqps",
@@ -572,21 +608,33 @@
             }
         },
         {
+            "title": "Agent Sessions",
+            "type": "row",
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 42
+            },
+            "collapsed": false,
+            "panels": []
+        },
+        {
             "title": "Agent Session Rate",
             "type": "timeseries",
             "gridPos": {
                 "h": 9,
                 "w": 8,
                 "x": 0,
-                "y": 39
+                "y": 43
             },
             "datasource": {
                 "uid": "loki"
             },
             "targets": [
                 {
-                    "expr": "sum(rate({service=~\"qwen-.*\"}[5m])) by (service)",
-                    "legendFormat": "{{service}}",
+                    "expr": "sum(rate({service_name=~\"qwen-.*\"}[5m])) by (service_name)",
+                    "legendFormat": "{{service_name}}",
                     "refId": "A"
                 }
             ],
@@ -612,15 +660,15 @@
                 "h": 9,
                 "w": 8,
                 "x": 8,
-                "y": 39
+                "y": 43
             },
             "datasource": {
                 "uid": "loki"
             },
             "targets": [
                 {
-                    "expr": "count(count_over_time({service=~\"qwen-.*\"}[5m])) by (service)",
-                    "legendFormat": "{{service}}",
+                    "expr": "count(count_over_time({service_name=~\"qwen-.*\"}[5m])) by (service_name)",
+                    "legendFormat": "{{service_name}}",
                     "refId": "A"
                 }
             ],
@@ -650,15 +698,15 @@
                 "h": 9,
                 "w": 8,
                 "x": 16,
-                "y": 39
+                "y": 43
             },
             "datasource": {
                 "uid": "loki"
             },
             "targets": [
                 {
-                    "expr": "sum(rate({service=~\"qwen-.*\"} |~ \"(?i)error|fail|exception|timeout\"[5m])) by (service)",
-                    "legendFormat": "{{service}}",
+                    "expr": "sum(rate({service_name=~\"qwen-.*\"} |~ \"(?i)error|fail|exception|timeout\"[5m])) by (service_name)",
+                    "legendFormat": "{{service_name}}",
                     "refId": "A"
                 }
             ],
@@ -688,14 +736,14 @@
                 "h": 12,
                 "w": 24,
                 "x": 0,
-                "y": 48
+                "y": 52
             },
             "datasource": {
                 "uid": "loki"
             },
             "targets": [
                 {
-                    "expr": "{service=~\"qwen-.*\"}",
+                    "expr": "{service_name=~\"qwen-.*\"}",
                     "refId": "A"
                 }
             ],
@@ -709,12 +757,24 @@
         },
         {
             "title": "AI Traces",
+            "type": "row",
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 64
+            },
+            "collapsed": false,
+            "panels": []
+        },
+        {
+            "title": "AI Traces",
             "type": "table",
             "gridPos": {
                 "h": 12,
                 "w": 24,
                 "x": 0,
-                "y": 60
+                "y": 65
             },
             "datasource": {
                 "type": "tempo",
@@ -747,6 +807,18 @@
             }
         },
         {
+            "title": "Token Usage Trends",
+            "type": "row",
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 77
+            },
+            "collapsed": false,
+            "panels": []
+        },
+        {
             "title": "Token Usage Over Week",
             "type": "timeseries",
             "timeFrom": "now-7d",
@@ -755,7 +827,7 @@
                 "h": 18,
                 "w": 12,
                 "x": 0,
-                "y": 72
+                "y": 78
             },
             "datasource": {
                 "uid": "vm"
@@ -813,7 +885,7 @@
                 "h": 18,
                 "w": 12,
                 "x": 12,
-                "y": 72
+                "y": 78
             },
             "datasource": {
                 "uid": "vm"
@@ -863,13 +935,25 @@
             }
         },
         {
+            "title": "Headroom",
+            "type": "row",
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 96
+            },
+            "collapsed": false,
+            "panels": []
+        },
+        {
             "title": "Headroom Tokens Saved Rate",
             "type": "timeseries",
             "gridPos": {
                 "h": 9,
                 "w": 8,
                 "x": 0,
-                "y": 90
+                "y": 97
             },
             "datasource": {
                 "uid": "vm"
@@ -908,7 +992,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 8,
-                "y": 90
+                "y": 97
             },
             "datasource": {
                 "uid": "vm"
@@ -944,7 +1028,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 16,
-                "y": 90
+                "y": 97
             },
             "datasource": {
                 "uid": "vm"
@@ -988,7 +1072,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 0,
-                "y": 99
+                "y": 106
             },
             "datasource": {
                 "uid": "vm"
@@ -1043,7 +1127,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 8,
-                "y": 99
+                "y": 106
             },
             "datasource": {
                 "uid": "vm"
@@ -1096,7 +1180,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 16,
-                "y": 99
+                "y": 106
             },
             "datasource": {
                 "uid": "vm"
@@ -1148,7 +1232,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 0,
-                "y": 117
+                "y": 115
             },
             "datasource": {
                 "uid": "vm"
@@ -1192,7 +1276,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 8,
-                "y": 117
+                "y": 115
             },
             "datasource": {
                 "uid": "vm"
@@ -1240,7 +1324,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 16,
-                "y": 117
+                "y": 115
             },
             "datasource": {
                 "uid": "vm"
@@ -1273,13 +1357,25 @@
             }
         },
         {
+            "title": "Crawl4AI",
+            "type": "row",
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 124
+            },
+            "collapsed": false,
+            "panels": []
+        },
+        {
             "title": "Crawl4AI Request Rate by Handler",
             "type": "timeseries",
             "gridPos": {
                 "h": 9,
                 "w": 8,
                 "x": 0,
-                "y": 108
+                "y": 125
             },
             "datasource": {
                 "uid": "vm"
@@ -1313,7 +1409,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 8,
-                "y": 108
+                "y": 125
             },
             "datasource": {
                 "uid": "vm"
@@ -1347,7 +1443,7 @@
                 "h": 9,
                 "w": 8,
                 "x": 16,
-                "y": 108
+                "y": 125
             },
             "datasource": {
                 "uid": "vm"
@@ -1399,7 +1495,7 @@
         "to": "now"
     },
     "title": "AI",
-    "description": "LLM proxy metrics, LiteLLM trace observability, direct MCP client telemetry, and coding agent session logs",
+    "description": "LLM proxy metrics, LiteLLM trace observability, MCP gateway telemetry, and coding agent session logs",
     "uid": "shoggoth-ai",
     "version": 3
 }

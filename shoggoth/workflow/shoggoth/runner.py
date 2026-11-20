@@ -245,7 +245,13 @@ class Shoggoth:
             self._remove_review_worktree(wt_path)
             return None, ""
 
-        if review_repo_dir != repo_dir:
+        # Only a PR against the workspace itself carries
+        # workspace-relative paths (``<sub-repo>/...``) that need the
+        # sub-repo prefix stripped before the patch applies at
+        # ``review_repo_dir``; a PR against a sub-repository is
+        # already relative to it.
+        if (review_repo_dir != repo_dir
+                and self.working_repo == self.project_repo):
             log(f"_apply_pr_to_worktree: rewriting patch paths "
                 f"(review_repo_dir={review_repo_dir})")
             diff_text = self._rewrite_patch_paths(
@@ -309,7 +315,10 @@ class Shoggoth:
             elif line.startswith(f"+++ b/{top_slash}"):
                 line = f"+++ b/{line[len('+++ b/' + top_slash):]}"
             stripped.append(line)
-        return "\n".join(stripped)
+        rewritten = "\n".join(stripped)
+        if patch_text.endswith("\n"):
+            rewritten += "\n"
+        return rewritten
 
     @staticmethod
     def _remove_review_worktree(wt_path):
@@ -339,11 +348,28 @@ class Shoggoth:
             shutil.rmtree(wt_path, ignore_errors=True)
 
     def _resolve_review_repo_dir(self, pr_repo, pr_number):
-        """If ccws and the PR touches exactly one sub-repo with its own .git,
-        return that sub-repo's absolute path. Otherwise return self.repo_dir.
+        """If ccws and the PR is scoped to exactly one sub-repo with its
+        own .git, return that sub-repo's absolute path. Otherwise return
+        self.repo_dir.
+
+        A PR against the workspace itself is scoped by its file paths:
+        they name the one sub-repo the PR touches. A PR against a
+        sub-repository of the workspace is scoped to that
+        sub-repository: its file paths are relative to the
+        sub-repository's own root, so they name no workspace sub-repo,
+        and the PR's own repository is the one to review.
         """
         if self.type != "ccws":
             return self.repo_dir
+        if pr_repo and pr_repo != self.project_repo:
+            # The PR is against a sub-repository of the workspace:
+            # the PR's repository is the sub-repo to review.
+            path = os.path.join(self.repo_dir,
+                                pr_repo.rsplit("/", 1)[-1])
+            if os.path.isdir(os.path.join(path, ".git")):
+                log(f"_resolve_review_repo_dir: PR is against "
+                    f"sub-repo {pr_repo}")
+                return path
         files = self.gitea.get_pr_files(pr_repo, pr_number) or []
         prefixes = {f["path"].split("/", 1)[0]
                     for f in files if "/" in f.get("path", "")}
@@ -356,4 +382,40 @@ class Shoggoth:
         if len(prefixes) > 1:
             log(f"_resolve_review_repo_dir: PR touches {len(prefixes)} "
                 f"sub-repos, reviewing at the ccws level")
+        return self.repo_dir
+
+    def _resolve_working_repo_dir(self, pr_repo):
+        """The repository that holds the PR's working branch.
+
+        A ccws task branch is created and pushed only in the
+        modified sub-repositories -- ``wshandler branch new`` and
+        ``wshandler push`` walk the repositories the workspace's
+        list names and never touch the workspace root -- and the PR
+        is opened against the sub-repository that carries it. A PR
+        against the workspace itself carries its branch in the
+        workspace root. The branch-holding repository is where a
+        slash command (``/squash`` / ``/rebase`` / ``/drop``) must
+        rewrite history and push: the root clone does not carry the
+        branch at all.
+
+        Unlike ``_resolve_review_repo_dir`` this does not fall back
+        to scoping by the PR's file paths: a PR against the
+        workspace itself whose files sit in one sub-repo still has
+        its branch -- and its commits -- in the workspace root.
+
+        Falls back to ``self.repo_dir`` when the sub-repository is
+        not materialized, so the caller fails on the missing branch
+        rather than on a missing directory.
+        """
+        if self.type != "ccws":
+            return self.repo_dir
+        if pr_repo and pr_repo != self.project_repo:
+            # The PR is against a sub-repository of the workspace:
+            # the PR's repository is the one holding the branch.
+            path = os.path.join(self.repo_dir,
+                                pr_repo.rsplit("/", 1)[-1])
+            if os.path.isdir(os.path.join(path, ".git")):
+                log(f"_resolve_working_repo_dir: branch lives in "
+                    f"sub-repo {pr_repo}")
+                return path
         return self.repo_dir
