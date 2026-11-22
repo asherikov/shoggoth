@@ -291,7 +291,35 @@ class Gitea(HttpApiClient):
             return
         return result
 
-    def get_unresolved_review_comments(self, repo, pr_number):
+    def get_unresolved_review_comments(self, repo, pr_number,
+                                       is_command_comment=None):
+        """Return the PR's unresolved review-comment threads.
+
+        Each returned thread is a dict with ``id`` (the root
+        comment's id, the resolve target), ``review_id``, ``path``,
+        ``line`` (the ``position`` value Gitea reports, i.e. the
+        file line the comment anchors to), ``body`` (all
+        participants combined as ``[login]: body`` blocks, sorted
+        by comment id) and ``commit_id`` (the root comment's
+        ``CommitSHA``, used by the caller's outdated check).
+
+        Resolution is evaluated per THREAD, not per comment:
+        Gitea resolves a conversation by writing
+        ``resolve_doer_id`` onto the single root comment row
+        (``MarkConversation`` updates one id; replies never carry
+        a resolver), so a thread is closed as soon as ANY of its
+        comments has a resolver. Filtering per comment would
+        resurrect a resolved thread through its unresolved
+        replies -- e.g. a ``/do`` reply inside a closed
+        conversation.
+
+        ``is_command_comment`` is an optional predicate applied to
+        each comment body: comments that are slash-command
+        invocations are triggers for the command handlers, not
+        review comments to address, so they are dropped from the
+        thread bodies (and a thread left with nothing but
+        commands is dropped entirely).
+        """
         slave_user = params.shoggoth_slave_user
         all_reviews = self._paginate(lambda page, limit: self.get(
             f"repos/{repo}/pulls/{pr_number}/reviews",
@@ -307,14 +335,12 @@ class Gitea(HttpApiClient):
                 params={"page": page, "limit": limit}))
             all_comments.extend(comments)
 
-        unresolved = [c for c in all_comments if not c.get("resolver")]
-
         trusted_users = set(
             params.shoggoth_trusted_users.split(","))
         trusted_users.discard(slave_user)
 
         threads = {}
-        for c in unresolved:
+        for c in all_comments:
             path = c.get("path", "unknown")
             line = c.get("position")  # Gitea API uses "position", not "line"
             if line is not None:
@@ -325,6 +351,14 @@ class Gitea(HttpApiClient):
 
         result = []
         for thread_key, thread_comments in threads.items():
+            if any(c.get("resolver") for c in thread_comments):
+                continue
+            if is_command_comment is not None:
+                thread_comments = [
+                    c for c in thread_comments
+                    if not is_command_comment(c.get("body", ""))]
+                if not thread_comments:
+                    continue
             path = thread_key[0]
             line = thread_key[1] if len(thread_key) == 2 else None
             has_trusted = any(
@@ -344,11 +378,13 @@ class Gitea(HttpApiClient):
                 "path": path,
                 "line": line,
                 "body": combined_body,
+                "commit_id": root_comment.get("commit_id") or "",
             })
 
         return result
 
-    def get_pr_review_thread(self, repo, pr_number, path, line):
+    def get_pr_review_thread(self, repo, pr_number, path, line,
+                             is_command_comment=None):
         """Fetch a SINGLE review-comment thread on a PR,
         identified by its ``(path, line)`` anchor. Returns
         a thread dict with the combined body of all
@@ -414,7 +450,14 @@ class Gitea(HttpApiClient):
 
         Returns ``None`` if the PR has no review
         comments at the requested ``(path, line)``
-        pair, or all such comments are resolved.
+        pair, the thread is resolved (Gitea writes
+        the resolver onto the conversation's root
+        comment row only -- see
+        ``get_unresolved_review_comments`` -- so any
+        comment carrying a resolver closes the whole
+        thread), or every comment in it is a
+        slash-command invocation dropped by
+        ``is_command_comment``.
         """
         all_reviews = self._paginate(lambda page, limit: self.get(
             f"repos/{repo}/pulls/{pr_number}/reviews",
@@ -429,13 +472,19 @@ class Gitea(HttpApiClient):
                 f"repos/{repo}/pulls/{pr_number}/reviews/{review_id}/comments",
                 params={"page": page, "limit": limit}))
             for c in comments:
-                if c.get("resolver"):
-                    continue
                 if c.get("path") != path:
                     continue
                 if c.get("position") != line:
                     continue
                 thread_comments.append(c)
+
+        if any(c.get("resolver") for c in thread_comments):
+            return None
+
+        if is_command_comment is not None:
+            thread_comments = [
+                c for c in thread_comments
+                if not is_command_comment(c.get("body", ""))]
 
         if not thread_comments:
             return None
@@ -451,6 +500,7 @@ class Gitea(HttpApiClient):
             "path": path,
             "line": line,
             "body": combined_body,
+            "commit_id": root_comment.get("commit_id") or "",
         }
 
     def find_review_comment_by_id(self, repo, pr_number, comment_id):
@@ -522,7 +572,24 @@ class Gitea(HttpApiClient):
         return None
 
     def resolve_comment(self, repo, comment_id):
-        self.post(f"repos/{repo}/pulls/comments/{comment_id}/resolve", {})
+        """Mark the review-comment thread rooted at ``comment_id`` resolved.
+
+        Gitea answers this endpoint with an EMPTY body (the resolve is
+        applied and the thread closes, but no resource is rendered
+        back), so the JSON-body ``post()`` helper cannot be used here:
+        its ``json.loads`` on the empty body raises
+        ``JSONDecodeError``, ``_http_warn`` swallows it and returns
+        ``None``, and every caller then reports a SUCCESSFUL resolve as
+        "resolve failed" — the workflow log says the comment could not
+        be resolved while the thread is closed in the Gitea UI.
+
+        ``_send_status`` keys the outcome off the HTTP status code
+        instead of the body, and returns ``True`` on a 2xx — the
+        contract the two call sites (``_pr_comment`` and
+        ``_slash_do``) already branch on.
+        """
+        return self._send_status(
+            "POST", f"repos/{repo}/pulls/comments/{comment_id}/resolve", {})
 
     def get_pr(self, repo, pr_number):
         return self.get(f"repos/{repo}/pulls/{pr_number}")

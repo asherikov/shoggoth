@@ -7,10 +7,10 @@
   Services. Its vhost config is large and mostly static; only the domain and
   the namespace are substituted at deploy time.
 
-  The agent-plugin source (plugin.json plus the memory-* / caveman skill
-  files) is mounted verbatim from files/web-internal/plugin/ through the
-  shoggoth.filesData helper — plain text, no Helm rendering, so adding or
-  editing a skill is a file edit, not a template edit.
+  The agent-plugin source (plugin.json, mcp.json, plus the memory-* /
+  caveman skill files) is mounted verbatim from files/web-internal/plugin/
+  through the shoggoth.filesData helper — plain text, no Helm rendering, so
+  adding or editing a skill is a file edit, not a template edit.
 
   Unlike grafana and argo-workflows, this file contains no literal `{{ ... }}`
   from another engine, so nothing here needs the Helm literal-brace escape.
@@ -485,7 +485,7 @@ spec:
         command:
         - sh
         - -c
-        - "set -eu\nmkdir -p /data/plugin/skills\nfor src in /src/plugin/*-skill.md; do\n    base=\"$(basename \"${src}\" -skill.md)\"\n    mkdir -p \"/data/plugin/skills/${base}\"\n    cp \"${src}\" \"/data/plugin/skills/${base}/SKILL.md\"\ndone\ncp /src/plugin/plugin.json /data/plugin/plugin.json\ntar czhf /data/plugin/plugin.tar.gz -C /data/plugin .\n"
+        - "set -eu\nmkdir -p /data/plugin/skills\nfor src in /src/plugin/*-skill.md; do\n    base=\"$(basename \"${src}\" -skill.md)\"\n    mkdir -p \"/data/plugin/skills/${base}\"\n    cp \"${src}\" \"/data/plugin/skills/${base}/SKILL.md\"\ndone\ncp /src/plugin/plugin.json /data/plugin/plugin.json\ncp /src/plugin/mcp.json /data/plugin/mcp.json\ntar czhf /data/plugin/plugin.tar.gz -C /data/plugin .\n"
         resources:
           requests:
             memory: 32Mi

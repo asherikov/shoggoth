@@ -33,7 +33,10 @@ identity:
   instanceDir: ""
 
 # Network ports (replaces SHOGGOTH_WEB_EXT_PORT, SHOGGOTH_WG_PORT,
-# SHOGGOTH_WG_UI_PORT, SHOGGOTH_REGISTRY_PORT).
+# SHOGGOTH_WG_UI_PORT). network.registry.hostPort is the host-side bind
+# port of the hostNetwork registry pod; the in-cluster `registry`
+# Service publishes a fixed port instead
+# (_helpers.tpl:shoggoth.registryServicePort).
 network:
   webExternal:
     hostPort: ""
@@ -48,6 +51,19 @@ ai:
   defaultModel: ""
   defaultApi: ""
   defaultTokenFileRef: ""
+
+# Workflow agent behaviour. Renders the SHOGGOTH_AGENT_TIMEOUT pod env var,
+# replacing the hardcoded Agent.AGENT_TIMEOUT constant the workflow scripts
+# used to carry.
+workflow:
+  # Per-prompt wall-clock cap, in seconds, for the qwen agent the
+  # command-handler worker step drives (pr-update, task, ci-failure).
+  # The WorkflowTemplate's activeDeadlineSeconds (4 h) is the outer
+  # safety net; this is the per-prompt ceiling so a single hung agent
+  # doesn't burn the whole pod's budget. Rendered into the
+  # shoggoth-workflow-config ConfigMap, which command-handler.yaml
+  # binds into the worker-step container's environment.
+  agentTimeout: 1200
 
 # Gitea (replaces SHOGGOTH_GITEA_SERVER_TOKEN_FILE).
 gitea:

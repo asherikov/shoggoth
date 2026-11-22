@@ -19,19 +19,19 @@ Inspired by sleep-time compute — the idea that memory formation happens best *
 
 ### 1. Gather Recent Material
 
-Find what changed recently, then read the relevant files:
+Find what changed recently, then read the relevant files. Basic Memory is reached through the LiteLLM MCP gateway, so every tool carries the `basic_memory-` prefix and every call passes `project="main"`:
 
 ```python
-# Find recently modified notes — use json format for the complete list
+# Find recently changed notes — use json format for the complete list
 # (text format truncates to ~5 items in the summary)
-recent_activity(timeframe="2d", output_format="json")
+basic_memory-bm_project(project="main", command="recent", since="2d", output_format="json")
 
 # Read specific daily notes
-read_note(identifier="memory/2026-02-27")
-read_note(identifier="memory/2026-02-26")
+basic_memory-bm_read(project="main", identifier="memory/2026-02-27")
+basic_memory-bm_read(project="main", identifier="memory/2026-02-26")
 
 # Check active tasks
-search_notes(note_types=["task"], status="active")
+basic_memory-bm_search(project="main", note_types=["task"], filters={"status": "active"})
 ```
 
 ### 2. Evaluate What Matters

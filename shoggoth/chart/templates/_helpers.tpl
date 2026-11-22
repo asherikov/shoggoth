@@ -130,6 +130,31 @@ hyphenated naming.
 {{- end -}}
 
 {{/*
+Fixed in-cluster port of the `registry` Service.
+
+The registry pod runs with hostNetwork and binds
+network.registry.hostPort directly on the host, so that port varies per
+instance to keep co-located instances from colliding on the host. The
+Service decouples the port clients dial from the port the pod listens
+on: its `port` (templates/registry.yaml) is fixed at 80 for every
+instance, its `targetPort` is the per-instance host port. In-cluster
+consumers therefore address the registry as registry:80 without any
+per-instance configuration, while host-side consumers (k3s containerd
+mirrors, docker daemon, control-node ansible) keep using the varying
+hostPort.
+
+Port 80, not a registry-conventional 5000, because it matches both the
+chart's other internal HTTP Services (litellm, apt-cache, web-internal,
+python-cache, build-cache) and the default the workflow scripts carry.
+
+Not a values key: the whole point is that in-cluster consumers must not
+need per-instance configuration, and the workflow scripts
+(shoggoth/workflow/shoggoth/config.py) carry the same constant as the
+default of SHOGGOTH_REGISTRY_PORT. The two must be changed together.
+*/}}
+{{- define "shoggoth.registryServicePort" -}}80{{- end -}}
+
+{{/*
 Common DNS configuration for pods in the shoggoth namespace.
 
 Every pod that must resolve <service>.<shoggoth-domain> needs the

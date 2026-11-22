@@ -34,9 +34,14 @@ network:
     udpPort: "51820"
     uiPort: "51821"
   registry:
-    # In-cluster registry Service port (SHOGGOTT_REGISTRY_PORT). Rendered
-    # unquoted into `port:`, so it must be a positive integer — a non-numeric
-    # or empty value renders as 0 and the API server rejects the Service.
+    # Host-side bind port of the hostNetwork registry pod — the port the
+    # host listens on (k3s containerd mirrors, docker daemon, the
+    # control-node ansible drop_image_tag play). Varies per instance so
+    # co-located instances do not collide on the host. The in-cluster
+    # Service port is fixed (80) and independent of this value. Must be
+    # a positive integer — it is rendered unquoted into `targetPort:`,
+    # containerPort, the probes and the zot config, where a non-numeric
+    # or empty value renders as 0.
     hostPort: "80"
 
 ai:
@@ -48,6 +53,11 @@ ai:
   # reads this file on every run and mirrors it into OpenBao's
   # ai/default-token, which the ai-default-token ExternalSecret then projects.
   defaultTokenFileRef: /shoggoth/private/ai-default-token.txt
+
+workflow:
+  # Per-prompt wall-clock cap, in seconds. Default 1200 (20 min); raise it for
+  # slow models or long review prompts.
+  agentTimeout: 4000
 
 gitea:
   serverTokenFileRef: /shoggoth/private/gitea-server-token.txt

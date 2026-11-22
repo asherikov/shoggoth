@@ -9,6 +9,7 @@ from .commands.argo_webhooks import (
     SetupRedmineWebhooks,
 )
 from .commands.ci_failure import CiFailureCommand
+from .commands.container_pull import ContainerPull
 from .commands.gitea_ldap_sync import GiteaLdapSync
 from .commands.mirror_sync import GithubMirrorSync
 from .commands.pr_update import PrUpdateCommand
@@ -213,6 +214,13 @@ def _run(args):
         # value that downstream consumers (git-cred sidecar,
         # web-internal proxy) only discover via 401s.
         PushSecretCheck().execute()
+    elif args.command == "container-pull":
+        # The container-pull template runs this twice per submit:
+        # once with SHOGGOTH_REGISTRY_ACTION=evict (DELETE the tag
+        # from the local zot) and once with repull (GET the manifest,
+        # which drives zot's on-demand sync to re-fetch the image
+        # from upstream).
+        ContainerPull().execute()
     elif args.command == "slave-test":
         cmd = SlaveTest()
         # Check names share the same positional bucket. ``execute``

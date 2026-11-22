@@ -42,7 +42,14 @@ class Agent:
     # ``activeDeadlineSeconds`` (4 h on command-handler) is
     # the outer safety net; this is the per-prompt ceiling so a
     # single hung agent doesn't burn the whole pod's budget.
-    AGENT_TIMEOUT = 1200
+    # Per-instance via the ``workflow.agentTimeout`` key in
+    # shoggoth.yaml: it is rendered into the
+    # ``shoggoth-workflow-config`` ConfigMap, bound into the
+    # worker-step container's environment as
+    # ``SHOGGOTH_AGENT_TIMEOUT``, and read here through
+    # ``params`` — so the default applies wherever the env var
+    # is unset (tests, one-off local runs).
+    AGENT_TIMEOUT = params.shoggoth_agent_timeout
 
     # Forbidden bash glob patterns the agent must NEVER invoke — git
     # commits/pushes/tags, wsh and wshandler wrappers — encoded as
@@ -359,7 +366,7 @@ class Agent:
         self.shoggoth = shoggoth
         self.otlp = OtlpLogger(params.otel_endpoint)
         self.tool_profile = "full"
-        self._qwen_restrict_path = None
+        self._qwen_settings_path = None
 
     def start_session(self, event_type):
         self.tool_profile = Agent.TOOL_PROFILE_BY_SESSION.get(event_type, "full")
@@ -369,21 +376,34 @@ class Agent:
 
         self.qwen_env = self._filter_qwen_env()
 
+        # System settings for the qwen subprocess: permission denials plus
+        # the litellm MCP gateway. The gateway cannot come from the agent
+        # plugin — qwen's Agent Plugins v1 loader rejects the plugin's
+        # streamable-http entry because a non-loopback http:// URL must be
+        # HTTPS, and skips it with only a debug-log warning. The settings
+        # path applies no protocol rule; an `httpUrl` key selects the
+        # streamable-http transport.
+        system_settings = {}
         deny_rules = Agent.QWEN_DENY_PATTERNS
         if deny_rules:
-            settings_path = f"/tmp/qwen-restrict-{self.otlp.session_id}.json"
-            try:
-                with open(settings_path, "w") as f:
-                    json.dump({"permissions": {"deny": deny_rules}}, f)
-                self.qwen_env["QWEN_CODE_SYSTEM_SETTINGS_PATH"] = settings_path
-                self._qwen_restrict_path = settings_path
-                log(f"start_session: wrote qwen restrictions to {settings_path} "
-                    f"({len(deny_rules)} deny rules)")
-            except OSError as e:
-                print(f"WARNING: failed to write qwen restriction file "
-                      f"{settings_path}: {e}", file=sys.stderr)
-        else:
-            self._qwen_restrict_path = None
+            system_settings["permissions"] = {"deny": deny_rules}
+        mcp_url = params.mcp_litellm_url
+        if not mcp_url.endswith("/"):
+            mcp_url += "/"
+        system_settings["mcpServers"] = {"shoggoth": {"httpUrl": mcp_url}}
+
+        settings_path = f"/tmp/qwen-settings-{self.otlp.session_id}.json"
+        try:
+            with open(settings_path, "w") as f:
+                json.dump(system_settings, f)
+            self.qwen_env["QWEN_CODE_SYSTEM_SETTINGS_PATH"] = settings_path
+            self._qwen_settings_path = settings_path
+            log(f"start_session: wrote qwen system settings to {settings_path} "
+                f"({len(deny_rules)} deny rules, mcp gateway {mcp_url})")
+        except OSError as e:
+            print(f"WARNING: failed to write qwen system settings file "
+                  f"{settings_path}: {e}", file=sys.stderr)
+            self._qwen_settings_path = None
 
         plugin_url = f"http://{self.shoggoth.domain}/plugin.tar.gz"
         plugin_archive = run(["curl", "-sfS", "--max-time", "30", "-o", "/tmp/plugin.tar.gz", plugin_url],
@@ -526,12 +546,12 @@ class Agent:
     def stop_session(self):
         log("stop_session")
         self.otlp.stop_session()
-        if self._qwen_restrict_path:
+        if self._qwen_settings_path:
             try:
-                os.unlink(self._qwen_restrict_path)
-                log(f"stop_session: removed qwen restrictions file "
-                    f"{self._qwen_restrict_path}")
+                os.unlink(self._qwen_settings_path)
+                log(f"stop_session: removed qwen system settings file "
+                    f"{self._qwen_settings_path}")
             except OSError as e:
-                print(f"WARNING: failed to remove qwen restriction file "
-                      f"{self._qwen_restrict_path}: {e}", file=sys.stderr)
-            self._qwen_restrict_path = None
+                print(f"WARNING: failed to remove qwen system settings file "
+                      f"{self._qwen_settings_path}: {e}", file=sys.stderr)
+            self._qwen_settings_path = None

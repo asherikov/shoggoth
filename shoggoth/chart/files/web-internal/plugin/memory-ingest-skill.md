@@ -41,17 +41,17 @@ Scan the content for entities worth tracking in the knowledge graph:
 - Organizations discussed in business/technical context
 - Topics with enough detail to warrant their own note
 ## Step 3: Search Existing Entities
-For each extracted entity, search Basic Memory with multiple query variations:
+For each extracted entity, search Basic Memory with multiple query variations. Basic Memory is reached through the LiteLLM MCP gateway, so every tool carries the `basic_memory-` prefix and every call passes `project="main"`:
 ```python
 # Person — try full name, last name
-search_notes(query="Sarah Chen")
-search_notes(query="Chen")
+basic_memory-bm_search(project="main", query="Sarah Chen")
+basic_memory-bm_search(project="main", query="Chen")
 # Organization — try full name, abbreviation, acronym
-search_notes(query="National Renewable Energy Laboratory")
-search_notes(query="NREL")
+basic_memory-bm_search(project="main", query="National Renewable Energy Laboratory")
+basic_memory-bm_search(project="main", query="NREL")
 # Topic — try the full term and keywords
-search_notes(query="edge computing")
-search_notes(query="edge inference")
+basic_memory-bm_search(project="main", query="edge computing")
+basic_memory-bm_search(project="main", query="edge inference")
 ```
 Classify each entity as:
 - **Existing** — found in Basic Memory. Will link to it with `[[wiki-link]]`.
@@ -80,7 +80,8 @@ Include enough context with each proposed entity for the user to make a quick de
 Create the primary note for the ingested content. This is the "record of what happened" — it preserves the raw material and adds structured metadata.
 ### Meeting / Conversation Note
 ```python
-write_note(
+basic_memory-bm_write(
+  project="main",
   title="NovaTech Meeting - Jordan Rivera - Feb 22, 2026",
   directory="meetings/2026",
   note_type="meeting",
@@ -107,7 +108,8 @@ Brief one-sentence summary of what this meeting was about.
 ```
 ### Document / Article Note
 ```python
-write_note(
+basic_memory-bm_write(
+  project="main",
   title="Edge Computing Architecture Whitepaper",
   directory="references",
   note_type="reference",
@@ -146,7 +148,8 @@ Invent categories as needed — these are suggestions, not a fixed list.
 For each entity the user approved, create a structured note. Match the entity type to an appropriate template.
 ### Person
 ```python
-write_note(
+basic_memory-bm_write(
+  project="main",
   title="Jordan Rivera",
   directory="people",
   note_type="person",
@@ -170,7 +173,8 @@ VP of Engineering at
 ```
 ### Organization
 ```python
-write_note(
+basic_memory-bm_write(
+  project="main",
   title="NovaTech",
   directory="organizations",
   note_type="organization",
@@ -194,7 +198,8 @@ SaaS platform company. Series B stage.
 ```
 ### Concept / Topic
 ```python
-write_note(
+basic_memory-bm_write(
+  project="main",
   title="Federated Learning",
   directory="concepts",
   note_type="concept",

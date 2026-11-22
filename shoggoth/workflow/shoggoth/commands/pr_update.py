@@ -265,7 +265,8 @@ class PrUpdateCommand(CommandBase):
                 f"lookups; the indexed code path is "
                 f"{self.shoggoth.repo_dir}, so cross-reference by reading "
                 f"matching files from the worktree path.\n"
-                f"Use basic_memory MCP (search, read_note) for prior "
+                f"Use basic_memory MCP (basic_memory-bm_search, "
+                f"basic_memory-bm_read) for prior "
                 f"project decisions.\n\n"
                 f"Produce a code review focused on:\n"
                 f"- correctness (logic bugs, off-by-one, edge cases)\n"
@@ -452,14 +453,212 @@ class PrUpdateCommand(CommandBase):
                 return issue.get("id")
         return None
 
+    def _is_trusted_commenter(self):
+        comment = self.gitea._payload.get("comment") or {}
+        author = (comment.get("user") or {}).get("login") or ""
+        trusted_users = set(
+            (params.shoggoth_trusted_users or "").split(","))
+        trusted_users.discard("")
+        trusted_users.discard(params.shoggoth_slave_user)
+        return bool(author) and author in trusted_users
+
+    def _is_command_comment(self, body):
+        # A comment whose body is a slash-command invocation is a
+        # trigger for the command handlers, not a review comment to
+        # address: the addressing flows must not feed ``/do`` (or
+        # ``/review``, ``/drop <sha>``, ...) to the agent as if it
+        # were an instruction -- that is how a ``/do`` reply inside
+        # a conversation ends up "addressed" as a review comment.
+        # The shapes mirror the worker's own dispatch regexes so
+        # the two can never disagree about what is a command;
+        # ``/do something`` deliberately stays a regular comment
+        # (the documented contract of SLASH_DO_RE).
+        body = (body or "").strip()
+        return bool(
+            self.SLASH_COMMAND_RE.match(body)
+            or self.SLASH_DO_RE.match(body)
+            or self.SLASH_DROP_RE.match(body))
+
+    def _trigger_review_thread(self, pr_repo, pr_number):
+        # The payload's comment struct carries only the id (no
+        # path/position -- see Gitea.find_review_comment_by_id), so
+        # the anchor is recovered by id-lookup and the thread is
+        # then fetched by (path, position): the same two-step path
+        # the /do dispatcher uses. Returns None whenever the
+        # trigger cannot be scoped to a single unresolved thread
+        # (no comment on the payload, top-level PR comment,
+        # deleted comment, or an already-resolved thread), which
+        # sends the caller to the full unresolved-thread sweep.
+        comment = self.gitea._payload.get("comment") or {}
+        comment_id = comment.get("id")
+        if comment_id is None:
+            return None
+        match = self.gitea.find_review_comment_by_id(
+            pr_repo, pr_number, comment_id)
+        if match is None:
+            return None
+        return self.gitea.get_pr_review_thread(
+            pr_repo, pr_number, match.get("path"), match.get("position"),
+            is_command_comment=self._is_command_comment)
+
+    # git blame failures Gitea itself treats as "comment
+    # invalidated" (isErrBlameInvalidated in
+    # services/pull/review.go): the path is gone from the head
+    # tree, the line is past EOF, or the object is missing.
+    BLAME_INVALIDATED_ERRORS = ("no such path", "has only", "bad object")
+
+    def _filter_outdated(self, threads, pr_repo, pr_number):
+        """Drop the threads Gitea would render as outdated.
+
+        Gitea marks a code comment invalidated when its anchor no
+        longer blames to the comment's commit on the PR head:
+        ``checkInvalidation`` blames ``TreePath`` at
+        ``UnsignedLine()`` on the head ref and invalidates on blame
+        failure or when the blamed commit differs from
+        ``CommitSHA``. The REST API does not expose that flag
+        (``PullReviewComment`` carries no invalidated field), so
+        the check is replicated here with ``git blame`` in the
+        worker's checkout: same path, same line, same head sha,
+        same comparison.
+
+        A thread is only dropped when it can be POSITIVELY proven
+        outdated. Every undeterminable case (no head sha, head sha
+        not present locally after a fetch attempt, comment without
+        ``commit_id``/line, unparsable blame output, blame failing
+        for a non-invalidation reason, blame landing on a
+        shallow-clone boundary commit) keeps the thread, so a
+        harness problem can never silently discard work.
+        """
+        if not threads:
+            return threads
+        head_sha = ((self.gitea._payload.get("pull_request") or {})
+                    .get("head") or {}).get("sha") or ""
+        if not head_sha:
+            pr_data = self.gitea.get_pr(pr_repo, pr_number) or {}
+            head_sha = ((pr_data.get("head") or {}).get("sha") or "")
+        if not head_sha:
+            log("pr-comment: outdated check skipped (no head sha)")
+            return threads
+        repo_dir = self.shoggoth._resolve_review_repo_dir(pr_repo,
+                                                          pr_number)
+        if not repo_dir or not os.path.isdir(os.path.join(repo_dir,
+                                                          ".git")):
+            log(f"pr-comment: outdated check skipped "
+                f"(no git repo at {repo_dir})")
+            return threads
+        # Sub-repositories are materialized as shallow clones
+        # (wshandler update -p shallow) and blame against a
+        # grafted history stops at the boundary commit -- every
+        # line then attributes to the tip, so a comment made on
+        # any earlier commit falsely looks outdated. Fetch full
+        # history first: the call is an idempotent no-op for full
+        # clones (the same one _pr_review makes on this tree),
+        # and _thread_outdated still treats a boundary
+        # attribution as inconclusive when the fetch fails.
+        self.shoggoth._unshallow(repo_dir)
+        git = Git(repo_dir)
+        # Blame marks boundary commits with a ``^`` prefix. Inside
+        # a still-shallow clone that is a graft point -- the walk
+        # stopped at the truncated history, so the line may
+        # predate the blamed commit and the attribution proves
+        # nothing. Outside a shallow clone the only boundary is
+        # the repository's root commit, whose attribution is
+        # conclusive. The flag is read AFTER the unshallow so a
+        # successful fetch flips it to the conclusive case.
+        shallow = (git.raw("rev-parse", "--is-shallow-repository",
+                           check=False).stdout.strip() == "true")
+        verify = f"{head_sha}^{{commit}}"
+        if git.raw("rev-parse", "--verify", verify,
+                   check=False).returncode != 0:
+            head_ref = ((self.gitea._payload.get("pull_request") or {})
+                        .get("head") or {}).get("ref") or ""
+            fetched = (self.shoggoth._ensure_remote_ref(
+                repo_dir, head_ref, pr_number) if head_ref else False)
+            if not fetched or git.raw("rev-parse", "--verify", verify,
+                                      check=False).returncode != 0:
+                log(f"pr-comment: outdated check skipped "
+                    f"(head {head_sha[:12]} unavailable in {repo_dir})")
+                return threads
+        kept = []
+        for thread in threads:
+            path = thread.get("path")
+            line = thread.get("line")
+            commit_id = thread.get("commit_id") or ""
+            if not path or not line or not commit_id:
+                kept.append(thread)
+                continue
+            if self._thread_outdated(git, head_sha, path, line,
+                                     commit_id, shallow):
+                log(f"pr-comment: skipping outdated thread "
+                    f"{path}:{line} (comment commit {commit_id[:12]})")
+                continue
+            kept.append(thread)
+        return kept
+
+    def _thread_outdated(self, git, head_sha, path, line, commit_id,
+                         shallow):
+        result = git.raw("blame", "-L", f"{line},{line}", head_sha,
+                         "--", path, check=False)
+        if result.returncode != 0:
+            stderr = result.stderr or ""
+            return any(msg in stderr
+                       for msg in self.BLAME_INVALIDATED_ERRORS)
+        first_line = (result.stdout or "").split("\n", 1)[0]
+        if first_line.startswith("^"):
+            # Boundary commit. In a still-shallow clone the blame
+            # walk stopped at the graft point, so the line may
+            # predate the blamed commit -- Gitea blames against
+            # full history and would attribute it further back,
+            # so the comparison can neither prove nor disprove
+            # outdatedness and the thread is kept. Outside a
+            # shallow clone the boundary is the repository's root
+            # commit and the attribution is conclusive.
+            if shallow:
+                return False
+            first_line = first_line[1:]
+        m = re.match(r"^([0-9a-f]{7,40})\b", first_line)
+        if m is None:
+            return False
+        blamed = m.group(1)
+        return not (blamed == commit_id
+                    or commit_id.startswith(blamed)
+                    or blamed.startswith(commit_id))
+
     def _pr_comment(self, pr_number, pr_url):
         pr_repo = self.shoggoth.working_repo
         pr_branch = self.shoggoth.working_branch
         task_subject = self.shoggoth.task_subject
         log(f"pr-comment: repo={pr_repo} pr={pr_number} branch={pr_branch}")
 
-        unresolved = self.gitea.get_unresolved_review_comments(pr_repo, pr_number)
-        log(f"pr-comment: unresolved comments={len(unresolved) if unresolved else 0}")
+        # Trigger-scoped addressing: when the triggering comment is
+        # an unresolved review comment from a trusted user, address
+        # only its thread. Every other trigger (top-level PR
+        # comment, review / review-request events with no comment
+        # field, untrusted author, resolved thread) falls back to
+        # the full unresolved-thread sweep, preserving the
+        # backlog behaviour for comments posted while no workflow
+        # ran.
+        thread = self._trigger_review_thread(pr_repo, pr_number)
+        if thread is not None and self._is_trusted_commenter():
+            unresolved = [thread]
+            log(f"pr-comment: addressing triggering thread only "
+                f"({thread.get('path')}:{thread.get('line')})")
+        else:
+            unresolved = self.gitea.get_unresolved_review_comments(
+                pr_repo, pr_number,
+                is_command_comment=self._is_command_comment)
+            log(f"pr-comment: unresolved comments="
+                f"{len(unresolved) if unresolved else 0}")
+            # Outdated threads (their anchor line no longer blames
+            # to the comment's commit on the PR head) are dropped
+            # from the backlog sweep: Gitea itself renders them as
+            # invalidated and the anchor is no longer actionable.
+            # The trigger-scoped branch above is deliberately NOT
+            # filtered -- a trusted user commenting in a stale
+            # thread is a fresh instruction that outranks the
+            # staleness of its anchor.
+            unresolved = self._filter_outdated(unresolved, pr_repo,
+                                               pr_number)
 
         if not unresolved:
             print("No unresolved review comments")
@@ -474,21 +673,19 @@ class PrUpdateCommand(CommandBase):
         self.agent.start_session("pr-comment")
 
         try:
-            rc = self.agent.prompt_with_retry(
-                f"Load memories regarding the project {self.shoggoth.project} from basic memory. "
-                f"Proceed if memory is not available.",
-                retry_label="pr-comment-mem-project")
+            task_clause = (f" and the task \"{task_subject}\" in that project"
+                           if task_subject else "")
+            mem_prompt = (
+                f"Load memories regarding the project "
+                f"{self.shoggoth.project}{task_clause} from basic memory, "
+                f"using the basic_memory MCP tools (basic_memory-bm_search, "
+                f"basic_memory-bm_read). Missing memories are not a failure. "
+                f"When done, stop and wait for further instructions."
+            )
+            rc = self.agent.prompt_with_retry(mem_prompt,
+                                              retry_label="pr-comment-mem")
             if rc != 0:
                 die(f"qwen agent exited with code {rc}")
-
-            if task_subject:
-                rc = self.agent.prompt_with_retry(
-                    f"Load memories regarding task \"{task_subject}\" "
-                    f"in project {self.shoggoth.project} from basic memory. "
-                    f"Proceed if memory is not available.", resume=True,
-                    retry_label="pr-comment-mem-task")
-                if rc != 0:
-                    die(f"qwen agent exited with code {rc}")
 
             for comment in unresolved:
                 c_path = comment.get("path", "unknown")
@@ -501,9 +698,12 @@ class PrUpdateCommand(CommandBase):
                     resolved_comments.append(comment)
                     continue
                 location = f"{c_path}:{c_line}" if c_line is not None else c_path
+                task_context = (
+                    f" for the task \"{task_subject}\""
+                    if task_subject else "")
                 prompt = (
-                    f"Address the following review comment on PR {pr_url} "
-                    f"(file: {location}): "
+                    f"Address the following review comment on the "
+                    f"PR{task_context} (file: {location}): "
                     f"{c_body}. Use the codebase-memory skill to understand "
                     f"the code context around the comment. "
                     f"Leave all changes uncommitted in the working tree. "
@@ -538,7 +738,7 @@ class PrUpdateCommand(CommandBase):
                         deferred_resolves.append(comment_id)
 
             rc = self.agent.prompt_with_retry(
-                f"Finalize all remaining work. Update basic memory with any new information "
+                f"Update basic memory with any new information "
                 f"learned about the project {self.shoggoth.project}.",
                 resume=True, timeout=Agent.AGENT_TIMEOUT,
                 retry_label="pr-comment-finalize")
@@ -1072,7 +1272,8 @@ class PrUpdateCommand(CommandBase):
         log(f"slash-do: fetching conversation at "
             f"{thread_path}:{thread_line} for pr={pr_url}")
         thread = self.gitea.get_pr_review_thread(
-            pr_repo, pr_number, thread_path, thread_line)
+            pr_repo, pr_number, thread_path, thread_line,
+            is_command_comment=self._is_command_comment)
         if thread is None:
             # No unresolved comments at this anchor
             # (the conversation was the only one and

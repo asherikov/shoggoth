@@ -1108,10 +1108,14 @@ spec:
 # templates must resolve to one of those declared parameters. So instead of
 # baking literal values into the templates (which would have to be re-rendered
 # on every env-var change), we point at this
-# ConfigMap; the controller fetches each key at admission time. The four
+# ConfigMap; the controller fetches each key at admission time. The
 # SHOGGOTH_* keys below are filled from .Values by Helm itself — there is no
 # envsubst pass over the rendered manifests — so the ConfigMap in the
-# cluster holds the literal domain, namespace, github org, and instance dir.
+# cluster holds the literal domain, namespace, github org, instance dir,
+# dns IP and agent timeout.
+# Quoted where the value must stay a string: ConfigMap `data` is
+# map[string]string, so an unquoted YAML integer renders as a number and the
+# API server rejects the object.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -1141,6 +1145,15 @@ data:
   # DNS and the user-facing ``git.s.local`` form would
   # fail to resolve from inside the terminal session.
   SHOGGOTH_DNS_IP: {{ .Values.identity.dnsIp }}
+  # Per-prompt wall-clock cap, in seconds, for the qwen agent the
+  # command-handler worker step drives. Bound into that container's
+  # environment by the same configMapKeyRef chain as the keys above;
+  # agent.py reads it as Agent.AGENT_TIMEOUT. The WorkflowTemplate's
+  # activeDeadlineSeconds (4 h) is the outer safety net; this is the
+  # per-prompt ceiling so a single hung agent doesn't burn the whole
+  # pod's budget. Quoted so the ConfigMap value is the string the env
+  # var must be.
+  SHOGGOTH_AGENT_TIMEOUT: {{ .Values.workflow.agentTimeout | quote }}
 ---
 # Controller configuration — workflow defaults that apply to every Workflow
 # created in the namespace.
@@ -1207,6 +1220,28 @@ data:
         - name: SHOGGOTH_INSTANCE_DIR
           value: {{ .Values.identity.instanceDir }}
       serviceAccountName: argo
+      # Workflow-level volumes for every workflow. The workflow-scripts
+      # hostPath carries the ansible host_state rsync of workflow/
+      # (/var/lib/rancher/k3s/storage/<instanceDir>/workflow-scripts/);
+      # Helm renders <instanceDir> here at deploy time, so the path needs
+      # no workflow parameter and no template has to declare the volume.
+      #
+      # It MUST live here, in spec.volumes, and not only in the
+      # podSpecPatch below: the controller's pod builder resolves every
+      # container volumeMount against the workflow's volumes (and the
+      # template's own `volumes:`) BEFORE it applies podSpecPatch
+      # (workflow/controller/workflowpod.go — addVolumeReferences runs
+      # ahead of applyPodSpecPatch), so a mount satisfied only by the
+      # patch fails with "volume 'workflow-scripts' not found in
+      # workflow spec". WorkflowSpec.volumes merges by name
+      # (patchMergeKey), so the four templates that still declare their
+      # own identical workflow-scripts entry keep working unchanged —
+      # and a template's own declaration wins the resolution anyway.
+      volumes:
+      - name: workflow-scripts
+        hostPath:
+          path: /var/lib/rancher/k3s/storage/{{ .Values.identity.instanceDir }}/workflow-scripts
+          type: DirectoryOrCreate
       # No podGC: pods are NOT deleted by argo-server's per-workflow
       # podGC garbage collector. The previous OnWorkflowSuccess strategy
       # deleted pods the moment a workflow succeeded, which made logs
@@ -1292,6 +1327,10 @@ data:
       # container in slave-term.yaml) wait on this same flag rather
       # than polling the three pre-flag outputs (known_hosts,
       # ssh_auth_sock, git_credential_sock).
+      #
+      # The workflow-scripts volume is NOT in this patch — it lives in
+      # `volumes:` above; see the comment there for why the patch alone
+      # cannot satisfy a template's volumeMount.
       podSpecPatch: |
         {
           {{- include "shoggoth.podDnsConfigJson" . | nindent 10 }}

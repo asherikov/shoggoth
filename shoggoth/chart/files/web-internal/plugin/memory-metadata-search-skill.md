@@ -12,7 +12,7 @@ Find notes by their structured frontmatter fields instead of (or in addition to)
 - **Tag-based filtering** — find notes tagged with specific frontmatter tags
 - **Schema-aware queries** — filter by nested schema fields using dot notation
 ## The Tool
-All metadata searching uses `search_notes`. Pass filters via `metadata_filters`, or use the `tags` and `status` convenience shortcuts. Omit `query` (or pass `None`) for filter-only searches.
+All metadata searching uses `basic_memory-bm_search`. Pass filters via `filters` (the alias `metadata_filters` is also accepted). The old `tags` and `status` convenience shortcuts no longer exist — express them as filters: `{"tags": [...]}` and `{"status": ...}`. Omit `query` for filter-only searches. Every call passes `project="main"` — Basic Memory is reached through the LiteLLM MCP gateway, so the tool name carries the `basic_memory-` prefix.
 ## Filter Syntax
 Filters are a JSON dictionary. Each key targets a frontmatter field; the value specifies the match condition. Multiple keys combine with **AND** logic.
 ### Equality
@@ -49,47 +49,46 @@ Numeric values use numeric comparison; strings use lexicographic comparison.
 | `$gt` / `$gte` | `{"field": {"$gt": N}}` | `{"confidence": {"$gt": 0.7}}` |
 | `$lt` / `$lte` | `{"field": {"$lt": N}}` | `{"score": {"$lt": 0.5}}` |
 | `$between` | `{"field": {"$between": [lo, hi]}}` | `{"score": {"$between": [0.3, 0.8]}}` |
+| `$contains` / `$exists` | `{"field": {"$contains": "x"}}` | `{"summary": {"$contains": "auth"}}` |
 | Nested | `{"a.b": "value"}` | `{"schema.version": "2"}` |
 **Rules:**
 - Keys must match `[A-Za-z0-9_-]+` (dots separate nesting levels)
-- Operator dicts must contain exactly one operator
+- Several operators on one field AND together: `{"score": {"$gte": 0.3, "$lt": 0.8}}`
 - `$in` and array-contains require non-empty lists
 - `$between` requires exactly `[min, max]`
 > **Warning:** Operators MUST include the `$` prefix — write `$gte`, not `gte`. Without the prefix the filter is treated as an exact-match key and will silently return no results. Correct: `{"confidence": {"$gte": 0.7}}`. Wrong: `{"confidence": {"gte": 0.7}}`.
-## Using `search_notes` with Metadata
-Pass `metadata_filters`, `tags`, or `status` to `search_notes`. Omit `query` for filter-only searches, or combine text and filters together.
+## Using `basic_memory-bm_search` with Metadata
+Pass `filters` to `basic_memory-bm_search`. Omit `query` for filter-only searches, or combine text and filters together.
 ```python
 # Filter-only — find all notes with a given status
-search_notes(metadata_filters={"status": "in-progress"})
-# Filter-only — high-priority specs in a specific project
-search_notes(
-    metadata_filters={"type": "spec", "priority": {"$in": ["high", "critical"]}},
-    project="research",
+basic_memory-bm_search(project="main", filters={"status": "in-progress"})
+# Filter-only — high-priority specs
+basic_memory-bm_search(
+    project="main",
+    filters={"type": "spec", "priority": {"$in": ["high", "critical"]}},
     page_size=10,
 )
 # Filter-only — notes with confidence above a threshold
-search_notes(metadata_filters={"confidence": {"$gt": 0.7}})
-# Convenience shortcuts for tags and status
-search_notes(status="active")
-search_notes(tags=["security", "oauth"])
+basic_memory-bm_search(project="main", filters={"confidence": {"$gt": 0.7}})
+# Tags are a frontmatter filter like any other
+basic_memory-bm_search(project="main", filters={"tags": ["security", "oauth"]})
 # Text search narrowed by metadata
-search_notes("authentication", metadata_filters={"status": "draft"})
-# Mix text, tag shortcut, and advanced filter
-search_notes(
-    "oauth flow",
-    tags=["security"],
-    metadata_filters={"confidence": {"$gt": 0.7}},
+basic_memory-bm_search(project="main", query="authentication", filters={"status": "draft"})
+# Mix text and advanced filter
+basic_memory-bm_search(
+    project="main",
+    query="oauth flow",
+    filters={"confidence": {"$gt": 0.7}},
 )
 ```
-**Merging rules:** `tags` and `status` are convenience shortcuts merged into `metadata_filters` via `setdefault`. If the same key exists in `metadata_filters`, the explicit filter wins.
 ## Tag Search Shorthand
 The `tag:` prefix in a query converts to a tag filter automatically:
 ```python
 # These are equivalent:
-search_notes("tag:tier1")
-search_notes("", tags=["tier1"])
+basic_memory-bm_search(project="main", query="tag:tier1")
+basic_memory-bm_search(project="main", filters={"tags": ["tier1"]})
 # Multiple tags (comma or space separated) — all must match:
-search_notes("tag:tier1,alpha")
+basic_memory-bm_search(project="main", query="tag:tier1,alpha")
 ```
 ## Example: Custom Frontmatter in Practice
 A note with custom fields:
@@ -112,21 +111,21 @@ confidence: 0.85
 Queries that find it:
 ```python
 # By status and type
-search_notes(metadata_filters={"status": "in-progress", "type": "spec"})
+basic_memory-bm_search(project="main", filters={"status": "in-progress", "type": "spec"})
 # By numeric threshold
-search_notes(metadata_filters={"confidence": {"$gt": 0.7}})
+basic_memory-bm_search(project="main", filters={"confidence": {"$gt": 0.7}})
 # By priority set
-search_notes(metadata_filters={"priority": {"$in": ["high", "critical"]}})
+basic_memory-bm_search(project="main", filters={"priority": {"$in": ["high", "critical"]}})
 # By tag shorthand
-search_notes("tag:security")
+basic_memory-bm_search(project="main", query="tag:security")
 # Combined text + metadata
-search_notes("OAuth", metadata_filters={"status": "in-progress"})
+basic_memory-bm_search(project="main", query="OAuth", filters={"status": "in-progress"})
 ```
 ## Guidelines
 - **Use metadata search for structured queries.** If you're looking for notes by a known field value (status, priority, type), metadata filters are more precise than text search.
 - **Use text search for content queries.** If you're looking for notes *about* something, text search is better. Combine both when you need precision.
 - **Custom fields are free.** Any YAML key you put in frontmatter becomes queryable — no schema or configuration required.
-- **Multiple filters are AND.** `{"status": "active", "priority": "high"}` requires both conditions.
-- **Omit `query` for filter-only searches.** `search_notes(metadata_filters={"status": "active"})` works without a text query.
-- **Dot notation for nesting.** Access nested YAML structures with dots: `{"schema.version": "2"}` queries the `version` key inside a `schema` object.
-- **Tags shortcut is convenient but limited.** `tags` and `status` are sugar for common fields. For anything else, use `metadata_filters` directly.
+- **Multiple filters are AND.** `filters={"status": "active", "priority": "high"}` requires both conditions.
+- **Omit `query` for filter-only searches.** `basic_memory-bm_search(project="main", filters={"status": "active"})` works without a text query.
+- **Dot notation for nesting.** Access nested YAML structures with dots: `filters={"schema.version": "2"}` queries the `version` key inside a `schema` object.
+- **Tags are just a filter.** `filters={"tags": ["security", "oauth"]}` requires both tags; the `tag:name` query prefix is the shorthand.

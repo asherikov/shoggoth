@@ -1,0 +1,162 @@
+---
+# container-pull — evict image(s) from the local zot pull-through cache
+# and re-pull them from upstream. Triggered manually: `argo submit
+# --from workflowtemplate/container-pull` from a developer shell, or the
+# Submit action on the template in the Argo UI (http://argo.<domain>/).
+#
+# Mechanism (both halves are plain Docker Registry HTTP API V2 calls
+# against the in-cluster `registry` Service on its fixed port 80
+# (chart/templates/_helpers.tpl:shoggoth.registryServicePort); zot runs
+# with anonymous access, so no credentials are needed):
+#   evict  — DELETE /v2/<repo>/manifests/<tag> drops the cached tag. 404
+#            (tag not cached) counts as success, matching
+#            ansible/drop_image_tag.yml.
+#   repull — GET the same path. zot's on-demand sync extension sees the
+#            manifest miss, fetches the image from the upstream
+#            registries (probed in the order configured in the registry
+#            ConfigMap: docker.io first) and re-caches it.
+# This is the tool for refreshing floating tags — e.g. after rebuilding
+# asherikov/shoggoth_tools:alpine and pushing the same tag upstream. The
+# deleted tag's unreferenced blobs are reclaimed by zot's GC
+# (deleteUntagged) on its own schedule, not by this workflow.
+#
+# `delay` suspends the workflow before the first step for a Go duration
+# (suspend.duration auto-resumes; no pod runs while suspended, and the UI
+# offers Resume to fire early / Terminate to cancel). It is relative, not
+# wall-clock — a "start at 03:00" target would need a sleep-until-epoch
+# step instead.
+#
+# No synchronization mutex, unlike github-mirror-sync and slave-test: a
+# long `delay` would hold the mutex for the whole wait and queue every
+# other submit behind it, and a concurrent refresh of the same tag only
+# races benignly (worst case the image is fetched twice). Refs are given
+# in local registry form (no registry host): `library/nginx:1.27`,
+# `project-zot/zot:v2.1.23`. A ref without a tag means `latest`;
+# `repo@sha256:...` digests work too. Upstream issue #4357 applies as
+# usual: a sync interrupted mid-flight leaves a stale .sync staging dir,
+# cleared by the registry pod's cleanup init container on restart.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: container-pull
+  namespace: shoggoth
+  labels:
+    app.kubernetes.io/part-of: shoggoth-argo
+spec:
+  entrypoint: run
+  # Covers delay + evict + repull. The suspend step costs nothing, so
+  # this only bounds how far ahead a submit may schedule itself; a
+  # submit whose delay exceeds it fails when the deadline passes.
+  activeDeadlineSeconds: 86400
+  arguments:
+    parameters:
+    # Submit-time parameters. Defaults pre-fill the `argo submit` /
+    # Argo UI form, so the common case needs no typing at all.
+    #
+    # No SHOGGOTH_* parameters, unlike the other templates: the
+    # workflow-scripts volume is a workflow-level default injected by
+    # workflowDefaults' `volumes:` (chart/templates/argo-workflows.yaml,
+    # Helm-rendered instance dir), the registry is reached on its fixed
+    # in-cluster Service port, and SHOGGOTH_DOMAIN — the one env var
+    # state.py's Parameters() demands of every shoggoth.py command — is
+    # bound straight from the shoggoth-workflow-config ConfigMap in the
+    # step's `env:`. So there is no `{{workflow.parameters.*}}` reference
+    # anywhere in this template.
+    - name: images
+      description: "Comma-separated image refs in local registry form (no registry host), e.g. asherikov/shoggoth_tools:alpine,project-zot/zot:v2.1.23. Missing tag means latest; repo@sha256:... digests work. Resolved against the configured upstreams in order (docker.io first)."
+      value: "asherikov/shoggoth_tools:alpine,asherikov/ccws:jammy,asherikov/ccws:noble,asherikov/ccws:resolute"
+    - name: delay
+      description: "Go duration to wait before running: 30s, 10m, 2h. Must be shorter than the 24h activeDeadlineSeconds. 0s runs immediately. While suspended the workflow can be resumed early from the UI."
+      value: "0s"
+  templates:
+  - name: run
+    steps:
+    - - name: delay
+        template: wait
+        arguments:
+          parameters:
+          - {name: delay, value: "{{workflow.parameters.delay}}"}
+    - - name: evict
+        template: refresh-step
+        arguments:
+          parameters:
+          - {name: action, value: evict}
+    - - name: repull
+        template: refresh-step
+        arguments:
+          parameters:
+          - {name: action, value: repull}
+
+  - name: wait
+    inputs:
+      parameters:
+      - name: delay
+    # Argo resolves parameter tags in suspend.duration, so the value
+    # comes straight from the submit parameter. 0s resumes at once.
+    suspend:
+      duration: "{{inputs.parameters.delay}}"
+
+  - name: refresh-step
+    inputs:
+      parameters:
+      - name: action
+    container:
+      image: asherikov/shoggoth_tools:alpine
+      imagePullPolicy: IfNotPresent
+      command:
+      - bash
+      - -lc
+      args:
+      - |
+        exec python3 /shoggoth/workflow/scripts/shoggoth.py container-pull 2>&1
+      env:
+      # Unbuffered so a step killed at activeDeadlineSeconds (a long
+      # delay followed by a slow pull) still leaves its logs in the UI.
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: "http://otelcol:4318"
+      # 4318 is otelcol's OTLP/HTTP receiver (4317 is the gRPC one), but
+      # Argo's own OTLP tracing — the argoexec emissary that wraps this
+      # container in init-less mode and inherits its env — defaults to
+      # the gRPC exporter when the protocol is unset, and a gRPC client
+      # against the HTTP port fails the span export with
+      # "http2: frame too large ... looked like an HTTP/1.1 header".
+      # Setting the protocol keeps the emissary's traces flowing; the
+      # script's own OtlpLogger is unaffected (plain HTTP POSTs).
+      - name: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: "http/protobuf"
+      # state.py constructs Parameters() at import time and
+      # SHOGGOTH_DOMAIN is its one required env var, so EVERY shoggoth.py
+      # command — including this one, which only talks to the registry
+      # Service — dies at startup without it. Bound straight from
+      # shoggoth-workflow-config, the same ConfigMap the other templates
+      # source their parameters from: kubelet resolves the key at pod
+      # start, so the submit form stays free of SHOGGOTH_* parameters and
+      # the user neither sees nor supplies the value.
+      - name: SHOGGOTH_DOMAIN
+        valueFrom:
+          configMapKeyRef:
+            name: shoggoth-workflow-config
+            key: SHOGGOTH_DOMAIN
+      - name: SHOGGOTH_REGISTRY_ACTION
+        value: "{{inputs.parameters.action}}"
+      - name: SHOGGOTH_REGISTRY_IMAGES
+        value: "{{workflow.parameters.images}}"
+      volumeMounts:
+      # The volume itself is a workflow-level default injected by
+      # workflowDefaults' `volumes:` (chart/templates/argo-workflows.yaml)
+      # — merged into every workflow's spec before the controller builds
+      # its pods — so this template declares no `volumes:` and no
+      # SHOGGOTH_INSTANCE_DIR parameter. It must come from
+      # workflowDefaults.spec.volumes rather than from the podSpecPatch:
+      # the pod builder resolves container volumeMounts against the
+      # workflow's volumes BEFORE it applies podSpecPatch
+      # (workflow/controller/workflowpod.go — addVolumeReferences runs
+      # ahead of applyPodSpecPatch), so a patch-only injection fails with
+      # "volume 'workflow-scripts' not found in workflow spec".
+      - name: workflow-scripts
+        mountPath: /shoggoth/workflow/scripts
+        readOnly: true
+    retryStrategy:
+      limit: 0

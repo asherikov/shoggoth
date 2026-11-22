@@ -38,6 +38,25 @@ class Parameters:
             ("shoggoth_dns_ip", "SHOGGOTH_DNS_IP", False, ""),
             ("shoggoth_github_org", "SHOGGOTH_GITHUB_ORG", False, ""),
             ("shoggoth_github_api_delay", "SHOGGOTH_GITHUB_API_DELAY", False, "2"),
+            # Per-prompt wall-clock cap, in seconds, for the qwen agent
+            # (Agent.AGENT_TIMEOUT). Rendered from the instance's
+            # shoggoth.yaml (workflow.agentTimeout) into the
+            # shoggoth-workflow-config ConfigMap, which the
+            # command-handler template binds into the worker-step
+            # container's environment. The WorkflowTemplate's
+            # activeDeadlineSeconds (4 h) is the outer safety net; this
+            # is the per-prompt ceiling so a single hung agent doesn't
+            # burn the whole pod's budget.
+            ("shoggoth_agent_timeout", "SHOGGOTH_AGENT_TIMEOUT", False, "1200"),
+            # In-cluster zot registry Service port. The Service publishes
+            # a fixed port 80 for every instance
+            # (chart/templates/_helpers.tpl:shoggoth.registryServicePort)
+            # and targets the per-instance hostNetwork port, so
+            # container-pull reaches the registry at
+            # http://registry:80 with no per-instance
+            # configuration. The env override remains for runs outside
+            # the cluster.
+            ("shoggoth_registry_port", "SHOGGOTH_REGISTRY_PORT", False, "80"),
             ("shoggoth_slave_user", "SHOGGOTH_SLAVE_USER", False, "slave"),
             ("shoggoth_review_user", "SHOGGOTH_REVIEW_USER", False, "admin"),
             ("shoggoth_trusted_users", "SHOGGOTH_TRUSTED_USERS", False, "admin"),
@@ -94,6 +113,10 @@ class Parameters:
         # Derived/composite parameters after the per-group loop so the
         # raw strings above are also available for one-off callers.
         self.shoggoth_github_api_delay = float(self.shoggoth_github_api_delay)
+        try:
+            self.shoggoth_agent_timeout = int(self.shoggoth_agent_timeout)
+        except ValueError:
+            die("SHOGGOTH_AGENT_TIMEOUT must be an integer number of seconds")
 
     def resolve_ldap_dn(self, base):
         """Return ``ou=people,dc=<shoggoth_domain_components>``.

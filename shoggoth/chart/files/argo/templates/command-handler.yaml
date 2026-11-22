@@ -146,6 +146,17 @@ spec:
         configMapKeyRef:
           name: shoggoth-workflow-config
           key: SHOGGOTH_NAMESPACE
+    # Per-prompt wall-clock cap, in seconds, for the qwen agent this
+    # template's worker step drives. Rendered into the
+    # shoggoth-workflow-config ConfigMap from the instance's
+    # shoggoth.yaml (workflow.agentTimeout) and read back here at
+    # admission time, so a per-instance timeout needs no template
+    # change. activeDeadlineSeconds above is the outer safety net.
+    - name: SHOGGOTH_AGENT_TIMEOUT
+      valueFrom:
+        configMapKeyRef:
+          name: shoggoth-workflow-config
+          key: SHOGGOTH_AGENT_TIMEOUT
   activeDeadlineSeconds: 14400
   # No workflow-level synchronization here -- the dispatcher
   # step (shoggoth_tools:alpine) is intentionally unconstrained
@@ -446,6 +457,16 @@ spec:
         value: "{{workflow.parameters.SHOGGOTH_GITHUB_ORG}}"
       - name: SHOGGOTH_NAMESPACE
         value: "{{workflow.parameters.SHOGGOTH_NAMESPACE}}"
+      # Per-prompt wall-clock cap, in seconds, for the qwen agent this
+      # step drives (Agent.AGENT_TIMEOUT in agent.py). Sourced from the
+      # shoggoth-workflow-config ConfigMap via the argument parameter
+      # above, which in turn is rendered from the instance's
+      # shoggoth.yaml (workflow.agentTimeout) — so the timeout is
+      # per-instance configuration, not a constant in the workflow
+      # scripts. Not set on the dispatch step above: it runs the
+      # shoggoth_tools dispatcher, which never invokes the agent.
+      - name: SHOGGOTH_AGENT_TIMEOUT
+        value: "{{workflow.parameters.SHOGGOTH_AGENT_TIMEOUT}}"
       - name: GITEA_PAYLOAD
         value: "{{inputs.parameters.payload}}"
       - name: SHOGGOTH_ARGO_RUN_URL

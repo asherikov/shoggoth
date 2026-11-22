@@ -13,9 +13,9 @@ Manage how entities move through status stages in Basic Memory. The core princip
 Deleting a note removes it from the knowledge graph — all its observations, relations, and history disappear. Archiving preserves everything while signaling the entity is no longer active.
 ```
 # Good — entity stays in the knowledge graph
-move_note → active/ to archive/
+basic_memory-bm_move → active/ to archive/
 # Bad — knowledge is lost
-delete_note
+basic_memory-bm_delete
 ```
 The only exception: notes created by mistake (typos, true duplicates) can be deleted.
 ## Folder Conventions
@@ -50,38 +50,42 @@ When the user mentions completion or status change, extract the intent:
 | "paused", "on hold", "deferred" | Paused | Update frontmatter status, keep in place |
 | "restarting", "reopening", "reviving" | Reactivate | Move back to active folder |
 ## Workflow
+Basic Memory is reached through the LiteLLM MCP gateway, so every tool carries the `basic_memory-` prefix and every call passes `project="main"`.
 ### 1. Find the Entity
 Search Basic Memory with multiple variations to locate the entity:
 ```python
-search_notes(query="quarterly report")
-search_notes(query="Q1 report")
+basic_memory-bm_search(project="main", query="quarterly report")
+basic_memory-bm_search(project="main", query="Q1 report")
 ```
 If multiple matches come back, present options and ask which one.
 If no match is found, ask for clarification — don't guess.
 ### 2. Move the File
-Use `move_note` to relocate the entity to the appropriate status folder:
+Use `basic_memory-bm_move` to relocate the entity to the appropriate status folder:
 ```python
-move_note(
+basic_memory-bm_move(
+  project="main",
   identifier="tasks/active/quarterly-report",
-  destination_path="tasks/completed/quarterly-report.md"
+  destination="tasks/completed/quarterly-report.md"
 )
 ```
 The permalink stays the same, so all existing `[[wiki-links]]` and `memory://` URLs continue to resolve.
 ### 3. Update Frontmatter
 After moving, update the status in frontmatter to match:
 ```python
-edit_note(
+basic_memory-bm_edit(
+  project="main",
   identifier="quarterly-report",
-  operation="find_replace",
+  command="find_replace",
   find_text="status: active",
   content="status: completed"
 )
 ```
 If there's a completion date field, set it:
 ```python
-edit_note(
+basic_memory-bm_edit(
+  project="main",
   identifier="quarterly-report",
-  operation="find_replace",
+  command="find_replace",
   find_text="completed:",
   content="completed: 2026-02-22"
 )
@@ -102,13 +106,15 @@ Sometimes only part of an entity is done. Don't move it — instead, update obse
 ### Revert / Reactivate
 If something was archived by mistake, move it back:
 ```python
-move_note(
+basic_memory-bm_move(
+  project="main",
   identifier="tasks/completed/quarterly-report",
-  destination_path="tasks/active/quarterly-report.md"
+  destination="tasks/active/quarterly-report.md"
 )
-edit_note(
+basic_memory-bm_edit(
+  project="main",
   identifier="quarterly-report",
-  operation="find_replace",
+  command="find_replace",
   find_text="status: completed",
   content="status: active"
 )
@@ -122,7 +128,7 @@ Some status changes don't require a folder move — "paused" or "blocked" items 
 ## Guidelines
 - **Archive, never delete.** The knowledge graph benefits from historical context.
 - **Move first, then update frontmatter.** This order ensures the file is in the right place even if the edit step fails.
-- **Permalinks survive moves.** Links to the entity keep working after a `move_note`.
+- **Permalinks survive moves.** Links to the entity keep working after a `basic_memory-bm_move`.
 - **Be concise in confirmations.** The user knows their system — just report what changed.
 - **Ask when ambiguous.** If multiple entities match or the target folder isn't clear, ask rather than guess.
 - **Batch operations are fine.** If the user says "archive all completed tasks", find them all, confirm the list, then move them in sequence.

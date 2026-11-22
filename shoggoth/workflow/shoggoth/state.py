@@ -52,4 +52,5 @@ MAINTENANCE_COMMANDS = {
     "slave-test",
     "gitea-ldap-sync", "redmine-ldap-sync",
     "pushsecret-check",
+    "container-pull",
 }

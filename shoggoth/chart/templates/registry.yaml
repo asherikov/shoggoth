@@ -2,9 +2,11 @@
   templates/registry.yaml — zot container image registry with pull-through
   caching.
 
-  Uses identity.namespace for service-account set-up and
-  .Values.network.registry.hostPort for both the Service port and the
-  embedded zot config.json. The init-container `cleanup-sync-staging`
+  Uses identity.namespace for service-account set-up. The pod is
+  hostNetwork and binds .Values.network.registry.hostPort on the host
+  (the embedded zot config.json listens there); the Service publishes
+  the fixed in-cluster port from shoggoth.registryServicePort and
+  targets that host port. The init-container `cleanup-sync-staging`
   scrubs zot's sync staging dirs on every pod start.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "registry")) }}
@@ -45,8 +47,12 @@ spec:
   selector:
     app: registry
   ports:
+  # The published port is fixed (shoggoth.registryServicePort) so every
+  # in-cluster consumer addresses the registry at registry:<that port>
+  # regardless of instance; targetPort stays the per-instance host port
+  # the hostNetwork pod binds on the host.
   - name: registry
-    port: {{ .Values.network.registry.hostPort }}
+    port: {{ include "shoggoth.registryServicePort" . }}
     targetPort: {{ .Values.network.registry.hostPort }}
 ---
 apiVersion: v1

@@ -78,19 +78,20 @@ settings:
 ---
 ```
 ## Discovering Unschemaed Notes
-Look for clusters of notes that share structure but have no schema:
-1. **Search by type**: `search_notes(query="type:Meeting")` — if many notes share a `type` but no `schema/Meeting.md` exists, it's a candidate.
-2. **Infer a schema**: Use `schema_infer` to analyze existing notes and generate a suggested schema:
+Look for clusters of notes that share structure but have no schema. Basic Memory is reached through the LiteLLM MCP gateway, so every tool carries the `basic_memory-` prefix and every call passes `project="main"`.
+1. **Search by type**: `basic_memory-bm_search(project="main", note_types=["Meeting"])` — if many notes share a `type` but no `schema/Meeting.md` exists, it's a candidate.
+2. **Infer a schema**: Use `basic_memory-bm_schema` with `command="infer"` to analyze existing notes and generate a suggested schema:
    ```python
-   schema_infer(noteType="Meeting")
-   schema_infer(noteType="Meeting", threshold=0.5)  # fields in 50%+ of notes
+   basic_memory-bm_schema(project="main", command="infer", note_type="Meeting")
+   basic_memory-bm_schema(project="main", command="infer", note_type="Meeting", threshold=0.5)  # fields in 50%+ of notes
    ```
    The threshold (0.0–1.0) controls how common a field must be to be included. Default is usually fine; lower it to catch rarer fields.
 3. **Review the suggestion** — the inferred schema shows field names, types, and frequency. Decide which fields to keep, make optional, or drop.
 ## Creating a Schema
 Write the schema note to `schema/<EntityName>`:
 ```python
-write_note(
+basic_memory-bm_write(
+  project="main",
   title="Meeting",
   directory="schema",
   note_type="schema",
@@ -123,11 +124,11 @@ Schema for meeting notes.
 Check how well existing notes conform to their schema:
 ```python
 # Validate all notes of a type
-schema_validate(noteType="Meeting")
+basic_memory-bm_schema(project="main", command="validate", note_type="Meeting")
 # Validate a single note
-schema_validate(identifier="meetings/2026-02-10-standup")
+basic_memory-bm_schema(project="main", command="validate", identifier="meetings/2026-02-10-standup")
 ```
-**Important:** `schema_validate` checks for schema fields as **observation categories** in the note body — e.g., a `status` field expects `- [status] active` as an observation. Fields stored only in frontmatter metadata won't satisfy validation. To pass cleanly, include schema fields as both frontmatter values (for metadata search) and observations (for schema validation).
+**Important:** `command="validate"` checks for schema fields as **observation categories** in the note body — e.g., a `status` field expects `- [status] active` as an observation. Fields stored only in frontmatter metadata won't satisfy validation. To pass cleanly, include schema fields as both frontmatter values (for metadata search) and observations (for schema validation).
 Validation reports:
 - **Missing required fields** — the note lacks a field the schema requires (as an observation category)
 - **Unknown fields** — the note has fields the schema doesn't define
@@ -137,9 +138,9 @@ Validation reports:
 - **`warn` mode**: Review warnings periodically. Fix notes that are clearly wrong; add optional fields to the schema for legitimate new patterns.
 - **`error` mode**: Use for strict schemas where conformance matters (e.g., automated pipelines consuming notes).
 ## Detecting Drift
-Over time, notes evolve and schemas lag behind. Use `schema_diff` to find divergence:
+Over time, notes evolve and schemas lag behind. Use `basic_memory-bm_schema` with `command="diff"` to find divergence:
 ```python
-schema_diff(noteType="Meeting")
+basic_memory-bm_schema(project="main", command="diff", note_type="Meeting")
 ```
 Diff reports:
 - **Fields in notes but not in schema** — candidates for adding to the schema (as optional)
@@ -147,19 +148,20 @@ Diff reports:
 - **Type inconsistencies** — fields used as different types across notes
 ## Schema Evolution
 When note structure changes:
-1. **Run diff** to see current state: `schema_diff(noteType="Meeting")`
-2. **Update the schema note** via `edit_note`:
+1. **Run diff** to see current state: `basic_memory-bm_schema(project="main", command="diff", note_type="Meeting")`
+2. **Update the schema note** via `basic_memory-bm_edit`:
    ```python
-   edit_note(
+   basic_memory-bm_edit(
+     project="main",
      identifier="schema/Meeting",
-     operation="find_replace",
+     command="find_replace",
      find_text="version: 1",
      content="version: 2",
      expected_replacements=1
    )
    ```
 3. **Add/remove/modify fields** in the `schema:` block
-4. **Re-validate** to confirm existing notes still pass: `schema_validate(noteType="Meeting")`
+4. **Re-validate** to confirm existing notes still pass: `basic_memory-bm_schema(project="main", command="validate", note_type="Meeting")`
 5. **Fix outliers** — update notes that don't conform to the new schema
 ### Evolution Guidelines
 - **Additive changes** (new optional fields) are safe — no version bump needed
@@ -169,10 +171,10 @@ When note structure changes:
 - **Schema as documentation** — even if validation is set to `warn`, the schema serves as living documentation for what notes of that type should contain
 ## Workflow Summary
 ```
-1. Notice repeated note structure → infer schema (schema_infer)
-2. Review + create schema note   → write to schema/ (write_note)
-3. Validate existing notes       → check conformance (schema_validate)
-4. Fix outliers                  → edit non-conforming notes (edit_note)
-5. Periodically check drift      → detect divergence (schema_diff)
-6. Evolve schema as needed       → update schema note (edit_note)
+1. Notice repeated note structure → infer schema (basic_memory-bm_schema command="infer")
+2. Review + create schema note   → write to schema/ (basic_memory-bm_write)
+3. Validate existing notes       → check conformance (basic_memory-bm_schema command="validate")
+4. Fix outliers                  → edit non-conforming notes (basic_memory-bm_edit)
+5. Periodically check drift      → detect divergence (basic_memory-bm_schema command="diff")
+6. Evolve schema as needed       → update schema note (basic_memory-bm_edit)
 ```
