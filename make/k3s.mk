@@ -32,16 +32,21 @@ pull_registry_image:
 	${K3S_SSH} 'sudo k3s ctr images pull ghcr.io/project-zot/zot:v2.1.23'
 
 
-# The whole control-node setup, in the order it has to happen: ansible-core
-# itself, the `kubernetes` Python client its modules import, then the two
-# collections.
+# Fetch the kubeconfig. ansible-core, the `kubernetes` Python client its
+# modules import and the two collections live in the client image (see the
+# Dockerfile), so a host needs nothing but docker to run any target in this
+# fragment.
+#
+# The path handed to the play is the CONTAINER's, not the host's. The play
+# writes with `delegate_to: localhost`, and localhost is now the container,
+# so an unmapped $(CURDIR)/private/kubeconfig would be created inside the
+# image and lost with `--rm` — a fetch that reports success and leaves the
+# host without a kubeconfig. group_vars derives the same value from
+# inventory_dir, which already resolves inside the mount; the `-e` exists
+# only to follow a KUBECONFIG pointed somewhere else.
 control_setup:
-	pipx install "ansible-core>=2.22.0"
-	pipx inject ansible-core kubernetes
-	ansible-galaxy collection install -r ansible/requirements.yml
-	# get kubeconfig
 	$(ANSIBLE)/kubeconfig.yml \
-		-e shoggoth_kubeconfig=$(if $(filter /% ~%,$(KUBECONFIG)),$(KUBECONFIG),$(CURDIR)/$(KUBECONFIG)) --ask-become-pass
+		-e shoggoth_kubeconfig=$(if $(filter /% ~%,$(KUBECONFIG)),$(TOOLS_CLIENT_KUBECONFIG),$(TOOLS_CLIENT_WORKDIR)/$(KUBECONFIG)) --ask-become-pass
 
 
 # connection & health

@@ -97,7 +97,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
       - name: init-git-cred-perms
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         command:
         - sh
@@ -127,7 +127,7 @@ spec:
             cpu: 50m
       containers:
       - name: git-cred
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         command:
         - /bin/bash

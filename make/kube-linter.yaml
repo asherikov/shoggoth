@@ -9,12 +9,12 @@
 # cannot be configured to be.
 #
 # This file is read from INSIDE a container. kube-linter is not a host
-# install: both make targets run it from
-# `stackrox/kube-linter:v0.8.3-alpine` with the repo mounted read-only at
-# /lint, so every path here is a container path and nothing here may name a
-# host directory. There is nothing to get wrong today — schemaLocations are
-# URLs and no check reads a file — but a future `cache:` would have to be a
-# path that exists inside the image, not on the host.
+# install: both make targets run it from the client image (`--target client`
+# in shoggoth/dockerfiles/tools) with the repo mounted read-only at /lint,
+# so every path here is a container path and nothing here may name a host
+# directory. There is nothing to get wrong today — schemaLocations are URLs
+# and no check reads a file — but a future `cache:` would have to be a path
+# that exists inside the image, not on the host.
 #
 # WHY THE RENDER IS PASSED AS A FILE. kube-linter renders Helm charts
 # itself, in-process, with no `helm` binary — and it hardcodes

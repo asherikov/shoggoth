@@ -16,7 +16,7 @@
 #            registries (probed in the order configured in the registry
 #            ConfigMap: docker.io first) and re-caches it.
 # This is the tool for refreshing floating tags — e.g. after rebuilding
-# asherikov/shoggoth_tools:alpine and pushing the same tag upstream. The
+# asherikov/shoggoth_tools:host and pushing the same tag upstream. The
 # deleted tag's unreferenced blobs are reclaimed by zot's GC
 # (deleteUntagged) on its own schedule, not by this workflow.
 #
@@ -63,8 +63,8 @@ spec:
     # step's `env:`. So there is no `{{workflow.parameters.*}}` reference
     # anywhere in this template.
     - name: images
-      description: "Comma-separated image refs in local registry form (no registry host), e.g. asherikov/shoggoth_tools:alpine,project-zot/zot:v2.1.23. Missing tag means latest; repo@sha256:... digests work. Resolved against the configured upstreams in order (docker.io first)."
-      value: "asherikov/shoggoth_tools:alpine,asherikov/ccws:jammy,asherikov/ccws:noble,asherikov/ccws:resolute"
+      description: "Comma-separated image refs in local registry form (no registry host), e.g. asherikov/shoggoth_tools:host,project-zot/zot:v2.1.23. Missing tag means latest; repo@sha256:... digests work. Resolved against the configured upstreams in order (docker.io first)."
+      value: "asherikov/shoggoth_tools:host,asherikov/ccws:jammy,asherikov/ccws:noble,asherikov/ccws:resolute"
     - name: delay
       description: "Go duration to wait before running: 30s, 10m, 2h. Must be shorter than the 24h activeDeadlineSeconds. 0s runs immediately. While suspended the workflow can be resumed early from the UI."
       value: "0s"
@@ -101,7 +101,7 @@ spec:
       parameters:
       - name: action
     container:
-      image: asherikov/shoggoth_tools:alpine
+      image: asherikov/shoggoth_tools:host
       imagePullPolicy: IfNotPresent
       command:
       - bash

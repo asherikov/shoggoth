@@ -6,7 +6,7 @@
 # Single-flight, one shoggoth.py invocation per webhook. v2 splits the
 # single pod into a two-step DAG:
 #
-#   1. ``dispatch`` step — runs in a ``shoggoth_tools:alpine`` pod
+#   1. ``dispatch`` step — runs in a ``shoggoth_tools:host`` pod
 #      (kubectl + scripts, no qwen agent). Invokes the standalone
 #      ``shoggoth/workflow/dispatch.py`` CLI utility —
 #      decoupled from ``shoggoth.py`` because the dispatcher's
@@ -159,7 +159,7 @@ spec:
           key: SHOGGOTH_AGENT_TIMEOUT
   activeDeadlineSeconds: 14400
   # No workflow-level synchronization here -- the dispatcher
-  # step (shoggoth_tools:alpine) is intentionally unconstrained
+  # step (shoggoth_tools:host) is intentionally unconstrained
   # so multiple webhooks can validate in parallel. The
   # single-flight constraint lives on the ``worker`` template
   # instead (see ``worker-step.synchronization`` below), so only
@@ -257,7 +257,7 @@ spec:
     # The dispatcher is its own CLI utility
     # (``shoggoth/workflow/dispatch.py``), not a
     # ``shoggoth.py`` subcommand — decoupling lets it run in
-    # the slim ``shoggoth_tools:alpine`` image (no agent, no
+    # the slim ``shoggoth_tools:host`` image (no agent, no
     # git-cred sidecar, no ``Shoggoth().checkout()``) while
     # the worker runs in ``slave:noble``. The script is
     # invoked with an absolute path so the executor doesn't
@@ -302,7 +302,7 @@ spec:
           path: /tmp/dispatch-should-run-worker
     serviceAccountName: shoggoth-sandbox-spawner
     container:
-      image: asherikov/shoggoth_tools:alpine
+      image: asherikov/shoggoth_tools:host
       imagePullPolicy: IfNotPresent
       command:
       - bash

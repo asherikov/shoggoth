@@ -1305,7 +1305,7 @@ spec:
       serviceAccountName: openbao-init
       initContainers:
         - name: fix-permissions
-          image: asherikov/shoggoth_tools:alpine
+          image: asherikov/shoggoth_tools:host
           imagePullPolicy: IfNotPresent
           command: ["sh", "-c"]
           args:
@@ -1325,7 +1325,7 @@ spec:
           securityContext:
             runAsUser: 0
         - name: unseal
-          image: asherikov/shoggoth_tools:alpine
+          image: asherikov/shoggoth_tools:host
           imagePullPolicy: IfNotPresent
           restartPolicy: Always
           command: ["bash", "-c"]
@@ -1475,7 +1475,7 @@ spec:
       serviceAccountName: openbao-init
       initContainers:
         - name: wait-for-openbao
-          image: asherikov/shoggoth_tools:alpine
+          image: asherikov/shoggoth_tools:host
           imagePullPolicy: IfNotPresent
           command: ["sh", "-c"]
           args:
@@ -1491,7 +1491,7 @@ spec:
                 echo "wait-for-openbao: OpenBao answered (HTTP ${code})"
       containers:
         - name: bootstrap
-          image: asherikov/shoggoth_tools:alpine
+          image: asherikov/shoggoth_tools:host
           imagePullPolicy: IfNotPresent
           command: ["bash", "-c"]
           args:

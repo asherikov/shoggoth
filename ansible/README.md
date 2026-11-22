@@ -2,38 +2,31 @@
 
 Implementation of the shoggoth deployment.
 
-Requirements:
-
-```sh
-pipx install "ansible-core>=2.22.0"    # ansible-core itself, in a venv of its own
-pipx inject ansible-core kubernetes    # the Python client the collection's modules import
-ansible-galaxy collection install -r ansible/requirements.yml
-```
+Requirements: docker. ansible-core, the two collections in `requirements.yml`
+and the `kubernetes` Python client their modules import are baked into the
+`client` stage of `shoggoth/dockerfiles/tools`, and every make target runs
+`ansible-playbook` inside that image — see "By hand" below for the `docker
+run` the make targets spell out, and `$(ANSIBLE)` in the Makefile for the
+single definition they all share.
 
 ## Run it
 
 ```sh
-export ANSIBLE_CONFIG=$PWD/ansible/ansible.cfg
-export KUBECONFIG=$PWD/private/kubeconfig
-
-ansible-playbook ansible/deploy.yml --limit shoggoth          # the deploy, three passes
-ansible-playbook ansible/kubeconfig.yml --limit shoggoth      # fetch the kubeconfig
-ansible-playbook ansible/service.yml --limit shoggoth \       # enable|disable
-  -e shoggoth_service=gitea -e shoggoth_service_action=enable
-ansible-playbook ansible/down.yml --limit shoggoth            # destructive, and unguarded
-ansible-playbook ansible/purge.yml --limit shoggoth-test      # destructive — asserts the guard first
-ansible-playbook ansible/drop_image_tag.yml --limit shoggoth \  # drop one tag
-  -e shoggoth_image=library/nginx -e shoggoth_tag=latest
-ansible-playbook ansible/clear_endpoints.yml --limit shoggoth \  # host-level: stops k3s
-  -e 'shoggoth_k3s_stale_ips=192.0.2.111' --ask-become-pass
+make up                # the deploy, three passes
+make down              # destructive, and unguarded
+make purge             # destructive — asserts the guard first
+make start SERVICE=gitea
+make stop SERVICE=gitea
+make control_setup     # fetch the kubeconfig
+make drop_image_tag IMAGE=library/nginx TAG=latest
+make k3s_clear_endpoints K3S_STALE_IPS=192.0.2.111   # host-level: stops k3s
+make ansible_lint      # offline: syntax, inventory, group_vars
+make ansible_check     # --check --diff over every play, needs the host
 ```
 
-The control node needs pipx on PATH, ansible-core 2.22.0 or newer (an older one
-cannot run a module on a host whose `python3` is 3.15 — see "Known issues"), and
-the `kubernetes` client inside the ansible-core venv: `ansible-galaxy collection
-install` installs collections, never their Python requirements, and a
-`pip install --user kubernetes` lands in site-packages the venv never reads.
-Verify with `pipx runpip ansible-core list | grep kubernetes`.
+`make up`, `make purge` and `make k3s_clear_endpoints` prompt for the become
+password, because they pass `--ask-become-pass`; the container is started with
+`-it` so the prompt has a terminal to read from.
 
 `down.yml` is the one destructive play with **no guard**; `purge.yml` asserts the
 primary instance first. `shoggoth` in `--limit` is the inventory group name, and
@@ -79,18 +72,34 @@ change whose `helm upgrade` would abort passes it clean.
 ansible-core, and it evaluates the inventory and group_vars expressions a
 `--syntax-check` never runs.
 
-Hand-invoking a playbook needs two things the snippet below spells out:
-`ansible.cfg` is looked up in `$PWD`, `~/.ansible.cfg` and
-`/etc/ansible/ansible.cfg` — **not** next to the playbook — and ignored silently
-otherwise (`config file = None`, then "no inventory was parsed", then "could not
-match supplied host pattern"); and `kubectl`/`helm`/`k8s_info` read `KUBECONFIG`
-from the environment:
+### By hand
+
+Every target above is one `docker run` of the client image plus an
+`ansible-playbook` command line. The prefix is long because three of the
+plays' requirements have to be reproduced from outside: `ansible.cfg` is looked
+up in `$PWD`, `~/.ansible.cfg` and `/etc/ansible/ansible.cfg` — **not** next to
+the playbook — and ignored silently otherwise (`config file = None`, then "no
+inventory was parsed", then "could not match supplied host pattern");
+`kubectl`/`helm`/`k8s_info` read `KUBECONFIG` from the environment, and both
+binaries live in the image, so the path has to be the container's; and the
+container runs as the caller's uid with no passwd entry, so `USER` must be
+passed explicitly or `group_vars` reads `lookup('env','USER')` as the number.
 
 ```sh
-export ANSIBLE_CONFIG=$PWD/ansible/ansible.cfg
-export KUBECONFIG=$PWD/private/kubeconfig
-ansible-playbook ansible/deploy.yml --limit shoggoth
+docker run --rm -it --user "$(id -u):$(id -g)" \
+    -v "$PWD:/work" -w /work \
+    -v "$HOME:$HOME" -e HOME="$HOME" -e USER="$(id -un)" \
+    -e HOST_IP=203.0.113.10 \
+    -e KUBECONFIG=/work/private/kubeconfig \
+    -e ANSIBLE_CONFIG=/work/ansible/ansible.cfg \
+    asherikov/shoggoth_tools:client \
+    ansible-playbook ansible/deploy.yml --limit shoggoth --ask-become-pass
 ```
+
+`$HOME` is mounted at the same path because ansible reads the ssh keys from
+there, the agent socket travels with it, and `DEFAULT_LOCAL_TMP` is
+`~/.ansible/tmp`. `-it` is only what makes the become prompt readable — the
+make targets drop it when stdin is not a tty.
 
 ## The plays
 

@@ -21,7 +21,7 @@ Each ``SlashCommand`` carries a ``handler`` field, one of:
     ``should_run_worker=false``. Examples today: ``/sandbox`` (which
     kubectl-applies a per-PR pod + Service) and ``/help`` (which
     posts a static catalog). These commands are fast: the dispatcher
-    is a ``shoggoth_tools:alpine`` pod with no agent / no
+    is a ``shoggoth_tools:host`` pod with no agent / no
     image-pull of ``slave:noble``, so end-to-end latency is ~2-5 s
     instead of the worker's ~60-90 s on a cold cache.
 

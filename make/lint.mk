@@ -16,22 +16,14 @@ SHOGGOTH_HELM_VALUES_LINT = $(SHOGGOTH_HELM_VALUES)
 # against the chart directory.
 KUBE_LINTER_CONFIG?=make/kube-linter.yaml
 
-# kube-linter is not a host install. It runs from its own container, so
-# docker is the prerequisite and the version is pinned here rather than in a
-# package list.
+# kube-linter runs from the client toolchain image (`--target client` in
+# shoggoth/dockerfiles/tools), so docker is the only prerequisite and the
+# version is pinned in that file's ARGs.
 #
-# The `-alpine` tag and not the plain one, and this is not a preference. The
-# plain `v0.8.3` image is `FROM scratch` — the binary and nothing else, no
-# /etc/ssl — while kubeconform fetches its JSON schemas over HTTPS from
-# raw.githubusercontent.com. Go builds its root pool from the paths in
-# crypto/x509/root_linux.go (certFiles, then certDirectories), so on the
-# scratch image every schema fetch fails with "x509: certificate signed by
-# unknown authority" and all 275 objects come back invalid. The alpine base
-# ships /etc/ssl/certs/ca-certificates.crt, which is what makes the fetch
-# work. Both manifests were pulled and their layers listed to confirm this:
-# the scratch image has one layer (the binary) and no ssl entries at all,
-# the alpine image has the alpine base plus the binary and both cert paths.
-KUBE_LINTER_IMAGE?=stackrox/kube-linter:v0.8.3-alpine
+# The binary is spelled out on the command line because that image has no
+# ENTRYPOINT: it carries five tools, and an entrypoint could name only one of
+# them. It is alpine-based with ca-certificates, which is what the schema
+# check needs — see the HTTPS note on the target below.
 
 # Where the repo is mounted inside the container, and the arguments as the
 # container sees them.
@@ -158,26 +150,27 @@ helm_lint_render: ${LINT_RENDER}
 # non-empty by `wc -l` in helm_lint_render, and a zero there would be a
 # render failure the helm template above already exited on.
 #
-# The container rather than a host binary, for the same reason `update`
-# runs updatecli in one: the version is pinned next to the check that
-# depends on it, and nobody has to install anything to run `make
+# It runs in a container because the version is pinned next to the check
+# that depends on it, and nobody has to install anything to run `make
 # helm_lint`. The mount is read-only because kube-linter writes nothing —
 # kubeconform only creates a cache directory when `cache:` is set, and the
 # config deliberately does not set it — and `--user` keeps a container
 # process from being able to leave root-owned files in the tree even if
 # that ever changed. If a `cache:` is ever added to the config, this mount
-# has to lose its `:ro`.
+# has to lose its `:ro`. It is the one call site that does not share
+# $(TOOLS_CLIENT_REPO): `update` rewrites pinned versions through its mount
+# and this one only reads.
 #
 # The container needs outbound HTTPS: the schema check fetches 18 schemas
 # from raw.githubusercontent.com and the CRDs-catalog on every run, since
 # no cache is configured. On a host whose docker network is locked down,
 # that is where this target fails, and the failure names the URL.
 helm_lint_kube_linter: ${LINT_RENDER}
-	docker run --rm --user "$$(id -u):$$(id -g)" \
+	$(TOOLS_CLIENT_RUN) \
 		-v $(CURDIR):$(KUBE_LINTER_WORKDIR):ro \
 		-w $(KUBE_LINTER_WORKDIR) \
-		$(KUBE_LINTER_IMAGE) \
-		lint $(KUBE_LINTER_RENDER) --config $(KUBE_LINTER_CFG)
+		$(TOOLS_IMAGE_CLIENT) \
+		kube-linter lint $(KUBE_LINTER_RENDER) --config $(KUBE_LINTER_CFG)
 
 # A union gate spanning a service's own workloads makes `make stop
 # SERVICE=<x>` a silent no-op: `or (x) (y)` still renders while y is on,
@@ -394,11 +387,11 @@ helm_lint_inspektor: ${LINT_RENDER} ${LINT_INSPEKTOR_OFF}
 	yq -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_INSPEKTOR_OFF} \
 		> ${LINT_TMP_DIR}/inspektor-off.conf
 	grep -c '' ${LINT_TMP_DIR}/inspektor-off.conf
-	docker run --rm --user "$$(id -u):$$(id -g)" \
+	$(TOOLS_CLIENT_RUN) \
 		-v $(CURDIR):$(KUBE_LINTER_WORKDIR):ro \
 		-w $(KUBE_LINTER_WORKDIR) \
-		$(KUBE_LINTER_IMAGE) \
-		lint $(KUBE_LINTER_OFF) \
+		$(TOOLS_IMAGE_CLIENT) \
+		kube-linter lint $(KUBE_LINTER_OFF) \
 			--config $(KUBE_LINTER_CFG) \
 			--do-not-auto-add-defaults
 
@@ -453,17 +446,21 @@ ANSIBLE_ROLES = $(patsubst ansible/roles/%,%, \
 # that touches the ansible/ tree at all: there is no CI here (see
 # ansible/README.md), so whatever is not checked locally is not checked.
 #
-# A missing ansible-playbook says so and skips, exactly the way the schema
-# check inside helm_lint_kube_linter's config absorbs the missing-yamllint
-# case helm_lint_dupes used to handle. ansible-core is a control-node
-# prerequisite, not something this target installs.
+# ansible-playbook runs in the client image: the one prerequisite is docker,
+# and a missing image fails with docker's own error rather than passing
+# silently.
 #
-# ANSIBLE_CONFIG is spelled out here rather than reusing the Makefile's
-# $(ANSIBLE) wrapper: this loop runs a bare `ansible-playbook`, and an empty
-# ANSIBLE_CONFIG does not mean "use the defaults" — it means ansible.cfg is
-# not applied, so `inventory = hosts.ini` is lost and the check runs against
-# whatever /etc/ansible/hosts happens to hold. A syntax check that passes
-# because it parsed no inventory at all is worse than one that fails.
+# The config is carried by $(TOOLS_CLIENT_ANSIBLE) as `-e ANSIBLE_CONFIG`,
+# and an `-e` rather than a `VAR=x cmd` prefix, because a prefix would set
+# the variable for the docker CLI and not for ansible inside the container.
+# It has to be set at all: ansible searches ./ansible.cfg, then
+# ~/.ansible.cfg, then /etc/ansible/ansible.cfg, so an unset one loses
+# `inventory = hosts.ini` and the check runs against whatever
+# /etc/ansible/hosts happens to hold — a syntax check that passes because it
+# parsed no inventory at all is worse than one that fails. The Makefile's
+# $(ANSIBLE) wrapper is not reused here: this loop runs a bare
+# `ansible-playbook`, and that variable ends in the `ansible` directory a
+# playbook path is appended to.
 #
 # The second half of the recipe is the roles/ tree, and it generates a
 # playbook rather than checking the role files in place. `--syntax-check`
@@ -478,22 +475,15 @@ ANSIBLE_ROLES = $(patsubst ansible/roles/%,%, \
 # the roles/ directory it names, and ANSIBLE_INVENTORY because the wrapper
 # asks for `localhost` and must not depend on the configured inventory
 # resolving at all.
-ANSIBLE_CFG = ansible/ansible.cfg
-
 ansible_lint: ansible_lint_syntax ansible_lint_vars
 
 # Order-only on the scratch directory: the wrapper playbook below is written
 # into it, and it must exist before the recipe runs rather than being a
 # reason for the recipe to re-run.
 ansible_lint_syntax: | ${LINT_TMP_DIR}
-	@if ! command -v ansible-playbook >/dev/null 2>&1; then \
-		echo "ansible_lint_syntax: ansible-playbook not installed — skipped"; \
-		echo "  (ansible-core is a control-node prerequisite; see README.md)"; \
-		exit 0; \
-	fi; \
 	for play in $(ANSIBLE_PLAYBOOKS); do \
 		echo "syntax-check $$play"; \
-		ANSIBLE_CONFIG=$(ANSIBLE_CFG) ansible-playbook --syntax-check $$play || exit 1; \
+		$(TOOLS_CLIENT_ANSIBLE) ansible-playbook --syntax-check $$play || exit 1; \
 	done; \
 	if [ -n "$(ANSIBLE_ROLES)" ]; then \
 		{ \
@@ -509,9 +499,9 @@ ansible_lint_syntax: | ${LINT_TMP_DIR}
 			done; \
 		} > ${LINT_TMP_DIR}/roles.yml; \
 		echo "syntax-check roles: $(ANSIBLE_ROLES)"; \
-		ANSIBLE_CONFIG=$(ANSIBLE_CFG) \
-			ANSIBLE_INVENTORY=ansible/hosts.ini \
-			ANSIBLE_ROLES_PATH=ansible/roles \
+		$(TOOLS_CLIENT_ANSIBLE) \
+			-e ANSIBLE_INVENTORY=ansible/hosts.ini \
+			-e ANSIBLE_ROLES_PATH=ansible/roles \
 			ansible-playbook --syntax-check ${LINT_TMP_DIR}/roles.yml || exit 1; \
 	fi
 
@@ -539,23 +529,19 @@ ansible_lint_syntax: | ${LINT_TMP_DIR}
 # output. Discarding stdout is deliberate — the exit status is the check,
 # and the inventory is large.
 #
-# HOST_IP is exported rather than passed with `-e`: the expression reads it
-# with `lookup('env', ...)`, and an extra var would be a second spelling of
-# the same value that could disagree with the environment the real run sees.
+# HOST_IP is passed to the container with `-e` rather than as an ansible
+# extra var: the expression reads it with `lookup('env', ...)`, and an extra
+# var would be a second spelling of the same value that could disagree with
+# the environment the real run sees. $(TOOLS_CLIENT_ANSIBLE) carries both it
+# and ANSIBLE_CONFIG.
 #
 # The success echo rides on the command with `&&` rather than sitting on its
-# own recipe line: every recipe line is a separate shell, so a line of its own
-# would run after the skip path's `exit 0` and report success on a host with
-# no ansible-inventory at all. A failing `ansible-inventory` prints the
-# expression it could not resolve and exits non-zero, so there is no `||` arm.
+# own recipe line: every recipe line is a separate shell, so a line of its
+# own would report success on a run whose inventory never resolved at all.
+# A failing `ansible-inventory` prints the expression it could not resolve
+# and exits non-zero, so there is no `||` arm.
 ansible_lint_vars:
-	@if ! command -v ansible-inventory >/dev/null 2>&1; then \
-		echo "ansible_lint_vars: ansible-inventory not installed — skipped"; \
-		echo "  (ansible-core is a control-node prerequisite; see README.md)"; \
-		exit 0; \
-	fi; \
-	HOST_IP="$(HOST_IP)" ANSIBLE_CONFIG=$(ANSIBLE_CFG) \
-		ansible-inventory --list --export >/dev/null && \
+	$(TOOLS_CLIENT_ANSIBLE) ansible-inventory --list --export >/dev/null && \
 		echo "ansible_lint_vars: the inventory and every group_vars expression resolve"
 
 # ---------------------------------------------------------------------------
@@ -611,6 +597,11 @@ ANSIBLE_CHECK_SERVICE ?= $(shell yq -r '.services | keys | .[0]' \
 # what they would change. A NOPASSWD host answers with an empty line (see the
 # Makefile).
 #
+# Every task in these plays runs inside the client image, the delegated
+# `command` tasks and `synchronize` along with ansible itself, which is why
+# that image carries kubectl, helm and rsync — see the Dockerfile's client
+# stage.
+#
 # Three of the plays need a value the real targets take from the command line.
 # `SERVICE` is derived above. `drop_image_tag.yml` gets literals, and they
 # are never used for a request: `uri` has no check-mode support, so its
@@ -627,11 +618,6 @@ ANSIBLE_CHECK_SERVICE ?= $(shell yq -r '.services | keys | .[0]' \
 # default INSTANCE would fail on that guard rather than on anything this
 # target is looking for.
 ansible_check: tunnel_up
-	@if ! command -v ansible-playbook >/dev/null 2>&1; then \
-		echo "ansible_check: ansible-playbook not installed — skipped"; \
-		echo "  (ansible-core is a control-node prerequisite; see README.md)"; \
-		exit 0; \
-	fi; \
 	if [ -z "$(ANSIBLE_CHECK_SERVICE)" ]; then \
 		echo "ansible_check: no service name to flip — yq is missing or"; \
 		echo "  .services in values.yaml is empty. Pass one explicitly:"; \
@@ -640,12 +626,7 @@ ansible_check: tunnel_up
 	fi; \
 	ansible_check_run() { \
 		echo "--- check $$1 ($$2)"; \
-		ANSIBLE_CONFIG=$(ANSIBLE_CFG) ansible-playbook \
-			--check --diff \
-			ansible/$$1 \
-			--limit $(INSTANCE) \
-			-e ansible_host=$(HOST_IP) \
-			$$3 || exit 1; \
+		$(ANSIBLE)/$$1 --check --diff $$3 || exit 1; \
 	}; \
 	ansible_check_run deploy.yml "make up" "--ask-become-pass"; \
 	ansible_check_run down.yml "make down"; \

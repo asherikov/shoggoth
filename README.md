@@ -63,11 +63,10 @@ lists the minimum; newer is fine unless called out.
 |-------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | k3s         | ≥ 1.34    | Required for the GA features the chart relies on: pod-level `ttlSecondsAfterFinished` (GA 1.29), container-level `restartPolicy` for native sidecar ordering (GA 1.33). The chart enforces this itself — `Chart.yaml` sets `kubeVersion: ">=1.34.0-0"`, so `helm install`/`upgrade` refuses an older cluster instead of letting the API server silently prune the field. Pinned in `shoggoth/shoggoth.nix`. |
 | helm        | ≥ 3.17.0  | Required for `--take-ownership`, which make targets rely on to adopt resources left unlabelled by an earlier non-Helm apply. |
-| kubectl     | bundled   | Comes with k3s; the operator host uses the same version (transferred via the SSH-tunneled kubeconfig).                                                                              |
+| kubectl     | bundled   | Used by the operator targets that run it on the host: `make status`, `make log`, `make shell`. Comes with k3s, and the operator host uses the same version over the SSH-tunneled kubeconfig. |
 | yq          | mikefarah v4 | The `Makefile` reads every configuration value out of `shoggoth/<instance>.yaml` through yq. The Python `yq` package is a *different* tool with a different CLI — install mikefarah's release (https://github.com/mikefarah/yq). |
 | envsubst    | gettext   | Used by `make host_install_nixos` to render `shoggoth.nix` and `ports.nix`. Bundled with most distros; on Alpine it is in the `gettext` package. |
-| ansible-core | ≥ 2.22.0 | Older versions not compatible with the latest python. |
-| docker       | any recent | Runs kube-linter as a container (`stackrox/kube-linter:v0.8.3-alpine`) for `make helm_lint_kube_linter` and `make helm_lint_inspektor`, so kube-linter itself is not a host install; also used by `make update`. The `-alpine` tag is required, not a preference: the plain `v0.8.3` image is `FROM scratch` with no CA bundle, and the schema check fetches its JSON schemas over HTTPS. The container needs outbound network for that, and the repo is mounted read-only — it writes nothing. |
+| docker       | any recent | Runs the host-side toolchain from `asherikov/shoggoth_tools:client` (`--target client` in `shoggoth/dockerfiles/tools`): the lint, diagram and ansible targets run in that image, so docker is the only tool to install for them. Needs outbound network for the first pull. |
 | host kernel  | ≥ 5.10   | Required for Inspektor Gadget |
 
 Comparison

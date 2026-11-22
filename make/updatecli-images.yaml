@@ -1,0 +1,128 @@
+#
+# The versions pinned in the client stage of shoggoth/dockerfiles/tools.
+#
+# Separate from make/updatecli.yaml because it reads from a different kind of
+# source and writes to a different file: this one's only target file is the
+# ARG block the `client` stage is built from. `make update` runs both configs
+# (UPDATECLI_CONFIGS in make/chore.mk), and neither writes a file the other
+# touches, so the two runs are independent.
+#
+# `sources` and `targets` are maps keyed by resource id, as in the other
+# config: a target consumes exactly one `sourceid`, and the five targets below
+# all write the same file, so they are chained with `dependson`. Updatecli
+# runs each DAG vertex in its own goroutine and the file target is an
+# unsynchronised read-modify-write, so without the chain two targets on one
+# file would race and one of the two updates would be lost. The chain always
+# runs from a lower id to a higher one in the order below, so it cannot form
+# a loop.
+#
+# Every source is `gittag` with `lsremote`, the same kind the other config
+# uses for the actions and the collections: one source kind covers all five,
+# and `git ls-remote` needs no clone. The Python packages are pinned from
+# their git tags rather than from a package registry because each project's
+# release tag is the version pip installs — ansible/ansible v2.22.0 is
+# ansible-core 2.22.0, mingrammer/diagrams v0.25.1 is diagrams 0.25.1 — so
+# the tag and the pin are the same number.
+#
+# The `regex/semver` versionfilter carries a capture group for the bare
+# version, so the source emits `0.8.3` and the target's `replacepattern`
+# supplies the `v` prefix the ARG line needs. Without the group updatecli
+# would emit the whole tag and the ARG would end up `v`-less.
+#
+# The base image's own packages — helm, kubectl, graphviz, python3, and the
+# py3-* packages the stage's apk list carries — are NOT here. They are
+# unpinned by design and follow whatever alpine:3.24 ships, which is the same
+# policy the rest of the stage's apk list follows. Only the three packages pip
+# installs are pinned, because none of them has an apk package at all.
+name: Bump pinned versions in the client image
+
+scms:
+  local:
+    disabled: true
+
+sources:
+  kube-linter:
+    kind: gittag
+    spec:
+      url: https://github.com/stackrox/kube-linter.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v([0-9]+\.[0-9]+\.[0-9]+)$'
+  updatecli:
+    kind: gittag
+    spec:
+      url: https://github.com/updatecli/updatecli.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v([0-9]+\.[0-9]+\.[0-9]+)$'
+  ansible-core:
+    kind: gittag
+    spec:
+      url: https://github.com/ansible/ansible.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v([0-9]+\.[0-9]+\.[0-9]+)$'
+  kubediagrams:
+    kind: gittag
+    spec:
+      url: https://github.com/philippemerle/KubeDiagrams.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v?([0-9]+\.[0-9]+\.[0-9]+)$'
+  diagrams:
+    kind: gittag
+    spec:
+      url: https://github.com/mingrammer/diagrams.git
+      lsremote: true
+      versionfilter:
+        kind: regex/semver
+        regex: '^v?([0-9]+\.[0-9]+\.[0-9]+)$'
+
+targets:
+  kube-linter:
+    kind: file
+    sourceid: kube-linter
+    spec:
+      file: shoggoth/dockerfiles/tools
+      matchpattern: '(ARG KUBE_LINTER_VERSION=v)[0-9.]+'
+      replacepattern: '${1}{{ source "kube-linter" }}'
+  updatecli:
+    kind: file
+    sourceid: updatecli
+    dependson:
+      - target#kube-linter
+    spec:
+      file: shoggoth/dockerfiles/tools
+      matchpattern: '(ARG UPDATECLI_VERSION=v)[0-9.]+'
+      replacepattern: '${1}{{ source "updatecli" }}'
+  ansible-core:
+    kind: file
+    sourceid: ansible-core
+    dependson:
+      - target#updatecli
+    spec:
+      file: shoggoth/dockerfiles/tools
+      matchpattern: '(ARG ANSIBLE_CORE_VERSION=)[0-9.]+'
+      replacepattern: '${1}{{ source "ansible-core" }}'
+  kubediagrams:
+    kind: file
+    sourceid: kubediagrams
+    dependson:
+      - target#ansible-core
+    spec:
+      file: shoggoth/dockerfiles/tools
+      matchpattern: '(ARG KUBEDIAGRAMS_VERSION=)[0-9.]+'
+      replacepattern: '${1}{{ source "kubediagrams" }}'
+  diagrams:
+    kind: file
+    sourceid: diagrams
+    dependson:
+      - target#kubediagrams
+    spec:
+      file: shoggoth/dockerfiles/tools
+      matchpattern: '(ARG DIAGRAMS_VERSION=)[0-9.]+'
+      replacepattern: '${1}{{ source "diagrams" }}'

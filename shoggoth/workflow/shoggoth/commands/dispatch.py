@@ -73,7 +73,7 @@ class _SandboxPodNotReadyError(Exception):
 class DispatchCommand(CommandBase):
     """Control-plane pod for the `command-handler` DAG.
 
-    The dispatcher runs in a `shoggoth_tools:alpine` pod with
+    The dispatcher runs in a `shoggoth_tools:host` pod with
     kubectl available. Its job is to validate the inbound webhook
     event and decide whether the worker step (a separate
     `slave:noble` pod that does the heavy lifting -- git clone, agent
@@ -334,7 +334,7 @@ class DispatchCommand(CommandBase):
         Like ``_handle_sandbox``, this is a dispatcher-only
         handler: the worker step is skipped via
         ``should_run_worker=false``. End-to-end latency is
-        ~2-5 s on the ``shoggoth_tools:alpine`` pod -- the
+        ~2-5 s on the ``shoggoth_tools:host`` pod -- the
         worker path would otherwise spend ~60-90 s on a cold
         ``slave:noble`` image pull + agent init, which is
         unacceptable for a static catalog post.
@@ -958,7 +958,7 @@ class DispatchCommand(CommandBase):
                 "initContainers": [
                     {
                         "name": "wait-bootstrap",
-                        "image": "asherikov/shoggoth_tools:alpine",
+                        "image": "asherikov/shoggoth_tools:host",
                         "imagePullPolicy": "IfNotPresent",
                         "env": [
                             {"name": "SHOGGOTH_NAMESPACE",
@@ -978,7 +978,7 @@ class DispatchCommand(CommandBase):
                     },
                     {
                         "name": "init-git-cred-perms",
-                        "image": "asherikov/shoggoth_tools:alpine",
+                        "image": "asherikov/shoggoth_tools:host",
                         "imagePullPolicy": "IfNotPresent",
                         "command": ["/usr/bin/python3"],
                         "args": [SANDBOX_PATH, "init-perms"],
@@ -1016,7 +1016,7 @@ class DispatchCommand(CommandBase):
                 "containers": [
                     {
                         "name": "git-cred",
-                        "image": "asherikov/shoggoth_tools:alpine",
+                        "image": "asherikov/shoggoth_tools:host",
                         "imagePullPolicy": "IfNotPresent",
                         "command": ["/bin/bash",
                                     "/git-cred/bootstrap.sh"],
@@ -1445,7 +1445,7 @@ class DispatchCommand(CommandBase):
                         # argv.
                         "name": "cleanup",
                         "image":
-                            "asherikov/shoggoth_tools:alpine",
+                            "asherikov/shoggoth_tools:host",
                         "imagePullPolicy": "IfNotPresent",
                         "command": ["/usr/bin/python3"],
                         "args": [SANDBOX_PATH, "cleanup"],

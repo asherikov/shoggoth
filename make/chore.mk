@@ -67,10 +67,13 @@ graph:
 # the icons will be missing. This is an accepted trade-off for the
 # simpler pipeline.
 #
-# Requires on $PATH:
-#   kube-diagrams (https://github.com/philippemerle/KubeDiagrams):
-#     pip install KubeDiagrams
-#   graphviz `dot` binary (already on this system at /usr/bin/dot)
+# Requires on $PATH: helm and yq, for the render and the kind filter. Both
+# are host prerequisites the Makefile uses everywhere else.
+#
+# kube-diagrams and graphviz `dot` run from the client image (`--target
+# client` in shoggoth/dockerfiles/tools), which carries KubeDiagrams and the
+# graphviz package with the cairo/pango plugins `-Tsvg:cairo` needs. docker is
+# the only prerequisite for this half.
 #
 # Known limitation: KubeDiagrams does not resolve ${SHOGGOTH_NAMESPACE}
 # placeholders in the input manifests, so node.namespace fields render
@@ -110,6 +113,18 @@ CLUSTERVIZ_CONFIG := make/kube-diagrams.yaml
 #
 # $1 = output name (e.g. "cluster-rbac" for docs/cluster-rbac.svg)
 # $2 = space-separated set of kinds for that view
+#
+# helm and yq run on the host: they are host prerequisites the Makefile
+# itself uses everywhere else, and the render has to happen where the chart
+# directory is. kube-diagrams and dot run together in ONE container — they are
+# two halves of one step, and the .dot between them is an intermediate only
+# the pair shares — and the stream reaches kube-diagrams through the pipe, so
+# the container is started with `-i`. No `-t`: stdin is a pipe, and a pty
+# would only mangle it.
+#
+# The paths stay repo-relative and are resolved by `-w` inside the container,
+# so the host and the container agree on where .tmp/clusterviz and docs are
+# without either side rewriting them.
 define clusterviz_run
 	set -e; mkdir -p .tmp/clusterviz; \
 	KIND_RE='^($(subst $(space),|,$(2)))$$'; \
@@ -123,9 +138,11 @@ define clusterviz_run
 	echo "  $$N manifests for view '$1'"; \
 	helm template shoggoth-clusterviz $(SHOGGOTH_CHART_ROOT) $(SHOGGOTH_HELM_COMMON_ARGS) \
 		| yq ea "select(.kind != null and (.kind | test(\"$$KIND_RE\")))" \
-		| kube-diagrams -c ${CLUSTERVIZ_CONFIG} -o .tmp/clusterviz/$1.dot -f dot - \
-		|| { echo "FAIL: kube-diagrams failed for '$1'"; exit 1; }
-	dot -Grankdir=TB -Gsplines=spline -Tsvg:cairo .tmp/clusterviz/$1.dot -o docs/$1.svg
+		| $(TOOLS_CLIENT_RUN) -i $(TOOLS_CLIENT_REPO) $(TOOLS_IMAGE_CLIENT) \
+			sh -c 'kube-diagrams -c ${CLUSTERVIZ_CONFIG} -o .tmp/clusterviz/$1.dot -f dot - \
+				&& dot -Grankdir=TB -Gsplines=spline -Tsvg:cairo \
+					.tmp/clusterviz/$1.dot -o docs/$1.svg' \
+		|| { echo "FAIL: kube-diagrams or dot failed for '$1'"; exit 1; }
 endef
 
 .PHONY: clusterviz clusterviz-rbac clusterviz-workloads clusterviz-storage clusterviz-networking clusterviz-secrets
@@ -229,9 +246,17 @@ skills:
 
 # update — bump every pinned version in this tree, in place, and stop there.
 
-UPDATECLI_IMAGE?=updatecli/updatecli:v0.123.0-slim
 UPDATECLI_CONFIG?=make/updatecli.yaml
-UPDATECLI_WORKDIR?=/work
+
+# The second config, for the versions pinned in the client image. It is a
+# separate file because it reads from different sources and writes to a
+# different file: shoggoth/dockerfiles/tools, the ARG block the `client`
+# stage is built from. `make update` runs both, and neither writes a file the
+# other touches, so the two runs are independent and unordered.
+UPDATECLI_IMAGE_CONFIG?=make/updatecli-images.yaml
+
+# Both configs, in the order they run. Override to run one half.
+UPDATECLI_CONFIGS?=$(UPDATECLI_CONFIG) $(UPDATECLI_IMAGE_CONFIG)
 
 # The two CRD submodules updatecli cannot reach. A submodule pointer is a gitlink
 # (mode 160000) recorded in the superproject's index, not file content, so there is
@@ -242,17 +267,20 @@ CRD_SUBMODULES?=argo-workflows external-secrets
 
 .PHONY: update
 
+# updatecli runs from the client image, like kube-linter above: the version is
+# pinned in the Dockerfile's ARGs. The mount is read-write because the whole
+# point of the target is to rewrite the pinned versions in the tree.
 update:
 	mkdir -p .tmp
-	docker run --rm --user "$$(id -u):$$(id -g)" \
-		-v $(CURDIR):$(UPDATECLI_WORKDIR) \
-		-w $(UPDATECLI_WORKDIR) \
-		-e TMPDIR=$(UPDATECLI_WORKDIR)/.tmp \
-		$(UPDATECLI_IMAGE) \
-		pipeline apply \
-		--config $(UPDATECLI_WORKDIR)/$(UPDATECLI_CONFIG) \
-		--commit=false \
-		--push=false
+	set -e; for cfg in $(UPDATECLI_CONFIGS); do \
+		$(TOOLS_CLIENT_RUN) $(TOOLS_CLIENT_REPO) \
+			-e TMPDIR=$(TOOLS_CLIENT_WORKDIR)/.tmp \
+			$(TOOLS_IMAGE_CLIENT) \
+			updatecli pipeline apply \
+			--config $(TOOLS_CLIENT_WORKDIR)/$$cfg \
+			--commit=false \
+			--push=false; \
+	done
 	set -e; for m in $(CRD_SUBMODULES); do \
 		v=$$(yq ".$$m" shoggoth/crd/versions.yaml); \
 		echo ">>>>>>>>>>>> shoggoth/crd/$$m -> $$v"; \

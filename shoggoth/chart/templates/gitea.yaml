@@ -597,7 +597,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
       - name: render-config
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         env:
         - name: SHOGGOTH_DOMAIN

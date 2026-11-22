@@ -719,7 +719,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
       - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         env:
         - name: SHOGGOTH_NAMESPACE
@@ -858,7 +858,7 @@ spec:
         # Runs as the controller's SA (argo-workflow-controller), which
         # has create/get/update/delete on workflowtemplates and
         # workfloweventbindings (see ClusterRole argo-workflow-controller).
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         env:
         - name: SHOGGOTH_NAMESPACE
@@ -1337,7 +1337,7 @@ data:
           "initContainers": [
             {
               "name": "wait-bootstrap",
-              "image": "asherikov/shoggoth_tools:alpine",
+              "image": "asherikov/shoggoth_tools:host",
               "imagePullPolicy": "IfNotPresent",
               "env": [
                 {"name": "SHOGGOTH_NAMESPACE", "value": "{{ .Release.Namespace }}"}
@@ -1351,7 +1351,7 @@ data:
             },
             {
               "name": "init-git-cred-perms",
-              "image": "asherikov/shoggoth_tools:alpine",
+              "image": "asherikov/shoggoth_tools:host",
               "imagePullPolicy": "IfNotPresent",
               "command": ["sh", "-c"],
               "args": ["set -eu\nchown 1000:1000 /shoggoth/git-cred\nchmod 0700 /shoggoth/git-cred"],
@@ -1367,7 +1367,7 @@ data:
           "containers": [
             {
               "name": "git-cred",
-              "image": "asherikov/shoggoth_tools:alpine",
+              "image": "asherikov/shoggoth_tools:host",
               "imagePullPolicy": "IfNotPresent",
               "command": ["/bin/bash", "/git-cred/bootstrap.sh"],
               "env": [

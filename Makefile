@@ -33,6 +33,93 @@ HOST_IP?=$(shell getent hosts ${HOST} | cut -f 1 -d ' ')
 
 SSH_COMMON_ARGS=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 
+# The client-side toolchain image, built from shoggoth/dockerfiles/tools with
+# `--target client` — see that file's header for why the host-side tools are a
+# second image rather than part of `:host`. It carries kube-linter,
+# updatecli, KubeDiagrams with the graphviz `dot` it shells out to,
+# ansible-core with the two collections and the `kubernetes` client its
+# modules import, kubectl and rsync, so every target that would otherwise
+# need one of those on the host needs only docker.
+TOOLS_IMAGE_CLIENT?=asherikov/shoggoth_tools:client
+
+# Where the repo is mounted inside the container, and the working directory
+# set to the same place. Every path these fragments pass is repo-relative, so
+# a fixed root plus -w is what makes them resolve with no rewriting; the one
+# exception, the kube-linter targets in make/lint.mk, keep their own
+# read-only mount at $(KUBE_LINTER_WORKDIR).
+TOOLS_CLIENT_WORKDIR?=/work
+
+# -it when the recipe has a terminal, -i otherwise. The ansible family needs
+# stdin: `--ask-become-pass` prompts, and a prompt on /dev/null is an error
+# rather than a question. Same detection as the `shell` target in
+# make/k3s.mk, in a variable so every call site shares it. Only the ansible
+# prefix uses it — kube-linter, updatecli and the clusterviz pipeline either
+# do not read stdin or read it from a pipe, where a pty would only mangle it.
+TOOLS_CLIENT_TTY = $$([ -t 0 ] && printf -- -it || printf -- -i)
+
+# The invariant part of every `docker run` in this tree that uses the client
+# image. The image itself is NOT here: docker stops parsing flags at the
+# image name, and three of the four call sites need flags of their own after
+# this prefix — a read-only mount, a TMPDIR, an `-i` for the clusterviz pipe.
+# So each site spells `$(TOOLS_CLIENT_RUN) <its flags> $(TOOLS_IMAGE_CLIENT)
+# <command>`, which also makes visible which image runs what.
+#
+# No network namespace of its own: the schema check in make/lint.mk fetches
+# its JSON schemas over HTTPS. The invoking uid, so nothing the container
+# writes lands root-owned in the tree.
+TOOLS_CLIENT_RUN = docker run --rm --user "$$(id -u):$$(id -g)"
+
+# The repo itself, read-write: `make update` rewrites pinned versions through
+# it and clusterviz writes into .tmp/ and docs/. A read-only variant would
+# need a second spelling of the same mount, and the one target that mounted
+# it read-only is the kube-linter pair, which keeps its own.
+TOOLS_CLIENT_REPO = -v $(CURDIR):$(TOOLS_CLIENT_WORKDIR) -w $(TOOLS_CLIENT_WORKDIR)
+
+# The invoking user's home, mounted at the same path it has on the host. This
+# is not a convenience: ansible's ssh transport authenticates with the key
+# files under ~/.ssh, and the control node writes its local scratch to
+# ~/.ansible/tmp (DEFAULT_LOCAL_TMP), neither of which exists in an image
+# running as an arbitrary uid.
+#
+# The agent socket rides along when there is one — OpenSSH reads it from
+# SSH_AUTH_SOCK with no -A, which covers a key that lives in an agent or a
+# hardware token rather than in ~/.ssh.
+TOOLS_CLIENT_HOME = -v $(HOME):$(HOME) \
+    -e HOME=$(HOME) \
+    $(if $(SSH_AUTH_SOCK),-v $(SSH_AUTH_SOCK):$(SSH_AUTH_SOCK) \
+        -e SSH_AUTH_SOCK=$(SSH_AUTH_SOCK),)
+
+# KUBECONFIG as the container sees it. k3s.mk exports the host path, and the
+# plays read it from the environment — `kubectl config current-context` in
+# deploy.yml's preflight, and the kubernetes.core modules behind it — so it
+# has to be remapped rather than inherited. A path outside the repo is passed
+# through unchanged: that tree is not mounted, and a missing file fails the
+# task instead of silently reaching a different cluster.
+TOOLS_CLIENT_KUBECONFIG = $(patsubst $(CURDIR)/%,$(TOOLS_CLIENT_WORKDIR)/%,$(KUBECONFIG))
+
+# What the container cannot infer about the host it is driving:
+#
+#   * USER, because the image has no passwd entry for the invoking uid and
+#     `id -un` there prints the number. group_vars/instances.yml reads the
+#     ssh user from lookup('env','USER'), so without this the ssh user
+#     becomes "1000".
+#   * HOST_IP, for the same lookup in that file, and because
+#     `-e ansible_host` alone would leave a second, empty spelling of it.
+#   * KUBECONFIG, per the mapping above.
+#   * ANSIBLE_CONFIG, because ansible searches ./ansible.cfg, then
+#     ~/.ansible.cfg, then /etc/ansible/ansible.cfg — and this repo keeps its
+#     config in ansible/ansible.cfg, which none of those find.
+TOOLS_CLIENT_ANSIBLE_ENV = -e USER=$(or $(USER),$(shell id -un)) \
+    -e HOST_IP=$(HOST_IP) \
+    -e KUBECONFIG=$(TOOLS_CLIENT_KUBECONFIG) \
+    -e ANSIBLE_CONFIG=$(TOOLS_CLIENT_WORKDIR)/ansible/ansible.cfg
+
+# Everything a bare ansible-playbook or ansible-inventory needs, for the call
+# sites in make/lint.mk that run the binaries with their own flags rather
+# than through $(ANSIBLE).
+TOOLS_CLIENT_ANSIBLE = docker run $(TOOLS_CLIENT_TTY) $(TOOLS_CLIENT_REPO) \
+    $(TOOLS_CLIENT_HOME) $(TOOLS_CLIENT_ANSIBLE_ENV) $(TOOLS_IMAGE_CLIENT)
+
 # Ansible looks for ansible.cfg in $PWD, then ~/.ansible.cfg, then
 # /etc/ansible/ansible.cfg. It does not look next to the playbook, so
 # `ansible-playbook ansible/deploy.yml`.
@@ -45,7 +132,13 @@ SSH_COMMON_ARGS=-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 # `--ask-become-pass` deliberately is NOT shared — it prompts every play it
 # touches (see ansible/README.md). Recursive (`=`), so `INSTANCE=` and
 # `HOST_IP=` on the command line still reach it.
-ANSIBLE = ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook \
+#
+# ansible-playbook runs inside the client image: the two collections, the
+# `kubernetes` client and ansible-core itself are baked in there, so the
+# control node needs nothing but docker. The environment is carried as `-e`
+# flags on the `docker run`: a `VAR=x cmd` prefix would set the variable for
+# the docker CLI process, not for the process inside the container.
+ANSIBLE = $(TOOLS_CLIENT_ANSIBLE) ansible-playbook \
           --limit $(INSTANCE) -e ansible_host=$(HOST_IP) ansible
 
 help:

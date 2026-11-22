@@ -7,7 +7,7 @@
   job pods, the slave-term interactive web terminal, slave-dind, the
   Argo workflow pods (command-handler's worker step, slave-test) and
   the dispatch sandbox pods. github-mirror-sync is deliberately not
-  one: it runs the shoggoth_tools alpine image and has no ccws cache
+  one: it runs the shoggoth_tools host image and has no ccws cache
   to share.
 
   Capacity: 30Gi (covers pip wheels + ccws cache state with headroom).

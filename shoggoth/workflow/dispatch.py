@@ -4,7 +4,7 @@
 Standalone CLI binary invoked by the ``dispatch`` step of the
 ``command-handler`` Argo WorkflowTemplate (see
 ``shoggoth/chart/files/argo/templates/command-handler.yaml``).
-The dispatcher runs in a ``shoggoth_tools:alpine`` pod with
+The dispatcher runs in a ``shoggoth_tools:host`` pod with
 kubectl and validates the inbound webhook event before deciding
 whether the worker step (``shoggoth.py <command>`` in a separate
 ``slave:noble`` pod) should run.

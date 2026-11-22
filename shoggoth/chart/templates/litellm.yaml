@@ -85,7 +85,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
       - name: render-config
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         env:
         - name: OLLAMA_CLOUD_TOKEN
@@ -126,7 +126,7 @@ spec:
           mountPath: /tmpl
           readOnly: true
       - name: wait-bootstrap
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         command:
         - bash

@@ -480,7 +480,7 @@ spec:
       {{- include "shoggoth.podDnsConfig" . | nindent 6 }}
       initContainers:
       - name: build-plugin
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         command:
         - sh
@@ -500,7 +500,7 @@ spec:
         - name: plugin-data
           mountPath: /data/plugin
       - name: render-config
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         command:
         - bash
@@ -552,7 +552,7 @@ spec:
         - name: rendered-config
           mountPath: /rendered
       - name: fix-permissions
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         command:
         - bash

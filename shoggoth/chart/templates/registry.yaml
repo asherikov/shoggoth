@@ -155,7 +155,7 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet
       initContainers:
       - name: cleanup-sync-staging
-        image: asherikov/shoggoth_tools:alpine
+        image: asherikov/shoggoth_tools:host
         imagePullPolicy: IfNotPresent
         command:
         - bash

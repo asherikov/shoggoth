@@ -1887,11 +1887,16 @@ second.
     `-e TMPDIR=/work/.tmp` — the repo's gitignored scratch directory. The
     directory survives the run, because `tmp.Clean()` only fires under
     `--clean`; keeping it under `.tmp` is what keeps the litter out of
-    `git status`. The default image is the `-slim` variant, which is
-    `FROM scratch` with one static binary: no shell, no git, no package
-    manager, so nothing in the pipeline can reach a remote by accident. (The
-    non-slim image pins `USER updatecli`, uid 1000, which would break the
-    in-place file rewrite for any other uid.)
+    `git status`. (The non-slim image pins `USER updatecli`, uid 1000, which
+    would break the in-place file rewrite for any other uid.) updatecli
+    therefore runs from the `client` stage of `shoggoth/dockerfiles/tools`,
+    which is built FROM alpine and has no `VOLUME /tmp` at all. That image
+    does carry curl, git and a shell, so what keeps the pipeline off the
+    network is the manifest rather than the base: `make/updatecli.yaml`
+    declares no `shell` or `git` resource and disables `scms.local`
+    outright, and its four action-version sources are the only ones that
+    touch the network at all. A new `source:` of another kind has to be
+    checked against that.
   - - **the honest cost: 41 `sources` + 42 `targets` (655 lines) for this
     tree**, against Renovate's two-line `extends` plus two `customManagers`.
     One source per image is not optional — a source emits one version, and a
@@ -2126,15 +2131,14 @@ against all 50 cached renders plus four mutations, the schema URLs confirmed
 live, the strict-mode and duplicate-key walks clean. A CEL compile error
 would surface on the first real `make helm_lint_kube_linter` run, loudly.
 
-It runs from its own container — `stackrox/kube-linter:v0.8.3-alpine`, pinned
-in `make/lint.mk` — so kube-linter is not a host install and docker is the
-prerequisite. The `-alpine` tag is load-bearing: the plain `v0.8.3` image is
-`FROM scratch` and carries no CA bundle, while kubeconform fetches its schemas
-over HTTPS and Go builds its root pool from `crypto/x509/root_linux.go`'s
-`certFiles`/`certDirectories`. Both images' manifests were pulled and their
-layers listed to confirm it — the scratch image has one layer and no `ssl`
-entries, the alpine image has the alpine base with
-`etc/ssl/certs/ca-certificates.crt`.
+It runs from the `client` stage of `shoggoth/dockerfiles/tools` — the binary is
+fetched from the upstream release asset, the version pinned in the Dockerfile's
+`ARG`s, and `make/lint.mk` spells the binary out because the image has no
+`ENTRYPOINT` — so kube-linter is not a host install and docker is the
+prerequisite. The schema check needs a CA bundle: kube-linter fetches its
+schemas over HTTPS and Go builds its root pool from
+`crypto/x509/root_linux.go`'s `certFiles`/`certDirectories`, which the stage
+satisfies with `ca-certificates` in its apk list.
 
 **The first real run failed, and the failure was not in the checks.**
 `make helm_lint_kube_linter` aborted at registration with

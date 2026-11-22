@@ -42,7 +42,7 @@ spec:
   templates:
   - name: sync
     container:
-      image: asherikov/shoggoth_tools:alpine
+      image: asherikov/shoggoth_tools:host
       imagePullPolicy: IfNotPresent
       command:
       - bash

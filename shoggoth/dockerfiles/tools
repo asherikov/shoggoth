@@ -1,5 +1,21 @@
+# Two images, one file. `--target tools` builds the in-cluster utility image
+# (`:host`); `--target client` builds the host-side toolchain (`:client`).
+#
+# WHY TWO AND NOT ONE. `:host` is pulled by 39 in-cluster workloads — the
+# chart's init containers, the argo workflow steps, the dispatcher's sandbox
+# pods — most of them with 16-64Mi memory limits and nothing to do but run
+# kubectl or chown a directory. Carrying the client toolchain there would put
+# a python 3.14 interpreter, graphviz with cairo/pango, the pygraphviz
+# extension and a 35 MB icon library into all of them, and would force the
+# base image off alpine:3.22 (see the python note on the client stage).
+#
+# The two stages are independent: `client` is FROM the alpine base, not FROM
+# `tools`, so the CI workflow builds them as two jobs and neither waits on
+# the other.
 ARG BASE_IMAGE=alpine:3.22
-FROM ${BASE_IMAGE}
+ARG CLIENT_BASE_IMAGE=alpine:3.24
+
+FROM ${BASE_IMAGE} AS tools
 
 RUN apk add --no-cache \
         bash \
@@ -30,3 +46,152 @@ ENV GIT_TERMINAL_PROMPT="0"
 # Python delays the log stream and reorders it against the step's own
 # output.
 ENV PYTHONUNBUFFERED="1"
+
+# ---------------------------------------------------------------------------
+# client — the host-side toolchain.
+#
+# Everything the Makefile would otherwise expect installed on the client
+# host: kube-linter, updatecli, KubeDiagrams (with the graphviz `dot` it
+# shells out to), ansible-core with its two collections and the `kubernetes`
+# client its modules import, kubectl and helm for the plays that run them on
+# the control node, and rsync for ansible.posix's `synchronize`.
+# `make helm_lint_kube_linter`, `make update`, `make clusterviz` and the
+# whole `ansible_*` / deploy family run these binaries through `docker run`,
+# so docker is the only prerequisite.
+#
+# alpine:3.24 and not 3.22, and this is not a preference: ansible-core 2.22
+# and later declare requires_python >= 3.13, and 3.22 ships 3.12.16 while
+# 3.24 ships 3.14.10. The bound is what rules 3.22 out — a version of
+# ansible-core old enough to run on 3.12 cannot run a module against a host
+# whose python3 is 3.15.
+#
+# No `pipx` and no venv: the image is the isolation. pip installs into the
+# system interpreter, which is what `ansible-playbook` on PATH runs.
+FROM ${CLIENT_BASE_IMAGE} AS client
+
+# Pinned, and bumped by `make update`: make/updatecli-images.yaml reads the
+# upstream release tag of each project and rewrites the line below, so a bump
+# lands here as a commit like every other pinned version in the tree. Each is
+# a deliberate upgrade — the regex/semver versionfilter there takes the whole
+# release tag, so a pre-release never reaches this file.
+ARG KUBE_LINTER_VERSION=v0.8.3
+ARG UPDATECLI_VERSION=v0.123.0
+ARG ANSIBLE_CORE_VERSION=2.22.0
+ARG KUBEDIAGRAMS_VERSION=0.9.0
+ARG DIAGRAMS_VERSION=0.25.1
+
+# graphviz is the runtime half of KubeDiagrams — `make clusterviz` pipes its
+# DOT into `dot -Tsvg:cairo`, which needs the cairo/pango plugins the package
+# pulls. rsync is what ansible.posix's `synchronize` runs on BOTH ends.
+# openssh-client is the control node's transport; ansible itself never
+# reaches a host any other way. `bash` is here for the interactive
+# `docker run -it ... bash` case, which is the point of the image.
+#
+# helm and kubectl are here because the plays run them as `command` tasks
+# delegated to the control node — deploy.yml's `helm upgrade --install` and
+# `kubectl apply`, down.yml's `helm uninstall`, and the `kubernetes.core.helm`
+# and `helm_template` modules, which shell out to the same binary. Running
+# ansible in an image without them would fail at the first helm call, so
+# moving the control node into the container moves these with it. Neither is
+# pinned: the version is whatever the base image ships, and no flag the plays
+# pass is version-specific.
+RUN apk add --no-cache \
+        bash \
+        ca-certificates \
+        curl \
+        graphviz \
+        helm \
+        kubectl \
+        openssh-client \
+        py3-cryptography \
+        py3-graphviz \
+        py3-jinja2 \
+        py3-jsonpatch \
+        py3-kubernetes \
+        py3-packaging \
+        py3-pip \
+        py3-puremagic \
+        py3-pygraphviz \
+        py3-resolvelib \
+        py3-yaml \
+        python3 \
+        rsync
+
+# The two static Go binaries, fetched from their release assets rather than
+# from a package manager: neither alpine's community repo nor any apk in
+# these images carries them, and both publish a single static amd64 binary
+# that needs nothing but libc.
+#
+# Both ARGs above carry the release tag verbatim, `v` included — the ARG
+# block and the two `matchpattern`s in make/updatecli-images.yaml that rewrite
+# it agree on that — so the URLs below spell them out whole and must not
+# prefix a second `v`.
+RUN curl -fsSL "https://github.com/stackrox/kube-linter/releases/download/${KUBE_LINTER_VERSION}/kube-linter-linux" \
+        -o /usr/local/bin/kube-linter \
+    && curl -fsSL "https://github.com/updatecli/updatecli/releases/download/${UPDATECLI_VERSION}/updatecli_Linux_x86_64.tar.gz" \
+        | tar -xz -C /usr/local/bin updatecli \
+    && chmod 0755 /usr/local/bin/kube-linter /usr/local/bin/updatecli
+
+# `diagrams` is installed first and with --no-deps, its two real imports
+# spelled out. Upstream 0.25.1 declares `pre-commit` as an unconditional
+# install_requires — a packaging bug, not a runtime need — and honouring it
+# drags nodeenv, virtualenv and cmd2 into a diagram tool. Installing it
+# before KubeDiagrams is what makes the trick work: pip does not recurse
+# into the dependencies of a package it finds already satisfied, so
+# KubeDiagrams sees diagrams present and never reads its metadata. Reversing
+# the two commands pulls pre-commit back in.
+#
+# What is left for pip is three packages, and each one is here because apk
+# cannot supply it:
+#
+#   * diagrams — no py3-diagrams package exists. It still needs --no-deps:
+#     upstream 0.25.1 declares `pre-commit` as an unconditional
+#     install_requires, a packaging bug rather than a runtime need, and
+#     honouring it drags nodeenv, virtualenv and cmd2 into a diagram tool.
+#     Its real imports — graphviz, jinja2, PyYAML — are already present from
+#     the apk list above, so --no-deps leaves nothing missing.
+#   * ansible-core — pinned, and the pin is load-bearing. Alpine's community
+#     repo ships 2.21.0, whose requires_python is >=3.12; 2.22.0 declares
+#     >=3.13, which is what rules alpine:3.22's python 3.12.16 out for this
+#     stage. A version old enough to accept 3.12 cannot run a module against
+#     a host whose python3 is 3.15, so the apk package is not usable here,
+#     and the version is bumped by make/updatecli-images.yaml instead of
+#     being followed from the repo.
+#   * KubeDiagrams — no py3-kubediagrams package exists. Its dependencies
+#     resolve against the apk list above (py3-yaml, py3-puremagic,
+#     py3-pygraphviz) plus graphviz2drawio and svg-path, both pure-python
+#     wheels.
+#
+# --break-system-packages because alpine's python3 ships PEP 668's
+# EXTERNALLY-MANAGED marker, and this is a deliberate system install: no venv
+# and no pipx, the image is the isolation and `ansible-playbook` on PATH runs
+# the interpreter these land in. Its dist-info is also what makes pip see the
+# apk-installed py3-* packages as already satisfied and skip them.
+#
+# The `kubernetes` client comes from apk rather than from here, and so do
+# `jsonpatch` and `requests-oauthlib` — kubernetes.core's requirements.txt
+# names those three, and `ansible-galaxy collection install` installs the
+# modules and never them. What matters is that the imports resolve when the
+# modules run, not which tool put them on disk. The collections themselves
+# come in the next step, because `ansible-galaxy` is a script ansible-core
+# installs and cannot run before it.
+RUN pip install --no-cache-dir --break-system-packages --no-deps \
+        diagrams==${DIAGRAMS_VERSION} \
+    && pip install --no-cache-dir --break-system-packages \
+        ansible-core==${ANSIBLE_CORE_VERSION} \
+        KubeDiagrams==${KUBEDIAGRAMS_VERSION}
+
+# The collections come from the repo's own requirements file rather than
+# from a second spelling of the versions: `make update` rewrites
+# ansible/requirements.yml, and a copy here would drift from it silently.
+#
+# They go to /usr/share/ansible/collections, a path in ansible's default
+# COLLECTIONS_PATHS, rather than to ~/.ansible/collections: the container
+# runs as the invoking uid, which has no passwd entry and therefore no home
+# directory that could hold them, and this path is searched on every run
+# regardless of who is running it.
+COPY ansible/requirements.yml /tmp/shoggoth-collections.yml
+RUN ansible-galaxy collection install \
+        --requirements-file /tmp/shoggoth-collections.yml \
+        --collections-path /usr/share/ansible/collections \
+    && rm -f /tmp/shoggoth-collections.yml

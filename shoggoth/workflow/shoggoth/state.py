@@ -36,7 +36,7 @@ secrets_store = SecretStore()
 #     ``dispatch`` step of the ``command-handler`` DAG),
 #     not via ``shoggoth.py``. The dispatcher has a different
 #     dependency surface (no agent, no git-cred sidecar) and
-#     runs in a separate ``shoggoth_tools:alpine`` pod.
+#     runs in a separate ``shoggoth_tools:host`` pod.
 #   * ``sandbox`` is the placeholder for the future /sandbox
 #     slash command; the dispatcher handles it via
 #     ``DispatchCommand._handle_sandbox`` (in
