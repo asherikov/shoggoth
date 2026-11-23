@@ -1,19 +1,21 @@
 # Two images, one file. `--target tools` builds the in-cluster utility image
-# (`:host`); `--target client` builds the host-side toolchain (`:client`).
+# (`:host`); `--target client` builds the host-side toolchain (`:client`)
+# layered on top of `:host`.
 #
 # WHY TWO AND NOT ONE. `:host` is pulled by 39 in-cluster workloads — the
 # chart's init containers, the argo workflow steps, the dispatcher's sandbox
 # pods — most of them with 16-64Mi memory limits and nothing to do but run
 # kubectl or chown a directory. Carrying the client toolchain there would put
 # a python 3.14 interpreter, graphviz with cairo/pango, the pygraphviz
-# extension and a 35 MB icon library into all of them, and would force the
-# base image off alpine:3.22 (see the python note on the client stage).
+# extension and a 35 MB icon library into all of them.
 #
-# The two stages are independent: `client` is FROM the alpine base, not FROM
-# `tools`, so the CI workflow builds them as two jobs and neither waits on
-# the other.
-ARG BASE_IMAGE=alpine:3.22
-ARG CLIENT_BASE_IMAGE=alpine:3.24
+# alpine:3.24 and not 3.22, and this is not a preference: ansible-core 2.22
+# and later declare requires_python >= 3.13, and 3.22 ships 3.12.16 while
+# 3.24 ships 3.14.10. The bound is what rules 3.22 out — a version of
+# ansible-core old enough to run on 3.12 cannot run a module against a host
+# whose python3 is 3.15. `:client` is built FROM `:host`, so this bound
+# applies to the one shared base.
+ARG BASE_IMAGE=alpine:3.24
 
 FROM ${BASE_IMAGE} AS tools
 
@@ -59,15 +61,9 @@ ENV PYTHONUNBUFFERED="1"
 # whole `ansible_*` / deploy family run these binaries through `docker run`,
 # so docker is the only prerequisite.
 #
-# alpine:3.24 and not 3.22, and this is not a preference: ansible-core 2.22
-# and later declare requires_python >= 3.13, and 3.22 ships 3.12.16 while
-# 3.24 ships 3.14.10. The bound is what rules 3.22 out — a version of
-# ansible-core old enough to run on 3.12 cannot run a module against a host
-# whose python3 is 3.15.
-#
 # No `pipx` and no venv: the image is the isolation. pip installs into the
 # system interpreter, which is what `ansible-playbook` on PATH runs.
-FROM ${CLIENT_BASE_IMAGE} AS client
+FROM tools AS client
 
 # Pinned, and bumped by `make update`: make/updatecli-images.yaml reads the
 # upstream release tag of each project and rewrites the line below, so a bump
@@ -190,8 +186,11 @@ RUN pip install --no-cache-dir --break-system-packages --no-deps \
 # runs as the invoking uid, which has no passwd entry and therefore no home
 # directory that could hold them, and this path is searched on every run
 # regardless of who is running it.
-COPY ansible/requirements.yml /tmp/shoggoth-collections.yml
-RUN ansible-galaxy collection install \
+#
+# Bind-mounted rather than COPYed: the file is only an input to this step,
+# so a COPY would leave it in a layer for the `rm -f` to whiteout, and the
+# mount keeps it out of the image entirely.
+RUN --mount=type=bind,target=/tmp/shoggoth-collections.yml,source=ansible/requirements.yml \
+    ansible-galaxy collection install \
         --requirements-file /tmp/shoggoth-collections.yml \
-        --collections-path /usr/share/ansible/collections \
-    && rm -f /tmp/shoggoth-collections.yml
+        --collections-path /usr/share/ansible/collections

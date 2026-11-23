@@ -27,6 +27,11 @@ jobs:
                   platforms: linux/amd64
                   provenance: false
     docker_client:
+        # `client` is FROM the `tools` stage, so the host image is built and
+        # pushed first: the pair lands on Docker Hub in dependency order,
+        # and a broken tools stage fails fast instead of racing the client
+        # build on a second runner.
+        needs: docker_tools
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v7
