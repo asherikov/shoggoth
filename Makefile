@@ -64,9 +64,11 @@ TOOLS_CLIENT_TTY = $$([ -t 0 ] && printf -- -it || printf -- -i)
 # So each site spells `$(TOOLS_CLIENT_RUN) <its flags> $(TOOLS_IMAGE_CLIENT)
 # <command>`, which also makes visible which image runs what.
 #
-# No network namespace of its own: the schema check in make/lint.mk fetches
-# its JSON schemas over HTTPS. The invoking uid, so nothing the container
-# writes lands root-owned in the tree.
+# Bridge networking: the container has its own namespace and reaches the
+# internet through NAT, which is all make/lint.mk's schema fetch and
+# `make update` need. The ansible family is the exception and adds
+# `--network host` — see $(TOOLS_CLIENT_ANSIBLE) for why. The invoking
+# uid, so nothing the container writes lands root-owned in the tree.
 TOOLS_CLIENT_RUN = docker run --rm --user "$$(id -u):$$(id -g)"
 
 # The repo itself, read-write: `make update` rewrites pinned versions through
@@ -81,11 +83,24 @@ TOOLS_CLIENT_REPO = -v $(CURDIR):$(TOOLS_CLIENT_WORKDIR) -w $(TOOLS_CLIENT_WORKD
 # ~/.ansible/tmp (DEFAULT_LOCAL_TMP), neither of which exists in an image
 # running as an arbitrary uid.
 #
+# The passwd/group databases ride along too, and they are load-bearing rather
+# than incidental. OpenSSH resolves the home directory with
+# getpwuid(getuid()), NOT from $HOME — verified: `HOME=/tmp/x ssh -G host`
+# still prints userknownhostsfile under the passwd entry's home, not /tmp/x.
+# The image carries no entry for the invoking uid, so without these mounts
+# every ssh aborts before it opens a socket with "No user exists for uid
+# <uid>" when it expands ~/.ssh/config — the undelegated host_state tasks and
+# the synchronize task's `rsync --rsh ssh` alike. The host's databases resolve
+# the invoking uid to the home just mounted, which is the one place ~/.ssh
+# actually is. Read-only: nothing in the container writes them.
+#
 # The agent socket rides along when there is one — OpenSSH reads it from
 # SSH_AUTH_SOCK with no -A, which covers a key that lives in an agent or a
 # hardware token rather than in ~/.ssh.
 TOOLS_CLIENT_HOME = -v $(HOME):$(HOME) \
     -e HOME=$(HOME) \
+    -v /etc/passwd:/etc/passwd:ro \
+    -v /etc/group:/etc/group:ro \
     $(if $(SSH_AUTH_SOCK),-v $(SSH_AUTH_SOCK):$(SSH_AUTH_SOCK) \
         -e SSH_AUTH_SOCK=$(SSH_AUTH_SOCK),)
 
@@ -117,8 +132,22 @@ TOOLS_CLIENT_ANSIBLE_ENV = -e USER=$(or $(USER),$(shell id -un)) \
 # Everything a bare ansible-playbook or ansible-inventory needs, for the call
 # sites in make/lint.mk that run the binaries with their own flags rather
 # than through $(ANSIBLE).
-TOOLS_CLIENT_ANSIBLE = docker run $(TOOLS_CLIENT_TTY) $(TOOLS_CLIENT_REPO) \
-    $(TOOLS_CLIENT_HOME) $(TOOLS_CLIENT_ANSIBLE_ENV) $(TOOLS_IMAGE_CLIENT)
+#
+# `--network host` is load-bearing, not a convenience: the control node has
+# to be the host on the network. `tunnel_up` forwards the k3s API to the
+# HOST's loopback (`ssh -L 6443:127.0.0.1:6443`), kubeconfig.yml writes the
+# host's k3s.yaml verbatim and its server is `https://127.0.0.1:6443`, and
+# every task in the plays is `delegate_to: localhost` — which, since the
+# control node moved into this image, is the container. In a namespace of
+# its own that address is the container itself, nothing listens on it, and
+# every helm/kubectl call dies with "connection refused"; sharing the
+# host's is what makes the forward, the hostNetwork services (the registry
+# drop_image_tag.yml talks to) and the host's own name resolution
+# reachable. The prefix is $(TOOLS_CLIENT_RUN), the same one the other
+# client-image sites build on.
+TOOLS_CLIENT_ANSIBLE = $(TOOLS_CLIENT_RUN) $(TOOLS_CLIENT_TTY) --network host \
+    $(TOOLS_CLIENT_REPO) $(TOOLS_CLIENT_HOME) $(TOOLS_CLIENT_ANSIBLE_ENV) \
+    $(TOOLS_IMAGE_CLIENT)
 
 # Ansible looks for ansible.cfg in $PWD, then ~/.ansible.cfg, then
 # /etc/ansible/ansible.cfg. It does not look next to the playbook, so

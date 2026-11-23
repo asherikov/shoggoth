@@ -22,6 +22,7 @@ jobs:
                   context: .
                   #push: ${{ startsWith(github.ref, 'refs/tags/') }}
                   push: true
+                  target: tools
                   tags: asherikov/shoggoth_tools:host
                   platforms: linux/amd64
                   provenance: false

@@ -14,7 +14,18 @@
 #   repull — GET the same path. zot's on-demand sync extension sees the
 #            manifest miss, fetches the image from the upstream
 #            registries (probed in the order configured in the registry
-#            ConfigMap: docker.io first) and re-caches it.
+#            ConfigMap: docker.io first) and re-caches it. The sync runs
+#            on a context detached from the request (3h budget), so it
+#            commits even after the client gives up: a client timeout is
+#            not a sync failure, and the script waits it out instead of
+#            failing the step. A single-arch image manifest is answered
+#            only once the whole image has been copied; an index/list
+#            (multi-arch) is answered as soon as its root manifest is
+#            cached, with the per-arch children left uncached — so the
+#            script then GETs every child manifest by digest, each
+#            driving a full per-arch sync. A 200 for the root alone
+#            proves only that the manifest list is cached, not that the
+#            image was pulled.
 # This is the tool for refreshing floating tags — e.g. after rebuilding
 # asherikov/shoggoth_tools:host and pushing the same tag upstream. The
 # deleted tag's unreferenced blobs are reclaimed by zot's GC
@@ -46,7 +57,9 @@ spec:
   entrypoint: run
   # Covers delay + evict + repull. The suspend step costs nothing, so
   # this only bounds how far ahead a submit may schedule itself; a
-  # submit whose delay exceeds it fails when the deadline passes.
+  # submit whose delay exceeds it fails when the deadline passes. It is
+  # also the outer bound on repull: each manifest request may wait up
+  # to SHOGGOTH_REGISTRY_PULL_WAIT for zot's detached sync to commit.
   activeDeadlineSeconds: 86400
   arguments:
     parameters:
@@ -64,7 +77,7 @@ spec:
     # anywhere in this template.
     - name: images
       description: "Comma-separated image refs in local registry form (no registry host), e.g. asherikov/shoggoth_tools:host,project-zot/zot:v2.1.23. Missing tag means latest; repo@sha256:... digests work. Resolved against the configured upstreams in order (docker.io first)."
-      value: "asherikov/shoggoth_tools:host,asherikov/ccws:jammy,asherikov/ccws:noble,asherikov/ccws:resolute"
+      value: "asherikov/shoggoth_tools:host,asherikov/shoggoth_tools:client,asherikov/ccws:jammy,asherikov/ccws:noble,asherikov/ccws:resolute"
     - name: delay
       description: "Go duration to wait before running: 30s, 10m, 2h. Must be shorter than the 24h activeDeadlineSeconds. 0s runs immediately. While suspended the workflow can be resumed early from the UI."
       value: "0s"
@@ -143,6 +156,14 @@ spec:
         value: "{{inputs.parameters.action}}"
       - name: SHOGGOTH_REGISTRY_IMAGES
         value: "{{workflow.parameters.images}}"
+      # Total seconds one manifest request -- the tag itself, or one
+      # index child fetched to materialize a multi-arch image -- may
+      # take: the script's first 600s attempt plus the wait for zot's
+      # detached on-demand sync to commit (zot's own sync budget is 3h).
+      # Matches the script default; raise it for slower upstream links.
+      # The workflow's activeDeadlineSeconds stays the outer bound.
+      - name: SHOGGOTH_REGISTRY_PULL_WAIT
+        value: "11400"
       volumeMounts:
       # The volume itself is a workflow-level default injected by
       # workflowDefaults' `volumes:` (chart/templates/argo-workflows.yaml)

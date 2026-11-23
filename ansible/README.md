@@ -81,14 +81,19 @@ up in `$PWD`, `~/.ansible.cfg` and `/etc/ansible/ansible.cfg` — **not** next t
 the playbook — and ignored silently otherwise (`config file = None`, then "no
 inventory was parsed", then "could not match supplied host pattern");
 `kubectl`/`helm`/`k8s_info` read `KUBECONFIG` from the environment, and both
-binaries live in the image, so the path has to be the container's; and the
+binaries live in the image, so the path has to be the container's; the
 container runs as the caller's uid with no passwd entry, so `USER` must be
-passed explicitly or `group_vars` reads `lookup('env','USER')` as the number.
+passed explicitly or `group_vars` reads `lookup('env','USER')` as the number;
+and the container needs `--network host`, because the control node IS the host
+on the network — the plays reach the cluster at `127.0.0.1:6443` through
+`tunnel_up`'s forward on the host's loopback, and the kubeconfig they read is
+the host's verbatim.
 
 ```sh
-docker run --rm -it --user "$(id -u):$(id -g)" \
+docker run --rm -it --network host --user "$(id -u):$(id -g)" \
     -v "$PWD:/work" -w /work \
     -v "$HOME:$HOME" -e HOME="$HOME" -e USER="$(id -un)" \
+    -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
     -e HOST_IP=203.0.113.10 \
     -e KUBECONFIG=/work/private/kubeconfig \
     -e ANSIBLE_CONFIG=/work/ansible/ansible.cfg \
@@ -98,8 +103,17 @@ docker run --rm -it --user "$(id -u):$(id -g)" \
 
 `$HOME` is mounted at the same path because ansible reads the ssh keys from
 there, the agent socket travels with it, and `DEFAULT_LOCAL_TMP` is
-`~/.ansible/tmp`. `-it` is only what makes the become prompt readable — the
-make targets drop it when stdin is not a tty.
+`~/.ansible/tmp`. That is the CONTROLLER's staging dir; the one on the TARGET
+is `remote_tmp`, which `ansible.cfg` pins to `/tmp/.ansible/tmp` because the
+default `~/.ansible/tmp` cannot expand for a uid the container has no passwd
+entry for — the note in that file has the mechanism. The host's `/etc/passwd`
+and `/etc/group` are mounted read-only for the same reason OpenSSH needs them:
+`ssh` resolves the home directory for `~/.ssh` with `getpwuid(getuid())` and
+ignores `$HOME`, so without an entry for the invoking uid every ssh — the
+undelegated `host_state` tasks and the `synchronize` task's rsync alike — dies
+with `No user exists for uid <uid>` before it opens a socket. `-it` is only
+what makes the become prompt readable — the make targets drop it when stdin is
+not a tty.
 
 ## The plays
 
