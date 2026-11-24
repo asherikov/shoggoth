@@ -6,22 +6,20 @@
   and `services.gitea-runner.enabled`), so either can be toggled independently
   via its own values key.
 
-  Each service's resources are gated on its OWN key. An earlier version gated
-  the whole file on the union of the two, on the stated grounds that the two
-  Deployments share a PVC and ConfigMap. They do not: gitea-runner mounts only
+  Each service's resources are gated on its OWN key. The two Deployments
+  share no PVC and no ConfigMap: gitea-runner mounts only
   `gitea-runner-templates`, `shoggoth-render-config` and `shoggoth-shared-cache`
-  — never `gitea-data` nor `gitea-init`. The union therefore meant nothing ever
-  read `services.gitea.enabled`, so disabling that key printed success
+  — never `gitea-data` nor `gitea-init`. A union gate would mean nothing ever
+  read `services.gitea.enabled`, so disabling that key would print success
   while Deployment/gitea and Service/git kept serving (the gitea
   ExternalSecrets live in their own templates, gated on `gitea` alone, so they
-  did disappear — a half-stopped release). The runner reaches the server over
+  would disappear — a half-stopped release). The runner reaches the server over
   the network via GITEA_INSTANCE_URL, not through a shared mount, so the two
   Deployments have no storage coupling to preserve.
 
   BOOTSTRAP: THE POSTSTART HOOK, NOT A SEPARATE WORKLOAD. There is no
-  `gitea-bootstrap` and no `gitea-render-config` in this chart — those names
-  survived from an earlier layout and match nothing that exists. Everything
-  the gitea Deployment needs beyond its GITEA__* env is done by the
+  `gitea-bootstrap` and no `gitea-render-config` in this chart. Everything the
+  gitea Deployment needs beyond its GITEA__* env is done by the
   `gitea-init` ConfigMap's init.sh, run as the gitea container's own
   postStart hook (see `lifecycle` below), which:
     - waits for `gitea admin auth list` to answer,
@@ -114,9 +112,9 @@ data:
         | awk -v name="openldap" '$2 == name {print $1; exit}')"
     # The user_filter must exclude the three infrastructure accounts
     # (``admin``, ``ldapauth``, ``config-admin``) — the workflow
-    # script's ``Ldap.EXCLUDED_LOGINS`` tuple. Gitea 1.x does not
+    # script's ``Ldap.EXCLUDED_LOGINS`` tuple. Gitea does not
     # expose the LDAP source list/patch endpoints over its v1 API
-    # (verified against ``routers/api/v1/api.go`` v1.21/v1.22/v1.27),
+    # (verified against ``routers/api/v1/api.go``),
     # so this static filter is the authoritative source: it is
     # applied at first install (``add-ldap``) and re-applied on
     # every gitea pod start (``update-ldap``). The workflow's
@@ -201,9 +199,9 @@ data:
     # upgrade` restarts every pod in the release, which makes that race the
     # normal case rather than the exception, so the registration is retried
     # here instead of being attempted exactly once. Re-reading the source list
-    # each attempt is what makes the retry safe in both directions: a row that
-    # survived from an earlier start is updated, and one that the rollback
-    # deleted is added again.
+    # each attempt is what makes the retry safe in both directions: a row
+    # already in the database is updated, and a row the rollback deleted is
+    # added again.
     OAUTH_REGISTERED=0
     for OAUTH_ATTEMPT in $(seq 1 30); do
         OAUTH_EXISTING="$(su-exec git gitea admin auth list 2>/dev/null \
@@ -264,9 +262,9 @@ data:
     # ever claiming it — and `admin` is excluded from the source's
     # user_filter, so the local account and the directory entry never collide.
     #
-    # A failure here is fatal, and deliberately so: the old `|| echo` fallback
-    # hid it, which is how the "admin user not found yet" case survived into a
-    # deployment where the password was never applied at all.
+    # A failure here is fatal, and deliberately so: a `|| echo` fallback
+    # would hide it, and the account would end up present with a password
+    # nobody ever applied.
     if su-exec git gitea admin user create \
         --username admin \
         --email "admin@${SHOGGOTH_DOMAIN}" \
@@ -399,7 +397,7 @@ spec:
           value: noreply.git.{{ .Values.identity.domain }}
         # ALLOWED_HOST_LIST belongs to [security]: [webhook].ALLOWED_HOST_LIST is
         # the deprecated spelling — Gitea logs a deprecation warning on every
-        # start (modules/setting/webhook.go) and drops the fallback in v28.0.0.
+        # start (modules/setting/webhook.go).
         # The effective value is unchanged: [webhook] wins when present, and
         # otherwise falls back to [security].
         - name: GITEA__security__ALLOWED_HOST_LIST
@@ -457,8 +455,8 @@ spec:
         # Setting it explicitly rather than trusting that default is what
         # makes the value survive an app.ini that already carries
         # ENABLE_OPENID_SIGNIN = true. The s6 setup renders app.ini from
-        # /etc/templates/app.ini only when the file is absent, so a volume
-        # created before this key was pinned keeps whatever it had, and
+        # /etc/templates/app.ini only when the file is absent, so an app.ini
+        # that already carries the true value keeps it, and
         # `environment-to-ini` (`gitea config edit-ini --in-place
         # --apply-env`, docker/root/usr/local/bin) is the only thing that
         # rewrites it on every container start —
@@ -763,16 +761,15 @@ data:
       # slave-dind's git-cred sidecar initialises; the matching bind mount
       # of /shoggoth/git-cred into the container is what `container.valid_volumes`
       # (below) authorises. SSH_AUTH_SOCK is set in the slave Dockerfile ENV
-      # block. GITEA_INSTANCE_SSH_HOST was dropped (unused — same value as
-      # GITEA_SSH_HOST).
+      # block. GITEA_INSTANCE_SSH_HOST is not set: it is unused, and it
+      # would carry the same value as GITEA_SSH_HOST.
       envs:
         RUNNER_TOOL_CACHE: /toolcache
         GITEA_SSH_HOST: git.{{ .Values.identity.domain }}
         # GITEA_SERVER_URL is the direct service form, not the gateway
-        # path. Baking `http://api/gitea` into the slave image's ENV block
-        # broke every workflow step that calls the Gitea API: Angie has
+        # path. The gateway path does not work: Angie has
         # `server_name api.${DOMAIN}` (not `server_name api`), so
-        # Host=`api` fell through to the default_server 404. The direct
+        # Host=`api` falls through to the default_server 404. The direct
         # form matches what the argo maintenance template wires
         # (chart/files/argo/templates/maintenance.yaml), so spawned job
         # containers that import shoggoth.py can build `api_url` without

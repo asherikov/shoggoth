@@ -5,9 +5,11 @@
 
   Paired with ``redmine-slave-token.yaml``: the ``slave_token_init.rb``
   post-deploy hook writes a fresh token into the K8s Secret, this
-  PushSecret mirrors it to OpenBao. The corresponding ``ExternalSecret``
-  has ``creationPolicy: Orphan`` + ``refreshInterval: 0s`` so it does
-  not race the script's write.
+  PushSecret mirrors it to OpenBao — the only writer that goes *out*. The
+  corresponding ``ExternalSecret`` has ``creationPolicy: Orphan`` +
+  ``refreshInterval: 0s`` so it does not race the script's write; the
+  credential shape is documented in README.md, "Chart template
+  conventions".
 
   Gated on ``secret-store-write``: the PushSecret itself requires the
   write SecretStore to be enabled.

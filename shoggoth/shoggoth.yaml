@@ -11,9 +11,9 @@
 # omitted here falls back to that default. Ports are quoted strings to match
 # the chart's own types.
 #
-# The pre-chart `shoggoth.env` remains only for host-install rendering
-# (shoggoth.nix, ports.nix via envsubst at install time). It is no longer a
-# source for anything Helm reads.
+# The host-install rendering (shoggoth.nix and ports.nix, via envsubst at
+# install time) is the one other consumer of these values, and it reads them
+# out of this file as well.
 
 identity:
   # Also SHOGGOTH_DOMAIN for pods; the domain every service is reachable at.

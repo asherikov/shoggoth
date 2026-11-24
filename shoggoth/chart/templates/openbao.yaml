@@ -399,10 +399,8 @@ data:
             base64:*) ;;
             *)
                 # A value is only migratable when its remainder really is
-                # base64-of-32-bytes. The pre-Helm bootstrap wrote a raw
-                # 32-character alphanumeric key (its own renderer applied the
-                # prefix at render time), and 32 base64-alphabet characters
-                # decode cleanly to 24 bytes — prefixing that produces a key
+                # base64-of-32-bytes. A raw 32-character alphanumeric key
+                # decodes cleanly to 24 bytes — prefixing that produces a key
                 # Laravel rejects outright. Only a remainder that decodes to
                 # exactly 32 bytes needs the prefix added.
                 if [ "$(printf '%s' "${app_key}" | base64 -d 2>/dev/null | wc -c)" -eq 32 ]; then
@@ -541,13 +539,13 @@ data:
     done
 
     # === Phase B.5: drop the stale auth/ldap mount (idempotent) ===
-    # OpenBao >= 2.7 no longer bundles the LDAP auth engine (it moved to the
+    # OpenBao >= 2.7 does not bundle the LDAP auth engine (it ships as the
     # external openbao-plugin-auth-ldap, openbao GH-3882), so an auth/ldap
-    # mount persisted by an older version can never be set up again: every
-    # unseal logs "plugin not found in the catalog: ldap" and skips the
-    # entry. Remove it once. A mount that is already absent is not an
-    # error, and a failure here is not fatal either — nothing authenticates
-    # through auth/ldap, so a leftover entry only costs log noise.
+    # mount persisted on the PVC can never be set up again: every unseal logs
+    # "plugin not found in the catalog: ldap" and skips the entry. Remove it
+    # once. A mount that is already absent is not an error, and a failure here
+    # is not fatal either — nothing authenticates through auth/ldap, so a
+    # leftover entry only costs log noise.
     phase "Phase B.5: disabling stale auth/ldap mount"
     if code=$(curl -sS --max-time 10 -o /tmp/bao-ldap-disable.json -w '%{http_code}' \
         -X DELETE \
@@ -580,8 +578,8 @@ data:
     # oidc, radius. That array is what the login page's "Method" dropdown
     # renders (ui/app/components/auth-form.js, authMethods/methodsToShow), so
     # the page advertises five methods that are not configured, three of
-    # which cannot be mounted in this image at all: ldap and radius left the
-    # binary with openbao GH-3882 (see the auth/ldap removal above), and
+    # which cannot be mounted in this image at all: ldap and radius are out of
+    # the binary with openbao GH-3882 (see the auth/ldap phase above), and
     # userpass/jwt/oidc are simply not enabled.
     #
     # Making the one real mount visible gives the UI a non-empty list, which
@@ -597,7 +595,7 @@ data:
     # a POST on a config value, not a create. auth/token is also not in
     # untunableMounts (internal/vault/mount.go), so the request is accepted.
     # It is cosmetic: a failure costs the dropdown and nothing else, so it
-    # is logged rather than fatal, matching the auth/ldap removal above.
+    # is logged rather than fatal, matching the auth/ldap phase above.
     phase "Phase B.5: exposing auth/token in the unauthenticated mount listing"
     if code=$(curl -sS --max-time 10 -o /tmp/bao-token-tune.json -w '%{http_code}' \
         -X POST "${OPENBAO_ADDR}/v1/sys/auth/token/tune" \
@@ -736,12 +734,11 @@ data:
 
     ESO_READ_TOKEN_B64="$(kubectl get secret -n "${NAMESPACE}" shoggoth-openbao-eso-read-token -o jsonpath='{.data.token}' 2>/dev/null || true)"
     # A Secret outliving the OpenBao that minted its token is the one
-    # failure mode here that used to have no self-healing path: the
-    # token is still in the Secret, OpenBao is healthy, and the ESO
-    # controller cannot authenticate ("unable to validate store"), so
-    # every ExternalSecret of the release stops being projected until
-    # somebody deletes the Secret by hand. Validating the stored token
-    # against THIS OpenBao turns that into a re-mint.
+    # failure mode this phase self-heals: the token is still in the
+    # Secret, OpenBao is healthy, and the ESO controller cannot
+    # authenticate ("unable to validate store"), so every ExternalSecret
+    # of the release stops being projected until the Secret is re-minted.
+    # Validating the stored token against THIS OpenBao is what does that.
     if [ -n "${ESO_READ_TOKEN_B64}" ] && ! bao_token_usable "${ESO_READ_TOKEN_B64}"; then
         log "Phase B.5: the stored shoggoth-openbao-eso-read-token is not valid in this OpenBao — re-minting"
         ESO_READ_TOKEN_B64=""
@@ -789,8 +786,8 @@ data:
     # this same SecretStore — stayed Ready. Adding a PushSecret means adding
     # two lines here; nothing checks that they were added.
     #
-    # What the external-secrets Vault client (v2.11.0,
-    # ``providers/v1/vault/client_push.go``) actually does, in order:
+    # What the external-secrets Vault client
+    # (``providers/v1/vault/client_push.go``) actually does, in order:
     #
     #   1. ``GET /v1/secret/data/<path>`` — unconditional, and the FIRST
     #      request of every push whether or not the remote secret exists. It
@@ -832,11 +829,11 @@ data:
     # Idempotency: keep the token in the K8s Secret if it is still a
     # token THIS OpenBao accepts. The check is a live lookup-self call
     # (see bao_token_usable): the Secret can hold a token that the
-    # instance does not know any more — a re-initialised OpenBao has a
-    # fresh token store — and the PushSecret controller then fails every
-    # write with a 403 that reads like a policy problem. Re-minting the
-    # dead token is the self-healing path that used to require deleting
-    # the Secret by hand.
+    # instance does not accept — a re-initialised OpenBao has a fresh
+    # token store — and the PushSecret controller then fails every write
+    # with a 403 that reads like a policy problem. Re-minting the dead
+    # token is what the lookup-self check buys: without it the only
+    # repair is deleting the Secret by hand.
     ESO_WRITE_TOKEN_B64="$(kubectl get secret -n "${NAMESPACE}" shoggoth-openbao-eso-write-token -o jsonpath='{.data.token}' 2>/dev/null || true)"
     if [ -n "${ESO_WRITE_TOKEN_B64}" ] && ! bao_token_usable "${ESO_WRITE_TOKEN_B64}"; then
         log "Phase B.5: the stored shoggoth-openbao-eso-write-token is not valid in this OpenBao — re-minting"
@@ -998,18 +995,17 @@ data:
     log "Phase D: done (wrote shoggoth-ca + shoggoth-server K8s Secrets)"
 
     # === Phase E: Authelia as the OIDC auth backend (auth/oidc) ===
-    # Phase B.5 removed the LDAP backend that mapped the directory's admins
-    # group onto shoggoth-admin and left the token method in its place,
-    # which is not something an operator types into a browser. This phase
-    # restores a browser login by pointing the OIDC auth engine at
-    # Authelia, which is a standard OIDC provider
+    # Phase B.5 leaves the token method in place of the LDAP backend that
+    # mapped the directory's admins group onto shoggoth-admin, and a token
+    # is not something an operator types into a browser. This phase points
+    # the OIDC auth engine at Authelia, which is a standard OIDC provider
     # (identity_providers.oidc in authelia-config.yaml).
     #
     # The engine is BUILT IN, not a plugin to fetch:
     # internal/helper/builtinplugins/registry.go registers "oidc" with the
     # same credJWT.Factory as "jwt", so the mount is available the moment
     # the binary is. That is the difference from the ldap/radius/kerberos
-    # trio openbao GH-3882 moved out of the image (see Phase B.5), and the
+    # trio openbao GH-3882 ships out of the image (see Phase B.5), and the
     # reason this phase has no catalog entry to check.
     #
     # WHY THIS PHASE NEEDS NO AUTHELIA REACHABILITY
@@ -1170,8 +1166,9 @@ data:
     # authelia-config.yaml lists the same URI; the two files cannot drift
     # without one of them failing loudly.
     #
-    # bound_claims is the authorization rule and it is the rule the removed
-    # LDAP backend had: only the directory's admins group gets in.
+    # bound_claims is the authorization rule and it carries the
+    # restriction the LDAP backend enforced: only the directory's admins
+    # group gets in.
     # validateBoundClaims normalises both sides to lists (claims.go
     # normalizeList) and accepts any actual value equal to any expected
     # one, so a member of admins passes and anyone else fails with

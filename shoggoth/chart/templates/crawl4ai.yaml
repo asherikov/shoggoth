@@ -1,8 +1,7 @@
 {{- /*
   templates/crawl4ai.yaml — Crawl4AI web page fetcher with its built-in MCP
-  server. Consumed by litellm via the API gateway: the mcp_servers entry in
-  the rendered litellm config points at http://crawl4ai:80/mcp/sse and
-  authenticates with Secret/crawl4ai-token (templates/crawl4ai-token.yaml).
+  server. Consumed by litellm via the API gateway, which authenticates with
+  Secret/crawl4ai-token (templates/crawl4ai-token.yaml).
 
   CRAWL4AI_API_TOKEN is load-bearing: the image's entrypoint binds
   127.0.0.1 when no credential is present and refuses the all-interfaces

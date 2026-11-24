@@ -24,9 +24,9 @@ this (by the DNS naming spec, the same limit the instance name is held to).
 {{- end -}}
 
 {{/*
-Canonical shoggoth labels. Preserves the existing `app:` label convention
-from k3s/*.yaml so a per-service selector (`kubectl get pod -l app=foo`)
-keeps working unchanged.
+Canonical shoggoth labels. Carries an `app:` label alongside the
+app.kubernetes.io set, so a per-service selector (`kubectl get pod -l
+app=foo`) keeps working.
 */}}
 {{- define "shoggoth.labels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}

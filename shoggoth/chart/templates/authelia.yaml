@@ -2,9 +2,9 @@
   templates/authelia.yaml — the Authelia SSO portal (ServiceAccount, Service,
   Deployment).
 
-  GATE: services.authelia.enabled. Everything below, including the config
-  split out into authelia-config.yaml and the ExternalSecret in
-  authelia-secrets.yaml, disappears when the flag is false.
+  GATE: services.authelia.enabled. Everything below, including the config in
+  authelia-config.yaml and the ExternalSecret in authelia-secrets.yaml,
+  disappears when the flag is false.
 
   WHAT IT CONSUMES
     ConfigMap authelia-config    (this chart, authelia-config.yaml)
@@ -27,8 +27,8 @@
   number must both stay in sync with the Service's targetPort).
 
   WHY THERE IS A PVC
-  The portal's state is not recreatable by logging in again, which is what
-  the emptyDir an earlier revision mounted here assumed. The OIDC opaque
+  The portal's state is not recreatable by logging in again, so a data
+  directory that starts empty on every pod start loses it. The OIDC opaque
   identifiers are the part a login cannot repair: Store.GetSubject
   (internal/oidc/store.go) resolves a user's `sub` through
   LoadUserOpaqueIdentifierBySignature("openid", sector, username) and, when
@@ -46,13 +46,13 @@
   lost the same way, which is a latent cost rather than a current one — totp
   and webauthn are disabled here.
 
-  The PVC is also what makes the storage path durable in the sense the
-  emptyDir only faked. The image runs as root (PUID=0/PGID=0, no USER
-  directive) and the entrypoint chowns /config, but nothing in the image
-  creates or chowns a data directory of the chart's choosing, so the mount
-  has to exist before the process starts — a bound volume does, and the
-  local-path provisioner's directory is root-owned, so the same root
-  context that writes the SQLite file can write it there.
+  The PVC is also what makes the storage path durable. The image runs as
+  root (PUID=0/PGID=0, no USER directive) and the entrypoint chowns
+  /config, but nothing in the image creates or chowns a data directory of
+  the chart's choosing, so the mount has to exist before the process
+  starts — a bound volume does, and the local-path provisioner's directory
+  is root-owned, so the same root context that writes the SQLite file can
+  write it there.
 
   helm.sh/resource-policy: keep, matching gitea-data and every other PVC in
   the chart: `helm uninstall` stops the workload and preserves the
@@ -72,7 +72,7 @@
   AUTHELIA_PORT_443_TCP{,_PROTO,_PORT,_ADDR}. Authelia's environment loader
   reads that exact prefix — getEnvConfigMap builds its key map from
   AUTHELIA_ + the uppercased config key — so AUTHELIA_PORT is not noise to it.
-  It lands on the deprecated top-level `port` key (deprecated in 4.30.0,
+  It lands on the deprecated top-level `port` key (deprecated,
   auto-mapped to server.port), and server.port next to the server.address
   this chart sets is fatal: "error occurred performing deprecation mapping
   for keys 'server.host', 'server.port', and 'server.path' to new key

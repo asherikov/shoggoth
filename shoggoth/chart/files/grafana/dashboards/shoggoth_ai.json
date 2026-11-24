@@ -1089,7 +1089,7 @@
                     "refId": "B"
                 }
             ],
-            "description": "Headroom calls per second by upstream provider. Failures are 4xx/5xx excluding 429 (rate limits are counted separately below). headroom_requests_total carries no mode label at the pinned version, so the per-provider breakdown is the closest equivalent to the old mode split.",
+            "description": "Headroom calls per second by upstream provider. Failures are 4xx/5xx excluding 429 (rate limits are counted separately below). headroom_requests_total carries no mode label, so the per-provider breakdown is the closest equivalent.",
             "fieldConfig": {
                 "defaults": {
                     "unit": "reqps",

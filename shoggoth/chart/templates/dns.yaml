@@ -1,7 +1,7 @@
 {{- /*
   templates/dns.yaml — CoreDNS-based split-horizon DNS for the shoggoth
   namespace. One ConfigMap (Corefile), one Service (clusterIP pinned to
-  identity.dnsIp), one Deployment (coredns 1.14.7 with mounted config +
+  identity.dnsIp), one Deployment (coredns with mounted config +
   blacklist hostPath).
 
   The blacklists hostPath
@@ -9,14 +9,13 @@
   is mounted read-only from the host; it is populated outside the release,
   by the host-state step that runs before the install.
 
-  Original env-var placeholders are mapped as:
+  The env-var placeholder names correspond to chart values as:
     ${SHOGGOTH_NAMESPACE}      -> {{ .Release.Namespace }}
     ${SHOGGOTH_DOMAIN}         -> {{ .Values.identity.domain }}
     ${SHOGGOTH_DNS_IP}         -> {{ .Values.identity.dnsIp }}
     ${SHOGGOTH_INSTANCE_DIR}   -> {{ .Values.identity.instanceDir }}
 
-  The `app: dns` label is preserved verbatim so `kubectl get pods -l app=dns`
-  and the service toggle continue to work without changes.
+  The `app: dns` label is what `kubectl get pods -l app=dns` selects on.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "dns")) }}
 apiVersion: v1
@@ -124,8 +123,8 @@ spec:
           protocol: TCP
           name: dns-tcp
         # Both probes below hit 8181, CoreDNS's readiness endpoint. The port
-        # is declared here for the same reason the ESO controller below
-        # declares its own health port: kube-linter's readiness-port and
+        # is declared here for the same reason external-secrets.yaml declares
+        # its own health port: kube-linter's readiness-port and
         # liveness-port checks compare a probe's port against the declared
         # containerPorts, and an undeclared one is reported whether or not
         # the process is listening. CoreDNS does listen on 8181, so this is

@@ -7,14 +7,14 @@
   and the otelcol scrape of /metrics (bearer_token_file). /health is the
   only crawl4ai endpoint that works without it.
 
-  Same shape as headroom-proxy-token.yaml and for the same reasons: a
-  literal in this file needs no `helm.sh/resource-policy: keep` (a re-render
-  reproduces it byte for byte), and no ExternalSecret/PushSecret pair —
-  nothing in the crawl4ai pod mints or rotates the value, so there is no
-  runtime writer for an Orphan policy to stay out of the way of. Token
-  rotation: regenerate via `openssl rand -hex 32`, base64-encode (no wrap),
-  and replace data.token below; all three consumers pick the new value up
-  on their next restart.
+  Same shape as headroom-proxy-token.yaml: a literal in this file, so it
+  needs no `helm.sh/resource-policy: keep` (headroom-proxy-token.yaml
+  documents why the annotation is absent), and no ExternalSecret/PushSecret
+  pair — nothing in the crawl4ai pod mints or rotates the value, so there
+  is no runtime writer for an Orphan policy to stay out of the way of.
+  Token rotation: regenerate via `openssl rand -hex 32`, base64-encode
+  (no wrap), and replace data.token below; all three consumers pick the
+  new value up on their next restart.
 
   Gated on `crawl4ai`: the token has no consumer that survives the service
   being off, and otelcol's mount of it is gated the same way.

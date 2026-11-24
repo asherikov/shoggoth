@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import base64
 import io
 import json
@@ -70,16 +70,14 @@ class Gitea(HttpApiClient):
         # Initialise to ``{}`` (not ``None``) so the ``get_*`` payload
         # accessors (``get_repo_full_name`` / ``get_pr_number`` / etc.)
         # don't ``AttributeError: 'NoneType' object has no attribute
-        # 'get'`` if ``load_payload`` is never called. The pre-fix
-        # ``None`` initialiser surfaced as a runtime crash in the
-        # dispatcher's ``_handle_sandbox`` branch — ``DispatchCommand``
-        # intentionally skips ``load_payload`` for ``sandbox`` because
-        # the sandbox handler's payload accessors all read keys that
-        # may legitimately be absent (and should return a default
-        # empty string / None rather than crashing). Maintenance
-        # commands that don't need the payload never call
-        # ``load_payload`` either, so this default matters for them
-        # too.
+        # 'get'`` if ``load_payload`` is never called.
+        # ``DispatchCommand`` intentionally skips ``load_payload``
+        # for ``sandbox`` because the sandbox handler's payload
+        # accessors all read keys that may legitimately be absent (and
+        # should return a default empty string / None rather than
+        # crashing). Maintenance commands that don't need the payload
+        # never call ``load_payload`` either, so this default matters
+        # for them too.
         self._payload = {}
 
     def _auth_header(self):
@@ -136,8 +134,8 @@ class Gitea(HttpApiClient):
         # present but the value is None. `dict.get("review")` returns None in
         # that case (the default-{} only fires when the key is *absent*); a
         # truthiness check is the predicate the rest of this class already
-        # relies on via `_payload.get("review") or {}`. Without this fix,
-        # is_review_by_slave_user() crashes with
+        # relies on via `_payload.get("review") or {}`. Without the truthiness
+        # check, is_review_by_slave_user() crashes with
         # AttributeError: 'NoneType' object has no attribute 'get' before
         # the action=="review_requested" branch (the one actually meant
         # for review-request events) can run.
@@ -403,7 +401,7 @@ class Gitea(HttpApiClient):
         as the anchor). The workflow then asks Gitea
         for JUST that thread and feeds its body to the
         agent — no other comments on the PR are visible
-        to the agent. This is the load-bearing change
+        to the agent. This is the load-bearing property
         for the "``/do`` should never apply to all
         comments in the MR" requirement: a function that
         returns the full PR comment list (even if
@@ -513,17 +511,17 @@ class Gitea(HttpApiClient):
         pull_request_review_id)`` for the comment that triggered
         the webhook. The webhook's
         ``IssueCommentPayload.Comment`` struct
-        (``modules/structs/issue_comment.go:11``) carries only
+        (``modules/structs/issue_comment.go``) carries only
         the ``id`` — ``path``/``position`` are not serialised —
         because the reply path
-        (``routers/api/v1/repo/pull_review.go:266`` →
+        (``routers/api/v1/repo/pull_review.go`` →
         ``CreateCodeComment`` → ``notify_service.CreateIssueComment``
         → ``convert.ToAPIComment``) goes through the
         stripped-down ``*api.Comment`` converter
-        (``services/convert/issue_comment.go:18``) instead of
+        (``services/convert/issue_comment.go``) instead of
         the ``*api.PullReviewComment`` converter used by the
         ``/reviews/{id}/comments`` REST endpoint
-        (``services/convert/pull_review.go:103``, which DOES
+        (``services/convert/pull_review.go``, which DOES
         carry ``Path``/``LineNum``). The dispatcher therefore
         has to recover the anchor via id lookup, not from the
         payload directly.
@@ -600,7 +598,7 @@ class Gitea(HttpApiClient):
 
         Hits ``GET /repos/{repo}/pulls/{n}/reviews``
         (handler ``ListPullReviews`` at
-        ``routers/api/v1/repo/pull_review.go:27``,
+        ``routers/api/v1/repo/pull_review.go``,
         paginated by the same ``_paginate`` pattern used
         by the other list endpoints in this class — the
         route returns the full list in one page on Gitea,
@@ -815,11 +813,11 @@ class Gitea(HttpApiClient):
         Used by ``PrUpdateCommand``'s ``/review`` slash command
         so the user-driven path and the existing
         ``pull_request_review_request`` workflow trigger
-        converge on the same Gitea API call. The dispatch
-        path no longer uses a symmetric DELETE to clear the
-        request — re-requests are now handled by gating
-        ``_pr_review`` on the slave's existing review state
-        (see ``slave_has_submitted_review_on_head``).
+        converge on the same Gitea API call. Re-requests are
+        handled by gating ``_pr_review`` on the slave's existing
+        review state (see ``slave_has_submitted_review_on_head``);
+        the dispatch path does not clear the request with a
+        symmetric DELETE.
         """
         return self.post(
             f"repos/{repo}/pulls/{pr_number}/requested_reviewers",

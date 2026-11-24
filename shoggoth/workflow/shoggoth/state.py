@@ -1,25 +1,20 @@
 """Module-level singletons shared by every consumer in the package.
 
-The original ``shoggoth.py`` constructed ``params = Parameters()`` and
-``secrets_store = SecretStore()`` at module top level and every
-downstream module reached for them by bare name. The split preserves
-that idiom: each new module does ``from .state import params,
-secrets_store`` instead of constructing its own copy. The
-``WORKFLOW_COMMANDS`` / ``MAINTENANCE_COMMANDS`` sets move here too —
-they're read by both ``argparse`` (``main()``) and the dispatcher
-(``_run()``), and the command names are part of the script's public
-contract.
+``params`` and ``secrets_store`` are constructed once here; every
+consumer imports them (``from .state import params, secrets_store``)
+instead of constructing its own copy. The ``WORKFLOW_COMMANDS`` /
+``MAINTENANCE_COMMANDS`` sets live here too — they're read by both
+``argparse`` (``main()``) and the dispatcher (``_run()``), and the
+command names are part of the script's public contract.
 """
 
 
 from .config import Parameters, SecretStore
 
-# Eagerly construct the singletons. The original script did the same;
-# making this explicit here documents that downstream modules are
-# allowed to import these names and expect a populated instance
-# (not a lazy factory). A missing required env var (currently only
-# ``SHOGGOTH_DOMAIN``) raises via ``die()`` at import time — same
-# fail-fast behavior as before the split.
+# Eagerly construct the singletons: downstream modules import these
+# names and expect a populated instance (not a lazy factory). A
+# missing required env var (currently only ``SHOGGOTH_DOMAIN``)
+# raises via ``die()`` at import time.
 params = Parameters()
 secrets_store = SecretStore()
 
@@ -32,18 +27,15 @@ secrets_store = SecretStore()
 #
 # ``dispatch`` and ``sandbox`` are NOT in WORKFLOW_COMMANDS:
 #   * ``dispatch`` is reached via the standalone
-#     ``shoggoth/workflow/dispatch.py`` CLI utility (the
-#     ``dispatch`` step of the ``command-handler`` DAG),
-#     not via ``shoggoth.py``. The dispatcher has a different
-#     dependency surface (no agent, no git-cred sidecar) and
-#     runs in a separate ``shoggoth_tools:host`` pod.
-#   * ``sandbox`` is the placeholder for the future /sandbox
-#     slash command; the dispatcher handles it via
-#     ``DispatchCommand._handle_sandbox`` (in
-#     ``shoggoth/workflow/shoggoth/commands/dispatch.py``)
-#     and emits ``should_run_worker=false`` so the worker step
-#     is skipped. It is never invoked directly on the worker, so
-#     it doesn't belong in WORKFLOW_COMMANDS.
+#     ``shoggoth/workflow/dispatch.py`` CLI utility, not via
+#     ``shoggoth.py``. The dispatcher has a different dependency
+#     surface (no agent, no git-cred sidecar).
+#   * ``sandbox`` is the placeholder for the /sandbox slash
+#     command; it is handled by ``DispatchCommand._handle_sandbox``
+#     (in ``shoggoth/workflow/shoggoth/commands/dispatch.py``),
+#     which emits ``should_run_worker=false``. It is never invoked
+#     directly on the worker, so it doesn't belong in
+#     WORKFLOW_COMMANDS.
 WORKFLOW_COMMANDS = {"task", "ci-failure", "pr-update"}
 MAINTENANCE_COMMANDS = {
     "argo-webhooks", "redmine-webhooks", "redmine-argo-webhooks",

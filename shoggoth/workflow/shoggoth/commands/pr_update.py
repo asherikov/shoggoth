@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import json
 import os
 import re
@@ -54,18 +54,12 @@ class PrUpdateCommand(CommandBase):
         r"^/drop(\s+[0-9a-f]{7,40}){1,}\s*$",
         re.IGNORECASE)
 
-    # The worker only handles worker-owned slash commands
-    # (``/review``, ``/squash``, ``/rebase``, ``/drop``,
-    # ``/do``). It does NOT consult the slash-command
-    # catalog (``slash_commands.SUPPORTED_COMMANDS``) or the
-    # ``/help`` renderer (``format_help_text``). The dispatcher
-    # is the SOLE owner of dispatcher-handled commands
-    # (``/help``, ``/sandbox``): its ``_handle_pr_update``
-    # body-shape router inspects ``payload.comment.body`` and
-    # dispatches to the matching ``_handle_<name>`` (or
-    # passes the event through to the worker). The worker
-    # therefore sees only commands it knows how to handle,
-    # and any unknown command name produces a silent no-op
+    # Which slash commands this worker handles is defined by the
+    # slash-command catalog: ``slash_commands.SUPPORTED_COMMANDS``
+    # is the single source of truth for the handler/worker split,
+    # and ``slash_commands.format_help_text`` renders it for
+    # ``/help``. This worker does not consult either, so any
+    # command it does not know produces a silent no-op
     # (see ``_handle_slash_command``).
 
     def __init__(self, shoggoth, gitea, redmine, agent):
@@ -85,8 +79,8 @@ class PrUpdateCommand(CommandBase):
             # DEFENCE IN DEPTH: the gitea-pr-update binding's
             # selector already drops
             # ``payload.action == "deleted"`` events before
-            # the workflow pod is even applied (see
-            # gitea-pr-update-binding.yaml:138), so this
+            # the workflow pod is even applied (see the
+            # ``gitea-pr-update-binding.yaml`` selector), so this
             # branch is unreachable on the Gitea-side
             # path. The distinctive log line ("DEFENCE IN
             # DEPTH") makes any future selector relaxation
@@ -400,17 +394,17 @@ class PrUpdateCommand(CommandBase):
                     result = self.gitea.post_pr_review_chunked(
                         pr_repo, pr_number, review_md)
                 # No follow-up comment on the inline path. A
-                # clickable index of the inline comments used to
-                # be posted as a second comment here (Gitea's
+                # clickable index of the inline comments is not
+                # posted as a second comment here: Gitea's
                 # POST-reviews response carries no per-comment
-                # ids, so the index needed a follow-up GET), but
-                # its header re-rendered the verdict and summary
-                # the review body already carries — the review
-                # thread held two comments with the same
-                # information and only one unique payload (the
-                # link list). The review body's location list
-                # plus the inline comments at their diff anchors
-                # are the complete result; the index was noise.
+                # ids, so the index would need a follow-up GET,
+                # and its header re-renders the verdict and
+                # summary the review body already carries — the
+                # review thread would hold two comments with the
+                # same information and only one unique payload
+                # (the link list). The review body's location
+                # list plus the inline comments at their diff
+                # anchors are the complete result.
             else:
                 # ``pr_sha`` is empty (or ``inline_comments``
                 # empty), so the inline post was skipped — but the
@@ -550,11 +544,12 @@ class PrUpdateCommand(CommandBase):
         # (wshandler update -p shallow) and blame against a
         # grafted history stops at the boundary commit -- every
         # line then attributes to the tip, so a comment made on
-        # any earlier commit falsely looks outdated. Fetch full
-        # history first: the call is an idempotent no-op for full
-        # clones (the same one _pr_review makes on this tree),
-        # and _thread_outdated still treats a boundary
-        # attribution as inconclusive when the fetch fails.
+        # any commit other than the tip falsely looks outdated.
+        # Fetch full history first: the call is an idempotent
+        # no-op for full clones (the same one _pr_review makes on
+        # this tree), and _thread_outdated still treats a
+        # boundary attribution as inconclusive when the fetch
+        # fails.
         self.shoggoth._unshallow(repo_dir)
         git = Git(repo_dir)
         # Blame marks boundary commits with a ``^`` prefix. Inside
@@ -816,7 +811,7 @@ class PrUpdateCommand(CommandBase):
         review-comments path as a regular comment.
 
         ``/drop <sha1> [<sha2> ...]`` is matched by
-        ``SLASH_DROP_RE``. The dispatcher (see
+        ``SLASH_DROP_RE``. The caller (see
         ``_handle_slash_command``) re-parses the body to
         extract the SHA list -- this function only returns
         the command name string, the SHA extraction
@@ -900,12 +895,8 @@ class PrUpdateCommand(CommandBase):
         #
         # In particular the slave user (the agent's own
         # account) is NOT allowed to trigger slash
-        # commands. The earlier design gave the slave
-        # an exception for ``/do`` and ``/help`` (so it
-        # could leave instructions in a review comment
-        # and trigger a pass); the trust model has since
-        # been tightened to require a trusted human in
-        # the loop. ``/do`` is now reply-only — the
+        # commands. The trust model requires a trusted
+        # human in the loop. ``/do`` is reply-only — the
         # trusted human replies to a review comment with
         # ``/do`` to drive the agent on that thread —
         # so the slave's own comments inside the thread
@@ -950,33 +941,25 @@ class PrUpdateCommand(CommandBase):
         handler = getattr(self, f"_slash_{command}", None)
         if handler is None:
             # INTENTIONAL DESIGN: silent no-op for unknown
-            # slash commands. The pr-update path only handles
-            # worker-owned commands (``/review``, ``/squash``,
-            # ``/rebase``, ``/drop``, ``/do``); everything
-            # else falls through to this branch and produces
-            # no PR-visible response. Posting a "Unknown
-            # command" PR comment surfaced noise on every
+            # slash commands. The commands this path handles
+            # are the worker-owned ones in the slash-command
+            # catalog (see ``slash_commands.SUPPORTED_COMMANDS``);
+            # everything else falls through to this branch and
+            # produces no PR-visible response. Posting a "Unknown
+            # command" PR comment surfaces noise on every
             # typo (including ones the user wrote in a quoted
             # code block in the conversation, never meant as
             # a command). The documented contract: silence is
             # the default; users discover the supported set
-            # via ``/help`` explicitly. A future change could
-            # re-add the noisy comment for the trust-gated
-            # case if the signal-to-noise is judged worth it —
-            # the current judgement is no.
+            # via ``/help`` explicitly.
             #
             # The same silent no-op covers any
             # dispatcher-owned command (``/help``,
-            # ``/sandbox``) that reaches the worker path
-            # during a brief dispatcher-code rollout window
-            # (a stale dispatcher pod without
-            # ``_detect_slash_command_from_body`` falls
-            # through to pass-through, emits
-            # ``should_run_worker=true``, and the worker
-            # sees the body). The worker has no
-            # ``_slash_help`` or ``_slash_sandbox`` method,
-            # so the unknown-command branch logs the no-op
-            # and returns — same observable effect as a
+            # ``/sandbox``) that reaches this path. The
+            # worker has no ``_slash_help`` or
+            # ``_slash_sandbox`` method, so the
+            # unknown-command branch logs the no-op and
+            # returns — same observable effect as a
             # dispatcher short-circuit, but with no catalog
             # import on the worker side.
             log(f"slash-command: no handler for /{command}; "
@@ -985,7 +968,7 @@ class PrUpdateCommand(CommandBase):
         # ``/do`` needs the inline ``(path, line)`` anchor for
         # the thread the user replied to. The webhook
         # payload's ``IssueCommentPayload.Comment`` struct
-        # (Gitea ``modules/structs/issue_comment.go:11``) is
+        # (Gitea ``modules/structs/issue_comment.go``) is
         # the stripped-down ``*api.Comment`` — it carries
         # only ``id`` (plus body, user, urls, timestamps);
         # ``path`` and ``position`` are NOT serialised
@@ -1007,8 +990,9 @@ class PrUpdateCommand(CommandBase):
         # it against ``/reviews/{id}/comments``. The matched
         # row carries the same ``path``/``position`` as the
         # parent comment (the reply row inherits them from
-        # the parent at creation time, see
-        # ``services/pull/review.go:266``), which is exactly
+        # the parent at creation time — see
+        # ``services/pull/review.go``'s
+        # ``CreateCodeComment``), which is exactly
         # the thread anchor ``get_pr_review_thread`` filters
         # on.
         #
@@ -1021,10 +1005,9 @@ class PrUpdateCommand(CommandBase):
         # gate inside ``_slash_do``
         # (``if thread_path is None or thread_line is None:
         # return``) silently drops the trigger. That matches
-        # the original "no parent thread = no-op" policy and
-        # closes the bug where the Webhook-only lookup
-        # silently no-op'd on EVERY ``/do`` invocation
-        # (including valid inline replies).
+        # the "no parent thread = no-op" policy and
+        # recovers ``/do`` on inline replies, which a
+        # Webhook-only lookup silently no-op'd on.
         thread_path = None
         thread_line = None
         if command == "do":
@@ -1071,10 +1054,10 @@ class PrUpdateCommand(CommandBase):
             # log (which the workflow template displays prominently
             # and which Argo uses to mark the step as Failed) and
             # stops the rest of the dispatch path from running on
-            # a half-completed state. The pre-fix behaviour
-            # (silently continue) hid the very bugs the user is
+            # a half-completed state. Silently continuing hides
+            # the very bugs the user is
             # trying to debug — e.g. the ``session_id = None``
-            # crash in /squash, where the workflow succeeded in
+            # crash in /squash, where the workflow succeeds in
             # Argo despite the command being a no-op.
             die(f"slash-command: /{command} failed: {e}")
 
@@ -1095,9 +1078,9 @@ class PrUpdateCommand(CommandBase):
         without raising). After posting, this calls ``die()`` so
         the Argo step is marked Failed and the user sees the same
         message in the workflow log; ``command`` names the slash
-        command for the die line. The pre-fix behaviour was to
-        return from the handler normally and let the workflow
-        succeed — which masked destructive partial state
+        command for the die line. Returning from the handler
+        normally and letting the workflow succeed masks
+        destructive partial state
         (e.g. ``/squash`` with a successful ``git reset --soft`` +
         ``git commit`` but a rejected ``git push``: the local
         branch is squashed, the remote is not, the next push is a
@@ -1135,9 +1118,10 @@ class PrUpdateCommand(CommandBase):
         this failure. Every handled failure mode (a rejected
         pre-flight push, a git command that failed, the agent
         producing an unusable message, an unreadable permission
-        set, a drop whose range does not resolve) used to post its
-        own per-mode wording — sometimes with git stderr or a
-        multi-paragraph recovery recipe — which made the PR thread
+        set, a drop whose range does not resolve) is funnelled
+        into this one generic comment instead of a per-mode
+        wording — a per-mode message would carry git stderr or a
+        multi-paragraph recovery recipe and make the PR thread
         the place to diff bot behaviour instead of the workflow
         log. The detail stays in the Argo log, which this message
         points at; the thread stays at two messages.
@@ -1165,8 +1149,8 @@ class PrUpdateCommand(CommandBase):
         defined exclusively for inline review comments
         (``CommentTypeCode``), grouped by
         ``(path, line)`` — see
-        ``models/issues/comment_code.go:22`` and
-        ``models/issues/review.go:935`` (the
+        ``models/issues/comment_code.go`` and
+        ``models/issues/review.go`` (the
         ``MarkConversation`` function explicitly
         checks ``comment.Type != CommentTypeCode``
         and returns early for anything else).
@@ -1180,9 +1164,9 @@ class PrUpdateCommand(CommandBase):
         identified (Gitea has no concept of an issue
         comment thread), so the handler does nothing.
 
-        The dispatcher reads the webhook payload's
-        ``comment.path`` and ``comment.position``
-        fields. These are present only when the
+        The webhook payload's ``comment.path`` and
+        ``comment.position`` fields are the anchor. They
+        are present only when the
         triggering comment is a reply to an inline
         review comment — i.e. it was posted via the
         code-comment "Reply" form in the conversation
@@ -1310,8 +1294,8 @@ class PrUpdateCommand(CommandBase):
             # which tells qwen to create a fresh on-disk
             # session under our chosen uuid (the only way to
             # establish the session in the first place).
-            # ``resume=True`` here was a copy-paste residue from
-            # ``_pr_comment`` — that handler chains several
+            # ``resume=True`` here would be wrong for this
+            # handler: ``_pr_comment`` chains several
             # prompts and needs ``--resume`` to keep them in
             # one conversation; ``_slash_do`` makes a single
             # prompt then ``stop_session``s immediately, so there
@@ -2600,11 +2584,10 @@ class PrUpdateCommand(CommandBase):
         ``_pr_comment`` accumulated before the timeout. The
         message is per-comment framing ("Addressed N comment(s)
         before timeout") because ``_pr_comment`` is the only
-        caller: ``/do`` used to route its timeout through here
-        with a per-conversation framing, and now posts its own
-        generic failure into the review thread instead (see
-        ``_post_do_failure``) — one failure message per command,
-        and the ``/do`` one has to land in the conversation.
+        caller: ``/do`` posts its own generic failure into the
+        review thread instead (see ``_post_do_failure``) — one
+        failure message per command, and the ``/do`` one has to
+        land in the conversation.
 
         ``die()`` fires after the body is posted, so the wording
         in the final line of ``timeout_msg`` is the last thing

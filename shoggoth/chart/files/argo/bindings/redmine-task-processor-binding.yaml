@@ -5,22 +5,23 @@
 # Webhook endpoint (set up by shoggoth.py redmine-argo-webhooks):
 #   POST http://api.{domain}/argo/api/v1/events/shoggoth/redmine-task-processor
 #
-# v4 syntax notes (vs v3.7.0):
-#   - spec.event.selector is now an expr-lang boolean expression evaluated
+# v4 syntax notes (Argo Workflows v4 API):
+#   - spec.event.selector is an expr-lang boolean expression evaluated
 #     against {namespace, discriminator, payload, metadata} in
-#     server/event/dispatch/operation.go. v3 treated it as a literal
-#     discriminator match — bare "redmine-task-processor" now parses as
-#     the expression "redmine - task - processor" and fails with
-#     "unknown name redmine". Use `discriminator == "<name>"` to match.
-#   - parameters[].value (literal) has been replaced by parameters[].valueFrom.event
-#     (also an expr-lang expression). Bare strings inside the expression must be
-#     quoted (`"shoggoth.py"`), and Go-template `{{...}}` wrapping (v3) is
-#     gone — the entire expression is the value of that field.
-#   - The v3 `{{.payload.data.issue.id | squote}}` (Go-template + sprig)
-#     becomes a plain expr-lang expression. The dispatcher's args split
-#     the action into two env-driven argv slots (SHOGGOTH_COMMAND="task",
-#     SHOGGOTH_TASK_ID=<id>) so argparse sees `task` and `<id>` as
-#     separate positionals instead of one malformed `task '<id>'` string.
+#     server/event/dispatch/operation.go. A bare discriminator name
+#     ("redmine-task-processor") parses as the arithmetic expression
+#     "redmine - task - processor" and fails with "unknown name redmine",
+#     so the selector must use `discriminator == "<name>"` to match.
+#   - parameters[].valueFrom.event carries an expr-lang expression. Bare
+#     strings inside the expression must be quoted (`"shoggoth.py"`), and
+#     the entire expression is the value of that field — no Go-template
+#     `{{...}}` wrapping.
+#   - The task id is a plain expr-lang expression
+#     (`string(payload.data.issue.id)`), not a Go-template + sprig pipe.
+#     The dispatcher's args split the action into two env-driven argv
+#     slots (SHOGGOTH_COMMAND="task", SHOGGOTH_TASK_ID=<id>) so argparse
+#     sees `task` and `<id>` as separate positionals instead of one
+#     malformed `task '<id>'` string.
 #
 # Selector filtering (the drop-list):
 #   The hook subscribes to issue.created and issue.updated on every
@@ -45,7 +46,7 @@
 #         body when no one is assigned; the explicit ``!= nil``
 #         check is a fast path that saves a Redmine API round-
 #         trip in the dispatcher's ``_check_task_actionable``
-#         (shoggoth/runner.py:48-78) — the dispatcher
+#         (shoggoth/runner.py) — the dispatcher
 #         re-validates assignee in any case, but the selector
 #         drop is free (one expr-lang evaluation in argo-server
 #         vs a full workflow pod spin-up).
@@ -55,21 +56,20 @@
 #         The "is the assignee the slave" check is delegated to
 #         the dispatcher's ``_check_task_actionable``, which
 #         re-validates the assignee via the Redmine API and
-#         exits 0 on mismatch. The earlier in-selector check
-#         (either by display-name literal or by resolved
-#         Redmine ID) was dropped because both require either
-#         a magic-string coupling to redmine-init or runtime
-#         ID plumbing that the selector environment (restricted
-#         to {payload, metadata, discriminator}) cannot access
-#         — see the conversation log for the trade-off.
+#         exits 0 on mismatch. No in-selector assignee check
+#         exists: a display-name literal or a resolved Redmine ID
+#         would each require either a magic-string coupling to
+#         redmine-init or runtime ID plumbing that the selector
+#         environment (restricted to {payload, metadata,
+#         discriminator}) cannot access.
 #
 #   Notes:
 #     - The `status.name` and `assigned_to` access assumes the
 #       standard Redmine issue API response shape — see
 #       https://www.redmine.org/projects/redmine/wiki/Rest_Issues
 #       for the field set. The `Webhookable` concern that
-#       builds the native webhook body (Redmine 5+ core,
-#       shoggoth uses 7.0.1) renders issues via the same
+#       builds the native webhook body (Redmine core)
+#       renders issues via the same
 #       JSON builder, so the shape is identical.
 #     - The selector runs inside argo-server BEFORE the
 #       workflow is created, so the cost of a dropped event

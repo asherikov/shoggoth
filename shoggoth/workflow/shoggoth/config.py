@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import os
 
 from .util import die
@@ -22,31 +22,21 @@ class Parameters:
             ("shoggoth_domain", "SHOGGOTH_DOMAIN", True, ""),
             ("shoggoth_namespace", "SHOGGOTH_NAMESPACE", False, "shoggoth"),
             # Custom CoreDNS service IP.
-            # The dispatcher's sandbox pod spec uses this for
-            # ``dnsConfig.nameservers`` so the pod uses the
-            # same DNS as the slave Deployments -- the
-            # rewrite rules there map ``*.s.local`` to
-            # ``*.shoggoth.svc.cluster.local``, so the
-            # user-facing ``git.s.local`` form resolves from
-            # inside the sandbox terminal. Optional because
-            # the ``git.<ns>`` short form used by the
-            # inlined git-clone URL works against any DNS
-            # that has the cluster's search path; the
-            # custom DNS is only needed for the user-facing
-            # fallback. The Argo template propagates it from
-            # ``shoggoth-workflow-config`` (argo-workflows.yaml).
+            # Wiring ``dnsConfig.nameservers`` to it gives a pod the
+            # same DNS as the slave Deployments -- the rewrite rules
+            # there map ``*.s.local`` to
+            # ``*.shoggoth.svc.cluster.local``, so the user-facing
+            # ``git.s.local`` form resolves from inside the sandbox
+            # terminal. Optional because the ``git.<ns>`` short form
+            # used by the in-cluster git-clone URL works against any
+            # DNS that has the cluster's search path; the custom DNS
+            # is only needed for the user-facing fallback.
             ("shoggoth_dns_ip", "SHOGGOTH_DNS_IP", False, ""),
             ("shoggoth_github_org", "SHOGGOTH_GITHUB_ORG", False, ""),
             ("shoggoth_github_api_delay", "SHOGGOTH_GITHUB_API_DELAY", False, "2"),
             # Per-prompt wall-clock cap, in seconds, for the qwen agent
-            # (Agent.AGENT_TIMEOUT). Rendered from the instance's
-            # shoggoth.yaml (workflow.agentTimeout) into the
-            # shoggoth-workflow-config ConfigMap, which the
-            # command-handler template binds into the worker-step
-            # container's environment. The WorkflowTemplate's
-            # activeDeadlineSeconds (4 h) is the outer safety net; this
-            # is the per-prompt ceiling so a single hung agent doesn't
-            # burn the whole pod's budget.
+            # (Agent.AGENT_TIMEOUT): the per-prompt ceiling, so a single
+            # hung agent doesn't burn the whole run's budget.
             ("shoggoth_agent_timeout", "SHOGGOTH_AGENT_TIMEOUT", False, "1200"),
             # In-cluster zot registry Service port. The Service publishes
             # a fixed port 80 for every instance
@@ -172,9 +162,7 @@ class SecretStore:
         # ``state -> config -> k8s -> state`` cycle: ``state``
         # imports ``Parameters`` and ``SecretStore`` from here,
         # and a top-level ``from .k8s import K8s`` would close
-        # the loop. The original monolithic ``shoggoth.py`` had
-        # no module boundary, so the cycle didn't exist; the
-        # split needs the indirection.
+        # the loop.
         from .k8s import K8s as _K8s
         k8s = k8s or _K8s()
         return k8s.read_secret(kv_path, key=key)

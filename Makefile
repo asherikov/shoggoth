@@ -16,7 +16,9 @@ SHOGGOTH_CHART_ROOT?=$(CURDIR)/shoggoth/chart
 # nothing after it, which is YAML null and is rejected by the schema; the dns
 # Service loses its pinned clusterIP; and every hostPath lands under
 # /var/lib/rancher/k3s/storage// with an empty instanceDir. That is exactly
-# the render `make helm_lint_kube_linter` was checking until this was added.
+# the render `make helm_lint_kube_linter` checks, so leaving the variable
+# undefined would have the offline gate certify a cluster that is never
+# deployed.
 SHOGGOTH_HELM_VALUES = --values $(SHOGGOTH_CONFIG)
 
 SHOGGOTH_CFG = $(shell yq -r '$(1)' $(SHOGGOTH_CONFIG) 2>/dev/null)
@@ -137,8 +139,8 @@ TOOLS_CLIENT_ANSIBLE_ENV = -e USER=$(or $(USER),$(shell id -un)) \
 # to be the host on the network. `tunnel_up` forwards the k3s API to the
 # HOST's loopback (`ssh -L 6443:127.0.0.1:6443`), kubeconfig.yml writes the
 # host's k3s.yaml verbatim and its server is `https://127.0.0.1:6443`, and
-# every task in the plays is `delegate_to: localhost` — which, since the
-# control node moved into this image, is the container. In a namespace of
+# every task in the plays is `delegate_to: localhost` — the control node,
+# which is this container. In a namespace of
 # its own that address is the container itself, nothing listens on it, and
 # every helm/kubectl call dies with "connection refused"; sharing the
 # host's is what makes the forward, the hostNetwork services (the registry
@@ -201,7 +203,8 @@ reboot:
 hosts:
 	# DOMAIN/HOST_IP travel through the environment, not --domain/--host-ip
 	# flags: setup-client.sh already reads DOMAIN from the environment
-	# (line 13), and passing config as CLI args is what this layout avoids.
+	# (see its DOMAIN default), and passing config as CLI args is what this
+	# layout avoids.
 	DOMAIN="${DOMAIN}" HOST_IP="${HOST_IP}" ./shoggoth/setup-client.sh --update-hosts
 
 ping:

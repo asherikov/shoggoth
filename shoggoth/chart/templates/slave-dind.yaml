@@ -2,7 +2,8 @@
   templates/slave-dind.yaml — privileged DinD image used by CI consumers.
 
   Mounts the git-cred-bootstrap ConfigMap (templates/git-cred-bootstrap.yaml)
-  as a sidecar volume, so it only needs to ship whenever this Deployment does.
+  as a sidecar volume; the gate that decides when that ConfigMap ships is
+  documented in its own file.
 
   The /cache persistent storage is shared across all CI consumers
   (gitea-runner job pods and slave-term). See templates/shared-cache.yaml

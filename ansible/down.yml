@@ -72,12 +72,13 @@
       # `when` silently swallows the case where it was never set.
       register: shoggoth_down_uninstall
       # `release_namespace` is exported as HELM_NAMESPACE
-      # (module_utils/helm.py:154-158), which is what `--namespace` does;
+      # (module_utils/helm.py), which is what `--namespace` does;
       # `wait` + `wait_timeout` are `--wait --timeout`, and `purge` defaults
       # true so `--keep-history` is not passed.
       #
       # A release that fails to uninstall is still a hard module failure, so
-      # `ignore_errors` carries the old `||` and the task below the WARN.
+      # `ignore_errors` is what keeps it from failing the play, and the
+      # task below reports it as the WARN.
 
     - name: Warn if the uninstall failed
       ansible.builtin.debug:
@@ -151,7 +152,7 @@
       # and the body is `{"metadata":{"finalizers":[]}}` — an EMPTY list, which
       # is what makes it a strip rather than a set. A missing object is a
       # documented silent skip with a warning
-      # (module_utils/k8s/runner.py:177-186); any other failure raises, and
+      # (module_utils/k8s/runner.py); any other failure raises, and
       # `ignore_errors` prints it and carries on.
 
     - name: Check whether the release still exists
@@ -293,7 +294,7 @@
           delegate_to: localhost
           # `kubectl delete --ignore-not-found=true --timeout=60s`: `state:
           # absent` returns `{}` for an object that is already gone
-          # (module_utils/k8s/service.py:448-455), and `wait` + `wait_timeout`
+          # (module_utils/k8s/service.py), and `wait` + `wait_timeout`
           # bound the wait the same way.
           #
           # The wait needs the strip above it: this is the LAST step, so the
@@ -313,5 +314,5 @@
           ansible.builtin.debug:
             msg: "WARN: the orphan purge failed; the release is uninstalled regardless."
           delegate_to: localhost
-          # The WARN the shell used to print on failure; the failing task's own
-          # output is still printed above, which the `||` threw away.
+          # The WARN a failed purge reports; the failing task's own output is
+          # still printed above, which a `||` would throw away.

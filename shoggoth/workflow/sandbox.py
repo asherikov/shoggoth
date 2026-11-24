@@ -26,37 +26,30 @@ Subcommands
 
 One container, not two
 ----------------------
-The main container used to be a ``ttyd`` container and an ``sshd``
-container, two entries in the same pod, started side by side by
-the kubelet. They were split because sshd was the root process of
-the pod: it bound the privileged port 22 and did OpenSSH's
-privilege separation, while the web terminal had to be the
-unprivileged ``ccws`` user. Neither server needs that any more --
-both run as ``ccws``, both on unprivileged ports, and the
-container itself runs as ``ccws`` too.
-
-The split cost a lot. The two containers had to agree on when the
-workspace was ready, which needed a shared volume and a pair of
-flag files; and because pod Ready is a conjunction over every
-container, a dead container took the pod out of Ready, which made
-the *surviving* one unreachable too -- a healthy sshd serving
-sessions that nobody could reach, and a web terminal that looked
-fine in ``kubectl get pod`` while the sandbox was dead.
+The main container runs the SSH server and the web terminal in one
+process tree, both as the unprivileged ``ccws`` user on unprivileged
+ports; the container itself runs as ``ccws`` too, so neither server
+needs a root process.
 
 One container, one process tree, one sequence: materialize, then
-serve. No handshake, no shared state volume, and nothing to go
-out of Ready but the container itself.
+serve. There is no handshake and no shared state volume, and nothing
+to go out of Ready but the container itself. Two containers would
+have to agree on when the workspace was ready, which needs a shared
+volume and a pair of flag files; and because pod Ready is a
+conjunction over every container, a dead container takes the pod out
+of Ready, which makes the *surviving* one unreachable too -- a
+healthy sshd serving sessions that nobody could reach, and a web
+terminal that looked fine in ``kubectl get pod`` while the sandbox
+was dead.
 
 Mounting
 --------
-The sandbox pod's spec mounts /shoggoth/workflow-scripts from the
-host: the host-state step rsyncs the repo's ``workflow/`` tree to
-/var/lib/rancher/k3s/storage/${INSTANCE}/workflow-scripts/ on the
-cluster node, so the same absolute path is visible to every
-container in the pod. Neither image bakes the
-workflow scripts in (dockerfiles/slave and dockerfiles/tools carry
-no COPY/ADD for them), so this mount is the only way any container
--- init, main, or sidecar -- reaches this module.
+The sandbox pod mounts /shoggoth/workflow-scripts from the host, so
+the same absolute path is visible to every container in the pod.
+Neither image bakes the workflow scripts in (dockerfiles/slave and
+dockerfiles/tools carry no COPY/ADD for them), so this mount is the
+only way any container -- init, main, or sidecar -- reaches this
+module.
 """
 import argparse
 import json
@@ -116,18 +109,17 @@ SANDBOX_LIFETIME_MARGIN_S = 300
 SANDBOX_USER = "ccws"
 SANDBOX_HOME = "/home/ccws"
 
-# The name of the pod's main container. The dispatcher knows it
-# (it writes the pod spec) and passes it to the cleanup sidecar
-# through the environment, so the sidecar watches the container
-# the dispatcher actually created.
+# The name of the pod's main container, passed to the cleanup sidecar
+# through the environment (``SANDBOX_CONTAINER``), so the sidecar
+# watches the container that actually runs the servers.
 SANDBOX_CONTAINER = os.environ.get("SANDBOX_CONTAINER", "sandbox")
 
 # The web terminal's port inside the container. Deliberately
 # unprivileged: the terminal runs as the unprivileged ``ccws``
 # user, and a root -> non-root uid transition clears the
 # capability set, so a process that has dropped to ``ccws``
-# cannot bind a port below 1024 any more -- not even with
-# CAP_NET_BIND_SERVICE, which is gone with the rest of the set.
+# cannot bind a port below 1024 at all -- not even with
+# CAP_NET_BIND_SERVICE, which is cleared with the rest of the set.
 # The Service maps the user-facing port 80 onto this one, so the
 # user still reaches the terminal on port 80.
 SANDBOX_TTYD_PORT = _env_int("SANDBOX_TTYD_PORT", 8080)
@@ -234,9 +226,7 @@ SANDBOX_BASHRC_MARKER = "# ccws sandbox: start in the materialized workspace"
 # generated config could not double-bind even in principle. The
 # dispatcher's per-sandbox Service exposes the user-facing port 22
 # and points it at that port. These literals are kept in sync by
-# hand -- no parametrization -- so the constants that used to live
-# here (SLAVE_USER, SLAVE_SSHD_PORT) were dead code (referenced
-# only by one log line) and have been removed.
+# hand -- no parametrization.
 
 # Cleanup budgets (see ``cleanup`` below):
 #   MAX_LIFETIME  hard cap so a script bug in the detection logic
@@ -272,8 +262,8 @@ CLEANUP_POLL_S = 10
 
 def log(msg):
     """stderr log; the kubelet captures the init/main/cleanup
-    container stderr into the workflow log via Argo's log
-    archival, so this is the user-visible diagnostic channel."""
+    container stderr into the pod log, so this is the user-visible
+    diagnostic channel."""
     print(f"sandbox: {msg}", file=sys.stderr, flush=True)
 
 
@@ -533,13 +523,13 @@ def _materialize_workspace(repo, repo_type, branch, pr_number, sub_repo):
     """Materialize the workspace; return the directory to work in.
 
     The materialization runs in a forked child that drops to the
-    unprivileged ``ccws`` user first. The container is root (sshd
-    needs it), but the workspace has to belong to the user whose
-    session opens it: git refuses to operate in a repository owned
-    by somebody else (the "dubious ownership" guard), and the user
-    has to be able to write in it. Running the clone as the user
-    makes the files the user's by construction -- there is no chown
-    pass over the tree afterwards.
+    unprivileged ``ccws`` user first (``_drop_privileges``), and the
+    workspace has to belong to the user whose session opens it: git
+    refuses to operate in a repository owned by somebody else (the
+    "dubious ownership" guard), and the user has to be able to write
+    in it. Running the clone as the user makes the files the user's
+    by construction -- there is no chown pass over the tree
+    afterwards.
 
     The child reports the outcome over a pipe: the target
     directory on success, the reason on failure.
@@ -701,8 +691,7 @@ def sandbox(repo, repo_type, branch="", pr_number="", sub_repo=""):
     ``--repo`` and the other options from ``sys.argv``. Re-parsing
     ``sys.argv`` inside this function would re-see the literal
     subcommand token ``"sandbox"`` as a positional and fail with
-    "unrecognized arguments: sandbox" (the exact bug this
-    signature was introduced to fix).
+    "unrecognized arguments: sandbox".
     """
     _wait_for_git_cred()
     target = _materialize_workspace(repo, repo_type, branch, pr_number,
@@ -852,7 +841,7 @@ def _start_sshd():
     unprivileged sshd can serve: it has no privileges left to
     switch to another account, so the kernel refuses the switch
     ("Failed to set uids to N") and the login is refused. Nothing
-    in the sandbox needs a root process any more.
+    in the sandbox needs a root process.
 
     Authentication is by password. PAM verifies it through the
     setuid-root ``unix_chkpwd`` helper, so the daemon never reads
@@ -1004,12 +993,10 @@ def _supervise(children):
 
     The pod's restartPolicy is Never, so the pod ends when its
     main container exits. One container, two servers: the first
-    one to exit ends the sandbox and the other is stopped with it
-    -- the semantics the two-container layout had, where the
-    kubelet stopped the surviving container when the first one
-    exited. A user closing the browser tab ends the sandbox (ttyd
-    --once exits), exactly as it did before; an SSH logout ends it
-    the same way now (sshd -i exits when its one session does).
+    one to exit ends the sandbox and the other is stopped with it.
+    A user closing the browser tab ends the sandbox (ttyd
+    --once exits); an SSH logout ends it the same way (sshd -i
+    exits when its one session does).
 
     Returns the exit code of the first server to exit: that is
     the container's exit code. The one exception is the one-shot

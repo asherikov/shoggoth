@@ -3,8 +3,8 @@
 # redmine-task-processor; gitea-ci-failure intentionally unregistered)
 # via WorkflowEventBinding.
 #
-# Single-flight, one shoggoth.py invocation per webhook. v2 splits the
-# single pod into a two-step DAG:
+# Single-flight, one shoggoth.py invocation per webhook. The workflow is a
+# two-step DAG:
 #
 #   1. ``dispatch`` step — runs in a ``shoggoth_tools:host`` pod
 #      (kubectl + scripts, no qwen agent). Invokes the standalone
@@ -37,25 +37,24 @@
 #
 #   2. ``worker`` step — runs in a ``slave:noble`` pod (qwen
 #      agent, git-cred sidecar, ccache). Depends on ``dispatch``
-#      and only runs when ``should_run_worker == "true"``. Mirrors
-#      the old single-pod template's env / mounts — git clone,
-#      agent run, git push.
+#      and only runs when ``should_run_worker == "true"``. Carries
+#      the environment the work needs — git clone, agent run, git
+#      push.
 #
 # Args (from the binding):
-#   script:   script to invoke (always shoggoth.py for now)
+#   script:   script to invoke (always shoggoth.py)
 #   command:  the original subcommand (``pr-update`` / ``task``).
-#             ``sandbox`` and ``help`` no longer arrive as their
-#             own binding-level command — the single gitea-pr-update
-#             binding always passes ``"pr-update"`` and the
-#             dispatcher's ``_handle_pr_update`` body-shape router
-#             detects ``/sandbox`` and ``/help`` comments and
-#             dispatches them to the dedicated handlers. The
+#             ``sandbox`` and ``help`` have no binding-level command
+#             of their own: the single gitea-pr-update binding always
+#             passes ``"pr-update"`` and the dispatcher's
+#             ``_handle_pr_update`` body-shape router detects the
+#             ``/sandbox`` and ``/help`` comments and dispatches them
+#             to the dedicated handlers. The
 #             dispatch template passes this into both pods:
 #             dispatch sets ``SHOGGOTH_ORIGINAL_COMMAND`` (the
 #             dispatcher takes it as argv[1]), worker sets
 #             ``SHOGGOTH_COMMAND`` (its ``args.command`` is the
-#             original command, identical to the pre-split
-#             single-pod behaviour).
+#             original command).
 #   task_id:  optional argv[2] for the worker and argv[2] for
 #             the dispatcher (argv[1] is the command). Used by
 #             ``task`` (numeric Redmine issue ID), empty for the
@@ -111,12 +110,12 @@ spec:
     # included so a staging-instance override that flips the
     # namespace in the ConfigMap flows through to BOTH the
     # dispatch step (which kubectl-applies the sandbox pod into
-    # that namespace) and the worker step (which the dispatcher's
-    # pre-existing ``if action == "deleted"`` defence-in-depth
-    # branch used to hardcode but is now an explicit
-    # ``{{workflow.parameters.SHOGGOTH_NAMESPACE}}`` so the
-    # worker can be rescheduled into a non-default namespace
-    # without code changes). Values are fetched from the
+    # that namespace) and the worker step (where the dispatcher's
+    # ``if action == "deleted"`` defence-in-depth branch reads the
+    # explicit ``{{workflow.parameters.SHOGGOTH_NAMESPACE}}``
+    # instead of a hardcoded default, so the worker can be
+    # rescheduled into a non-default namespace without code
+    # changes). Values are fetched from the
     # shoggoth-workflow-config ConfigMap at admission time — the ConfigMap holds
     # the actual domain/org/instance-dir/namespace because the deploy-time
     # envsubst pass renders its `${SHOGGOTH_*}` placeholders to
@@ -344,9 +343,9 @@ spec:
       - name: GITEA_SERVER_URL
         value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/gitea"
       # No GITEA_INSTANCE_SSH_HOST here — nothing reads it. The SSH host
-      # that is wired is GITEA_SSH_HOST (slave-term.yaml:224), and the
+      # that is wired is GITEA_SSH_HOST (see slave-term.yaml), and the
       # git-cred-bootstrap sidecar keyscans both git.<domain> and the bare
-      # service (git-cred-bootstrap.yaml:72).
+      # service (see git-cred-bootstrap.yaml).
       - name: REDMINE_SERVER
         value: "http://api.{{workflow.parameters.SHOGGOTH_DOMAIN}}/redmine"
       # Namespace for the sandbox pod/service the
@@ -401,10 +400,10 @@ spec:
       - name: task_id
       - name: payload
     # Per-template mutex: only one worker pod (slave:noble)
-    # runs at a time. Replaces the workflow-level mutex the
-    # pre-fix template carried (``spec.synchronization`` at
-    # the top level, which blocked admission of any second
-    # workflow and therefore serialised the dispatcher too).
+    # runs at a time. The mutex sits on this template rather than
+    # at the workflow level (``spec.synchronization``), which
+    # would block admission of any second workflow and therefore
+    # serialise the dispatcher too.
     # The contention is on the in-pod work -- the slave runs
     # the Qwen agent and force-pushes the PR branch -- so
     # the gate belongs here, not on the dispatcher's webhook
@@ -441,7 +440,7 @@ spec:
       # Not re-wired here: OTEL_EXPORTER_OTLP_*, OPENAI_*, BM_MCP_URL,
       # CCACHE_* and SHOGGOTH_SLAVE_USER are baked into the
       # registry.{{workflow.parameters.SHOGGOTH_DOMAIN}}/slave image
-      # (see dockerfiles/slave), and this pod carries the CoreDNS
+      # (see shoggoth/dockerfiles/slave), and this pod carries the CoreDNS
       # resolver that makes those short service names resolve. The
       # dispatch-step above does set the OTEL trio because it runs the
       # shoggoth_tools image, which has no such ENV block.
@@ -470,9 +469,9 @@ spec:
       - name: GITEA_PAYLOAD
         value: "{{inputs.parameters.payload}}"
       - name: SHOGGOTH_ARGO_RUN_URL
-        # Dropped ?id={{workflow.creationTimestamp}} — Argo's workflow UI
-        # uses path segments, not a query parameter, and creationTimestamp
-        # is an RFC-3339 timestamp, not a run id. The URL navigates to the
+        # No ?id={{workflow.creationTimestamp}}: Argo's workflow UI uses
+        # path segments, not a query parameter, and creationTimestamp is
+        # an RFC-3339 timestamp, not a run id. The URL navigates to the
         # correct run page on its own.
         value: "http://argo.{{workflow.parameters.SHOGGOTH_DOMAIN}}/workflows/shoggoth/{{workflow.name}}"
       volumeMounts:

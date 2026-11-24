@@ -13,7 +13,8 @@
   This is the same shape as redmine-slave-token-push.yaml, and for the
   same reason: the pod never needs an OpenBao credential. It writes only
   the K8s Secret, and the ESO controller — which already holds the
-  write-scoped token — does the OpenBao side.
+  write-scoped token — does the OpenBao side. The credential shape is
+  documented in README.md, "Chart template conventions".
 
   Gated on ``secret-store-write``: the PushSecret itself requires the
   write SecretStore to be enabled.

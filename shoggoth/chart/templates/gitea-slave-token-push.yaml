@@ -5,10 +5,11 @@
 
   Paired with ``gitea-slave-token.yaml``: the ``slave-token`` script
   writes a fresh token into the K8s Secret, this PushSecret mirrors it
-  to OpenBao. The corresponding ``ExternalSecret`` has
-  ``creationPolicy: Orphan`` and ``refreshInterval: 0s`` so it does
-  not race the script's write — the PushSecret is the only writer
-  that goes *out* to OpenBao.
+  to OpenBao — the only writer that goes *out*. The corresponding
+  ``ExternalSecret`` has ``creationPolicy: Orphan`` and
+  ``refreshInterval: 0s`` so it does not race the script's write; the
+  credential shape is documented in README.md, "Chart template
+  conventions".
 
   Gated on ``secret-store-write``: the PushSecret itself requires the
   write SecretStore to be enabled.

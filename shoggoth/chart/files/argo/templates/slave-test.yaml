@@ -3,12 +3,12 @@
 #
 # Nine checks (gitea-api, redmine-api, git-http, git-ssh,
 # embeddings, mcp, telemetry, pip-cache, apt-cache)
-# followed by a final "assert all passed" step. Originally seven ran in
-# parallel with only git-ssh waiting on git-http (they share the scratch
-# repo — first writer wins, second's POST may race). Now serialized:
+# followed by a final "assert all passed" step. Serialized:
 # spec.parallelism: 1 caps the workflow at one active pod at a time, so
 # all checks run back-to-back in scheduler-determined order and the
 # final assert step's exit code is the AND of every check's exit code.
+# Only git-ssh waits on git-http — they share the scratch repo, and
+# first writer wins while the second's POST may race.
 #
 # We keep the DAG (instead of converting to a Steps template) so the
 # per-task dependency graph — git-ssh depends on git-http, assert-all-
@@ -117,7 +117,7 @@ spec:
     inputs:
       parameters:
       - name: check_name
-    # R1-8: a failing check is recorded as Failed but does not skip
+    # A failing check is recorded as Failed but does not skip
     # dependents.
     #
     # The eight "dependency-free" parallel checks (gitea-api, redmine-api,
@@ -128,7 +128,7 @@ spec:
     # Once any task in the DAG declares `depends:` (here `git-ssh` and
     # `assert-all-passed`), `usingDepends` flips true at the template level
     # and the per-task check `usingDepends && task.ContinueOn != nil`
-    # (workflow/validate/validate.go:1355) rejects every other task with a
+    # (workflow/validate/validate.go) rejects every other task with a
     # `continueOn:` block. The check is template-wide, not per-task-pair.
     # We drop `continueOn` from the parallel checks and rely on the fact
     # that they have no direct dependents in the DAG other than
@@ -142,9 +142,9 @@ spec:
     # `assert-all-passed`) encode "run regardless of upstream outcome"
     # in `depends:` via task-result notation, e.g.
     # `(git-http.Succeeded || git-http.Failed || git-http.Errored)`.
-    # R1-6: the check writes its exit code to a file Argo reads as an
-    # outputs.parameters value, since the original bash for-loop
-    # indirection ({{steps.$step.exitCode}}) does not work in Argo.
+    # The check writes its exit code to a file Argo reads as an
+    # outputs.parameters value: the bash for-loop indirection
+    # ({{steps.$step.exitCode}}) does not work in Argo.
     outputs:
       parameters:
       - name: exit_code
@@ -164,13 +164,13 @@ spec:
         exit $rc
       env:
       # OTEL_EXPORTER_OTLP_* is not re-wired here: the slave image
-      # bakes the endpoint/protocol/timeout (see dockerfiles/slave), and
+      # bakes the endpoint/protocol/timeout (see shoggoth/dockerfiles/slave), and
       # this pod carries the CoreDNS resolver that makes the short
       # `otelcol` name resolve.
       # Python's stdout is block-buffered when it is a pipe, so a check
-      # killed at activeDeadlineSeconds used to lose everything it had
-      # printed — the UI showed a pod with no logs and the only clue
-      # was "Step exceeded its deadline". Unbuffered output survives
+      # killed at activeDeadlineSeconds loses everything it had
+      # printed — the UI shows a pod with no logs and the only clue
+      # is "Step exceeded its deadline". Unbuffered output survives
       # the SIGKILL.
       - name: PYTHONUNBUFFERED
         value: "1"
@@ -239,10 +239,10 @@ spec:
         claimName: shoggoth-shared-cache
 
   - name: assert-all-passed
-    # R1-6: read each check's exit_code via explicit inputs.parameters
+    # Read each check's exit_code via explicit inputs.parameters
     # (Argo resolves {{tasks.<name>.outputs.parameters.exit_code}}
-    # at submit time once each check has produced its output — the
-    # broken {{steps.$step.exitCode}} indirection is gone).
+    # at submit time once each check has produced its output; the
+    # {{steps.$step.exitCode}} indirection does not work in Argo).
     inputs:
       parameters:
       - name: gitea-api-exit

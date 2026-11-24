@@ -12,7 +12,7 @@ Find notes by their structured frontmatter fields instead of (or in addition to)
 - **Tag-based filtering** — find notes tagged with specific frontmatter tags
 - **Schema-aware queries** — filter by nested schema fields using dot notation
 ## The Tool
-All metadata searching uses `basic_memory-bm_search`. Pass filters via `filters` (the alias `metadata_filters` is also accepted). The old `tags` and `status` convenience shortcuts no longer exist — express them as filters: `{"tags": [...]}` and `{"status": ...}`. Omit `query` for filter-only searches. Every call passes `project="main"` — Basic Memory is reached through the LiteLLM MCP gateway, so the tool name carries the `basic_memory-` prefix.
+All metadata searching uses `basic_memory-bm_search`. Pass filters via `filters` (the alias `metadata_filters` is also accepted). Express tags and status as filters: `{"tags": [...]}` and `{"status": ...}`. Omit `query` for filter-only searches. Every call passes `project="main"` — Basic Memory is reached through the LiteLLM MCP gateway, so the tool name carries the `basic_memory-` prefix.
 ## Filter Syntax
 Filters are a JSON dictionary. Each key targets a frontmatter field; the value specifies the match condition. Multiple keys combine with **AND** logic.
 ### Equality

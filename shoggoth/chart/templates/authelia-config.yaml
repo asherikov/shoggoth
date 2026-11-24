@@ -84,7 +84,7 @@ data:
 
     # There is deliberately no top-level `default_redirection_url`. The global
     # form and the `session.cookies` block below are mutually exclusive:
-    # 4.39.28's validator rejects the pair outright
+    # Authelia's validator rejects the pair outright
     # (internal/configuration/validator/session.go pushes
     # errFmtSessionLegacyRedirectionURL when both are set), the error is fatal,
     # and the pod never starts — "session: option 'cookies' must be configured
@@ -250,13 +250,13 @@ data:
           # be more indented than the `key` mapping it belongs to (that key
           # starts at column 12), and nindent carries the same 14 into the
           # file Authelia finally reads. Drop either 14 and BOTH parses
-          # break: the rendered ConfigMap is no longer valid YAML, and even
+          # break: the rendered ConfigMap stops being valid YAML, and even
           # if it were, the PEM would land at a column that ends the block
           # scalar.
           - key: |
 {{ `              {{- fileContent "/config/secrets/oidc-jwks-key" | nindent 14 }}` }}
         # WHY THIS BLOCK EXISTS, AND WHICH CLIENTS ARE IN IT
-        # Authelia 4.39.28's default claims strategy is constructed with an
+        # Authelia's default claims strategy is constructed with an
         # EMPTY, NON-NIL ID-token allowlist — NewDefaultCustomClaimsStrategy
         # sets `claimsIDToken: []string{}` (internal/oidc/claims.go) — and
         # isClaimAllowed treats only `nil` as "allow all":
@@ -353,10 +353,10 @@ data:
           # `allowed = nil` and therefore does carry `groups` — is never
           # consulted for the role.
           #
-          # The result is exactly the reported symptom: an SSO login that
-          # succeeds and is read-only, with the groups otherwise correct,
-          # because extractUserGroups loops all three sources and only the
-          # first non-empty one wins while extractRoleAndOrgs does not.
+          # The result is an SSO login that succeeds and is read-only, with
+          # the groups otherwise correct, because extractUserGroups loops all
+          # three sources and only the first non-empty one wins while
+          # extractRoleAndOrgs does not.
           #
           # `groups` is the only claim needed. `preferred_username` and
           # `email` are deliberately absent: extractLogin finds no

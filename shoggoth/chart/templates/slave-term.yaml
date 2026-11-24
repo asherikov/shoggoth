@@ -1,10 +1,10 @@
 {{- /*
   templates/slave-term.yaml — interactive web terminal (ttyd + tmux + Qwen Code).
 
-  Replaces the privileged `slave-dind` service for interactive use (no dockerd,
-  no DinD). Uses the shared git-cred-bootstrap sidecar (same one slave-dind
-  mounts) so ssh-agent + git-credential-cache are initialized in one place and
-  live for the lifetime of the pod.
+  The interactive alternative to the privileged `slave-dind` service (no
+  dockerd, no DinD). Uses the shared git-cred-bootstrap sidecar (same one
+  slave-dind mounts) so ssh-agent + git-credential-cache are initialized in
+  one place and live for the lifetime of the pod.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "slave-term")) }}
 apiVersion: v1
@@ -176,22 +176,21 @@ spec:
           runAsUser: 1000
         # `restartPolicy: Always` makes git-cred a native sidecar
         # (long-running, restart on failure, started before any
-        # non-sidecar container that depends on its outputs). K8s 1.28+
-        # also exposes a `startOrder` field on Container that would
+        # non-sidecar container that depends on its outputs). K8s also
+        # exposes a `startOrder` field on Container that would
         # gate `term` on git-cred's readinessProbe; we intentionally do
-        # not set it because shoggoth's running k3s build (v1.34.3+k3s3)
+        # not set it because the running k3s build
         # does not expose `startOrder` in its apiserver OpenAPI v2 —
         # `kubectl apply` rejects it with "field not declared in schema",
         # and even if accepted, the kubelet would not honour it. The
         # `term` entrypoint waits inline for the sidecar's ready flag
         # instead (see `command:` below).
         #
-        # The readinessProbe is NOT purely diagnostic, whatever the
-        # comment used to say: a native sidecar's readiness counts
-        # towards the Pod Ready condition (KEP-753 — "Readiness probes of
-        # sidecars will contribute to determine the whole Pod
-        # readiness"), so this probe does decide whether the pod is
-        # Ready. What it must not decide is whether the pod is
+        # The readinessProbe is NOT purely diagnostic: a native sidecar's
+        # readiness counts towards the Pod Ready condition (KEP-753 —
+        # "Readiness probes of sidecars will contribute to determine the
+        # whole Pod readiness"), so this probe does decide whether the pod
+        # is Ready. What it must not decide is whether the pod is
         # REACHABLE — that is the Service's business, and the Service
         # publishes not-ready addresses (see the Service above), so a
         # git-cred that has not finished bootstrapping leaves the pod
@@ -251,7 +250,7 @@ spec:
           # Wait for the git-cred sidecar to populate /shoggoth/git-cred
           # before launching ttyd. The kubelet starts this container in
           # parallel with git-cred (no `startOrder` gate — the running
-          # k3s build, v1.34.3+k3s3, does not expose the field in its
+          # k3s build does not expose the field in its
           # apiserver OpenAPI v2 and `kubectl apply` rejects it anyway),
           # so this inline poll is the actual gate. Budget 60 s matches
           # the sidecar's readinessProbe failureThreshold. We wait on
@@ -290,14 +289,13 @@ spec:
           #
           # `exec` replaces this shell, so ttyd IS the container's PID 1
           # and ttyd's exit status IS the container's exit status.
-          # Nothing may follow this line for the same reason: the
-          # `|| true` and the trailing `exit 0` that used to sit here
-          # were unreachable in both directions — on success the shell
-          # is already gone, and on failure (ttyd missing) the
-          # non-interactive shell exits 127 before it consults the `||`
-          # list. Neither ever forced an exit code, so the "force exit
-          # 0 to avoid CrashLoopBackOff" rationale behind them was
-          # false.
+          # Nothing may follow this line for the same reason: a `|| true`
+          # and a trailing `exit 0` after it would be unreachable in both
+          # directions — on success the shell is already gone, and on
+          # failure (ttyd missing) the non-interactive shell exits 127
+          # before it consults the `||` list. Neither forces an exit code,
+          # so the "force exit 0 to avoid CrashLoopBackOff" rationale for
+          # them is false.
           #
           # The exit status is already the one the normal path wants:
           # ttyd --once exits 0 when the client disconnects (upstream

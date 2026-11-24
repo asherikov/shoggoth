@@ -1,12 +1,10 @@
 """Shoggoth workflow + maintenance package.
 
-Originally a single ``shoggoth.py`` (~7.5k lines, 28 classes) that
-served both the webhook-driven workflow pod (task / ci-failure /
-pr-update) and the cron-style maintenance pod (webhook setup, mirror
-sync, slave user lifecycle, ldap sync). Split into this package so
-each subsystem can be read in isolation; the ``shoggoth.py`` shim
-at the parent directory re-exports ``main()`` and is the entrypoint
-every caller invokes.
+One submodule per subsystem, so each can be read in isolation: the
+webhook-driven workflow (task / ci-failure / pr-update) and the
+cron-style maintenance commands (webhook setup, mirror sync, slave
+user lifecycle, ldap sync). The ``shoggoth.py`` shim at the parent
+directory forwards to ``main()`` and is the entrypoint callers invoke.
 
 Public surface (re-exported at the package root):
   * ``Gitea`` / ``Redmine`` / ``Github`` — HTTP clients.

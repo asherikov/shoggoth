@@ -5,10 +5,10 @@
   `cdash-storage` (Laravel storage/uploads/logs, mounted by the cdash
   Deployment). Both use the `local-path` StorageClass.
 
-  The cdash-db Service, StatefulSet and ServiceAccount carry no legacy
-  `app:` label on their metadata — only on their pods, where the Service
-  and StatefulSet selectors match on it. The legacy label is what gives a
-  workload its `Application:` box in the applications view
+  The cdash-db Service, StatefulSet and ServiceAccount carry no `app:` label
+  on their metadata — only on their pods, where the Service and StatefulSet
+  selectors match on it. That label is what gives a workload its
+  `Application:` box in the applications view
   (make/clusterviz-views.yaml), and the database is plumbing that view
   hides: it keeps its place in the cluster view, and nothing functional
   moves, because selectors read the pod template labels, not the
@@ -595,8 +595,8 @@ spec:
         #
         # ONE-WAY DOOR ON THE ACCOUNT: OAuthController matches the account by
         # email and then calls recordExternalLogin(), which sets
-        # `password_login_disabled` — so once a user signs in through the SSO
-        # button, the LDAP password form no longer works for that account.
+        # `password_login_disabled` — so a user who signs in through the SSO
+        # button cannot use the LDAP password form for that account.
         # That is CDash's own behaviour and is not overridden here.
         - name: PINGIDENTITY_ENABLE
           value: 'true'

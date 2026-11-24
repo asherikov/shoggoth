@@ -1,8 +1,8 @@
 {{- /*
   templates/sandbox-spawner.yaml — ServiceAccount + Role + 3 RoleBindings for
-  the sandbox dispatcher (command-handler DAG).
+  the sandbox dispatcher (command-handler DAG). An internal artifact: it
+  renders under services.sandbox-spawner.enabled.
 */}}
-{{- /* internal artifact — toggled via services.sandbox-spawner.enabled */ -}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "sandbox-spawner")) }}
 apiVersion: v1
 kind: ServiceAccount

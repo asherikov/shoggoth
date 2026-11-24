@@ -54,28 +54,26 @@
       IP and neither Service contends for the port.
 
   ---------------------------------------------------------------------------
-  Why the instance ConfigMap is release-owned now
+  Why the instance ConfigMap is release-owned
   ---------------------------------------------------------------------------
-  The previous design rendered this object with the upstream chart and applied
-  it on top of a shared release, owned by nobody. That split existed only
-  because one release could not be told which instance was asking. With the
-  daemon per instance it is an ordinary template: the release owns it, so
+  The instance ConfigMap is an ordinary template of this release, so
   `helm uninstall` removes the daemon AND this instance's collector in one
-  step, and there is no label-selector delete, no instance counting and no
-  "uninstall when the last one goes" logic anywhere.
+  step: no label-selector delete, no instance counting and no "uninstall when
+  the last one goes" logic anywhere. A shared release would need all three,
+  because nothing in it says which instance is asking — the per-instance
+  daemon above is what makes the release the right owner.
 
-  The daemon still reconciles it exactly as before, and that is the part worth
-  being precise about: `gadget-namespace` in the daemon's config is
-  `.Release.Namespace`, and pkg/gadget-service/store/k8s-configmap-store
-  watches ConfigMaps labelled `type: gadget-instance` in THAT namespace with
-  an informer. So a ConfigMap owned by the release is picked up within
-  seconds, on install and on upgrade alike — ownership by Helm is orthogonal
-  to how the daemon discovers it.
+  The daemon's discovery is the part worth being precise about:
+  `gadget-namespace` in the daemon's config is `.Release.Namespace`, and
+  pkg/gadget-service/store/k8s-configmap-store watches ConfigMaps labelled
+  `type: gadget-instance` in THAT namespace with an informer. So a ConfigMap
+  owned by the release is picked up within seconds, on install and on upgrade
+  alike — ownership by Helm is orthogonal to how the daemon discovers it.
 
   The object's own name is free: the daemon keys on `metadata.name`, and the
-  sha256 truncation upstream derives from the entry name was only that
-  chart's naming convention. `top-tcp-<namespace>` is the same string the
-  otelcol keep-regex matches, so the two spellings still meet in one place.
+  sha256 truncation upstream derives from the entry name is that chart's
+  naming convention. `top-tcp-<namespace>` is the same string the otelcol
+  keep-regex matches, so the two spellings meet in one place.
 
   ---------------------------------------------------------------------------
   Two details that are easy to get wrong

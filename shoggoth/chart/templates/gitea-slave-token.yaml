@@ -6,14 +6,15 @@
   gitea-runner.yaml / argo-workflows.yaml / web-internal.yaml /
   litellm.yaml all wait on ``externalsecret/gitea-slave-token-pull`` and
   the ``git-cred`` sidecar mounts the resulting Secret. The ExternalSecret
-  must exist for those waits to succeed: without it they burn their
-  10-minute timeouts and no Deployment leaves init.
+  must exist for those waits to succeed: without it every wait times out
+  and no Deployment leaves init.
 
   ``creationPolicy: Orphan`` + ``refreshInterval: 0s`` is load-bearing:
   the PushSecret at ``gitea-slave-token-push.yaml`` reads this K8s
   Secret and pushes it back to OpenBao, and the script that writes the
   fresh token (``slave-token``) must remain the authority on the Secret
-  value.
+  value — see the credential shape in README.md, "Chart template
+  conventions".
 
   Gated on ``gitea``: gitea is the upstream identity provider and a
   default-on service; every consumer (slave-dind, slave-term,

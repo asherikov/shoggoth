@@ -1,18 +1,14 @@
 ---
 # Destroy an instance: namespace, cluster-scoped RBAC, host storage data.
 #
-# The last step is the one this play buys. A recursive delete of the only copy
-# of the instance's secrets and kubeconfig, reached as
+# The last step is the one this play buys: a recursive delete of the only copy
+# of the instance's secrets and kubeconfig. `ansible.builtin.file` with
+# `state: absent` recurses and takes the path as a variable Ansible assembles,
+# so the delete runs as a named task on the host instead of an `rm -rf`
+# interpolated into an ssh command line through three levels of quoting.
 #
-#     ${K3S_SSH} 'sudo rm -rf /var/lib/rancher/k3s/storage/${INSTANCE}'
-#
-# driven by a variable interpolated into a shell string inside single quotes.
-# `ansible.builtin.file` with `state: absent` is the same operation with the
-# path assembled by Ansible instead of by three levels of quoting, and it runs
-# as a named task on the host rather than as an opaque ssh command line.
-#
-# The other two steps use `kubernetes.core.k8s`, which has the primitives a
-# shell loop had to hand-roll:
+# The other two steps use `kubernetes.core.k8s`, which carries the primitives
+# a shell loop would have to hand-roll:
 #
 #   * the namespace is a named object, so `state: absent` + `wait` deletes it
 #     and waits, with `wait_timeout` bounding the wait — the bound
@@ -20,18 +16,18 @@
 #   * the cluster-scoped RBAC sweep is `delete_all` with `label_selectors`
 #     (both since 3.0.0), exactly what
 #     `kubectl delete clusterrole,clusterrolebinding -l <selector>` does.
-#     There is no `command` line left in this play.
+#     No step in this play runs a `command` line.
 #
-# Deliberately still NOT run here: no `helm uninstall`. The release's own
-# record lives in the namespace, so deleting the namespace removes it anyway —
-# and `helm uninstall` would additionally delete the cluster-scoped
+# Deliberately absent: no `helm uninstall`. The release's own record lives in
+# the namespace, so deleting the namespace removes it anyway — and
+# `helm uninstall` would additionally delete the cluster-scoped
 # ClusterRoles/ClusterRoleBindings in argo-workflows.yaml, external-secrets.yaml
 # and otelcol.yaml. This play deletes them explicitly instead (see the two RBAC
 # tasks below).
 #
 # The cluster-scoped RBAC is PER-INSTANCE — each name is prefixed with the
 # release name (see shoggoth/chart/templates/otelcol.yaml) — so the namespace
-# deletion no longer takes them with it. They have to be deleted explicitly, or
+# deletion does not take them with it. They have to be deleted explicitly, or
 # they leak: a cluster-scoped object is not garbage-collected with its
 # namespace, and its ClusterRoleBinding would keep granting the (now-deleted)
 # instance's ServiceAccount its permissions.

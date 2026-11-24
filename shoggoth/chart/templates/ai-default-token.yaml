@@ -10,8 +10,11 @@
 
   ``creationPolicy: Orphan``: when ``.Values.ai.defaultTokenFileRef``
   is set, openbao-bootstrap Phase B mirrors the file contents to
-  ``ai/default-token`` in OpenBao on every bootstrap run. The file is
-  authoritative; a controller refresh must not race the bootstrap.
+  ``ai/default-token`` in OpenBao on every bootstrap run, so the file
+  stays authoritative and a controller refresh must not race the
+  mirror. The credential shape (``creationPolicy`` pairing, the
+  read-scoped ``secretStoreRef``, the stable ``remoteRef`` path) is
+  documented in README.md, "Chart template conventions".
 
   Gated on ``secret-store``: no single service dominates; ``litellm``,
   ``localai``, and ``headroom`` all consume the result, and using

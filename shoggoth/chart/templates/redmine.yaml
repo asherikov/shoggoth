@@ -1,23 +1,27 @@
 {{- /*
   templates/redmine.yaml — Redmine (Rails) + its PostgreSQL backend.
 
-  Emits two `app:` labels, as legacy did: `redmine` (the web Deployment) and
-  `redmine-db` (the PostgreSQL StatefulSet). The whole file is gated on
-  `services.redmine.enabled`; the redmine-db Service, StatefulSet and
-  ServiceAccount each carry their own `services.redmine-db.enabled` guard,
-  so either workload can be toggled on its own.
+  Emits two literal `app:` labels, `redmine` (the web Deployment) and
+  `redmine-db` (the PostgreSQL StatefulSet), on top of the standard set from
+  `shoggoth.labels` — the convention that helper preserves from the k3s
+  manifests, so a per-service selector (`kubectl get pods -l app=redmine`)
+  keeps working. The whole file is gated on `services.redmine.enabled`; the
+  redmine-db Service, StatefulSet and ServiceAccount each carry their own
+  `services.redmine-db.enabled` guard, so either workload can be toggled on
+  its own.
 
-  The redmine-db `app:` label is on the pods and nowhere else: the legacy
-  label is what gives a workload its `Application:` box in the applications
-  view (make/clusterviz-views.yaml), and the database is plumbing that view
+  The redmine-db `app:` label sits on the pods and nowhere else: that label is
+  what gives a workload its `Application:` box in the applications view
+  (make/clusterviz-views.yaml), and the database is plumbing that view
   hides — it keeps its place in the cluster view. The Service and StatefulSet
   selectors read the pod template labels, not the controller's own metadata,
   so dropping the label from the three metadata blocks moves nothing
   functional, and the pods stay selectable by `kubectl get pods -l
-  app=redmine-db` exactly as before.
+  app=redmine-db`.
 
   Secrets arrive via ExternalSecrets, never inline, and the pods depend on
-  them natively — no init container waits for them:
+  them natively — no init container waits for them (README, "Secret
+  dependencies are native"):
 
     redmine-db-password         secret volume + REDMINE_DB_PASSWORD_FILE
     redmine-secret-key-base     secret volume + REDMINE_SECRET_KEY_BASE_FILE
@@ -350,7 +354,7 @@ data:
   sso_suite_zeitwerk.rb: |
     # WHY THIS FILE EXISTS
     #
-    # Redmine 7.0.3 loads every plugin's lib/ into the main Zeitwerk
+    # Redmine loads every plugin's lib/ into the main Zeitwerk
     # autoloader with eager loading enabled (lib/redmine/plugin_loader.rb,
     # add_autoload_paths: it builds a Rails::Engine::Configuration, adds
     # 'lib' with eager_load: true, and pushes each all_eager_load_paths entry

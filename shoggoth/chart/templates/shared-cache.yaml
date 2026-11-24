@@ -10,9 +10,9 @@
   one: it runs the shoggoth_tools host image and has no ccws cache
   to share.
 
-  Capacity: 30Gi (covers pip wheels + ccws cache state with headroom).
-  Bump via storageClass.resources.patch if a project outgrows this; do not
-  re-create per-consumer PVCs.
+  Capacity: 30Gi (covers pip wheels + ccws cache state with headroom);
+  the request is a literal in this file, so a project that outgrows it
+  bumps it here. Do not re-create per-consumer PVCs.
 
   No `app:` label — this is an internal artifact, not a service. It is
   always-on as long as services.shared-cache.enabled is true.

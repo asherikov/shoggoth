@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import json
 import os
 import secrets
@@ -27,9 +27,9 @@ class SlaveTest:
         self._k8s = None
         self.git_cred = GitCredentials()
         self.slave_user = params.shoggoth_slave_user
-        # `gitea_url` is the HTTP API base. The slave-test template wires
-        # this to the web-internal API gateway (api.${DOMAIN}/gitea),
-        # which replaces our Authorization header with the real slave
+        # `gitea_url` is the HTTP API base: the web-internal API
+        # gateway (api.${DOMAIN}/gitea), which replaces our
+        # Authorization header with the real slave
         # token before forwarding to Gitea (see web-internal.yaml,
         # `proxy_set_header Authorization "Bearer ${GITEA_SLAVE_TOKEN}"`).
         # The script therefore doesn't need to acquire the slave token
@@ -40,8 +40,8 @@ class SlaveTest:
         # git-cred-bootstrap populates the credential cache for
         # `host=git.${DOMAIN}`, so a clone through the gateway at
         # `host=api.${DOMAIN}` would have no matching credential and git
-        # would fail. The slave-test template always sets it
-        # (slave-test.yaml, GITEA_GIT_URL); there is deliberately no
+        # would fail. It is always set from ``GITEA_GIT_URL`` (see
+        # slave-test.yaml); there is deliberately no
         # fallback to gitea_url, which is the one URL this check cannot
         # use — `_check_git_http` dies with a clear message instead of
         # surfacing the failure as a git credential error.
@@ -133,9 +133,8 @@ class SlaveTest:
         # slave token before forwarding, so the literal ``"gateway"``
         # string is enough to satisfy the Gitea client's auth-header
         # builder — the same pattern ``_check_git_http`` uses for the
-        # scratch-repo HTTP API. No ``_slave_token()`` call (which
-        # would die in the ``slave:noble`` container with no kubectl
-        # and no env-var wired).
+        # scratch-repo HTTP API. No ``_slave_token()`` call: it needs
+        # kubectl or a wired token env var, and this check has neither.
         token = "gateway"
         headers = self._slave_headers(token)
         print(f"Gitea API URL: {self.gitea_url}")
@@ -490,8 +489,8 @@ class SlaveTest:
         # aggregate tools/list, never directly — the backends'
         # credentials (Secret/crawl4ai-token, the gitea slave token)
         # live in litellm, and the check pods must not carry them.
-        # kubectl is unavailable in the slave:noble image, so the
-        # check cannot fetch a Secret at runtime either.
+        # kubectl is unavailable in this check, so it cannot fetch a
+        # Secret at runtime either.
         #
         # The tradeoff is visibility: litellm absorbs a per-backend
         # fault and drops that backend's tools from the aggregate, so

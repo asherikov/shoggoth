@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import hashlib
 import json
 import secrets as _secrets
@@ -16,8 +16,7 @@ from . import slash_commands
 
 # ----- sandbox runtime -----------------------------------------------
 # The four sandbox-pod lifecycle scripts (init: wait-bootstrap +
-# init-git-cred-perms; main: sandbox; sidecar: cleanup) used to live
-# as inline shell constants in this module. They are now a single
+# init-git-cred-perms; main: sandbox; sidecar: cleanup) are a single
 # Python module at ``shoggoth/workflow/sandbox.py``
 # (subcommands: ``wait-bootstrap``, ``init-perms``, ``sandbox``,
 # ``cleanup``), mounted into the sandbox pod at
@@ -26,11 +25,11 @@ from . import slash_commands
 # cluster node). Each container invokes python3 with the
 # subcommand and (for the sandbox subcommand) the user-controlled
 # ``--repo`` and ``--branch`` values as separate argv items
-# -- so the pre-fix shell-injection RCE (the branch name
-# interpolated via Python ``.format()`` into a double-quoted
-# shell arg, reachable from any Gitea user with write access on
-# the base repo) is closed by construction: there is no shell
-# any more. Neither image carries the workflow scripts
+# -- so the shell-injection RCE (the branch name
+# interpolated into a shell argument, reachable from any Gitea
+# user with write access on the base repo) is closed by
+# construction: the containers invoke python3 directly and no
+# shell is involved. Neither image carries the workflow scripts
 # (dockerfiles/slave and dockerfiles/tools have no COPY/ADD
 # for them), so the hostPath mount is the only way any
 # container -- init, main, or sidecar -- reaches this module.
@@ -46,13 +45,13 @@ class _SandboxPodNotReadyError(Exception):
     reaches the dispatcher's stdout (Argo captures it in
     the workflow log) before the load-bearing ``die()`` runs.
     ``die()`` raises ``SystemExit``, which inherits from
-    ``BaseException`` (NOT ``Exception``), so a pre-fix
-    ``die()`` inside ``_wait_sandbox_ready`` propagated
-    straight through the except block and the diagnostic
-    was never written anywhere -- the user had to dig
-    through the Argo logs to find out the sandbox failed,
-    and even then the post-mortem was racing the cleanup
-    sidecar's deletion.
+    ``BaseException`` (NOT ``Exception``), so a ``die()``
+    inside ``_wait_sandbox_ready`` propagates straight
+    through the except block and the diagnostic is never
+    written anywhere -- the user has to dig through the
+    Argo logs to find out the sandbox failed, and even
+    then the post-mortem races the cleanup sidecar's
+    deletion.
 
     The exception carries the diagnostic blob (describe
     output + per-container logs + pre-wait snapshot
@@ -71,26 +70,22 @@ class _SandboxPodNotReadyError(Exception):
 
 
 class DispatchCommand(CommandBase):
-    """Control-plane pod for the `command-handler` DAG.
+    """Validates the inbound webhook event and decides whether the
+    worker step -- a separate pod that does the heavy lifting (git
+    clone, agent run, git push) -- is actually needed.
 
-    The dispatcher runs in a `shoggoth_tools:host` pod with
-    kubectl available. Its job is to validate the inbound webhook
-    event and decide whether the worker step (a separate
-    `slave:noble` pod that does the heavy lifting -- git clone, agent
-    run, git push) is actually needed.
-
-    For most commands this is a near-pass-through -- the validation
-    that used to run in the worker is duplicated here so we can
-    `sys.exit(0)` before spending 5-10s booting the agent image.
-    The worker keeps the same checks as defence-in-depth in case the
-    state changes between dispatch and worker start.
+    For most commands this is a near-pass-through -- the same
+    validation runs here so we can ``sys.exit(0)`` before spending
+    5-10s booting the agent image. The worker keeps the same checks
+    as defence-in-depth in case the state changes between dispatch
+    and worker start.
 
     The dispatcher also writes two argo workflow outputs read by
     the DAG's `worker` step:
 
       * ``command`` -- the original command string (`pr-update`,
         `task`, `ci-failure`). Echoed back to the worker so the
-        worker's argv still carries the command name.
+        worker's argv carries the command name.
       * ``should_run_worker`` -- the string `"true"` or `"false"`.
         The worker step is gated on this via the DAG `when:`
         condition. `sandbox` sets it to `"false"` because the
@@ -155,15 +150,16 @@ class DispatchCommand(CommandBase):
         # ``pull_request.head.ref`` to populate the per-sandbox
         # pod manifest and Service URL; ``help`` reads the
         # same to determine the PR to post the catalog comment
-        # to. The pre-fix logic excluded ``sandbox`` from the
-        # load list and the sandbox handler then crashed with
+        # to. ``sandbox`` belongs in the load list: its handler
+        # dereferences ``repository.full_name`` /
+        # ``pull_request.number`` / ``pull_request.head.ref``
+        # through ``Gitea.get_repo_full_name``, which raises
         # ``AttributeError: 'NoneType' object has no attribute
-        # 'get'`` from ``Gitea.get_repo_full_name`` on the
-        # uninitialised ``_payload`` (``Gitea._payload`` is now
-        # initialised to ``{}`` as a defence-in-depth default,
-        # but the payload still needs to be loaded to populate
-        # the actual fields -- loading an empty / Redmine-only
-        # payload is a no-op cost).
+        # 'get'`` on an unloaded payload. ``Gitea._payload``
+        # defaults to ``{}`` as defence-in-depth, but the
+        # payload has to be loaded to populate the actual
+        # fields -- loading an empty / Redmine-only payload is
+        # a no-op cost).
         if self.original_command in ("ci-failure", "pr-update",
                                       "sandbox", "help"):
             self.gitea.load_payload()
@@ -176,9 +172,8 @@ class DispatchCommand(CommandBase):
         # always passes ``original_command == "pr-update"``; slash-
         # command body-shape routing for ``/sandbox`` and ``/help``
         # happens inside ``_handle_pr_update`` so the body is
-        # inspected only once (the dispatcher pod is already
-        # running) and not in the binding's expr-lang selector.
-        # ``task`` and ``ci-failure`` still arrive as distinct
+        # inspected only once and not in the binding's expr-lang
+        # selector. ``task`` and ``ci-failure`` arrive as distinct
         # ``original_command`` values from their own bindings.
         if self.original_command == "task":
             self._handle_task()
@@ -324,20 +319,11 @@ class DispatchCommand(CommandBase):
         is the SOLE owner of the catalog (see
         ``shoggoth/workflow/shoggoth/commands/slash_commands.py``
         -- ``SUPPORTED_COMMANDS`` and ``format_help_text()``).
-        The pr-update worker does NOT have a ``_slash_help``
-        handler, so a ``/help`` body that reaches the worker
-        path (e.g. during a brief dispatcher-code rollout
-        window where ``_detect_slash_command_from_body``
-        hasn't been redeployed yet) silently no-ops rather
-        than rendering a duplicate catalog post.
 
         Like ``_handle_sandbox``, this is a dispatcher-only
         handler: the worker step is skipped via
-        ``should_run_worker=false``. End-to-end latency is
-        ~2-5 s on the ``shoggoth_tools:host`` pod -- the
-        worker path would otherwise spend ~60-90 s on a cold
-        ``slave:noble`` image pull + agent init, which is
-        unacceptable for a static catalog post.
+        ``should_run_worker=false``. A static catalog post does
+        not justify the worker's image pull + agent init cost.
 
         Trust gate: mirrors the pr-update worker's
         ``_handle_slash_command`` exactly. Posting the
@@ -432,10 +418,10 @@ class DispatchCommand(CommandBase):
             pod's ``status.phase`` transition to a terminal
             state and runs ``kubectl delete pod
             --grace-period=0``, removing the pod from the
-            API server. The sandbox pod no longer relies on
-            K8s 1.23+ ``spec.ttlSecondsAfterFinished``
-            (rejected by older API servers as "unknown
-            field"), so the
+            API server. The sandbox pod uses the sidecar's
+            delete rather than
+            ``spec.ttlSecondsAfterFinished`` (rejected by
+            older API servers as "unknown field"), so the
             cleanup contract holds on every cluster version
             shoggoth supports.
           * Service's ``ownerReferences`` point at the pod, so
@@ -481,9 +467,9 @@ class DispatchCommand(CommandBase):
             # materializes the same workspace they do. The project's
             # repository, not the PR's head repository: the project
             # carries the layout, and the PR's head ref is checked
-            # out on top of it (the sandbox used to clone the head
-            # repository, which for a fork PR is the contributor's
-            # fork and carries no workspace at all).
+            # out on top of it (the head repository of a fork PR is
+            # the contributor's fork and carries no workspace at
+            # all).
             resolver = ProjectResolver(self.gitea, self.redmine,
                                        params.shoggoth_domain)
             project_repo, _ = resolver.repo_for_branch(
@@ -491,7 +477,7 @@ class DispatchCommand(CommandBase):
             if not project_repo:
                 # No Redmine project matched the branch: fall back to
                 # the PR's own repository, which is what the sandbox
-                # cloned before.
+                # clones.
                 project_repo = repo_full_name
             repo_type = resolver.repo_type(project_repo)
             # The PR's head ref is checked out in the repository it
@@ -618,9 +604,9 @@ class DispatchCommand(CommandBase):
             # the reason; die() surfaces it in the Argo log
             # (which Argo uses to mark the step Failed) and
             # stops the rest of the dispatch path from running
-            # on a half-completed state. The pre-fix behaviour
-            # silently continued and the workflow was marked
-            # Succeeded with no sandbox running -- exactly the
+            # on a half-completed state. Silently continuing
+            # here would mark the workflow Succeeded with no
+            # sandbox running -- exactly the
             # misleading-success failure mode the user
             # reported ("dispatcher logs an error ... but
             # succeeds"). Exit 1 here is the load-bearing
@@ -878,16 +864,16 @@ class DispatchCommand(CommandBase):
             port 80 onto). It supervises them: the first one to
             exit ends the sandbox and the other is stopped with
             it. ttyd --once exits 0 when the browser disconnects,
-            so the user's closing the tab ends the sandbox the
-            same way it did before; ``sshd -i`` exits when its
+            so the user's closing the tab ends the sandbox just
+            as an SSH logout does; ``sshd -i`` exits when its
             one session ends, so an SSH logout ends it too. The
             pod's ``restartPolicy: Never`` means there is no
             CrashLoopBackOff to avoid in the first place.
 
         ``restartPolicy: Never`` + the ``cleanup`` sidecar is
-        the cleanup contract (the pre-fix
-        ``spec.ttlSecondsAfterFinished`` field is rejected by
-        clusters running K8s < 1.23).
+        the cleanup contract (``spec.ttlSecondsAfterFinished``
+        is rejected by clusters running K8s < 1.23, so the
+        sidecar's own delete is the portable path).
         """
         namespace = params.shoggoth_namespace
         domain = params.shoggoth_domain
@@ -939,8 +925,6 @@ class DispatchCommand(CommandBase):
                          ],
                      }} if params.shoggoth_dns_ip else {}),
                 # No ``spec.ttlSecondsAfterFinished`` -- the
-                # Pod-level field was added in K8s 1.23
-                # (feature-gated until 1.29 GA) and the
                 # shoggoth cluster's API server rejects it
                 # with "unknown field
                 # spec.ttlSecondsAfterFinished" on
@@ -994,24 +978,22 @@ class DispatchCommand(CommandBase):
                             "limits": {"memory": "32Mi", "cpu": "50m"},
                         },
                     },
-                    # The pre-fix design had a ``git-clone`` init
-                    # container here. That container was waiting on
-                    # the ``git-cred`` sidecar's ready flag, but
-                    # init containers run BEFORE all regular
+                    # No ``git-clone`` init container here: it would
+                    # wait on the ``git-cred`` sidecar's ready flag,
+                    # but init containers run BEFORE all regular
                     # containers (including sidecars) -- so the
                     # sidecar couldn't start until the init
                     # container finished, and the init container
                     # couldn't finish until the sidecar's ready flag
-                    # was set. The 90s ``git-cred not ready``
-                    # timeout was the visible failure mode. The
-                    # clone is now inlined into the ``sandbox``
-                    # container's startup (the ``sandbox``
+                    # was set, which deadlocks until the ready
+                    # timeout fires. The clone is inlined into the
+                    # ``sandbox`` container's startup (the ``sandbox``
                     # subcommand of
                     # ``shoggoth/workflow/sandbox.py``), so
                     # it waits inline for the sidecar. That is where
                     # the workspace materialization happens too -- it
                     # needs the sidecar's credentials for the same
-                    # reason the clone did.
+                    # reason the clone does.
                 ],
                 "containers": [
                     {
@@ -1070,20 +1052,15 @@ class DispatchCommand(CommandBase):
                         # The sandbox itself: one container running
                         # both servers.
                         #
-                        # It used to be two containers -- a ``ttyd``
-                        # one and an ``sshd`` one -- in the same
-                        # pod, split because sshd was the root
-                        # process of the pod (it bound the
-                        # privileged port 22 and did OpenSSH's
-                        # privilege separation), while the web
-                        # terminal had to be the unprivileged
-                        # ``ccws`` user. The split cost a shared
-                        # volume and a pair of flag files to agree
-                        # on when the workspace was ready, and --
-                        # because pod Ready is a conjunction over
-                        # every container -- a dead container took
-                        # the pod out of Ready, which made the
-                        # *surviving* one unreachable too.
+                        # Splitting this into a ``ttyd`` container
+                        # and an ``sshd`` container in the same pod
+                        # would cost a shared volume and a pair of
+                        # flag files to agree on when the workspace
+                        # was ready, and -- because pod Ready is a
+                        # conjunction over every container -- a dead
+                        # container takes the pod out of Ready,
+                        # which makes the *surviving* one
+                        # unreachable too.
                         #
                         # One container runs the whole sequence
                         # (materialize, then serve), with no
@@ -1205,19 +1182,18 @@ class DispatchCommand(CommandBase):
                         # workspace clones its listed
                         # sub-repositories, which is minutes, not
                         # seconds) + a few seconds for ttyd to
-                        # bind its port. The pre-fix
-                        # value of 30 s was too tight -- on a
-                        # slow clone the kubelet's liveness
-                        # probe started failing before ttyd
-                        # was even up, the failureThreshold
-                        # elapsed, and the kubelet killed the
-                        # container before the user could
-                        # connect. Once ttyd is up, the
+                        # bind its port. A tighter value (30 s)
+                        # is not enough: on a slow clone the
+                        # kubelet's liveness probe starts failing
+                        # before ttyd is even up, the
+                        # failureThreshold elapses, and the
+                        # kubelet kills the container before the
+                        # user can connect. Once ttyd is up, the
                         # ``periodSeconds: 10`` /
                         # ``failureThreshold: 3`` (30 s of
                         # sustained failures) is the kill
                         # path for a hung ttyd -- faster
-                        # than the pre-fix 90 s budget so the
+                        # than a 90 s budget so the
                         # cleanup sidecar (which has its own
                         # not-ready watchdog) sees the
                         # termination signal sooner.
@@ -1244,8 +1220,8 @@ class DispatchCommand(CommandBase):
                             # privileges to switch to another
                             # account -- which is what limits the
                             # sandbox to the ccws account. The web
-                            # terminal has been unprivileged all
-                            # along for the same reason.
+                            # terminal runs as the same unprivileged
+                            # user for the same reason.
                             #
                             # Nothing in the sandbox needs a
                             # privilege of its own: the workspace is
@@ -1347,7 +1323,7 @@ class DispatchCommand(CommandBase):
                                 # (.../partial/x.deb ->
                                 # .../archives/x.deb)", both rc=100.
                                 # Verified against the image's own
-                                # apt 2.8: the five below leave an
+                                # apt: the five below leave an
                                 # update, a download and a full
                                 # install (fetch, rename, dpkg
                                 # unpack, triggers) clean.
@@ -1618,9 +1594,9 @@ class DispatchCommand(CommandBase):
             # Service would leak past the pod's lifetime
             # (K8s GC only cascades-delete child services
             # with an ownerReference pointing at the
-            # deleted pod). The pre-fix code logged a
-            # WARNING and continued; the Service would
-            # silently linger in the cluster. Fail loud so
+            # deleted pod). Logging a WARNING and
+            # continuing leaves the Service silently
+            # lingering in the cluster. Fail loud so
             # the workflow is marked Failed and the user
             # can retry.
             die(f"sandbox: could not look up pod UID for "
@@ -1647,13 +1623,13 @@ class DispatchCommand(CommandBase):
         if result.returncode != 0:
             # Same reasoning as the UID-lookup die() above:
             # a Service without the ownerReference leaks
-            # when the pod is TTL'd. The pre-fix code
-            # logged WARNING and continued, leaving a
-            # ghost Service in the cluster for every
-            # /sandbox invocation that hit a transient
-            # patch failure (auth hiccup, RBAC mismatch,
-            # etc.). Fail loud so the workflow is marked
-            # Failed and the user retries.
+            # when the pod is TTL'd. Logging a WARNING and
+            # continuing leaves a ghost Service in the
+            # cluster for every /sandbox invocation that
+            # hits a transient patch failure (auth hiccup,
+            # RBAC mismatch, etc.). Fail loud so the
+            # workflow is marked Failed and the user
+            # retries.
             die(f"sandbox: kubectl patch ownerReference "
                 f"failed: {result.stderr.strip()!r}; refusing "
                 f"to leave a Service without ownerReference "
@@ -1674,9 +1650,9 @@ class DispatchCommand(CommandBase):
         because the sandbox pod's own ``cleanup`` sidecar deletes
         the pod as soon as it decides the sandbox is dead -- and a
         pod deleted mid-wait leaves the dispatcher with nothing left
-        to describe. The pre-fix version took one snapshot two
-        seconds after ``kubectl apply`` and one probe after the wait
-        expired, so a pod deleted in between produced a diagnostic
+        to describe. A single snapshot taken a moment after
+        ``kubectl apply`` plus one probe after the wait expires
+        produces, for a pod deleted in between, a diagnostic
         describing the pod's second of life: the init container's
         "all K8s Secrets Ready" and nothing else. The live snapshot
         chain keeps the pod's state as of its last moments.
@@ -1689,12 +1665,11 @@ class DispatchCommand(CommandBase):
 
         Diagnostic output on timeout:
 
-        The pre-fix version called ``kubectl logs
-        --all-containers`` and bailed when the pod was
-        gone (the cleanup sidecar sometimes deletes the
-        pod before the dispatcher's wait returns, leaving
-        ``NotFound`` and an empty tail). The new version
-        chains three probes in order of diagnostic value:
+        Three probes are chained in order of diagnostic value,
+        because a single ``kubectl logs --all-containers`` bails
+        when the pod is gone (the cleanup sidecar sometimes
+        deletes the pod before the dispatcher's wait returns,
+        leaving ``NotFound`` and an empty tail):
 
           1. ``kubectl describe pod`` -- the single best
              source of container exit codes / messages,
@@ -1870,7 +1845,7 @@ class DispatchCommand(CommandBase):
             # Last resort -- neither the post-wait nor
             # the live probes yielded anything. The
             # user knows to look at the Argo logs for
-            # the dispatcher's earlier kubectl
+            # the dispatcher's own kubectl
             # invocations.
             diag_parts.append(
                 "pod was deleted before logs could be "
@@ -1886,12 +1861,12 @@ class DispatchCommand(CommandBase):
         # full diagnostic to the dispatcher's stdout
         # (Argo captures it in the workflow log), posts
         # a short plain pointer as a PR comment, and
-        # re-dies. A pre-fix ``die()`` here raised
+        # re-dies. A ``die()`` here raises
         # SystemExit, which is a BaseException (not
-        # Exception) and propagated straight through
-        # the except block -- the diagnostic was
+        # Exception) and propagates straight through
+        # the except block -- the diagnostic is
         # never written anywhere and the user never
-        # saw the failure on the PR.
+        # sees the failure on the PR.
         raise _SandboxPodNotReadyError(sandbox_id, diag)
 
     def _snapshot_sandbox_pod(self, sandbox_id, settle_s=2):
@@ -1978,16 +1953,15 @@ class DispatchCommand(CommandBase):
         # ``Volumes:``, ``Limits:``, ``Requests:``,
         # ``Environment:``, ``Mounts:``,
         # ``Node-Selectors:``, ``Tolerations:``,
-        # ...). The earlier version of this function
-        # accepted any ``<word>:`` line and never
-        # exited the ``Containers:`` section, so it
-        # captured ``Limits:``, ``Requests:``,
+        # ...). Accepting any ``<word>:`` line without
+        # leaving the ``Containers:`` section captures
+        # ``Limits:``, ``Requests:``,
         # ``Environment:``, ``Mounts:``,
         # ``Conditions:``, and ``Volumes:`` as
         # "container names" and the per-container log
-        # probes turned into a wall of
+        # probes turn into a wall of
         # ``container Limits is not valid for pod ...``
-        # errors that buried the actual failure
+        # errors that bury the actual failure
         # (init-container error, image-pull
         # failure, etc.). The state machine below
         # enforces: (a) two leading spaces for

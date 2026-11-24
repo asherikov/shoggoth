@@ -2,15 +2,15 @@
   zz-crd-ready-wait.yaml — Waits for CRDs to become Established before any
   resource that depends on them is created.
 
-  A PRE-INSTALL / PRE-UPGRADE hook, and it has to be one. It used to be a
-  post-install hook, which made it useless for the case it exists for: Helm
-  creates the release's resources BEFORE a post-install hook runs, so on a
-  cluster without the CRDs the install already died on the first CR
+  A PRE-INSTALL / PRE-UPGRADE hook, and it has to be one. A post-install
+  hook would be useless for the case it exists for: Helm creates the
+  release's resources BEFORE a post-install hook runs, so on a cluster
+  without the CRDs the install already dies on the first CR
   ("no matches for kind \"ExternalSecret\" in version \"external-secrets.io\"")
   and a failed install never runs its post-install hooks — the Job's own
-  diagnostic could not fire on exactly the case it
-  was written for. As a pre-install hook the Job runs FIRST, fails loudly
-  with it, and the release never reaches the CRs.
+  diagnostic could not fire on exactly the case it is written for. As a
+  pre-install hook the Job runs FIRST, fails loudly with it, and the
+  release never reaches the CRs.
 
   It cannot promise to run before a template is "interpreted" — Helm renders
   every template into the release manifest before it executes any hook, so
@@ -199,12 +199,12 @@ spec:
               # PREFLIGHT: hand kubectl a kubeconfig, then ask it what it
               # resolved.
               #
-              # This check used to verify the two facts the in-cluster config
-              # needs — KUBERNETES_SERVICE_HOST/PORT and the projected token —
-              # on the theory that with them present client-go would build the
-              # in-cluster config by itself. That theory is wrong, and the
-              # install that carried it proved so: the pod had all of them, the
-              # check passed in silence, and every call still went to
+              # The two facts the in-cluster config needs —
+              # KUBERNETES_SERVICE_HOST/PORT and the projected token — are
+              # not sufficient for client-go to build the in-cluster config
+              # by itself. A pod that has all of them and no kubeconfig
+              # resolves to a VALID config pointing at loopback, and every
+              # call goes to
               #
               #     Get "http://localhost:8080/api?timeout=30s":
               #       dial tcp [::1]:8080: connect: connection refused
@@ -229,9 +229,8 @@ spec:
               #
               # in-cluster is a branch there, not a fallback, and nothing about
               # a missing credential is reported when the branch is not taken.
-              # Checking the facts client-go WOULD have needed cannot see that,
-              # which is why the previous version of this check passed on a pod
-              # whose every API call was dying.
+              # Checking the facts client-go would need cannot see that
+              # branch, which is why this check does not stop at them.
               #
               # So the config is written here instead of discovered, from the
               # three facts the ServiceAccount admission plugin gives every
@@ -354,8 +353,8 @@ spec:
 
               # ONE API call for the whole inventory, not one per group.
               # `kubectl get crd -o jsonpath` fetches every CRD object in full
-              # and filters client-side, so the per-group call was downloading
-              # the entire inventory once per group — ~30 CRDs, several of them
+              # and filters client-side, so a per-group call downloads the
+              # entire inventory once per group — ~30 CRDs, several of them
               # multi-megabyte — on the least idle moment of the install.
               # Fetching once and splitting by group locally halves that
               # payload, and it is what makes the per-group check below
@@ -368,16 +367,15 @@ spec:
 
               NAMES=()
               for g in "${CRD_GROUP_LIST[@]}"; do
-                # A group with no CRDs is a hard failure, and it used to be
-                # invisible. The per-group `kubectl get crd` sat in a process
-                # substitution (`done < <(kubectl …)`), whose exit status
-                # `set -e` never sees: an unreachable API server left that
-                # group's list empty and the hook went on to wait for the
-                # OTHER groups only. That is how this hook once waited for
-                # eight Argo CRDs and zero external-secrets.io ones, on a
-                # cluster where the ESO CRDs were installed and being queried
-                # three minutes earlier — and the "no CRDs found" branch below
-                # never fired, because NAMES was not empty.
+                # A group with no CRDs is a hard failure, and it has to be
+                # visible. A per-group read whose exit status `set -e` never
+                # sees — a process substitution, `done < <(kubectl …)` — lets
+                # an unreachable API server leave that group's list empty
+                # while the hook waits for the OTHER groups only: the "no
+                # CRDs found" branch below never fires, because NAMES is not
+                # empty. So the inventory is read once up front with its
+                # failure surfaced, and the per-group split runs on that
+                # single result.
                 GROUP_NAMES=()
                 while IFS=$'\t' read -r grp name; do
                   if [ "${grp}" = "${g}" ] && [ -n "${name}" ]; then
@@ -406,17 +404,14 @@ spec:
                 #   * the connection to the API server died mid-wait, which
                 #     says nothing about any CRD.
                 #
-                # Both used to be reported the same way, and wrongly. The
-                # straggler read ended in `|| true`, so a transport failure
-                # left ESTABLISHED empty and every CRD in NAMES was printed
-                # as `Established=unknown` — a verdict this script had not
-                # obtained. That is how a run in which `kubectl wait` had
-                # already printed `condition met` for twelve of the fourteen
-                # CRDs still ended on "not every CRD became Established
-                # within 120s" with all fourteen listed as unknown. Same
-                # conflation argo-workflows.yaml's apply-workflows init
-                # container was fixed for: a read that failed is not a read
-                # that said no, and readability comes before judgement.
+                # Both reasons need opposite responses, so they must not be
+                # reported the same way. A straggler read that ends in
+                # `|| true` reports a transport failure as
+                # `Established=unknown` for every CRD in NAMES — a verdict
+                # this script had not obtained. Same rule as
+                # argo-workflows.yaml's apply-workflows init container: a
+                # read that failed is not a read that said no, and
+                # readability comes before judgement.
                 #
                 # The read is required now, and `kctl` retries it. It is one
                 # inventory call against a budget that has already spent its

@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import json
 import sys
 import time

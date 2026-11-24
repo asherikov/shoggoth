@@ -1,11 +1,8 @@
 """Maintenance and workflow command implementations.
 
-The original ``shoggoth.py`` defined every command class at module
-top level alongside the dispatcher. The split moves each command to
-its own file (so e.g. ``SlaveAccess``'s 400-line ``execute`` body
-sits alone instead of crowding ``SlaveTest``); this ``__init__``
-re-exports the same names ``shoggoth.py`` had so the dispatcher
-can still import them by class name.
+Each command class lives in its own module in this package, and this
+``__init__`` re-exports the classes so callers can import them by
+class name.
 
 Adding a new command:
   1. Create ``commands/<name>.py`` with the class.

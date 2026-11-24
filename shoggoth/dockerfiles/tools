@@ -6,15 +6,14 @@
 # chart's init containers, the argo workflow steps, the dispatcher's sandbox
 # pods — most of them with 16-64Mi memory limits and nothing to do but run
 # kubectl or chown a directory. Carrying the client toolchain there would put
-# a python 3.14 interpreter, graphviz with cairo/pango, the pygraphviz
+# a python interpreter, graphviz with cairo/pango, the pygraphviz
 # extension and a 35 MB icon library into all of them.
 #
-# alpine:3.24 and not 3.22, and this is not a preference: ansible-core 2.22
-# and later declare requires_python >= 3.13, and 3.22 ships 3.12.16 while
-# 3.24 ships 3.14.10. The bound is what rules 3.22 out — a version of
-# ansible-core old enough to run on 3.12 cannot run a module against a host
-# whose python3 is 3.15. `:client` is built FROM `:host`, so this bound
-# applies to the one shared base.
+# Why this base and not the older one, and this is not a preference:
+# ansible-core declares requires_python >= 3.13, and the older base ships a
+# python below that bound, which is what rules it out — a python below the
+# bound cannot run a module against a host whose python3 is newer. `:client`
+# is built FROM `:host`, so this bound applies to the one shared base.
 ARG BASE_IMAGE=alpine:3.24
 
 FROM ${BASE_IMAGE} AS tools
@@ -129,7 +128,7 @@ RUN curl -fsSL "https://github.com/stackrox/kube-linter/releases/download/${KUBE
     && chmod 0755 /usr/local/bin/kube-linter /usr/local/bin/updatecli
 
 # `diagrams` is installed first and with --no-deps, its two real imports
-# spelled out. Upstream 0.25.1 declares `pre-commit` as an unconditional
+# spelled out. Upstream declares `pre-commit` as an unconditional
 # install_requires — a packaging bug, not a runtime need — and honouring it
 # drags nodeenv, virtualenv and cmd2 into a diagram tool. Installing it
 # before KubeDiagrams is what makes the trick work: pip does not recurse
@@ -141,18 +140,18 @@ RUN curl -fsSL "https://github.com/stackrox/kube-linter/releases/download/${KUBE
 # cannot supply it:
 #
 #   * diagrams — no py3-diagrams package exists. It still needs --no-deps:
-#     upstream 0.25.1 declares `pre-commit` as an unconditional
+#     upstream declares `pre-commit` as an unconditional
 #     install_requires, a packaging bug rather than a runtime need, and
 #     honouring it drags nodeenv, virtualenv and cmd2 into a diagram tool.
 #     Its real imports — graphviz, jinja2, PyYAML — are already present from
 #     the apk list above, so --no-deps leaves nothing missing.
 #   * ansible-core — pinned, and the pin is load-bearing. Alpine's community
-#     repo ships 2.21.0, whose requires_python is >=3.12; 2.22.0 declares
-#     >=3.13, which is what rules alpine:3.22's python 3.12.16 out for this
-#     stage. A version old enough to accept 3.12 cannot run a module against
-#     a host whose python3 is 3.15, so the apk package is not usable here,
-#     and the version is bumped by make/updatecli-images.yaml instead of
-#     being followed from the repo.
+#     repo ships a version whose requires_python bound is below the stage's
+#     need (>=3.13), and its python is below the bound as well. A python
+#     below the bound cannot run a module against a host whose python3 is
+#     newer, so the apk package is not usable here, and the version is
+#     bumped by make/updatecli-images.yaml instead of being followed from
+#     the repo.
 #   * KubeDiagrams — no py3-kubediagrams package exists. Its dependencies
 #     resolve against the apk list above (py3-yaml, py3-puremagic,
 #     py3-pygraphviz) plus graphviz2drawio and svg-path, both pure-python

@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import json
 import os
 import sys
@@ -24,27 +24,26 @@ class PushSecretCheck:
     ``"cannot read secret data from Vault: Error making API
     request..."``.
 
-    The maintenance workflow that wrote the K8s Secret still
-    succeeds, because the write is to the K8s Secret, not to
-    OpenBao. Argo doesn't watch the PushSecret's events, so the
-    failure stays invisible until a downstream consumer
-    (git-cred sidecar, web-internal proxy) starts 401-ing on the
-    stale OpenBao value. This class makes the failure visible:
-    it queries each known PushSecret's ``status.conditions`` and
-    ``die()``s the workflow when any condition is not ``Ready``.
+    The Secret write succeeds on its own — it targets the K8s
+    Secret, not OpenBao — so the failure stays invisible until a
+    downstream consumer (git-cred sidecar, web-internal proxy)
+    starts 401-ing on the stale OpenBao value. This class makes the
+    failure visible: it queries each known PushSecret's
+    ``status.conditions`` and ``die()``s when any condition is not
+    ``Ready``.
 
-    RBAC: the maintenance SA needs ``get`` on ``pushsecrets`` in
+    RBAC: the service account needs ``get`` on ``pushsecrets`` in
     the namespace — the
     ``shoggoth-maintenance-secret-writer-pushsecrets-read`` Role
     grants it.
     """
 
-    # PushSecrets whose OpenBao round-trip the maintenance workflow
-    # should verify. Centralised so adding a PushSecret to the SecretStore
+    # PushSecrets whose OpenBao round-trip this command
+    # verifies. Centralised so adding a PushSecret to the SecretStore
     # is a one-line change here.
     # ``redmine-slave-token`` is included even though the redmine
-    # pod's ``slave_token_init.rb`` POST caller — not the
-    # maintenance workflow — is what writes its K8s Secret: the
+    # pod's ``slave_token_init.rb`` POST caller — not this
+    # command — is what writes its K8s Secret: the
     # four PushSecrets share a SecretStore and a write token, so a
     # single root-cause failure surfaces in all four and a single
     # check covers all four. ``cdash-api-token`` is the same shape
@@ -61,7 +60,7 @@ class PushSecretCheck:
     # evaluate the freshly-written K8s Secret. Default 0 — the
     # controller reacts to Secret change events within seconds
     # (the 5-minute ``refreshInterval`` is the fallback), and the
-    # upstream maintenance steps (gitea-ldap-sync, slave-access,
+    # sibling maintenance commands (gitea-ldap-sync, slave-access,
     # slave-token, runner-token, ssh-key, redmine-ldap-sync) take
     # much longer than that, so by the time the check runs the
     # conditions are already settled. Override via

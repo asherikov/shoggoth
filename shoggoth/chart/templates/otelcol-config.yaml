@@ -1,7 +1,7 @@
 {{- /*
   templates/otelcol-config.yaml — the collector pipeline ConfigMap for otelcol.
 
-  Split out of otelcol.yaml so the DaemonSet can checksum it with
+  Held in its own file so the DaemonSet can checksum it with
   `include (print $.Template.BasePath "/otelcol-config.yaml") . | sha256sum`.
   A workload cannot checksum the file that defines it: `include` on the
   containing template re-enters it and the render recurses until Helm errors
@@ -244,10 +244,10 @@ data:
                             # is a prefix of `top-tcp-shoggoth-test`, so the
                             # unanchored spelling would keep BOTH scopes. With
                             # one daemon per instance only this instance's
-                            # scope is ever scraped, so the filter no longer
-                            # carries the separation on its own — it is kept
-                            # because it is the one thing that still holds if
-                            # the topology ever goes back to a shared daemon.
+                            # scope is ever scraped, so the filter is
+                            # defence in depth on top of the scope name — it
+                            # is the one thing that holds if the topology
+                            # ever shares a daemon.
                             # The scope name is the mapped name from
                             # `tcp:<name>` in the gadget instance's
                             # `otel-metrics-name` param, with the datasource

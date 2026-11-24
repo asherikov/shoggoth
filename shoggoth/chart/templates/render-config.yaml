@@ -1,13 +1,8 @@
 {{- /*
   templates/render-config.yaml — generic in-cluster envsubst helper. Embeds
   the shell script the per-service render-config init containers run to
-  envsubst templates:
-    Env:
-      RENDER_VARS   envsubst VARS expression (e.g. '${FOO}${BAR}').
-                    If empty, substitutes all env vars present in the container.
-    Mounts:
-      /templates (read-only)   ConfigMap containing file templates
-      /rendered  (read-write)  emptyDir where rendered files are written
+  envsubst templates; the script documents its own contract (``RENDER_VARS``,
+  the ``/templates`` and ``/rendered`` mounts) at the top of its body.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "render-config")) }}
 apiVersion: v1

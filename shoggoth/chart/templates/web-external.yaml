@@ -49,8 +49,9 @@ spec:
       annotations:
         # Roll the pod when the mounted angie.conf changes. Two of the values
         # in that file appear nowhere else in this Deployment —
-        # network.wireguard.uiPort (the upstream port, line 39) and
-        # identity.dnsIp (the resolver, line 24) — so changing either left the
+        # network.wireguard.uiPort (the `upstream wireguard` server port in
+        # web-external-config.yaml) and identity.dnsIp (the `resolver`
+        # directive in web-external-config.yaml) — so changing either left the
         # pod template byte-identical and Helm started no rollout. The file is
         # mounted with subPath, so kubelet does not even reproject it onto the
         # running pod: angie keeps serving the port it parsed at startup and

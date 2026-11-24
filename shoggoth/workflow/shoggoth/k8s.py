@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import base64
 import binascii
 import json
@@ -12,8 +12,7 @@ class K8s:
 
     The SecretStore reads kv values from OpenBao and materialises them
     in the cluster namespace; this class talks to those Secrets directly
-    instead of round-tripping through OpenBao. The ``upsert_secret``
-    helper predates the class and is folded in here.
+    instead of round-tripping through OpenBao.
     """
 
     def __init__(self, namespace=None):

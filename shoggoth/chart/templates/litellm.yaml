@@ -7,8 +7,8 @@
   initContainer
   (templates/render-config.yaml); nothing expands them on the way through
   Helm, because there is no envsubst pass over the rendered manifests. The
-  SHOGGOTH_AI_DEFAULT_* vars are the ones that moved out of that class
-  entirely — they are .Values.ai.* now, filled by Helm at render time.
+  SHOGGOTH_AI_DEFAULT_* vars are not in that class: they are .Values.ai.*,
+  filled by Helm at render time.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "litellm")) }}
 apiVersion: v1
@@ -217,19 +217,17 @@ spec:
           value: WARNING
         # Boot with no master key. This proxy has no per-client auth model:
         # the slave image, basic-memory and setup-client.sh each call it with
-        # their own static literal key, and before the v1.109.1 bump it ran
-        # with no master key at all — every request accepted, the deployment
-        # being VPN-only behind web-internal, which is its access control.
-        # v1.109.x instead refuses to boot in that state (litellm commit
-        # fe480533, "refuse to start with an unset, empty, or publicly known
-        # master key"), so the sanctioned override restores the pre-update
-        # behaviour. A real LITELLM_MASTER_KEY is not a drop-in replacement:
-        # with one set, only the master key itself and DB-provisioned virtual
-        # keys are accepted, which would 401 every existing client until they
-        # are re-keyed.
+        # their own static literal key, and the deployment is VPN-only behind
+        # web-internal, which is its access control. It refuses to boot
+        # in that state (litellm commit fe480533, "refuse to start with an
+        # unset, empty, or publicly known master key"), so the sanctioned
+        # override is what keeps that model working. A real LITELLM_MASTER_KEY
+        # is not a drop-in replacement: with one set, only the master key
+        # itself and DB-provisioned virtual keys are accepted, which would 401
+        # every existing client until they are re-keyed.
         #
         # NO OIDC CLIENT IS REGISTERED FOR THIS SERVICE, and the reason is the
-        # same master key: v1.109.1's UI SSO needs BOTH LITELLM_MASTER_KEY and
+        # same master key: the UI SSO needs BOTH LITELLM_MASTER_KEY and
         # DATABASE_URL to be set — show_missing_vars_in_env() short-circuits
         # the /sso/key/generate route otherwise, so the button cannot work
         # without a master key. Setting one would retire every static token
@@ -334,11 +332,9 @@ metadata:
     shoggoth.io/group: ai
     shoggoth.io/exposure: internal
 rules:
-# No `secrets` rule and no `externalsecrets` rule: the wait loop used to
-# poll the ExternalSecret CRs (`kubectl get externalsecret <name>` →
-# their Ready condition) before the headroom poll. Those secrets
-# (ai-default-token, gitea-slave-token, crawl4ai-token) are now resolved
-# by the kubelet itself — render-config declares non-optional
+# No `secrets` rule and no `externalsecrets` rule: the secrets this pod
+# needs (ai-default-token, gitea-slave-token, crawl4ai-token) are
+# resolved by the kubelet itself — render-config declares non-optional
 # `secretKeyRef`s, so the kubelet refuses to start that init container
 # until the Secrets and their keys exist, with no API read and therefore
 # no RBAC needed.
@@ -443,10 +439,10 @@ data:
     #
     # default_on: true — every virtual key and every request goes
     # through headroom unless the caller passes `x-headroom-bypass: true`.
-    # Was false (LiteLLM's recommended opt-in posture) so an
-    # accidentally-enrolled key couldn't get tripped up by a content
-    # type headroom refuses; flipped to true so the savings show up
-    # on the shoggoth_ai Grafana dashboard without per-key wiring. To
+    # The opt-in alternative (LiteLLM's recommended posture) keeps an
+    # accidentally-enrolled key from being tripped up by a content type
+    # headroom refuses; true instead puts the savings on the shoggoth_ai
+    # Grafana dashboard without per-key wiring. To
     # exclude a single caller, send `x-headroom-bypass: true`. To
     # exclude specific keys, regenerate via `POST /key/generate` with
     # `"guardrails": []`. Per upstream behaviour:

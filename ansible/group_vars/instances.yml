@@ -10,9 +10,9 @@
 ansible_connection: ssh
 ansible_user: "{{ lookup('env', 'USER') | default(lookup('pipe', 'id -un'), true) }}"
 
-# `HOST_IP` from the environment. The name the inventory used to spell,
-# `host.<domain>`, resolves for nothing: setup-client.sh's `update_hosts`
-# writes <ip> <domain> and <ip> <service>.<domain> but never host.<domain>.
+# `HOST_IP` from the environment. `host.<domain>` resolves for nothing:
+# setup-client.sh's `update_hosts` writes <ip> <domain> and
+# <ip> <service>.<domain> but never host.<domain>.
 #
 # An empty value is deliberate, and is the whole point: it fails the connection
 # step with "hostname contains invalid characters" and reaches no host at all.
@@ -81,8 +81,8 @@ shoggoth_crd_files: >-
 #
 # `dst` is NOT the source directory's name, and it must not be: the chart
 # mounts `/var/lib/rancher/k3s/storage/<instance>/workflow-scripts` into
-# slave-dind at /host_volumes/workflow-scripts
-# (shoggoth/chart/templates/slave-dind.yaml:234), while the source directory
+# slave-dind at /host_volumes/workflow-scripts (the volumeMount in
+# shoggoth/chart/templates/slave-dind.yaml), while the source directory
 # is `workflow/`. Copying the source name into `dst` would sync the content
 # somewhere nothing mounts — the container would silently get an empty
 # directory, and only at runtime.

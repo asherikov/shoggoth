@@ -12,7 +12,7 @@
   Every ExternalSecret carries the finalizer
   `externalsecrets.external-secrets.io/externalsecret-cleanup`, and the only
   actor that removes it is the ESO controller, in its delete branch
-  (external-secrets v2.11.0, pkg/controllers/externalsecret):
+  (external-secrets, pkg/controllers/externalsecret):
   `cleanupManagedSecrets()` then `RemoveFinalizer` + patch. The chart sets no
   `spec.target.deletionPolicy`, so the CRD default `Retain` applies and
   `cleanupManagedSecrets` is a no-op — the finalizer removal needs the
@@ -52,13 +52,13 @@
     - if even that fails, it says so and exits 0, leaving the
       forced-cleanup fallback as the backstop.
     - if it cannot READ the cluster at all, it says that too, and says that
-      it cleared nothing. This is the case that used to be reported as
-      success: `count` ended in `2>/dev/null | wc -l`, which reports zero
-      for an unreachable API server, so the hook printed "all ESO CRs are
-      gone" and exited 0 on a cluster it had never successfully queried.
-      Helm then deleted the release with the finalizers still in place and
-      its `--wait` blocked for the whole timeout. A teardown hook that
-      cannot observe the cluster must not certify its state.
+      it cleared nothing. A count that ends in `2>/dev/null | wc -l`
+      reports zero for an API server it cannot reach — the error goes to
+      /dev/null and stdout comes back empty — so such a hook prints "all
+      ESO CRs are gone" and exits 0 on a cluster it has never successfully
+      queried. Helm then deletes the release with the finalizers still in
+      place and its `--wait` blocks for the whole timeout. A teardown hook
+      that cannot observe the cluster must not certify its state.
 
   SCOPE: only the CRs of THIS release, selected by
   `app.kubernetes.io/instance=<release name>` — the label
@@ -74,10 +74,10 @@
   manifest), and Helm does not wait for objects it did not create.
 
   ONE INSTALLATION IS REQUIRED BEFORE THIS HELPS. Helm runs the hooks
-  stored in the RELEASE record, not the ones in the chart on disk. A release
-  installed before this template existed carries no pre-delete hook, so its
-  uninstall still wedges; the hook takes effect from the next
-  `helm upgrade --install` onwards.
+  stored in the RELEASE record, not the ones in the chart on disk, so a
+  release gains this pre-delete hook only from the `helm upgrade --install`
+  that installs it; until then its uninstall has no hook and still wedges
+  on the finalizers.
 
   The RBAC trio below is part of the hook, not an ordinary resource: Helm
   applies hook resources before the rest of the release, so a Job that needs
@@ -238,26 +238,26 @@ spec:
 
               # A read that failed is not a read that said zero.
               #
-              # `count` used to end in `2>/dev/null | wc -l`, and that
-              # combination reports ZERO for an API server it cannot reach:
-              # the error goes to /dev/null and stdout comes back empty. So
-              # on a cluster whose pod->apiserver path was dropping
-              # connections, this hook issued no deletes, polled an empty
-              # list, and printed "all ESO CRs are gone — helm uninstall
-              # --wait has nothing to block on" before exiting 0. It had
-              # certified a state it never observed. Helm then deleted the
-              # release with the ExternalSecrets still holding their
-              # finalizers, and its --wait blocked for the whole timeout:
+              # A count that ends in `2>/dev/null | wc -l` reports ZERO for
+              # an API server it cannot reach: the error goes to /dev/null
+              # and stdout comes back empty. On a cluster whose
+              # pod->apiserver path is dropping connections such a hook
+              # issues no deletes, polls an empty list, and prints "all ESO
+              # CRs are gone — helm uninstall --wait has nothing to block
+              # on" before exiting 0 — a state it never observed. Helm then
+              # deletes the release with the ExternalSecrets still holding
+              # their finalizers, and its --wait blocks for the whole
+              # timeout:
               #
               #     Error: uninstallation completed with 1 error(s):
               #       * timed out waiting for the condition
               #
               # The finalizers are the one thing this hook exists to clear,
               # so a hook that cannot read the cluster has to say so rather
-              # than report success. Same rule argo-workflows.yaml's
-              # apply-workflows init container and zz-crd-ready-wait.yaml
-              # were both fixed under: readability is established before
-              # judgement, and a transport failure is not a verdict.
+              # than report success. Same rule as argo-workflows.yaml's
+              # apply-workflows init container and zz-crd-ready-wait.yaml:
+              # readability is established before judgement, and a
+              # transport failure is not a verdict.
               #
               # A missing CRD does NOT read as a normal zero. `kubectl get`
               # on a kind the API server does not serve exits non-zero with

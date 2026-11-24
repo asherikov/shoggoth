@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import os
 import time
 
@@ -8,16 +8,13 @@ class Git:
     """Thin wrapper around ``git`` CLI invocations used by the
     workflow script.
 
-    The script used to spawn ``git`` via ``run([...])`` at every
-    call site (55 of them at the time of writing). That format
-    repeatedly re-states the same three facts — which ``git``,
-    which ``-C <dir>``, which subcommand — and there is no single
-    place to add a global guard (e.g. ``GIT_TERMINAL_PROMPT=0`` for
-    CI, ``--no-pager`` for log hygiene, future per-invocation
-    metrics). This wrapper centralises the ``git`` argv and lets
-    each call site speak in domain terms (``add_all``, ``commit``,
-    ``push_force_with_lease``) instead of ``run(["git", "-C",
-    self.repo_dir, "commit", "-m", msg], check=False)``.
+    The wrapper centralises the ``git`` argv — which ``git``, which
+    ``-C <dir>``, which subcommand — so the three facts are stated
+    once and a global guard (e.g. ``GIT_TERMINAL_PROMPT=0`` for CI,
+    ``--no-pager`` for log hygiene, future per-invocation metrics)
+    has a single home. Each call site speaks in domain terms
+    (``add_all``, ``commit``, ``push_force_with_lease``) instead of
+    ``run(["git", "-C", self.repo_dir, "commit", "-m", msg], check=False)``.
 
     Scope and contract:
 
@@ -32,7 +29,7 @@ class Git:
       keep working unchanged).
     * ``check=None`` (the default) means "use ``run()``'s default"
       (raises on non-zero rc); passing ``check=False`` preserves
-      the original callsite's error-handling.
+      the call site's own error-handling.
     * ``env=`` (where the caller really does need it — only the
       rebase path wants ``GIT_EDITOR=true``) is forwarded to
       ``run()``; ``-c <key>=<value>`` git-level config is folded
@@ -67,8 +64,8 @@ class Git:
         Used by the few callsites whose argv shape does not recur
         elsewhere (e.g. ``for-each-ref``, ``tag --list``). New
         callers should prefer the named methods below; this
-        escape hatch is here so the wrapper does not block adding
-        one-off invocations during the cutover.
+        escape hatch is here so the wrapper does not block
+        one-off invocations.
         """
         return self._invoke(*args, env=env, check=check)
 

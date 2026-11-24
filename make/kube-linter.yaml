@@ -4,9 +4,8 @@
 # through `--config $(KUBE_LINTER_CONFIG)`. Everything the target buys
 # beyond the 63 built-in checks lives in the five custom checks below: CEL
 # is the only extensibility mechanism kube-linter offers, and it turns out
-# to be enough for the three chart invariants that used to be shell
-# targets in make/lint.mk, plus a schema-validation check the built-in one
-# cannot be configured to be.
+# to be enough for the three chart invariants below, plus a
+# schema-validation check the built-in one cannot be configured to be.
 #
 # This file is read from INSIDE a container. kube-linter is not a host
 # install: both make targets run it from the client image (`--target client`
@@ -386,22 +385,20 @@ customChecks:
 # readiness-port, startup-port, no-anti-affinity, the two pdb checks and
 # pdb-unhealthy-pod-eviction-policy.
 #
-# They are NOT all clean, and earlier revisions of this file claimed they
-# were. That claim was false twice over. First, liveness-port,
-# readiness-port and startup-port fired five findings — coredns on 8181,
-# cert-controller on 8081, webhook on 8081 — because three containers
-# probe a health port they never declared in `ports:`. All three now
-# declare it (dns.yaml coredns, external-secrets.yaml cert-controller and
-# webhook), so the claim is expected to hold again on the next run.
-# Second, every count in this file — the container tallies, the kind count,
-# the evaluation counts — was measured against the render produced while
-# `SHOGGOTH_HELM_VALUES` was undefined, i.e. with no `--values`. That render
-# had `port:` as YAML null on three Services, null containerPorts, null
-# clusterIP, hostPaths under /var/lib/rancher/k3s/storage// and seven
-# empty-string env values, so it did not describe anything deployable. The
-# Makefile fix (SHOGGOTH_HELM_VALUES = --values $(SHOGGOTH_CONFIG)) is what
-# makes these counts about the real render; they have not been re-measured
-# since. `make helm_lint_render` then count.
+# They are NOT all clean. liveness-port, readiness-port and startup-port
+# fire five findings — coredns on 8181, cert-controller on 8081, webhook
+# on 8081 — because three containers probe a health port they never
+# declared in `ports:`; all three declare it (dns.yaml coredns,
+# external-secrets.yaml cert-controller and webhook), so a clean run is
+# what the next evaluation shows. Every count in this file — the
+# container tallies, the kind count, the evaluation counts — is a
+# snapshot taken with no `--values`: that render had `port:` as YAML null
+# on three Services, null containerPorts, null clusterIP, hostPaths under
+# /var/lib/rancher/k3s/storage// and seven empty-string env values, so it
+# describes nothing deployable. The Makefile's
+# SHOGGOTH_HELM_VALUES = --values $(SHOGGOTH_CONFIG) is the render these
+# counts should describe; re-take them with `make helm_lint_render`, then
+# count.
 #
 # no-anti-affinity in particular is a guard rather than noise: it only
 # fires at replicas >= 2, and every Deployment and StatefulSet here sets 1.

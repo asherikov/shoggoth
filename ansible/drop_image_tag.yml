@@ -9,11 +9,11 @@
 # why every task here is `delegate_to: localhost`, so the request leaves the
 # control node directly.
 #
-# `ansible.builtin.uri` replaces a curl/mktemp/case shell dance. The
-# interesting part is `status_code`: listing 404 alongside 200/202/204 makes
-# the "tag not present" case an accepted outcome rather than something to
-# detect and branch on, and any other code fails the task with the response
-# body in the message.
+# `ansible.builtin.uri` is the request, and the interesting part is
+# `status_code`: listing 404 alongside 200/202/204 makes the "tag not
+# present" case an accepted outcome rather than something to detect and
+# branch on, and any other code fails the task with the response body in
+# the message.
 - name: Drop a tag from the local zot registry cache
   hosts: instances
   gather_facts: false

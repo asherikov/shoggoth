@@ -42,7 +42,8 @@
 #   * the Established wait is `kubectl wait`.
 #
 # `kubernetes.core.helm` does expose `--take-ownership` (since 6.1.0) and
-# `ansible/service.yml` uses it; the upgrade below predates that.
+# `ansible/service.yml` uses it; the upgrade below drives the helm CLI
+# directly.
 - name: Deploy the shoggoth release and provision the host state
   hosts: instances
   gather_facts: false
@@ -187,13 +188,14 @@
     # created above: a pre-existing namespace still carrying the labels is
     # exactly the case the strip exists for.
     #
-    # `failed_when: false` is what the old `|| true` did — labels that cannot be
+    # `failed_when: false` rather than `|| true` — labels that cannot be
     # stripped are usually already absent, and the warning below reports it
     # instead of passing silently.
     #
     # The step lives here rather than in the chart's pre-install hook
-    # (zz-namespace-podsecurity.yaml), which ran the chart's tools image with no
-    # kubeconfig, so every call it made died with `connection refused`.
+    # (zz-namespace-podsecurity.yaml): a hook runs the chart's tools image
+    # with no kubeconfig, so every call it makes dies with
+    # `connection refused`.
     - name: Strip any PodSecurity profile from the instance namespace
       ansible.builtin.command:
         cmd: >-
@@ -338,8 +340,8 @@
       # against a cluster that already has unmanaged copies aborts with
       # `invalid ownership metadata`. Idempotent after adoption.
       #
-      # `--create-namespace` is kept even though the namespace was just created:
-      # it is the flag's own idempotence, not belt-and-braces.
+      # `--create-namespace` is passed even though the namespace was just
+      # created: it is the flag's own idempotence, not belt-and-braces.
       #
       # Always "changed" from Ansible's point of view — helm upgrade --install
       # runs whether or not anything differs.

@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import os
 import re
 import shutil
@@ -113,9 +113,10 @@ class GithubMirrorSync:
     def _github_refs(self, github_org, repo_name):
         """Branch and tag heads from GitHub via `git ls-remote`.
 
-        One unauthenticated git request replaces the per-repo branches/tags
-        REST calls, which exhausted the GitHub API quota for orgs with more
-        than ~30 repos (2 unauthenticated calls per repo, 60/hour limit).
+        One unauthenticated git request stands in for the per-repo
+        branches/tags REST calls, which exhaust the GitHub API quota for
+        orgs with more than ~30 repos (2 unauthenticated calls per repo,
+        60/hour limit).
         """
         ls_remote = Git().ls_remote(
             f"https://github.com/{github_org}/{repo_name}.git", check=False)

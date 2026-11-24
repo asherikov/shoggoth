@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import json
 import os
 import re
@@ -38,17 +38,11 @@ def _normalise_diff_path(path):
 
 class Agent:
     # Default per-invocation wall-clock cap for ``prompt()`` / the
-    # ``pr-comment`` per-comment retries. The workflow template's
-    # ``activeDeadlineSeconds`` (4 h on command-handler) is
-    # the outer safety net; this is the per-prompt ceiling so a
-    # single hung agent doesn't burn the whole pod's budget.
-    # Per-instance via the ``workflow.agentTimeout`` key in
-    # shoggoth.yaml: it is rendered into the
-    # ``shoggoth-workflow-config`` ConfigMap, bound into the
-    # worker-step container's environment as
-    # ``SHOGGOTH_AGENT_TIMEOUT``, and read here through
-    # ``params`` — so the default applies wherever the env var
-    # is unset (tests, one-off local runs).
+    # ``pr-comment`` per-comment retries. Read from the environment
+    # through ``params`` (``SHOGGOTH_AGENT_TIMEOUT``), so the default
+    # applies wherever the env var is unset (tests, one-off local
+    # runs). It is the per-prompt ceiling so a single hung agent
+    # doesn't burn the whole run's budget.
     AGENT_TIMEOUT = params.shoggoth_agent_timeout
 
     # Forbidden bash glob patterns the agent must NEVER invoke — git
@@ -101,12 +95,11 @@ class Agent:
     # Mirrors ``qwen_security``: stripping these from the inherited env
     # before Popen() keeps workflow-injected secrets (default AI token)
     # out of the model context. The Gitea / Redmine / LDAP / SSH tokens
-    # are no longer injected by workflow templates (the script reads
-    # them from K8s directly), so they don't need filtering here.
-    # SHOGGOTH_VAULT_TOKEN is kept as a defensive measure — it is no
-    # longer read by this script after the K8s refactor, but if a
-    # workflow template still injects it, it shouldn't reach the agent
-    # either.
+    # are read from K8s directly rather than injected by workflow
+    # templates, so they need no filtering here.
+    # SHOGGOTH_VAULT_TOKEN is filtered as a defensive measure: this
+    # script does not read it, but a workflow template that injects it
+    # must not leak it to the agent either.
     SECRET_ENV_KEYS = frozenset([
         "SHOGGOTH_VAULT_TOKEN",
         "SHOGGOTH_AI_DEFAULT_TOKEN",
@@ -147,7 +140,7 @@ class Agent:
         payload "useful". ``required_keys`` is a tuple; the parsed
         dict passes if at least one of the keys is present, matching
         the lenient "any of these keys indicates a real review"
-        contract ``_extract_review_json`` historically enforced.
+        contract of ``_extract_review_json``.
 
         When the agent wraps the JSON in ```json ... ```
         fences the fenced block is preferred (the prompt asks
@@ -251,7 +244,7 @@ class Agent:
         the findings that have a resolvable path/line.
         Returns the tuple ``(markdown_body, inline_comments)``
         in that case; returns just the markdown string when
-        ``diff_text`` is ``None`` (backwards compatible).
+        ``diff_text`` is ``None``.
 
         ``new_position`` is a FILE LINE NUMBER, not a
         unified-diff position. The Gitea API field is

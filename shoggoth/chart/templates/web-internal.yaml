@@ -13,7 +13,9 @@
   adding or editing a skill is a file edit, not a template edit.
 
   Unlike grafana and argo-workflows, this file contains no literal `{{ ... }}`
-  from another engine, so nothing here needs the Helm literal-brace escape.
+  from another engine, so the Helm literal-brace escape the README's "Large
+  embedded files live in `files/`" section describes has nothing to apply to
+  here.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "web-internal")) }}
 ---
@@ -527,7 +529,7 @@ spec:
               key: token
         # Long-lived SA token for argo-webhook-receiver. Injected on every
         # request to /argo/ in angie.conf so the v4 webhook interceptor
-        # skips signature verification (interceptor.go:49-52 short-circuits
+        # skips signature verification (interceptor.go short-circuits
         # when an Authorization header is already present) and argo-server's
         # gatekeeper validates the bearer token instead.
         - name: ARGO_WEBHOOK_TOKEN

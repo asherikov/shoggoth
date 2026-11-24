@@ -28,9 +28,9 @@ KUBE_LINTER_CONFIG?=make/kube-linter.yaml
 # Where the repo is mounted inside the container, and the arguments as the
 # container sees them.
 #
-# kube-linter resolves its arguments with filepath.Abs — pkg/pathutil/path.go
-# — and config.Load splits the --config path the same way, so an absolute
-# HOST path means nothing inside. The mount puts $(CURDIR) at
+# kube-linter resolves its arguments with filepath.Abs, and config.Load
+# splits the --config path the same way, so an absolute HOST path means
+# nothing inside. The mount puts $(CURDIR) at
 # $(KUBE_LINTER_WORKDIR) and -w sets the working directory there, which
 # makes a relative path resolve correctly with no help at all; the patsubst
 # covers the one case that needs help, an absolute $(K3S_TMP_DIR) spelled
@@ -113,11 +113,10 @@ helm_lint_render: ${LINT_RENDER}
 	wc -l < ${LINT_RENDER}
 
 # The whole chart, checked against 63 built-in rules, four CEL checks of our
-# own and the Kubernetes JSON schemas. One binary, one render, and it
-# replaces three shell targets that did the same work with yq, join, sed and
-# grep: the duplicate-key guard, the roleRef resolver, and both halves of
-# the gadget scope check. All three are now CEL in make/kube-linter.yaml,
-# where the reason each one exists is a comment rather than a pipeline.
+# own and the Kubernetes JSON schemas. One binary, one render: the
+# duplicate-key guard, the roleRef resolver and both halves of the gadget
+# scope check are CEL checks in make/kube-linter.yaml, where the reason each
+# one exists is a comment rather than a pipeline.
 #
 # WHY A FILE AND NOT THE CHART DIRECTORY. kube-linter renders Helm charts
 # in-process, and it hardcodes ReleaseOptions{Name: "test-release",
@@ -135,8 +134,7 @@ helm_lint_render: ${LINT_RENDER}
 #
 # Duplicate mapping keys are caught here too, by the schema check with
 # strict: true — kubeconform switches to yaml.UnmarshalStrict for the whole
-# document, which is what reports them. That is what absorbed the old
-# yamllint-based helm_lint_dupes, whose entire reason for existing was the
+# document, which is what reports them. The class it covers is the
 # duplicate-label-key bug in five templates.
 #
 # Twelve of kube-linter's default-on checks are excluded in the config, each
@@ -174,12 +172,11 @@ helm_lint_kube_linter: ${LINT_RENDER}
 
 # A union gate spanning a service's own workloads makes `make stop
 # SERVICE=<x>` a silent no-op: `or (x) (y)` still renders while y is on,
-# so helm reports a successful upgrade and nothing is deleted. openbao hit
-# this — its Service, PVC and StatefulSet sat under
-# `or(openbao, openbao-bootstrap)`, and it was the only one of the 43 keys
-# whose toggle removed nothing. This renders once per key with that key
-# alone disabled and checks that the resources it owns are gone, which
-# catches the class rather than just that instance.
+# so helm reports a successful upgrade and nothing is deleted — openbao's
+# Service, PVC and StatefulSet under `or(openbao, openbao-bootstrap)` is
+# the shape. This renders once per key with that key alone disabled and
+# checks that the resources it owns are gone, which catches the class
+# rather than one instance.
 #
 # The comparison is by resource identity (kind/name), not by a document
 # count: a toggle that removes one resource and adds another leaves the
@@ -294,9 +291,9 @@ helm_lint_embedded: ${LINT_RENDER}
 # that stays here.
 #
 # The FORWARD direction -- every admitted `app` label and every policy's own
-# target resolved against the pod templates of the same render -- moved to
+# target resolved against the pod templates of the same render -- is
 # kube-linter's dangling-networkpolicy and
-# dangling-networkpolicypeer-podselector, both added via checks.include in
+# dangling-networkpolicypeer-podselector, both included via checks.include in
 # make/kube-linter.yaml. They are built-in checks that resolve a
 # podSelector against the pods of the same render, which is exactly the
 # forward half, and running them costs nothing extra: helm_lint_kube_linter
@@ -326,14 +323,15 @@ helm_lint_netpol: ${LINT_RENDER}
 	done | sort -u > ${LINT_TMP_DIR}/netpol-expected.txt
 	diff ${LINT_TMP_DIR}/netpol-expected.txt ${LINT_TMP_DIR}/netpol-admits.txt
 
-# The otelcol DaemonSet's pod template carried no reference to the config it
-# mounts: the collector pipeline is defined only in otelcol-config.yaml, and
-# reloader.yaml passes --resources-to-ignore=configmaps, so a ConfigMap edit
-# rolled nothing and the old pipeline kept running until the DaemonSet was
-# deleted by hand. The checksum/config annotation is what makes the edit
-# visible, and this is its regression guard -- it renders twice with a value
-# that changes only that ConfigMap and asserts the pod template is no longer
-# byte-identical. Removing the annotation fails here.
+# The otelcol DaemonSet's pod template has to reference the config it mounts:
+# the collector pipeline is defined only in otelcol-config.yaml, and
+# reloader.yaml passes --resources-to-ignore=configmaps, so without the
+# checksum annotation a ConfigMap edit rolls nothing and the previous
+# pipeline keeps running until the DaemonSet is deleted by hand. The
+# annotation is what makes the edit visible, and this is its regression
+# guard -- it renders twice with a value that changes only that ConfigMap
+# and asserts the pod template is no longer byte-identical. Removing the
+# annotation fails here.
 helm_lint_rollout: ${LINT_RENDER}
 	helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) \
 		--namespace lint \
@@ -356,9 +354,9 @@ helm_lint_rollout: ${LINT_RENDER}
 # that exists only while services.gadget.enabled is true. helm_lint_gates
 # cannot see an ungated job: it compares only the kind/name ids of each
 # key's own resources, and otelcol-config renders byte-identically in both
-# renders. So the job's guard moved into a CEL check
-# (inspektor-job-gated in make/kube-linter.yaml), and what is left here is
-# the part CEL cannot do for itself: prove the check is not vacuous.
+# renders. So the job's guard is a CEL check (inspektor-job-gated in
+# make/kube-linter.yaml), and this target is the part CEL cannot do for
+# itself: prove the check is not vacuous.
 #
 # A check that returns "" on a render where the job is correctly absent is
 # indistinguishable from a check that never ran -- which is the whole
@@ -417,12 +415,11 @@ helm_lint_inspektor: ${LINT_RENDER} ${LINT_INSPEKTOR_OFF}
 # find is not, which is the same reason CHART_SOURCES above uses it.
 #
 # Excluding roles/ is NOT the same as skipping it. A flat
-# `$(wildcard ansible/*.yml)` silently skipped
-# roles/host_state/tasks/main.yml, and nothing else covered it either:
-# deploy.yml reaches the role with `include_role`, which is the DYNAMIC
-# form — the role is loaded when that task executes, not when the playbook
-# is parsed, so `--syntax-check ansible/deploy.yml` never read a line of
-# it. The wrapper loop in ansible_lint_syntax is what closes that hole,
+# `$(wildcard ansible/*.yml)` misses roles/host_state/tasks/main.yml
+# entirely: deploy.yml reaches the role with `include_role`, which is the
+# DYNAMIC form — the role is loaded when that task executes, not when the
+# playbook is parsed, so `--syntax-check ansible/deploy.yml` never reads a
+# line of it. The wrapper loop in ansible_lint_syntax closes that hole,
 # using `import_role`, the static form a syntax check does resolve.
 ANSIBLE_PLAYBOOKS = $(filter-out ansible/requirements.yml \
                                   ansible/group_vars/% \
@@ -443,7 +440,7 @@ ANSIBLE_ROLES = $(patsubst ansible/roles/%,%, \
 # ansible-playbook command line without ever parsing the playbook, so a YAML
 # typo, a bad task name or a broken inventory reference otherwise reaches
 # the host on the first real run. This is also the only test in the repo
-# that touches the ansible/ tree at all: there is no CI here (see
+# that touches the ansible/ tree at all: no CI job covers it (see
 # ansible/README.md), so whatever is not checked locally is not checked.
 #
 # ansible-playbook runs in the client image: the one prerequisite is docker,
@@ -453,11 +450,11 @@ ANSIBLE_ROLES = $(patsubst ansible/roles/%,%, \
 # The config is carried by $(TOOLS_CLIENT_ANSIBLE) as `-e ANSIBLE_CONFIG`,
 # and an `-e` rather than a `VAR=x cmd` prefix, because a prefix would set
 # the variable for the docker CLI and not for ansible inside the container.
-# It has to be set at all: ansible searches ./ansible.cfg, then
-# ~/.ansible.cfg, then /etc/ansible/ansible.cfg, so an unset one loses
-# `inventory = hosts.ini` and the check runs against whatever
-# /etc/ansible/hosts happens to hold — a syntax check that passes because it
-# parsed no inventory at all is worse than one that fails. The Makefile's
+# It has to be set at all — the Makefile's ANSIBLE_CONFIG note gives the
+# search order ansible falls back through without it; unset, the check loses
+# `inventory = hosts.ini` and runs against whatever /etc/ansible/hosts
+# happens to hold — a syntax check that passes because it parsed no
+# inventory at all is worse than one that fails. The Makefile's
 # $(ANSIBLE) wrapper is not reused here: this loop runs a bare
 # `ansible-playbook`, and that variable ends in the `ansible` directory a
 # playbook path is appended to.

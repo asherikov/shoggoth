@@ -6,9 +6,8 @@
 # action here: the play is a toggle, so an ordering that runs one and then the
 # other belongs wherever the sequence is expressed, not here.
 #
-# The port is possible because the pinned collection DOES expose the two flags
-# the earlier notes in this tree claimed it did not — verify against
-# ansible/requirements.yml before quoting either claim again:
+# The port is possible because the pinned collection DOES expose the two
+# flags — verify against ansible/requirements.yml before relying on either:
 #
 #   * `take_ownership` -> `--take-ownership`, since kubernetes.core 6.1.0;
 #   * `reuse_values`   -> `--reuse-values=<bool>`, since 3.0.0.

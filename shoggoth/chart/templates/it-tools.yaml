@@ -3,9 +3,9 @@
   (sharevb/it-tools), a static Vue SPA served by the upstream nginx image.
   ServiceAccount + Service + Deployment.
 
-  Reached at it-tools.<domain> through the namespace CoreDNS suffix rewrite
-  (*.{domain} -> {namespace}.svc.cluster.local, see templates/dns.yaml): the
-  Service below is the whole ingress, no web-internal proxy entry needed.
+  Reached at it-tools.<domain> through the namespace CoreDNS suffix
+  rewrite (see templates/dns.yaml): the Service below is the whole
+  ingress, no web-internal proxy entry needed.
 
   Image tag is a pinned CalVer release (YYYY.M.D-<sha>), the newest release
   published upstream — the moving `latest` tag resolves to the same digest.

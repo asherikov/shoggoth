@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import argparse
 import base64
 import binascii
@@ -67,8 +67,8 @@ class SetupArgoWebhooks(GiteaCommand):
             # web-internal injects the
             # argo-webhook-receiver SA token before proxying to argo:80,
             # so the v4 webhook interceptor (which has no gitea parser and
-            # would 403 raw gitea payloads — webhookParsers at
-            # server/auth/webhook/interceptor.go:25-30) is short-circuited
+            # would 403 raw gitea payloads — webhookParsers in
+            # server/auth/webhook/interceptor.go) is short-circuited
             # by the Authorization header and argo-server's gatekeeper does
             # bearer validation against k8s instead.
             #
@@ -168,8 +168,8 @@ class SetupRedmineArgoWebhooks:
         # bearer token (web-internal.yaml + argo-webhook-receiver.yaml)
         # before forwarding to argo:80. Going directly (http://argo:80/...)
         # would trip the v4 interceptor's gitea/redmine signature matcher
-        # absence (webhookParsers at interceptor.go:25-30 has no entry for
-        # either) and 403 the request.
+        # absence (webhookParsers in server/auth/webhook/interceptor.go has
+        # no entry for either) and 403 the request.
         self.WEBHOOK_URL = (
             f"http://api.{domain}/argo/api/v1/events/{self.namespace}/redmine-task-processor"
         )

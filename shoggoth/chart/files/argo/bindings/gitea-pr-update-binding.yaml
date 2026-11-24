@@ -5,17 +5,17 @@
 # Webhook endpoint (set up by shoggoth.py argo-webhooks):
 #   POST http://api.{domain}/argo/api/v1/events/shoggoth/gitea-pr-update
 #
-# v4 syntax notes (vs v3.7.0):
-#   - spec.event.selector is now an expr-lang boolean expression evaluated
+# v4 syntax notes (Argo Workflows v4 API):
+#   - spec.event.selector is an expr-lang boolean expression evaluated
 #     against {namespace, discriminator, payload, metadata} in
-#     server/event/dispatch/operation.go. v3 treated it as a literal
-#     discriminator match — bare "gitea-pr-update" now parses as the
-#     expression "gitea - pr - update" and fails with "unknown name gitea".
-#     Use `discriminator == "<name>"` to match.
-#   - parameters[].value (literal) has been replaced by parameters[].valueFrom.event
-#     (also an expr-lang expression). Bare strings inside the expression must be
-#     quoted (`"shoggoth.py"`), and Go-template `{{...}}` wrapping
-#     (v3) is gone — the entire expression is the value of that field.
+#     server/event/dispatch/operation.go. A bare discriminator name
+#     ("gitea-pr-update") parses as the arithmetic expression
+#     "gitea - pr - update" and fails with "unknown name gitea", so the
+#     selector must use `discriminator == "<name>"` to match.
+#   - parameters[].valueFrom.event carries an expr-lang expression. Bare
+#     strings inside the expression must be quoted (`"shoggoth.py"`), and
+#     the entire expression is the value of that field — no Go-template
+#     `{{...}}` wrapping.
 #
 # Selector filtering (the drop-list):
 #   The hook subscribes to three event types — pull_request_review,
@@ -93,7 +93,7 @@ spec:
       # ``payload.comment.body``. All comment events
       # (including ``/sandbox`` and ``/help``) reach the
       # dispatcher through this single binding — there are
-      # no per-command bindings any more.
+      # no per-command bindings.
       - name: command
         valueFrom:
           event: '"pr-update"'

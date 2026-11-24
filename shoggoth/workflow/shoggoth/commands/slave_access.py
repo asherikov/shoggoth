@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import sys
 
 from ..util import die
@@ -51,24 +51,19 @@ class SlaveAccess(GiteaCommand):
         it. Idempotent: existing teams are reused, existing
         memberships are no-ops.
 
-        Why this exists: the slave was previously a member of the
-        org's ``Owners`` team, which Gitea grants implicit
-        ``AccessModeOwner`` on every repo in the org. The user
-        was removed from ``Owners`` (clean-up of the prior
-        impersonation-by-Owners setup) and is now a direct
-        write-collaborator on each repo. The receive-pack
-        permission check (``routers/private/hook_pre_receive.go``
-        → ``Permission.CanWrite(unit.TypeCode)``) reads the
-        ``Access`` table cache, and that table was left stale
-        after the team removal (``RecalculateUserAccess`` runs
-        on team add / direct-collaborator add / update, but
-        ``AddTeamMember`` is NOT one of those triggers — Gitea
-        1.27.3's ``services/org/team.go::AddTeamMember`` only
-        inserts a ``TeamUser`` row and does not touch the
-        ``Access`` table for the team's repos). A dedicated
-        push team gives the slave a persistent team-based
-        access path that survives the direct-collaborator being
-        removed by a future operator action.
+        Why this exists: the slave is a direct write-collaborator on
+        each repo, and the receive-pack permission check
+        (``routers/private/hook_pre_receive.go`` →
+        ``Permission.CanWrite(unit.TypeCode)``) reads the ``Access``
+        table cache rather than the collaborator row.
+        ``RecalculateUserAccess`` runs on team add /
+        direct-collaborator add / update, but ``AddTeamMember`` is NOT
+        one of those triggers — Gitea's
+        ``services/org/team.go::AddTeamMember`` only inserts a
+        ``TeamUser`` row and does not touch the ``Access`` table for
+        the team's repos. A dedicated push team gives the slave a
+        persistent team-based access path that survives the
+        direct-collaborator being removed by a future operator action.
 
         Gitea's behaviour for the create path matters here:
         ``NewTeam`` with ``includes_all_repositories=True`` walks
@@ -121,8 +116,7 @@ class SlaveAccess(GiteaCommand):
             else:
                 # If the team exists but is missing
                 # ``includes_all_repositories`` (e.g. it was created
-                # by an earlier version of this script before that
-                # flag was added), patch the team to set it. The
+                # without that flag), patch the team to set it. The
                 # patch does NOT re-run ``addRepositoryToTeam`` for
                 # the existing repos (see ``UpdateTeam`` in
                 # ``services/org/team.go``), so this is a no-op for
@@ -205,15 +199,14 @@ class SlaveAccess(GiteaCommand):
                     continue
 
                 # Check the *effective* permission (max of direct
-                # collaborator + team-based via org membership). The
-                # previous logic only checked whether the user was a
-                # collaborator at all, which meant a user added with
-                # ``read`` by a team — or with ``read`` from a prior
-                # run of an older maintenance script — was never
-                # escalated to ``write``. ``/squash`` and ``/rebase``
-                # force-push and need at least ``write``; ``read`` is
-                # the symptom the user reported as "User permission
-                # denied for writing" on the force-push.
+                # collaborator + team-based via org membership). A
+                # check for collaborator-ness alone is not enough: a
+                # user who is a collaborator only through a team that
+                # grants ``read`` stays below ``write``, and
+                # ``/squash`` and ``/rebase`` force-push and need at
+                # least ``write`` — ``read`` is the symptom the user
+                # reported as "User permission denied for writing" on
+                # the force-push.
                 role = self.gitea.get_repo_collaborator_permission(
                     full_name, user)
                 if role in ("write", "admin", "owner"):
@@ -225,16 +218,16 @@ class SlaveAccess(GiteaCommand):
                     # (``routers/private/hook_pre_receive.go`` →
                     # ``Permission.CanWrite(unit.TypeCode)``)
                     # reads the ``Access`` table cache directly
-                    # and short-circuits on stale state. If the
-                    # user was previously in the org's ``Owners``
-                    # team (or any team whose removal cleared the
-                    # ``Access`` row via
-                    # ``RecalculateUserAccess`` → ``accessMode <
-                    # minMode`` → DELETE without re-INSERT) and is
-                    # now only a direct write-collaborator, the
-                    # ``Access`` table for the user on the repo can
-                    # be empty even though the direct collaborator
-                    # row is present. ``AddOrUpdateCollaborator``
+                    # and short-circuits on stale state. The
+                    # ``Access`` row is cleared whenever the user's
+                    # highest access on the repo drops (``Owners``
+                    # team membership, or any team whose removal
+                    # cleared the row via ``RecalculateUserAccess``
+                    # → ``accessMode < minMode`` → DELETE without
+                    # re-INSERT), leaving a user who is only a direct
+                    # write-collaborator with an empty ``Access``
+                    # table even though the collaborator row is
+                    # present. ``AddOrUpdateCollaborator``
                     # early-returns when the requested mode equals
                     # the current ``Collaboration.Mode`` and does
                     # NOT call ``RecalculateUserAccess``, so a
@@ -338,8 +331,8 @@ class SlaveAccess(GiteaCommand):
         production branches is the whole point of the protection
         feature, and silently undoing it from the maintenance
         script would defeat that. Anything else, including
-        previously out-of-scope patterns like
-        ``wshandler/release-policies``, is patched.
+        non-obvious patterns like ``wshandler/release-policies``, is
+        patched.
 
         The list is computed by the caller and passed in full to
         ``update_branch_protection`` — Gitea's PATCH treats

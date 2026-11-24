@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import argparse
 import sys
 
@@ -36,13 +36,10 @@ from .state import (
 from .util import die
 
 # Commands that consume trailing positionals. Every other command
-# ignores ``args`` — including the empty ``""`` the worker step always
-# forwards as ``"${SHOGGOTH_TASK_ID}"`` for ``ci-failure`` /
-# ``pr-update``. The worker step of
-# ``shoggoth/chart/files/argo/templates/command-handler.yaml``
-# execs ``shoggoth.py "${SHOGGOTH_COMMAND}" "${SHOGGOTH_TASK_ID}"``, and
-# an empty ``SHOGGOTH_TASK_ID`` still expands to one argv element that
-# the ``args`` bucket (``nargs="*"``, default ``[]``) collects — there
+# ignores ``args`` — including the empty ``""`` always forwarded as
+# the trailing ``"${SHOGGOTH_TASK_ID}"`` argument for ``ci-failure`` /
+# ``pr-update``: an empty value expands to one argv element that the
+# ``args`` bucket (``nargs="*"``, default ``[]``) collects — there
 # is no ``task_id`` argument to default it away. That is why the
 # empty-value check in ``_positionals`` is scoped to this set — applied
 # globally it would fail every non-task worker run.
@@ -57,8 +54,9 @@ def _positionals(args):
     An empty value is an input error rather than a no-op: silently
     dropping it would let ``argo-webhooks ""`` reach
     ``_resolve_orgs(None)`` — the "every org" branch — which is the
-    exact foot-gun the single-bucket refactor removes. Terminates
-    with exit 2, matching the ``task`` numeric check in ``_run``.
+    foot-gun the single-bucket design has to guard against.
+    Terminates with exit 2, matching the ``task`` numeric check in
+    ``_run``.
     """
     positional = list(args.args)
     if "" in positional:
@@ -85,8 +83,7 @@ def _run(args):
     Trailing positionals share one ``args`` bucket (see
     ``_positionals``); ``task``'s task ID is validated up front so a
     bad input fails before the git-cred wait (which can take up to
-    ``GIT_CRED_READY_TIMEOUT`` seconds) — preserves the original
-    fail-fast behaviour.
+    ``GIT_CRED_READY_TIMEOUT`` seconds) — fail-fast on bad input.
     """
     positional = (_positionals(args)
                   if args.command in POSITIONAL_COMMANDS else [])
@@ -110,19 +107,9 @@ def _run(args):
         # ``Agent``, and dispatch to one of the
         # ``*Command`` classes.
         #
-        # ``dispatch`` is NOT a shoggoth.py subcommand —
-        # the dispatcher is its own CLI utility
-        # (``shoggoth/workflow/dispatch.py``) and is
-        # reached via the ``dispatch`` step of the
-        # ``command-handler`` DAG (see
-        # ``shoggoth/chart/files/argo/templates/command-handler.yaml``).
-        # ``sandbox`` is the placeholder for the future
-        # /sandbox slash command; it's handled by the
-        # dispatcher's ``_handle_sandbox`` (in
-        # ``shoggoth/workflow/shoggoth/commands/dispatch.py``)
-        # and never reaches the worker step. Neither belongs in
-        # ``WORKFLOW_COMMANDS`` — see ``state.py`` for the
-        # rationale.
+        # ``dispatch`` and ``sandbox`` are not ``shoggoth.py``
+        # subcommands and are not in ``WORKFLOW_COMMANDS`` —
+        # see ``state.py`` for the rationale.
         GitCredentials().wait_until_ready()
 
         gitea = Gitea()
@@ -209,14 +196,14 @@ def _run(args):
         # the upstream ``slave-token`` / ``runner-token`` steps) to
         # OpenBao via the ``shoggoth-openbao-write`` SecretStore.
         # Surfaces "cannot read secret data from Vault" and similar
-        # write-token failures as a workflow ``die()`` so the cron
-        # is marked failed instead of silently leaving a stale kv
-        # value that downstream consumers (git-cred sidecar,
-        # web-internal proxy) only discover via 401s.
+        # write-token failures as a ``die()`` so the step is marked
+        # failed instead of silently leaving a stale kv value that
+        # downstream consumers (git-cred sidecar, web-internal proxy)
+        # only discover via 401s.
         PushSecretCheck().execute()
     elif args.command == "container-pull":
-        # The container-pull template runs this twice per submit:
-        # once with SHOGGOTH_REGISTRY_ACTION=evict (DELETE the tag
+        # Runs twice per submit: once with
+        # SHOGGOTH_REGISTRY_ACTION=evict (DELETE the tag
         # from the local zot) and once with repull (GET the manifest,
         # which drives zot's on-demand sync to re-fetch the image
         # from upstream).
@@ -226,8 +213,7 @@ def _run(args):
         # Check names share the same positional bucket. ``execute``
         # validates every name against ``self.checks`` and dies on an
         # unknown one, so extra names fail closed instead of being
-        # silently dropped (the old single-slot parser ran only the
-        # first).
+        # silently dropped.
         cmd.execute(positional or None)
     elif args.command == "gitea-ldap-sync":
         gitea = Gitea()

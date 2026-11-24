@@ -62,7 +62,7 @@ lists the minimum; newer is fine unless called out.
 | Tool        | Version   | Notes                                                                                                                                                                              |
 |-------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | k3s         | ≥ 1.34    | Required for the GA features the chart relies on: pod-level `ttlSecondsAfterFinished` (GA 1.29), container-level `restartPolicy` for native sidecar ordering (GA 1.33). The chart enforces this itself — `Chart.yaml` sets `kubeVersion: ">=1.34.0-0"`, so `helm install`/`upgrade` refuses an older cluster instead of letting the API server silently prune the field. Pinned in `shoggoth/shoggoth.nix`. |
-| helm        | ≥ 3.17.0  | Required for `--take-ownership`, which make targets rely on to adopt resources left unlabelled by an earlier non-Helm apply. |
+| helm        | ≥ 3.17.0  | Required for `--take-ownership`, which make targets rely on to adopt resources applied outside Helm. |
 | kubectl     | bundled   | Used by the operator targets that run it on the host: `make status`, `make log`, `make shell`. Comes with k3s, and the operator host uses the same version over the SSH-tunneled kubeconfig. |
 | yq          | mikefarah v4 | The `Makefile` reads every configuration value out of `shoggoth/<instance>.yaml` through yq. The Python `yq` package is a *different* tool with a different CLI — install mikefarah's release (https://github.com/mikefarah/yq). |
 | envsubst    | gettext   | Used by `make host_install_nixos` to render `shoggoth.nix` and `ports.nix`. Bundled with most distros; on Alpine it is in the `gettext` package. |
@@ -194,26 +194,6 @@ or control them from multiple client computers.
 
 Most services are available only when connected to VPN.
 
-Services outside of VPN
------------------------
-
-<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/novpn.svg" alt="novpn" />
-
-Service interaction diagram
----------------------------
-
-<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/architecture.svg" alt="architecture" />
-
-Interaction with the client and external services
--------------------------------------------------
-
-<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/external.svg" alt="external" />
-
-Bringup order
--------------
-
-<img src="https://raw.githubusercontent.com/asherikov/shoggoth/refs/heads/main/docs/bringup.svg" alt="bringup" />
-
 Monitoring
 ----------
 
@@ -287,9 +267,8 @@ Two groups are used to control access:
   server admins (`role_attribute_path`) and OpenBao `shoggoth-admin` holders
   (the `authelia` role's `bound_claims`). The `cn=admin` directory admin is the
   initial member. Add human admin users to this group. The OpenBao mapping
-  changed engine rather than disappearing: the LDAP engine that read this group
-  left the binary with OpenBao 2.7 (openbao GH-3882) and the OIDC engine that
-  replaced it reads the same claim — see *OpenBao integration* below.
+  reads the `groups` claim through the OIDC engine — OpenBao 2.7 dropped the
+  LDAP auth engine (openbao GH-3882) — see *OpenBao integration* below.
 - **shoggoth-auth** — service bind accounts that authenticate users on behalf of
   applications. `ldapauth` is the initial member. This group has no OpenBao
   policy mapping.
@@ -310,9 +289,8 @@ independent login paths:
 - a token, minted once by the `openbao-bootstrap` Job into the
   `shoggoth-openbao-admin-token` Secret — renewable, with no parent, and
   re-minted only when the stored token no longer validates in the current
-  OpenBao. This is how operators and scripts sign in; the root token stays
-  where it always was, in the `openbao-unseal-key` Secret beside the unseal
-  key.
+  OpenBao. This is how operators and scripts sign in; the root token sits in
+  the `openbao-unseal-key` Secret beside the unseal key.
 - the `auth/oidc` mount the same Job writes, pointed at Authelia, with the
   `authelia` role carrying the same `shoggoth-admin` policy and admitting the
   directory's `admins` group (`bound_claims: {groups: ["admins"]}`), so an
@@ -387,9 +365,7 @@ Argo Workflows is deliberately not one of them. `argo-server` runs
 login page and every request to `argo.<domain>` — including a browser session
 from anyone who can reach it — is authorized as the `argo-server`
 ServiceAccount. That is a deliberate trade for a VPN-only deployment, not an
-oversight, and the SSO pieces an earlier revision wired for it were removed
-rather than left half-configured. See
-`shoggoth/chart/templates/argo-workflows.yaml`.
+oversight. See `shoggoth/chart/templates/argo-workflows.yaml`.
 
 Each client differs in how it reaches the portal, and the differences are the
 part worth knowing before adding a sixth. The mechanism behind each one is
@@ -403,37 +379,24 @@ documented in the template that configures it:
 | CDash   | Bundled PingIdentity Socialite driver; a CA bundle is built for PHP curl                | `cdash.yaml`                      |
 | OpenBao | `auth/oidc` mount written by the bootstrap Job; `oidc_discovery_ca_pem` carries the CA  | `openbao.yaml`                    |
 
-Three of the five read the ID token rather than the userinfo response, which is
-why they carry a claims policy in `authelia-config.yaml`: Authelia's default
-strategy puts an empty, non-nil allowlist on the ID token and filters every
-scoped claim out of it, while the userinfo endpoint still returns them. Redmine
-would fail with "Email cannot be blank" without its policy, OpenBao's
-`createIdentity` hard-errors on a missing claim, and Grafana needs `groups` in
-the token because it resolves `role_attribute_path` against the ID token before
-it calls userinfo — without it every SSO login is pinned to Viewer from a token
-that carries no groups. Gitea and CDash read userinfo only and deliberately have
-no policy.
+Three of the five read the ID token rather than the userinfo response and carry
+a claims policy in `authelia-config.yaml`; Gitea and CDash read userinfo only
+and have none. The per-client mechanism is documented in the template that
+configures it — see the table above.
 
 Grafana is the one client whose role mapping depends on that ordering, and the
 one whose local `admin` login is a separate mechanism — see *Password
 management* above and `shoggoth/chart/templates/grafana.yaml`.
 
-CDash is the one client of the five that cannot skip the consent screen: its
-bundled driver appends `prompt=login` to the authorization URL as a literal
-string, and Authelia reads that parameter before it consults the client's
-consent mode. This deployment accepts the extra click; the analysis is in
-`shoggoth/chart/templates/cdash.yaml`.
+CDash is the one client of the five that cannot skip the consent screen; the
+analysis is in `shoggoth/chart/templates/cdash.yaml`.
 
 LiteLLM is *not* an OIDC client, and it has no authentication at all: no master
 key is set, so every request is accepted and the bearer token each client
 sends (`OPENAI_API_KEY`, defaulting to the literal `ai` from `setup-client.sh`)
-is never validated. Its UI SSO needs both a master key and a database URL, and
-introducing a master key would retire every static token until each client is
-re-keyed — a worse trade than leaving the proxy open, VPN-only behind
-web-internal. v1.109.x refuses to boot without a master key, which the chart
-answers with the explicit
-`LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY=true` override. See
-`shoggoth/chart/templates/litellm.yaml`.
+is never validated. The trade-off and the
+`LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY=true` override are
+documented in `shoggoth/chart/templates/litellm.yaml`.
 
 Client Configuration
 ====================
@@ -625,7 +588,7 @@ Key consequences of the Helm takeover:
   Secrets the External Secrets Operator projected and the ones the
   `openbao-bootstrap` Job wrote at runtime — they are in no manifest and
   carry no ownerReference, so nothing else reclaims them. Without the hook
-  an uninstall left the ESO store token behind, and a token that outlives
+  the uninstall leaves the ESO store token behind, and a token that outlives
   the OpenBao it was minted for is a store that can never validate again.
   The hook does NOT touch Helm's release record: `helm uninstall` purges
   that record right after the hook runs, and a record deleted twice turns
@@ -779,8 +742,8 @@ Known issues
 ------------
 
 - The External Secrets webhook's `ValidatingWebhookConfiguration`s
-  (`secretstore-validate`, `externalsecret-validate`) are still shared across
-  instances. They are the one remaining cluster-scoped object that two
+  (`secretstore-validate`, `externalsecret-validate`) are shared across
+  instances. They are the only cluster-scoped object that two
   shoggoth instances on one cluster would fight over, and unlike the RBAC
   they are **not** Helm-managed: the ESO webhook's `register-vwc` init
   container applies them with `kubectl apply` from a ConfigMap payload
@@ -837,7 +800,7 @@ Known issues
 
 - `kubectl` jsonpath extraction broken for several common forms in Alpine’s
   `kubectl` 1.32 (the version packaged in `tools` and used by the
-  `wait-bootstrap` init containers that remain). The forms `{.data.tls.crt}`
+  `wait-bootstrap` init containers). The forms `{.data.tls.crt}`
   (dot notation for keys with dots), `{.data["X"]}` (double-quoted bracket
   form for any key), and bare `jsonpath='{.data[K]}'` inside a YAML literal
   block scalar (bash strips the inner quotes via word-splitting, leaving
@@ -853,10 +816,9 @@ Known issues
       | jq -e --arg k KEY '(.data[$k] // "") | length > 0' >/dev/null 2>&1
   ```
 
-  Most containers do not read Secret data at all any more — see
+  Most containers do not read Secret data themselves — see
   “Secret dependencies are native” below: the kubelet resolves the key.
-  The rule above applies to the few scripts that still have to look at a
-  Secret themselves. To diagnose a similar failure without restarting a
+  The rule above applies to the few scripts that read a Secret themselves. To diagnose a similar failure without restarting a
   deployment, run `make log SERVICE=<name>` (init-container states, container
   logs and recent events) and `make k3s_check_secret SECRET=<name>` (whether a
   Secret exists and which of its data keys are populated).
@@ -871,7 +833,7 @@ Known issues
   own finalizers, and the uninstall has no custom resource left to wait on.
   Helm runs the hooks stored in the RELEASE record, not the ones in the chart
   on disk, so the hook applies from the next `make up` onwards; a release
-  installed before that template existed still wedges on uninstall. If a
+  whose record lacks the hook still wedges on uninstall. If a
   `helm uninstall --wait` is itself wedged, `make down` reports the stuck CR
   kinds, clears their finalizers and retries on its own — there is no flag
   for it. A patch the kubectl context is not allowed to make is reported as
@@ -977,10 +939,9 @@ up in that map, so an unknown key renders nothing and the gate is always
 false. Two rules follow:
 
 - Gate on the identity that *consumes* the object, not on the service that
-  produced it. A gate naming a key nobody consumes makes `make stop
-  SERVICE=<x>` delete the object for no consumer's benefit — the `bringup`
-  identity dropped in chart 0.2.0 was gated on `maintenance-secret-writer`,
-  a key that named a different identity entirely.
+  produced it. A gate naming a key nobody consumes — or naming a different
+  identity's key — makes `make stop SERVICE=<x>` delete the object for no
+  consumer's benefit.
 - A gate spanning several consumers' workloads must not be a union of them:
   `make stop SERVICE=<x>` then reports success and deletes nothing, which is
   what `make helm_lint_gates` sweeps for.
@@ -989,12 +950,10 @@ Hook templates are the one exception. A hook that renders nothing cannot do
 its job, so the `zz-*` hook templates (`zz-crd-ready-wait.yaml`,
 `zz-eso-pre-delete.yaml`) are not gated: the first has to wait for the CRDs
 on every install, and the second has to clean up after a release whose ESO
-controller was toggled off. (A third, `zz-namespace-podsecurity.yaml`, used
-to put the namespace's PodSecurity profile in place; it ran `kubectl` with
-no kubeconfig, could not reach the API server, and failed the install with
-`BackoffLimitExceeded`. The step now lives on the control node instead —
-`ansible/deploy.yml`: "Strip any PodSecurity profile from the instance
-namespace".)
+controller was toggled off. The namespace's PodSecurity profile is stripped on
+the control node: a hook pod carries no kubeconfig and cannot reach the API
+server — see `ansible/deploy.yml`, "Strip any PodSecurity profile from the
+instance namespace".
 
 **Credentials.** `templates/<name>.yaml` projects one credential out of
 OpenBao into a K8s Secret; `templates/<name>-push.yaml` mirrors it back. The
@@ -1004,9 +963,8 @@ shape is fixed:
   SecretStore); write side — `secretStoreRefs: shoggoth-openbao-write`
   (`secret-store-write.yaml`). A read token cannot push.
 - `target.name` is the K8s Secret's name; `data[].remoteRef.key` is the
-  OpenBao path. The remoteRef path is stable across the chart migration, so
-  an install that predates the chart reuses the credential already sitting in
-  OpenBao instead of rotating it.
+  OpenBao path. The remoteRef path is stable, so a reinstall reuses the
+  credential already in OpenBao instead of rotating it.
 - `target.creationPolicy` is `Owner` unless another writer owns the value.
   `Orphan` + `refreshInterval: 0s` is the pairing for a credential that a
   script writes straight into the K8s Secret (`slave-token`, the runner
@@ -1103,9 +1061,9 @@ helper:
       {{- include "shoggoth.filesData" (list . "files/grafana/dashboards/*.json" false) | nindent 2 }}
 
 Each key is the file's basename and each value is the file's content, so a
-ConfigMap built this way is byte-compatible with the hand-written block it
-replaced — every volumeMount, projected source and subPath keeps working,
-and `make helm_lint_gates` still sees the same resource. The third argument
+ConfigMap built this way is byte-compatible with a hand-written block scalar —
+every volumeMount, projected source and subPath keeps working, and
+`make helm_lint_gates` still sees the same resource. The third argument
 picks how the content is treated:
 
 - `false` — mounted verbatim. The right choice for content that carries

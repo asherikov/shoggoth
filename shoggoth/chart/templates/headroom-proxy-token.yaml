@@ -13,15 +13,16 @@
   apply either: a Secret that no longer exists is created, not adopted, so
   there is no ownership metadata to survive.)
 
-  What the annotation DID change was the service toggle. Helm honours
-  `keep` on the upgrade path too (pkg/kube/client.go skips the deletion of
-  a resource that left the manifest when it carries the annotation), so
-  disabling `headroom-proxy-token` left the Secret in place — a
-  toggle that reported success and stopped nothing. Without the annotation
-  the toggle really deletes it, and with it the consumers that mount it
-  (otelcol, litellm, headroom) lose their Secret and cannot start. Which
-  of those two is right depends on what the toggle is FOR: stopping the
-  token alone cannot stop the services that need it.
+  What the annotation changes is the service toggle, not the uninstall.
+  Helm honours `keep` on the upgrade path too (pkg/kube/client.go skips
+  the deletion of a resource that left the manifest when it carries the
+  annotation), so with the annotation present, disabling
+  `headroom-proxy-token` leaves the Secret in place — a toggle that
+  reports success and stops nothing. Without the annotation the toggle
+  deletes it, and the consumers that mount it (otelcol, litellm,
+  headroom) then lose their Secret and cannot start. Which of the two is
+  right depends on what the toggle is for: stopping the token alone
+  cannot stop the services that need it.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "headroom-proxy-token")) }}
 apiVersion: v1

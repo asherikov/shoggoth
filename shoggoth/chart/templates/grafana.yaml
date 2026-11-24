@@ -1,20 +1,19 @@
 {{- /*
   templates/grafana.yaml — Grafana + the shoggoth_ai dashboard suite.
 
-  The dashboards themselves live in files/grafana/dashboards/*.json and are
-  mounted VERBATIM (shoggoth.filesData with render=false). Every `{{ ... }}`
-  in those files is GRAFANA's own templating (`{{host_name}}`, `{{service}}`,
-  `{{requested_model}}`, `{{span_name}}`, `{{.service}}`, `{{__line__}}`, ...),
-  consumed by Grafana when it renders a panel — written there as plain
-  `{{host_name}}`, with no Helm escape, because Helm never evaluates them.
-
-  That is the one property to protect. Helm evaluating `{{host_name}}` emits
-  `<no value>`, the YAML stays valid, the ConfigMap is accepted, and every
-  dashboard legend silently goes blank — there is no error to trace back to.
-  It happens if a dashboard is pasted back into this template without the
-  `{{`...`}}` escape, or if the filesData call below is switched to
-  render=true. Either way: render and diff the ConfigMap data before
-  trusting it.
+  The dashboards themselves live in files/grafana/dashboards/*.json and reach
+  the ConfigMap through `shoggoth.filesData` with render=false — the choice
+  the README's "Large embedded files live in `files/`" section explains, and
+  the one property of this file to protect. Every `{{ ... }}` in those files
+  is GRAFANA's own templating (`{{host_name}}`, `{{service}}`,
+  `{{requested_model}}`, `{{span_name}}`, `{{.service}}`, `{{__line__}}`,
+  ...), consumed by Grafana when it renders a panel. Helm evaluating
+  `{{host_name}}` emits `<no value>`, the YAML stays valid, the ConfigMap is
+  accepted, and every dashboard legend silently goes blank — there is no
+  error to trace back to. It happens if a dashboard is pasted back into this
+  template without the `{{`...`}}` escape, or if the filesData call below is
+  switched to render=true. Either way: render and diff the ConfigMap data
+  before trusting it.
 
   dashboards.secureJsonData holds the DB password sourced from the
   openbao-managed Secret at pod start; nothing secret is in this file.
@@ -28,7 +27,7 @@
   browse tree matches items by uid alone, so a dashboard sharing its folder's
   uid resolves to itself as parent and the tree recurses until the browser
   dies with "RangeError: Maximum call stack size exceeded" (grafana#131927,
-  fixed only in 13.3.x while this chart pins 13.2.4). Renaming a dashboard
+  not fixed in the pinned version). Renaming a dashboard
   uid instead does not help: provisioning matches stored dashboards by uid,
   so the old one survives the rename and keeps the collision. foldersFromFilesStructure stays false: the dashboards volume is a flat
   projected volume (one source per ConfigMap, no subdirectories), and the
@@ -245,17 +244,17 @@ spec:
         - name: GF_SECURITY_ADMIN_USER
           value: admin
         # WHY THIS IS $__file{} AND NOT A __FILE ENV SUFFIX
-        # Grafana 13.3.1 has no generic "read the value from this file" env
+        # Grafana has no generic "read the value from this file" env
         # convention. pkg/setting/expanders.go registers exactly one
         # fileExpander, and it fires only on the `$__file{...}` syntax inside
-        # an ini VALUE: applyEnvVariableOverrides (setting.go:1082) first
+        # an ini VALUE: applyEnvVariableOverrides (pkg/setting) first
         # writes the env var's literal text into [security] admin_password —
         # that key exists in conf/defaults.ini, so the first pass applies it —
-        # and only then does expandConfig (setting.go:1432) run the
+        # and only then does expandConfig run the
         # expanders. So GF_SECURITY_ADMIN_PASSWORD set to
         # `$__file{/run/secrets/admin_password}` is expanded to the file's
         # contents, TrimSpace'd, before readSecuritySettings reads
-        # AdminPassword (setting.go:2144).
+        # AdminPassword.
         #
         # The obvious `GF_SECURITY_ADMIN_PASSWORD__FILE` spelling does NOT
         # work: the second pass of applyEnvVariableOverrides creates a new
@@ -282,7 +281,7 @@ spec:
         # with SocialBaseUrl = "/login/" and name = "generic_oauth"
         # (pkg/login/social/social.go), so the value sent to Authelia is
         # AppURL + "/login/generic_oauth". There is no
-        # auth.generic_oauth.redirect_url in 13.3.1: no connector reads one,
+        # auth.generic_oauth.redirect_url: no connector reads one,
         # the ini key is never populated, and setting it would change
         # nothing. root_url is the only lever, which is also what the
         # upstream docs tell you to set for the callback URL to be right.
@@ -414,8 +413,8 @@ spec:
         lifecycle:
           postStart:
             exec:
-              # /bin/sh, not /bin/bash: grafana 13.3.0 removed bash from the
-              # alpine image (grafana/grafana#132643), so a bash postStart
+              # /bin/sh, not /bin/bash: the alpine image ships no bash
+              # (grafana/grafana#132643), so a bash postStart
               # hook fails with FailedPostStartHook and crash-loops the pod.
               command:
               - /bin/sh

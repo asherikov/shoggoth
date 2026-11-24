@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """Dispatch CLI utility — command-handler control plane.
 
-Standalone CLI binary invoked by the ``dispatch`` step of the
-``command-handler`` Argo WorkflowTemplate (see
-``shoggoth/chart/files/argo/templates/command-handler.yaml``).
-The dispatcher runs in a ``shoggoth_tools:host`` pod with
-kubectl and validates the inbound webhook event before deciding
-whether the worker step (``shoggoth.py <command>`` in a separate
-``slave:noble`` pod) should run.
+Validates an inbound webhook event and emits the dispatcher
+decision — ``should_run_worker`` plus the per-command output files.
 
 Decoupled from ``shoggoth.py`` because the dispatcher's
 dependency surface is different: no agent, no git-cred sidecar,
@@ -20,9 +15,7 @@ Contract with the dispatch template:
 
   * The original command (``pr-update`` / ``task`` /
     ``ci-failure`` / ``sandbox``) arrives as the first
-    command-line argument. The dispatch template execs
-    ``dispatch.py "${SHOGGOTH_ORIGINAL_COMMAND}"
-    "${SHOGGOTH_TASK_ID}"``, so a value containing shell
+    command-line argument, quoted so a value containing shell
     metacharacters still arrives as a single argv element rather
     than being interpolated into bash source.
   * The optional Redmine issue ID arrives as the second
@@ -79,13 +72,10 @@ from shoggoth.redmine import Redmine  # noqa: E402
 
 
 def main():
-    # Both dispatcher inputs are positionals. The dispatch template
-    # execs ``dispatch.py "${SHOGGOTH_ORIGINAL_COMMAND}"
-    # "${SHOGGOTH_TASK_ID}"`` — the env vars exist only so the
-    # Go-template values never land in bash source — so a value
-    # containing shell metacharacters still arrives as a single
-    # argv element. The ``command`` attribute is set to the
-    # literal ``"dispatch"`` so any future logging / debugging
+    # Both dispatcher inputs are positionals, so each arrives as one
+    # argv element (see the invocation contract in the module
+    # docstring). The ``command`` attribute is set to the
+    # literal ``"dispatch"`` so any logging / debugging
     # helper that prints ``args.command`` shows the actual
     # subcommand.
     parser = argparse.ArgumentParser(

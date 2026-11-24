@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import json
 import os
 import socket
@@ -37,8 +37,7 @@ DELETE_TIMEOUT = 60
 # Total time one manifest request -- the tag itself, or one index child
 # -- may take: the first PULL_TIMEOUT attempt plus the wait for zot's
 # detached sync to commit. The default covers zot's 3h sync budget plus
-# the initial attempt; the workflow's activeDeadlineSeconds remains the
-# outer bound. Override with SHOGGOTH_REGISTRY_PULL_WAIT (seconds).
+# the initial attempt. Override with SHOGGOTH_REGISTRY_PULL_WAIT (seconds).
 PULL_WAIT = PULL_TIMEOUT + 3 * 3600
 POLL_INTERVAL = 15
 

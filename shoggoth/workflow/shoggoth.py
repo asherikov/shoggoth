@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Shoggoth workflow + maintenance: dispatch entrypoint shim.
 
-Originally a single 7.5k-line script; the implementation now lives
-in the ``shoggoth`` package alongside this file. Invoking
-``python3 /shoggoth/workflow/scripts/shoggoth.py <command>``
-keeps working unchanged — this shim forwards to ``shoggoth.main()``.
+The implementation lives in the ``shoggoth`` package alongside this
+file; this shim forwards to ``shoggoth.main()``, so invoking
+``python3 /shoggoth/workflow/scripts/shoggoth.py <command>`` reaches
+the package's CLI.
 
 The argparse choices and the exit codes are all defined inside
 the package, so any drift between a caller's expected surface

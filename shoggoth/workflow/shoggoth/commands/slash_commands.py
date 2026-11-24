@@ -1,16 +1,18 @@
 """slash_commands -- single source of truth for the slash-command catalog.
 
-The dispatcher (``shoggoth/workflow/shoggoth/commands/dispatch.py``)
-owns the canonical list of slash commands and the ``/help`` message
-renderer (``format_help_text()``). The worker does NOT consult this
-catalog: it implements handlers for the worker-owned commands directly
-(``/review``, ``/squash``, ``/rebase``, ``/drop``, ``/do``) and
-treats every other command name as a silent no-op. Keeping the worker
-free of catalog imports (no round-trip dependency on
-``SUPPORTED_COMMANDS`` or ``format_help_text``) means a
-dispatcher-owned command that still reaches the worker -- e.g. during
-a dispatcher-code rollout window -- no-ops there instead of
-double-posting.
+This module owns the canonical list of slash commands
+(``SUPPORTED_COMMANDS``) and the ``/help`` message renderer
+(``format_help_text()``). Other modules refer to it rather than
+restating the catalog or the handler/worker split: the dispatcher
+(``shoggoth/workflow/shoggoth/commands/dispatch.py``) reads the
+``handler`` field to decide whether to run a command itself or pass
+the event to the worker, and the worker
+(``shoggoth/workflow/shoggoth/commands/pr_update.py``) implements
+handlers for the worker-owned commands directly and treats every
+other command name as a silent no-op. Keeping the worker free of
+catalog imports (no round-trip dependency on ``SUPPORTED_COMMANDS``
+or ``format_help_text``) means a dispatcher-owned command that still
+reaches the worker no-ops there instead of double-posting.
 
 Handler field
 -------------
@@ -21,9 +23,9 @@ Each ``SlashCommand`` carries a ``handler`` field, one of:
     ``should_run_worker=false``. Examples today: ``/sandbox`` (which
     kubectl-applies a per-PR pod + Service) and ``/help`` (which
     posts a static catalog). These commands are fast: the dispatcher
-    is a ``shoggoth_tools:host`` pod with no agent / no
-    image-pull of ``slave:noble``, so end-to-end latency is ~2-5 s
-    instead of the worker's ~60-90 s on a cold cache.
+    runs no agent and pulls no ``slave:noble`` image, so end-to-end
+    latency is ~2-5 s instead of the worker's ~60-90 s on a cold
+    cache.
 
   * ``"worker"`` -- handled by the ``slave:noble`` worker step in
     the same DAG. The dispatcher is a near-pass-through (it emits

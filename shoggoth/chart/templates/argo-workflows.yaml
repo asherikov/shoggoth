@@ -3,7 +3,7 @@
 
   Emits two `app:` labels, `argo-server` and `argo-workflow-controller`, both
   driven by the single `services.argo-workflows.enabled` toggle (both are
-  dispatched from this one file, so they were never separable).
+  dispatched from this one file, so they cannot be toggled apart).
 
   LITERAL GO-TEMPLATE TEXT — do not "clean up" the escapes below.
   The controller ConfigMap documents Argo's own parameter syntax in `#`
@@ -69,11 +69,9 @@ metadata:
 # convenience.
 #
 # This Role therefore carries NO write verb on any argoproj.io resource
-# except workflowtaskresults. The rule that used to sit here granted
-# create/update/patch/delete on workflows, workflowtemplates,
-# workfloweventbindings and cronworkflows, under a comment calling
-# workfloweventbindings "a benign read". That grant turned a workflow step
-# into a cluster-admin:
+# except workflowtaskresults. A write verb on workflows, workflowtemplates,
+# workfloweventbindings or cronworkflows turns a workflow step into a
+# cluster-admin:
 #
 #   1. the step writes a WorkflowTemplate whose pod spec sets
 #      serviceAccountName: argo-workflow-controller;
@@ -82,7 +80,7 @@ metadata:
 #      ClusterRole grants pods/exec cluster-wide — so the step can exec
 #      into any pod in the cluster.
 #
-# The grant also made the gitea PR-update and redmine task-processor
+# The same verbs also make the gitea PR-update and redmine task-processor
 # WorkflowEventBindings deletable from a workflow pod. Those bindings are
 # created only by the apply-workflows init container at controller pod
 # start, so a delete does not self-heal: both webhook triggers stay dead
@@ -91,11 +89,11 @@ metadata:
 #
 # The read side of that grant belongs to argo-server, the component that
 # actually needs it: its event_server LISTs workfloweventbindings in-cluster
-# with its own ServiceAccount. It now lives in the argo-workflow-server
+# with its own ServiceAccount. It belongs in the argo-workflow-server
 # Role below, which is bound to argo-server and to nothing else.
 #
-# workflowtaskresults: create + patch is the one argoproj.io write that
-# stays: it is what the Argo executor (argoexec) inside every workflow pod
+# workflowtaskresults: create + patch is the one argoproj.io write granted
+# here: it is what the Argo executor (argoexec) inside every workflow pod
 # needs to report a step's outputs, and it is upstream's own "Recommended
 # minimum permissions for the emissary executor" (Role `executor` in
 # argo-workflows/manifests/quick-start-minimal.yaml). It cannot make the
@@ -364,12 +362,12 @@ subjects:
 # same resources. The cluster-scoped half of argo-server's needs is the
 # separate argo-server-clusterworkflowtemplates-watcher ClusterRole above.
 #
-# This RoleBinding is named argo-workflow-server rather than keeping the
-# old argo-workflow-executor-server name because RoleBinding.roleRef is
-# immutable server-side: Helm cannot patch a roleRef, it can only create
-# and delete. Renaming the binding makes the change a delete + create,
-# which Helm does. Keeping the name and changing only the roleRef would
-# make every upgrade fail with "field is immutable".
+# This RoleBinding is named argo-workflow-server: RoleBinding.roleRef is
+# immutable server-side, so Helm cannot patch a roleRef, it can only create
+# and delete. Naming the binding after the Role it references makes the
+# change a delete + create, which Helm does. Reusing a binding name and
+# changing only the roleRef makes every upgrade fail with "field is
+# immutable".
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -488,7 +486,8 @@ rules:
 # Ready-condition status changes until the condition flips true. Without
 # `list` + `watch` the wait fails with
 # `Failed to watch ... cannot list resource externalsecrets`
-# (reflector.go:200) and the init container sits at 403 for the
+# (client-go's reflector, which is what the WATCH runs through) and the
+# init container sits at 403 for the
 # full 10-minute timeout. Resource-name-scoped so the bound SAs
 # (`argo-workflow-controller`, `argo` via
 # argo-workflow-pod-bootstrap-wait) can only watch the four
@@ -568,10 +567,10 @@ subjects:
   name: argo
   namespace: {{ .Release.Namespace }}
 ---
-# argo-workflow-controller's secret-source informer (argo workflows v3.7+, still applies in v4)
-# LIST/WATCHes every ExternalSecret AND the K8s Secrets they produce in
-# the namespace to track the source of secrets workflows reference via
-# secretKeyRef (e.g. gitea-slave-token, ssh-slave-private-key,
+# argo-workflow-controller's secret-source informer LIST/WATCHes every
+# ExternalSecret AND the K8s Secrets they
+# produce in the namespace to track the source of secrets workflows
+# reference via secretKeyRef (e.g. gitea-slave-token, ssh-slave-private-key,
 # openbao-unseal-key, gitea-runner-token). Without list/watch the
 # controller logs `Failed to watch ... is forbidden` every relist
 # interval. Separate Role from the bootstrap-wait get-only grant because
@@ -740,8 +739,8 @@ spec:
           # data.root-token key instead. Same pattern as the redmine service.
           #
           # kubectl wait uses one process per resource and an internal watch;
-          # the previous polling loop (`kubectl get -o json | jq`) re-forked
-          # kubectl + jq every 10s and was OOMing at 128Mi.
+          # a polling loop (`kubectl get -o json | jq`) re-forks kubectl + jq
+          # every 10s and OOMs at 128Mi.
           #
           # The three ExternalSecrets are waited for in ONE `kubectl wait`
           # call, not one call per secret. kubectl builds a single timeout
@@ -750,11 +749,11 @@ spec:
           # watchtools.ContextWithOptionalTimeout(context.Background(), o.Timeout)`
           # once in RunWait, then `o.ConditionFn(ctx, info, o)` per resource
           # — so --timeout is a budget for the SET, not a budget per
-          # resource. Three separate calls therefore meant three separate
-          # 600s budgets, up to 1800s in this init container, while the
+          # resource. Three separate calls are three separate 600s budgets,
+          # up to 1800s in this init container, while the
           # Deployment's progressDeadlineSeconds is 600s (the API server's
-          # default for an unset field). A slow ESO sync then made the
-          # controller report ProgressDeadlineExceeded on a rollout that was
+          # default for an unset field), so a slow ESO sync makes the
+          # controller report ProgressDeadlineExceeded on a rollout that is
           # merely slow. One call, one 600s budget.
           #
           # Each secret is still gated on the SAME `services.<x>.enabled`
@@ -781,7 +780,8 @@ spec:
           # its own `kubectl wait`. It runs in the BACKGROUND rather than
           # after the ExternalSecret wait, so this init container's total
           # budget stays at one TIMEOUT instead of two. The failure is
-          # reported with the same diagnostic as before.
+          # reported with the same diagnostic as the ExternalSecret wait
+          # below.
           kubectl wait --for=jsonpath='{.data.root-token}' --timeout="${TIMEOUT}" \
               -n "${NS}" secret/openbao-unseal-key &
           openbao_pid=$!
@@ -918,9 +918,10 @@ spec:
           # correctness depends on, and it carries its own retry loop; these
           # two exist to put the on-cluster object names in the pod log. A
           # transient API-server blip here — `dial tcp 10.43.0.1:443: i/o
-          # timeout`, the same one that cost three delete attempts in the
-          # run that motivated this — must not turn a successful reset into
-          # Init:Error, so they are retried and then reported, never fatal.
+          # timeout`, the same class external-secrets.yaml documents for its
+          # upgrade-cleanup init container — must not turn a successful reset
+          # into Init:Error, so they are retried and then reported, never
+          # fatal.
           list_kind() {
             local kind="$1"
             local attempt=1
@@ -1024,8 +1025,8 @@ spec:
             # smaller limits on first run. register-vwc in the
             # external-secrets chart template
             # (same image, same kind of work) uses 128Mi, but argo-workflows'
-            # apply-workflows hits higher peaks here — bumped to 512Mi to
-            # clear Init:OOMKilled.
+            # apply-workflows hits higher peaks here, so 512Mi is what clears
+            # Init:OOMKilled.
             memory: 512Mi
             cpu: 1000m
       containers:
@@ -1184,8 +1185,8 @@ data:
   resourceRateLimit: |
     limit: 32
     burst: 64
-  # Disable TLS on the controller's metrics server (port 9090). v3.7.0+
-  # defaults Secure: true and generates a fresh self-signed cert on every
+  # Disable TLS on the controller's metrics server (port 9090). Secure
+  # defaults to true and generates a fresh self-signed cert on every
   # startup, so kubelet probes (plaintext HTTP) get 400 and OTel scrapers
   # either need to skip verification or carry the cert. Plaintext on the
   # pod-local metrics port is fine; only the workflow-defaults content
@@ -1243,9 +1244,9 @@ data:
           path: /var/lib/rancher/k3s/storage/{{ .Values.identity.instanceDir }}/workflow-scripts
           type: DirectoryOrCreate
       # No podGC: pods are NOT deleted by argo-server's per-workflow
-      # podGC garbage collector. The previous OnWorkflowSuccess strategy
-      # deleted pods the moment a workflow succeeded, which made logs
-      # unreliable and surfaced the UI warning
+      # podGC garbage collector. An OnWorkflowSuccess strategy deletes pods
+      # the moment a workflow succeeds, which makes logs unreliable and
+      # surfaces the UI warning
       # "Your pod GC settings will delete pods immediately on
       # completion. Logs may not appear ...". Without podGC, pods stick
       # around until ttlStrategy expires (secondsAfterCompletion: 86400
@@ -1282,12 +1283,12 @@ data:
       # kubelet whenever it exits — including when argo's own
       # `cleanUpPod` → `TerminateContainers` SIGTERMs it after `main`
       # has completed. On a workflow pod (pod-level
-      # `restartPolicy: Never`) that produced an unbreakable loop: argo
-      # terminated git-cred, the kubelet restarted it, argo terminated
-      # it again. The pod phase never reached a terminal value, so
-      # `assessNodeStatus` kept returning NodeRunning, the workflow DAG
-      # never advanced past the first step, and every step eventually
-      # failed with "retry exceeded workflow deadline". Symptom on the
+      # `restartPolicy: Never`) that makes an unbreakable loop: argo
+      # terminates git-cred, the kubelet restarts it, argo terminates
+      # it again. The pod phase never reaches a terminal value, so
+      # `assessNodeStatus` keeps returning NodeRunning, the workflow DAG
+      # never advances past the first step, and every step eventually
+      # fails with "retry exceeded workflow deadline". Symptom on the
       # cluster: `Back-off restarting failed container git-cred` plus a
       # growing `RESTARTS` count on a step whose `main` and `wait`
       # containers had already exited 0.
@@ -1302,10 +1303,10 @@ data:
       # on `mainContainerSucceeded && waitContainerSucceeded`.
       #
       # git-cred and `main` therefore start concurrently rather than
-      # sidecar-first. That is not a regression in gating: the native
-      # sidecar path only waited for git-cred's container to start, not
-      # for its readinessProbe (no startupProbe is set), so main never
-      # actually waited on the daemons either way. The real gate is the
+      # sidecar-first. That is not a gap in gating: a native sidecar only
+      # waits for git-cred's container to start, not for its readinessProbe
+      # (no startupProbe is set), so main never waits on the daemons either
+      # way. The real gate is the
       # /shoggoth/git-cred/ready flag, which consumers poll — see
       # `GitCredentials().wait_until_ready` in the workflow scripts.
       #
@@ -1422,15 +1423,15 @@ data:
 # authorized as the `argo-server` ServiceAccount, which can submit, delete and
 # exec any workflow in the cluster.
 #
-# That is a deliberate trade, not a gap. The deployment is VPN-only, and the
-# alternative was an SSO login that gated only the UI while the webhook and
-# CLI paths kept running unauthenticated in server mode anyway — a login page
-# that hides nothing. The `sso` block of
+# That is a deliberate trade, not a gap. The deployment is VPN-only, and an
+# SSO login would gate only the UI while the webhook and CLI paths keep
+# running unauthenticated in server mode anyway — a login page that hides
+# nothing. No half-wired SSO is present to re-enable by accident: restoring
+# it means assembling the `sso` block of
 # argo-workflow-controller-configmap, the `--auth-mode sso` flag, the
 # `authelia-secrets`/`sso` Secret grants on the `argo-workflow-server` Role,
 # the Authelia client, the OpenBao seed paths and the ExternalSecret
-# projections were all removed, so there is no half-wired SSO to re-enable by
-# accident: restoring it means putting those pieces back together.
+# projections together.
 apiVersion: v1
 kind: Service
 metadata:
@@ -1481,11 +1482,10 @@ spec:
         imagePullPolicy: IfNotPresent
         command:
         # --secure=false is REQUIRED for the Gitea/Redmine webhook path.
-        # v3.7.0 used cmux, which demuxed plaintext HTTP and TLS on the
-        # same port by first byte. v4.x replaced cmux with Go's
-        # http.Server.Protocols, but the protocol demuxer sits *under*
-        # tls.NewListener (server/apiserver/argoserver.go), so once
-        # --secure=true (the default since v3) the listener refuses any
+        # The server demuxes plaintext HTTP and TLS on the same port (Go's
+        # http.Server.Protocols under tls.NewListener,
+        # server/apiserver/argoserver.go), so with --secure=true (the
+        # default) the listener refuses any
         # plaintext HTTP and resets the connection with a TLS fatal
         # alert. The gitea/redmine webhook URLs registered by
         # shoggoth.py now point at
@@ -1511,8 +1511,8 @@ spec:
         # route via web-internal, so neither the Secret nor a gitea
         # matcher patch is needed.
         #
-        # Probes use tcpSocket because the cluster's K8s version is too
-        # old for httpGet.insecureSkipTLSVerify (added in K8s 1.24 GA);
+        # Probes use tcpSocket because the cluster's K8s version does not
+        # support httpGet.insecureSkipTLSVerify;
         # TCP accept on port 80 is a sufficient "pod responsive"
         # signal — listener is up means http.Protocols is demuxing
         # connections to the right handler (v3.x) or the gRPC gateway

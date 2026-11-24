@@ -17,10 +17,10 @@
   personal-use system. Fusion's own docs label the mode "not recommended",
   hence this note.
 
-  Enabling auth later is an env-only change with no data migration: set
-  FUSION_PASSWORD (projected from OpenBao the way every other credential in
-  the chart is) and drop FUSION_ALLOW_EMPTY_PASSWORD. The feed database
-  lives on the PVC and is independent of credentials.
+  Turning auth on is an env-only change with no data migration: set
+  FUSION_PASSWORD (an OpenBao projection — see the README's "Chart template
+  conventions", Credentials) and drop FUSION_ALLOW_EMPTY_PASSWORD. The feed
+  database lives on the PVC and is independent of credentials.
 */}}
 {{- if (include "shoggoth.isServiceEnabled" (list . "fusion")) }}
 apiVersion: v1

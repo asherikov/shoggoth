@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import json
 import sys
 from urllib.parse import urlencode
@@ -79,8 +79,8 @@ class HttpApiClient:
         HTTP wrapper below repeats. ``payload`` may be ``None`` for endpoints
         that accept a JSON body or no body interchangeably; callers that need
         a real request without a body should use ``http_delete`` instead.
-        When ``quiet`` is set the pre-send method log is suppressed (matches
-        the original ``http_post_json(quiet=True)`` behaviour).
+        When ``quiet`` is set the pre-send method log is suppressed (as
+        in ``http_post_json(quiet=True)``).
         """
         hdrs = {"Content-Type": "application/json"}
         if headers:
@@ -312,16 +312,15 @@ class HttpApiClient:
           ``(items, None)``
 
         Callers branch on ``error is not None``: a transport failure
-        is a hard error (the maintenance script must ``die()`` so the
-        Argo step reports it); an empty list on a list endpoint is
-        just a fact about the org / repo. ``_paginate`` collapses the
-        two to ``[]`` and the old ``if not repos: continue`` paths
-        silently skipped the org — the bug the
+        is a hard error (the caller must ``die()`` so the step reports
+        it); an empty list on a list endpoint is just a fact about
+        the org / repo. ``_paginate`` collapses the two to ``[]``,
+        which silently skips the org — the failure the
         ``SlaveAccess._add_to_mirrored_repos`` /
-        ``_ensure_force_push_access`` defensive checks were meant
-        to surface. ``list_org`` etc. remain on the class for
-        callers that legitimately do not need to distinguish; new
-        callers use ``get_list``.
+        ``_ensure_force_push_access`` defensive checks surface.
+        ``list_org`` etc. remain on the class for callers that
+        legitimately do not need to distinguish; new callers use
+        ``get_list``.
         """
         page = 1
         items = []

@@ -12,7 +12,7 @@
   timeout kills them.
 
   ``ssh-slave-public-key.yaml`` is the public-key side of the same pair
-  and shares the openbao seed. It is gated alongside this one.
+  and is gated alongside this one.
 
   Gated on ``secret-store``: the Secret is read by ``slave-term``,
   ``slave-dind``, and ``argo-workflows``, none of which is a strict

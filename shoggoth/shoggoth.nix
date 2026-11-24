@@ -59,21 +59,20 @@ in {
   # IMPORTANT: shoggoth assumes the k3s version is at least
   # 1.34.
   #
-  # Features that are safe to rely on (all GA by 1.34):
+  # Features that are safe to rely on (all GA at that version):
   #
-  #   * Pod-level ``spec.ttlSecondsAfterFinished`` (added
-  #     1.23, GA 1.29).
+  #   * Pod-level ``spec.ttlSecondsAfterFinished`` (GA).
   #   * Container-level ``restartPolicy`` for native sidecar
-  #     ordering (added 1.28, GA 1.33).
-  #   * ``Job.spec.ttlSecondsAfterFinished`` (since 1.12).
+  #     ordering (GA).
+  #   * ``Job.spec.ttlSecondsAfterFinished`` (GA).
   services.k3s = {
     enable = true;
     role = "server";
-    #   --advertise-address=127.0.0.1 was the way to make the endpoint immune
-    #   to network changes, and it is no longer available. Since k8s 1.37 the
-    #   apiserver refuses to start when the public address is loopback and the
-    #   endpoint reconciler is the default `lease` ("cannot use public IP
-    #   127.0.0.1 with endpoint reconciler").
+    #   --advertise-address=127.0.0.1 is not available for making the endpoint
+    #   immune to network changes: the apiserver refuses to
+    #   start when the public address is loopback and the endpoint reconciler
+    #   is the default `lease` ("cannot use public IP 127.0.0.1 with endpoint
+    #   reconciler").
     #
     #   The design is the pin: --node-ip=10.99.0.1, set below. One flag feeds
     #   the apiserver's advertise address, the kubelet's --node-ip, etcd's

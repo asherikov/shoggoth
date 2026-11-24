@@ -22,18 +22,15 @@ shoggoth:
   nameOverride: ""
   fullnameOverride: ""
 
-# Identity (replaces SHOGGOTH_DOMAIN, SHOGGOTH_GITHUB_ORG, SHOGGOTH_DNS_IP).
-# identity.instanceDir comes from the per-instance shoggoth/<instance>.yaml,
-# which the installer passes with --values (matches the former
-# `SHOGGOTH_INSTANCE_DIR=${INSTANCE}` semantics).
+# Identity. identity.instanceDir comes from the per-instance
+# shoggoth/<instance>.yaml, which the installer passes with --values.
 identity:
   domain: ""
   githubOrg: ""
   dnsIp: ""
   instanceDir: ""
 
-# Network ports (replaces SHOGGOTH_WEB_EXT_PORT, SHOGGOTH_WG_PORT,
-# SHOGGOTH_WG_UI_PORT). network.registry.hostPort is the host-side bind
+# Network ports. network.registry.hostPort is the host-side bind
 # port of the hostNetwork registry pod; the in-cluster `registry`
 # Service publishes a fixed port instead
 # (_helpers.tpl:shoggoth.registryServicePort).
@@ -46,15 +43,14 @@ network:
   registry:
     hostPort: ""
 
-# AI defaults (replace SHOGGOTH_AI_DEFAULT_*).
+# AI defaults.
 ai:
   defaultModel: ""
   defaultApi: ""
   defaultTokenFileRef: ""
 
 # Workflow agent behaviour. Renders the SHOGGOTH_AGENT_TIMEOUT pod env var,
-# replacing the hardcoded Agent.AGENT_TIMEOUT constant the workflow scripts
-# used to carry.
+# which ``Agent.AGENT_TIMEOUT`` reads.
 workflow:
   # Per-prompt wall-clock cap, in seconds, for the qwen agent the
   # command-handler worker step drives (pr-update, task, ci-failure).
@@ -65,7 +61,7 @@ workflow:
   # binds into the worker-step container's environment.
   agentTimeout: 1200
 
-# Gitea (replaces SHOGGOTH_GITEA_SERVER_TOKEN_FILE).
+# Gitea.
 gitea:
   serverTokenFileRef: ""
 

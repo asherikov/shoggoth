@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import sys
 from datetime import datetime, timezone
 
@@ -76,10 +76,10 @@ class SlaveToken(GiteaCommand):
         # ``self.gitea.api_url`` is the constructor's
         # ``params.gitea_server_url + "/api/v1"`` — the
         # ``/api/v1`` prefix is already there. Appending another
-        # ``/api/v1/user`` produced the malformed
-        # ``/api/v1/api/v1/user`` URL that Gitea answered with
-        # 404, which the script then misread as "token
-        # rejected" and triggered an unnecessary rotation.
+        # ``/api/v1`` would build the malformed
+        # ``/api/v1/api/v1/user`` URL that Gitea answers with
+        # 404, which would then be misread as "token
+        # rejected" and trigger an unnecessary rotation.
         url = f"{self.gitea.api_url}/user"
         print(f"API check: GET {url} with Authorization: token {masked}")
         status, body = HttpApiClient.http_get_with_status(

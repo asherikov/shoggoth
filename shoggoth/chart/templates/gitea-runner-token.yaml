@@ -10,8 +10,9 @@
   ``creationPolicy: Orphan`` + ``refreshInterval: 0s`` is load-bearing
   for the same reason as ``gitea-slave-token.yaml``: the
   ``gitea-runner-token-push`` PushSecret is the authority on the Secret
-  value, and an ExternalSecret reconcile must not race the script's
-  fresh write with stale OpenBao data.
+  value, so a controller reconcile must not race the script's fresh
+  write — see the credential shape in README.md, "Chart template
+  conventions".
 
   Gated on ``gitea-runner``: the runner registration deploys only when
   that service is enabled, so disabling ``gitea-runner`` cleanly

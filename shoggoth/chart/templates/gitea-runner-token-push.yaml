@@ -7,9 +7,11 @@
   script writes a fresh token into the K8s Secret, this PushSecret
   mirrors it to OpenBao so the corresponding ``ExternalSecret`` (and any
   second cluster using the same OpenBao backend) can project the same
-  value. Read it as a one-way K8s → OpenBao write, controlled by the
-  ``Orphan`` ExternalSecret that has already declared the Secret
-  ownerless.
+  value. Read it as a one-way K8s → OpenBao write: the pod holds no
+  OpenBao credential, and the ``Orphan`` ExternalSecret in
+  gitea-runner-token.yaml keeps the script's write authoritative. The
+  credential shape is documented in README.md, "Chart template
+  conventions".
 
   Gated on ``secret-store-write``: the PushSecret itself requires the
   write SecretStore to be enabled. Default-on, so a default install is

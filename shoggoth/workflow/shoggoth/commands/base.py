@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import os
 
 from ..git import Git, WsHandler
@@ -19,9 +19,8 @@ class CommandBase:
         fix) and `commit_push_and_create_mr_ccws` (task implementation):
         for every modified sub-repo `git add -A`, then one repo-wide
         `wshandler commit` that walks all sub-repos and creates a commit per
-        repo that has staged changes. Failure at any step is fatal — the
-        workflow script's caller is a webhook (Argo WorkflowEventBinding),
-        so partial commits would leave the PR in an unrecoverable state.
+        repo that has staged changes. Failure at any step is fatal — a
+        partial commit set leaves the PR in an unrecoverable state.
         """
         for repo_name in modified_repos:
             repo_path = os.path.join(repo_dir, repo_name)

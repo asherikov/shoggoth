@@ -77,10 +77,9 @@ graph:
 #
 # Known limitation: KubeDiagrams does not resolve ${SHOGGOTH_NAMESPACE}
 # placeholders in the input manifests, so node.namespace fields render
-# as the literal string "${SHOGGOTH_NAMESPACE}" in the diagram. This used to
-# matter when the inputs were the raw envsubst manifests; the chart renders
-# through `helm template` with a real namespace, so the rendered stream no
-# longer carries unresolved placeholders.
+# as the literal string "${SHOGGOTH_NAMESPACE}" in the diagram. The chart
+# renders through `helm template` with a real namespace, so the rendered
+# stream carries no unresolved placeholders and the limitation stays latent.
 #
 # Does NOT touch docs/architecture.svg, docs/bringup.svg, etc. — the
 # `graph` target above is the one that regenerates the architecture
@@ -106,10 +105,8 @@ CLUSTERVIZ_CONFIG := make/kube-diagrams.yaml
 # multi-document YAML), and yq emits exactly such a stream. So there is no
 # intermediate file, no per-document split, and no script.
 #
-# This used to be `find shoggoth/k3s/*.yaml` + `grep -l`, which only worked
-# because those legacy manifests were already one-resource-per-file. That
-# directory is gone; the chart renders as a single multi-doc stream, so the
-# selection has to happen on the stream.
+# The chart renders as a single multi-document stream rather than one
+# resource per file, so the selection has to happen on the stream.
 #
 # $1 = output name (e.g. "cluster-rbac" for docs/cluster-rbac.svg)
 # $2 = space-separated set of kinds for that view

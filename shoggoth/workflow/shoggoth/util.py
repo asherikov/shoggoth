@@ -1,4 +1,4 @@
-"""Module split out of shoggoth.py; see package __init__."""
+"""Part of the shoggoth workflow package; see the package __init__ for the module map."""
 import re
 import subprocess
 import sys
@@ -9,15 +9,13 @@ def log(msg, file=None):
     """Print ``msg`` with one ``[shoggoth]`` prefix per line.
 
     The default for ``file`` resolves to ``sys.stderr`` at call
-    time, not at function-definition time. The original
-    ``shoggoth.py`` had ``file=sys.stderr`` (a default-argument
-    value, evaluated once at import). That's fine in production
-    but breaks any test framework that replaces ``sys.stderr``
-    after import: ``log`` would still hold a reference to the
-    pre-replacement file object, and writes through the default
-    would bypass the replacement. Resolving at call time costs
-    one ``getattr`` per call and keeps both the production and
-    test paths working.
+    time, not at function-definition time: a ``file=sys.stderr``
+    default argument is evaluated once at import, so it breaks any
+    test framework that replaces ``sys.stderr`` after import — ``log``
+    would hold a reference to the pre-replacement file object, and
+    writes through the default would bypass the replacement.
+    Resolving at call time costs one ``getattr`` per call and keeps
+    both the production and test paths working.
     """
     if file is None:
         file = sys.stderr
@@ -59,7 +57,7 @@ def run(cmd, **kwargs):
     process); the log row, however, uses a redacted copy via
     ``_redact_argv_for_log`` so secret-bearing tokens
     (``--from-literal=KEY=VALUE``, ``Authorization: token X``, ``-p
-    password``) never land in the Argo workflow log.
+    password``) never land in the workflow log.
     """
     kwargs.setdefault("check", True)
     kwargs.setdefault("capture_output", True)

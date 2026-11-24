@@ -38,7 +38,7 @@ pull_registry_image:
 # fragment.
 #
 # The path handed to the play is the CONTAINER's, not the host's. The play
-# writes with `delegate_to: localhost`, and localhost is now the container,
+# writes with `delegate_to: localhost`, and localhost is the container,
 # so an unmapped $(CURDIR)/private/kubeconfig would be created inside the
 # image and lost with `--rm` — a fetch that reports success and leaves the
 # host without a kubeconfig. group_vars derives the same value from
