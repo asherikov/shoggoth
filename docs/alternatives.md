@@ -1882,15 +1882,14 @@ second.
     that anonymous volume root-owned, so a container running as the invoking
     uid cannot create `$TMPDIR/updatecli` and dies with
     `mkdir /tmp/updatecli: permission denied` before it has read a single
-    manifest. `pkg/core/tmp/main.go` builds the path from `os.TempDir()`,
-    which honours `$TMPDIR`, so the target passes
-    `-e TMPDIR=/work/.tmp` — the repo's gitignored scratch directory. The
-    directory survives the run, because `tmp.Clean()` only fires under
-    `--clean`; keeping it under `.tmp` is what keeps the litter out of
-    `git status`. (The non-slim image pins `USER updatecli`, uid 1000, which
-    would break the in-place file rewrite for any other uid.) updatecli
-    therefore runs from the `client` stage of `shoggoth/dockerfiles/tools`,
-    which is built FROM alpine and has no `VOLUME /tmp` at all. That image
+    manifest — which rules both images out rather than calling for a
+    workaround. (The non-slim image also pins `USER updatecli`, uid 1000,
+    which would break the in-place file rewrite for any other uid.)
+    updatecli therefore runs from the `client` stage of
+    `shoggoth/dockerfiles/tools`, which is built FROM alpine and has no
+    `VOLUME /tmp` at all: `os.TempDir()` lands in the container's own /tmp,
+    which the invoking uid can write, and the scratch is lost with the
+    `--rm` container. That image
     does carry curl, git and a shell, so what keeps the pipeline off the
     network is the manifest rather than the base: `make/updatecli.yaml`
     declares no `shell` or `git` resource and disables `scms.local`
@@ -2091,7 +2090,7 @@ forwarded to conftest; the render has to come from `helm template` and feed both
 
 ```make
 helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) --namespace lint \
-	$(SHOGGOTH_HELM_VALUES_LINT) > ${LINT_RENDER}
+	$(SHOGGOTH_HELM_VALUES) > ${LINT_RENDER}
 kube-linter lint ${LINT_RENDER} --config make/kube-linter.yaml
 ```
 

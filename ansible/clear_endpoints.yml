@@ -51,8 +51,8 @@
 # Which tasks run where
 # ---------------------------------------------------------------------------
 # All of them run ON THE HOST, undelegated — the only play in the tree where
-# that is true of every task (purge.yml's host-storage step and kubeconfig.yml's
-# `slurp` are each one step inside a play whose work is elsewhere). The unit,
+# that is true of every task (purge.yml's host-storage step is one step inside
+# a play whose work is elsewhere). The unit,
 # the datastore and the sidecar files exist only there, and the cluster itself
 # is not contacted: the tunnel is not a prerequisite and the release is not
 # read. Both instances in the inventory point at one machine, so
@@ -634,8 +634,7 @@
               and check the journal.
           # A rescue that runs to the end clears the failure, so the play
           # would report success on a datastore it refused to touch. This
-          # is the task that keeps the exit status honest — the same role
-          # kubeconfig.yml's `fail` plays there.
+          # is the task that keeps the exit status honest.
 
       always:
         - name: Start k3s again

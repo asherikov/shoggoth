@@ -28,13 +28,10 @@ slave:
 # serial default. Each build still compiles the stages it needs itself —
 # BuildKit resolves the `FROM tools` inside the client build — so the
 # prerequisite orders and tags, it does not feed one build from the other.
-# Same meta-target shape as `clusterviz` in make/chore.mk.
 #
 # The context is the repo root, not shoggoth/: the client stage mounts
 # ansible/requirements.yml, which sits at the root.
 TOOLS_IMAGE_HOST?=asherikov/shoggoth_tools:host
-
-tools_images: tools_host tools_client
 
 tools_host:
 	docker build \

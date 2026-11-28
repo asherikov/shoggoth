@@ -67,13 +67,10 @@ graph:
 # the icons will be missing. This is an accepted trade-off for the
 # simpler pipeline.
 #
-# Requires on $PATH: helm and yq, for the render and the kind filter. Both
-# are host prerequisites the Makefile uses everywhere else.
-#
-# kube-diagrams and graphviz `dot` run from the client image (`--target
-# client` in shoggoth/dockerfiles/tools), which carries KubeDiagrams and the
-# graphviz package with the cairo/pango plugins `-Tsvg:cairo` needs. docker is
-# the only prerequisite for this half.
+# Requires on the host: docker, and nothing else. helm and yq for the render
+# and the kind filter, and kube-diagrams and the graphviz `dot` with the
+# cairo/pango plugins `-Tsvg:cairo` needs, all run from the client image
+# (`--target client` in shoggoth/dockerfiles/tools), one container per view.
 #
 # Known limitation: KubeDiagrams does not resolve ${SHOGGOTH_NAMESPACE}
 # placeholders in the input manifests, so node.namespace fields render
@@ -111,35 +108,40 @@ CLUSTERVIZ_CONFIG := make/kube-diagrams.yaml
 # $1 = output name (e.g. "cluster-rbac" for docs/cluster-rbac.svg)
 # $2 = space-separated set of kinds for that view
 #
-# helm and yq run on the host: they are host prerequisites the Makefile
-# itself uses everywhere else, and the render has to happen where the chart
-# directory is. kube-diagrams and dot run together in ONE container — they are
-# two halves of one step, and the .dot between them is an intermediate only
-# the pair shares — and the stream reaches kube-diagrams through the pipe, so
-# the container is started with `-i`. No `-t`: stdin is a pipe, and a pty
-# would only mangle it.
+# The whole pipeline — helm, yq, kube-diagrams and dot — runs in ONE
+# container. helm and yq are no host tools: they run from the client image
+# like kube-linter and updatecli do, so the render no longer has to happen
+# where the chart directory is. The stream between helm and yq stays a pipe
+# rather than an intermediate file, and the filtered manifests land in one
+# file the count and kube-diagrams both read. No `-i` and no `-t`: the stream
+# never leaves the container, so there is no host stdin to pass through.
 #
-# The paths stay repo-relative and are resolved by `-w` inside the container,
-# so the host and the container agree on where .tmp/clusterviz and docs are
-# without either side rewriting them.
+# The chart path is remapped for the container — $(SHOGGOTH_CHART_ROOT) is
+# absolute, and a host absolute path resolves to nothing inside. The
+# intermediates — the filtered manifests and the DOT — live in the
+# container's own /tmp and are lost with the `--rm` container; docs/ is the
+# only path written through the repo mount, because the SVG is the one
+# deliverable.
 define clusterviz_run
-	set -e; mkdir -p .tmp/clusterviz; \
-	KIND_RE='^($(subst $(space),|,$(2)))$$'; \
-	N=$$(helm template shoggoth-clusterviz $(SHOGGOTH_CHART_ROOT) $(SHOGGOTH_HELM_COMMON_ARGS) \
-		| yq ea -r "select(.kind != null and (.kind | test(\"$$KIND_RE\"))) | .kind" \
-		| grep -v '^---$$' | wc -l); \
-	if [ "$$N" -eq 0 ]; then \
-		echo "FAIL: view '$1' matched no resources — the render produced nothing for kinds: $(2)"; \
-		exit 1; \
-	fi; \
-	echo "  $$N manifests for view '$1'"; \
-	helm template shoggoth-clusterviz $(SHOGGOTH_CHART_ROOT) $(SHOGGOTH_HELM_COMMON_ARGS) \
-		| yq ea "select(.kind != null and (.kind | test(\"$$KIND_RE\")))" \
-		| $(TOOLS_CLIENT_RUN) -i $(TOOLS_CLIENT_REPO) $(TOOLS_IMAGE_CLIENT) \
-			sh -c 'kube-diagrams -c ${CLUSTERVIZ_CONFIG} -o .tmp/clusterviz/$1.dot -f dot - \
+	$(TOOLS_CLIENT_RUN) $(TOOLS_CLIENT_REPO) \
+		-e KIND_RE='^($(subst $(space),|,$(2)))$$' \
+		$(TOOLS_IMAGE_CLIENT) \
+		sh -c 'set -e; set -o pipefail; \
+			mkdir -p /tmp/clusterviz; \
+			helm template shoggoth-clusterviz $(SHOGGOTH_CHART_ROOT_CLIENT) $(SHOGGOTH_HELM_COMMON_ARGS) \
+				| yq ea "select(.kind != null and (.kind | test(strenv(KIND_RE))))" \
+				> /tmp/clusterviz/$1.manifests; \
+			N=$$(yq ea -r ".kind" /tmp/clusterviz/$1.manifests | grep -v "^---$$" | wc -l || true); \
+			if [ "$$N" -eq 0 ]; then \
+				echo "FAIL: view '$1' matched no resources — the render produced nothing for kinds: $(2)"; \
+				exit 1; \
+			fi; \
+			echo "  $$N manifests for view '$1'"; \
+			kube-diagrams -c $(CLUSTERVIZ_CONFIG) -o /tmp/clusterviz/$1.dot -f dot - \
+				< /tmp/clusterviz/$1.manifests \
 				&& dot -Grankdir=TB -Gsplines=spline -Tsvg:cairo \
-					.tmp/clusterviz/$1.dot -o docs/$1.svg' \
-		|| { echo "FAIL: kube-diagrams or dot failed for '$1'"; exit 1; }
+					/tmp/clusterviz/$1.dot -o docs/$1.svg' \
+		|| { echo "FAIL: render or diagram generation failed for '$1'"; exit 1; }
 endef
 
 .PHONY: clusterviz clusterviz-rbac clusterviz-workloads clusterviz-storage clusterviz-networking clusterviz-secrets
@@ -220,7 +222,12 @@ yamlfmt:
 	# templates, not YAML: a bare `{{- /* ... */}}` header at column 0 opens a
 	# flow mapping, so all 62 fail to parse and the target exits 2. To check
 	# what the chart actually emits, run `make helm_lint`.
-	yamlfmt -formatter indent=2,retain_line_breaks=true shoggoth/chart/*.yaml
+	#
+	# Runs from the client image, so the target asks nothing of the host but
+	# docker. The formatter rewrites the files in place, through the repo
+	# mount, as the invoking uid.
+	$(TOOLS_CLIENT_RUN) $(TOOLS_CLIENT_REPO) $(TOOLS_IMAGE_CLIENT) \
+		yamlfmt -formatter indent=2,retain_line_breaks=true shoggoth/chart/*.yaml
 
 
 get_skill:
@@ -267,11 +274,12 @@ CRD_SUBMODULES?=argo-workflows external-secrets
 # updatecli runs from the client image, like kube-linter above: the version is
 # pinned in the Dockerfile's ARGs. The mount is read-write because the whole
 # point of the target is to rewrite the pinned versions in the tree.
+# updatecli's scratch directory is the container's own /tmp — the client
+# image declares no VOLUME /tmp, and the container is --rm, so nothing
+# survives the run.
 update:
-	mkdir -p .tmp
 	set -e; for cfg in $(UPDATECLI_CONFIGS); do \
 		$(TOOLS_CLIENT_RUN) $(TOOLS_CLIENT_REPO) \
-			-e TMPDIR=$(TOOLS_CLIENT_WORKDIR)/.tmp \
 			$(TOOLS_IMAGE_CLIENT) \
 			updatecli pipeline apply \
 			--config $(TOOLS_CLIENT_WORKDIR)/$$cfg \
@@ -279,7 +287,7 @@ update:
 			--push=false; \
 	done
 	set -e; for m in $(CRD_SUBMODULES); do \
-		v=$$(yq ".$$m" shoggoth/crd/versions.yaml); \
+		v=$$($(TOOLS_CLIENT_YQ) -r ".$$m" shoggoth/crd/versions.yaml); \
 		echo ">>>>>>>>>>>> shoggoth/crd/$$m -> $$v"; \
 		git -C shoggoth/crd/$$m fetch --tags --quiet; \
 		git -C shoggoth/crd/$$m checkout --quiet --detach "$$v"; \

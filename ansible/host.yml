@@ -1,0 +1,189 @@
+---
+# Install or update the host OS configuration: render the NixOS module with
+# the instance's values, deploy it to /etc/nixos, and rebuild.
+#
+# The NixOS module (shoggoth/shoggoth.nix and shoggoth/ports.nix) stays the
+# host-OS source of truth. This play substitutes the instance config's
+# values into it and moves the result onto the host; it configures nothing
+# on its own.
+#
+# Usage:
+#   ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook --limit shoggoth \
+#     -e ansible_host=<ip> ansible/host.yml --ask-become-pass
+#
+# ---------------------------------------------------------------------------
+# How the play is put together
+# ---------------------------------------------------------------------------
+#   * One become password for the whole play (`--ask-become-pass`): the copy,
+#     the rebuild and the image warm all escalate.
+#   * The render runs on the CONTROL NODE, where the repo and envsubst (the
+#     image's gettext) are; the copy, the gate and the rebuild run ON THE
+#     HOST. The cluster is not contacted — no kubeconfig, no tunnel, no
+#     kubectl.
+#   * The import gate is a check, not a step: /etc/nixos/configuration.nix
+#     is edited by hand, once, and the play refuses to rebuild until it
+#     imports the rendered modules. A rebuild without the line would
+#     succeed and change nothing, which is the failure the gate exists to
+#     prevent.
+#   * `nixos-rebuild` and `k3s` are spelled with absolute paths: the ssh
+#     session is not a login shell, so the NixOS profile's bin directory is
+#     not on PATH, and sudo's secure_path is not assumed to carry it.
+#   * The render, its directory and the gate are forced to run in check mode
+#     (`check_mode: false`) for the reason deploy.yml's kubeconfig probe is:
+#     a dry run that skips them stats a file that was never rendered and
+#     reads `.rc` off a result that has none. The render writes into the
+#     control node's own .tmp and nothing else, so running it under --check
+#     changes nothing a check should protect.
+#
+# The rendered files land in the repo's .tmp, where the lint renders and the
+# tunnel log already go: it is gitignored, and a re-render overwrites it.
+- name: Install the host OS configuration
+  hosts: instances
+  gather_facts: false
+  # Nothing here reads a fact, and the connection-level interpreter
+  # discovery does not need gathering.
+
+  vars:
+    # Where the rendered modules are written before the copy — the control
+    # node's own tree, because the render happens there.
+    shoggoth_host_render_dir: "{{ shoggoth_repo_root }}/.tmp"
+
+  tasks:
+    - name: Load the instance configuration
+      ansible.builtin.include_vars:
+        file: "{{ shoggoth_instance_config }}"
+      # The six values the module renders, from the same file the deployment
+      # passes to helm. Runs locally.
+
+    - name: Create the render directory
+      ansible.builtin.file:
+        path: "{{ shoggoth_host_render_dir }}"
+        state: directory
+      delegate_to: localhost
+      check_mode: false
+      # Forced to run in check mode, like the render below: a dry run that
+      # skipped it would leave the render writing into a directory that is
+      # not there.
+
+    # -----------------------------------------------------------------------
+    # Render — on the control node
+    # -----------------------------------------------------------------------
+    # envsubst with an explicit variable list, not a bare `envsubst`: the
+    # module's own `${registryPort}` and `${domain}` are Nix antiquotations,
+    # and a bare run would substitute them away into empty strings. Only the
+    # SHOGGOTH_* names are listed, so every Nix expression survives verbatim.
+    - name: Render the NixOS module
+      ansible.builtin.shell:
+        cmd: >-
+          envsubst '${SHOGGOTH_DOMAIN}${SHOGGOTH_DNS_IP}${SHOGGOTH_REGISTRY_PORT}'
+          < {{ shoggoth_source_dir }}/shoggoth.nix
+          > {{ shoggoth_host_render_dir }}/shoggoth.nix
+      environment:
+        SHOGGOTH_DOMAIN: "{{ identity.domain }}"
+        SHOGGOTH_DNS_IP: "{{ identity.dnsIp }}"
+        SHOGGOTH_REGISTRY_PORT: "{{ network.registry.hostPort }}"
+      delegate_to: localhost
+      check_mode: false
+
+    - name: Render the ports module
+      ansible.builtin.shell:
+        cmd: >-
+          envsubst '${SHOGGOTH_WEB_EXT_PORT}${SHOGGOTH_WG_PORT}${SHOGGOTH_WG_UI_PORT}${SHOGGOTH_REGISTRY_PORT}'
+          < {{ shoggoth_source_dir }}/ports.nix
+          > {{ shoggoth_host_render_dir }}/{{ inventory_hostname }}-ports.nix
+      environment:
+        SHOGGOTH_WEB_EXT_PORT: "{{ network.webExternal.hostPort }}"
+        SHOGGOTH_WG_PORT: "{{ network.wireguard.udpPort }}"
+        SHOGGOTH_WG_UI_PORT: "{{ network.wireguard.uiPort }}"
+        SHOGGOTH_REGISTRY_PORT: "{{ network.registry.hostPort }}"
+      delegate_to: localhost
+      check_mode: false
+      # Named after the instance: two instances on one host render two ports
+      # modules, and /etc/nixos keeps both.
+
+    # -----------------------------------------------------------------------
+    # Deploy — on the host
+    # -----------------------------------------------------------------------
+    # Copied straight into /etc/nixos, where the module belongs. Inert until
+    # configuration.nix imports them, which is what the gate below checks.
+    - name: Install the rendered module
+      ansible.builtin.copy:
+        src: "{{ shoggoth_host_render_dir }}/shoggoth.nix"
+        dest: /etc/nixos/shoggoth.nix
+        mode: "0644"
+      become: true
+
+    - name: Install the rendered ports module
+      ansible.builtin.copy:
+        src: "{{ shoggoth_host_render_dir }}/{{ inventory_hostname }}-ports.nix"
+        dest: /etc/nixos/{{ inventory_hostname }}-ports.nix
+        mode: "0644"
+      become: true
+
+    - name: Check that configuration.nix imports the ports module
+      ansible.builtin.command:
+        cmd: grep -q {{ inventory_hostname }}-ports.nix /etc/nixos/configuration.nix
+      register: shoggoth_host_import
+      changed_when: false
+      # Not a failure: the assert below reports it, with the line to add.
+      failed_when: false
+      # A read, forced to run in check mode so the assert has a result.
+      check_mode: false
+
+    - name: Refuse to rebuild without the import line
+      ansible.builtin.assert:
+        that:
+          - shoggoth_host_import.rc == 0
+        fail_msg: >-
+          /etc/nixos/configuration.nix does not import
+          ./{{ inventory_hostname }}-ports.nix, so a rebuild would ignore the
+          rendered modules and change nothing. Add the line
+
+            imports = [ ./shoggoth.nix ./{{ inventory_hostname }}-ports.nix ];
+
+          to /etc/nixos/configuration.nix and run this play again. The
+          rendered files are already in /etc/nixos; nothing was rebuilt.
+        quiet: true
+      # The one manual step in the host install, and the reason the play is
+      # safe to re-run: the first pass deploys the files and the gate stops
+      # it before the rebuild; the second pass — after the import line —
+      # completes.
+
+    - name: Rebuild the host OS configuration
+      ansible.builtin.command:
+        cmd: /run/current-system/sw/bin/nixos-rebuild switch
+      register: shoggoth_host_rebuild
+      become: true
+      # The absolute path: the ssh session is not a login shell, so the
+      # NixOS profile's bin directory is not on PATH.
+      # /run/current-system/sw is a symlink into the current generation, so
+      # it names the same file before and after a switch.
+      # No timeout: a rebuild that pulls or builds packages takes as long as
+      # it takes, and a cut-short rebuild is a half-switched host.
+
+    - name: Rebuild result
+      ansible.builtin.debug:
+        var: shoggoth_host_rebuild.stdout_lines[-15:]
+      # The tail of the rebuild output — the activation summary is the part
+      # an operator reads.
+
+    # -----------------------------------------------------------------------
+    # Warm the registry image
+    # -----------------------------------------------------------------------
+    # The mirror the module configures routes every containerd pull through
+    # the local zot registry, and zot itself is an image — so the first pull
+    # of zot cannot go through the mirror. This warms it from upstream
+    # before the cluster starts, which is why it belongs to the host install
+    # and not to the deploy.
+    - name: Pull the registry image on the host
+      ansible.builtin.command:
+        cmd: /run/current-system/sw/bin/k3s ctr images pull ghcr.io/project-zot/zot:v2.1.23
+      register: shoggoth_host_zot
+      become: true
+      # `k3s ctr`, not `ctr`: the containerd socket the k3s unit owns is
+      # reached through k3s's own wrapper, which also carries the socket
+      # path.
+
+    - name: Registry image
+      ansible.builtin.debug:
+        var: shoggoth_host_zot.stdout_lines[-3:]

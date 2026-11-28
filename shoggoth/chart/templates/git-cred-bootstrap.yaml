@@ -41,6 +41,7 @@ data:
     SSH_AUTH_SOCK="/shoggoth/git-cred/ssh_auth_sock"
     GIT_CRED_SOCK="/shoggoth/git-cred/git_credential_sock"
     KNOWN_HOSTS="/shoggoth/git-cred/known_hosts"
+    BOOTSTRAP_LOG="/shoggoth/git-cred/bootstrap.log"
     CRED_TIMEOUT=31536000
     TERMINATION_LOG="${TERMINATION_LOG:-/dev/termination-log}"
 
@@ -51,6 +52,28 @@ data:
         exit 1
     }
 
+    # Diagnostics for the container's exit path. Argo resolves this sidecar's
+    # exit code through inferFailedReason, which excuses only 137/143, so any
+    # other status fails the workflow node — which makes the exit path the
+    # only part of this container that can break a step whose `main` has
+    # already succeeded.
+    #
+    # Each line is written to every sink kubelet may read, because they
+    # disagree about what survives: fd 3 is the container's own stderr, saved
+    # before fd 2 is redirected through `tee`. The termination signal is
+    # delivered to the whole process group, so `tee` dies together with this
+    # shell and only fd 3 can still reach the container log that
+    # FallbackToLogsOnError turns into the pod's termination message.
+    # ${TERMINATION_LOG} is the file kubelet reads directly, and
+    # ${BOOTSTRAP_LOG} is the copy on the volume the sidecar shares with the
+    # workflow's other containers.
+    log_line() {
+        local line="git-cred-bootstrap: $*"
+        echo "${line}" >&3 2>/dev/null || true
+        echo "${line}" 2>/dev/null >> "${TERMINATION_LOG}" || true
+        echo "${line}" 2>/dev/null >> "${BOOTSTRAP_LOG}" || true
+    }
+
     # ${SHOGGOTH_DOMAIN} is injected as a pod env var by the sidecar's
     # container spec (see slave-dind.yaml / slave-term.yaml env: entries);
     # this script reads it via `${SHOGGOTH_DOMAIN:-<unset>}` below.
@@ -58,8 +81,9 @@ data:
 
     mkdir -p /shoggoth/git-cred
     chmod 0700 /shoggoth/git-cred
-    touch /shoggoth/git-cred/bootstrap.log
-    exec 2> >(tee -a /shoggoth/git-cred/bootstrap.log >&2)
+    touch "${BOOTSTRAP_LOG}"
+    exec 3>&2
+    exec 2> >(tee -a "${BOOTSTRAP_LOG}" >&3)
     rm -f "${SSH_AUTH_SOCK}" "${GIT_CRED_SOCK}"
     rm -f /shoggoth/git-cred/ready
 
@@ -156,7 +180,29 @@ data:
     # inferFailedReason ignores sidecar exit codes 137/143 — just 30s
     # later.) INT is trapped for symmetry; SIGTERM is the only signal argo
     # sends here.
-    trap 'exit 0' TERM INT
+    #
+    # The handlers below record which signal ended the container and the
+    # status the shell finally exited with, so a status other than 0 is
+    # attributable from the container log alone. A missing "received SIG"
+    # line means the signal never reached this shell and the container died
+    # some other way; a "received SIG" line followed by a non-zero status
+    # means the shell was signalled and then failed on its way out. The EXIT
+    # trap does not run at all when the shell is killed outright, which is
+    # itself the discriminating case.
+    on_terminate() {
+        local sig="$1"
+        log_line "received SIG${sig} at $(date -u +%Y-%m-%dT%H:%M:%SZ), pid=$$"
+        exit 0
+    }
+
+    on_exit() {
+        log_line "exiting with status $?"
+    }
+
+    trap 'on_terminate TERM' TERM
+    trap 'on_terminate INT' INT
+    trap on_exit EXIT
+    log_line "signal handlers armed at $(date -u +%Y-%m-%dT%H:%M:%SZ), waiting for termination (pid=$$)"
     sleep infinity &
     wait $!
 {{- end }}

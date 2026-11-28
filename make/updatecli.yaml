@@ -587,7 +587,7 @@ targets:
     kind: file
     sourceid: zot
     spec:
-      file: make/k3s.mk
+      file: ansible/host.yml
       matchpattern: '(ctr images pull ghcr\.io/project-zot/zot:)v[0-9.]+'
       replacepattern: '${1}{{ source "zot" }}'
   action-checkout:

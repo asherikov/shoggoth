@@ -1,11 +1,13 @@
 # Shoggoth NixOS module for the host (common part)
 #
-# Copy this file to /etc/nixos/shoggoth.nix on the host and add the following
-# lines to /etc/nixos/configuration.nix:
+# This file is the host-OS source of truth: `make host_install_nixos`
+# (ansible/host.yml) renders it with the instance's values, copies the result
+# to /etc/nixos/shoggoth.nix, and gates the rebuild on configuration.nix
+# importing it. Add the line below to /etc/nixos/configuration.nix by hand:
 #
 #   imports = [ ./shoggoth.nix ./<instance>-ports.nix ];
 #
-# The <instance>-ports.nix file is generated when the host is installed.
+# The <instance>-ports.nix module is rendered from ports.nix by the same play.
 
 { config, pkgs, ... }:
 

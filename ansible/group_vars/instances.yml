@@ -10,9 +10,9 @@
 ansible_connection: ssh
 ansible_user: "{{ lookup('env', 'USER') | default(lookup('pipe', 'id -un'), true) }}"
 
-# `HOST_IP` from the environment. `host.<domain>` resolves for nothing:
-# setup-client.sh's `update_hosts` writes <ip> <domain> and
-# <ip> <service>.<domain> but never host.<domain>.
+# `HOST_IP` from the environment. `host.<domain>` resolves for nothing: the
+# cluster DNS maps <domain> and <service>.<domain> to Services, and
+# host.<domain> is not one of them.
 #
 # An empty value is deliberate, and is the whole point: it fails the connection
 # step with "hostname contains invalid characters" and reaches no host at all.
@@ -49,10 +49,6 @@ shoggoth_crd_root: "{{ (shoggoth_repo_root + '/shoggoth/crd') | normpath }}"
 # host_vars file — there is no host_vars/ directory, and adding one is how the
 # two spellings drift apart.
 shoggoth_instance_config: "{{ shoggoth_repo_root }}/shoggoth/{{ inventory_hostname }}.yaml"
-
-# Where the kubeconfig play writes its output — the `KUBECONFIG` path from the
-# environment.
-shoggoth_kubeconfig: "{{ shoggoth_repo_root }}/private/kubeconfig"
 
 # ---------------------------------------------------------------------------
 # CRDs

@@ -4,12 +4,6 @@
         helm_lint_gates helm_lint_collision helm_lint_netpol \
         helm_lint_rollout helm_lint_embedded helm_lint_inspektor
 
-# Values for the offline renders. This is just the instance config: the
-# checks render to a file and never apply anything, so there is nothing here
-# for a throwaway override to protect. The release name and namespace are
-# what distinguish lint output from a real install.
-SHOGGOTH_HELM_VALUES_LINT = $(SHOGGOTH_HELM_VALUES)
-
 # kube-linter's own config, kept beside the make fragments that consume it
 # rather than at the repo root, so `.kube-linter.yaml` is not left lying
 # around for kube-linter to pick up implicitly when someone runs it by hand
@@ -43,8 +37,30 @@ KUBE_LINTER_RENDER=$(patsubst $(CURDIR)/%,%,$(LINT_RENDER))
 KUBE_LINTER_OFF=$(patsubst $(CURDIR)/%,%,$(LINT_INSPEKTOR_OFF))
 KUBE_LINTER_CFG=$(patsubst $(CURDIR)/%,%,$(KUBE_LINTER_CONFIG))
 
+# The kube-linter invocation, shared by helm_lint_kube_linter and
+# helm_lint_inspektor — one container, one read-only mount of the repo at
+# $(KUBE_LINTER_WORKDIR), one config — so there is nothing to install to run
+# either. The mount is read-only because kube-linter writes nothing —
+# kubeconform only creates a cache directory when `cache:` is set, and the
+# config deliberately does not set it — and `--user` keeps a container
+# process from being able to leave root-owned files in the tree even if
+# that ever changed. If a `cache:` is ever added to the config, this mount
+# has to lose its `:ro`. It is the one call site that does not share
+# $(TOOLS_CLIENT_REPO): `update` rewrites pinned versions through its mount
+# and this one only reads.
+#
+# The container needs outbound HTTPS: the schema check fetches 18 schemas
+# from raw.githubusercontent.com and the CRDs-catalog on every run, since
+# no cache is configured. On a host whose docker network is locked down,
+# that is where a run fails, and the failure names the URL.
+KUBE_LINTER_RUN = $(TOOLS_CLIENT_RUN) \
+    -v $(CURDIR):$(KUBE_LINTER_WORKDIR):ro \
+    -w $(KUBE_LINTER_WORKDIR) \
+    $(TOOLS_IMAGE_CLIENT) \
+    kube-linter lint
+
 # Where the lint scratch lives: the helm renders above, and the ansible/
-# role wrapper playbook that ansible_lint_syntax generates below.
+# role wrapper playbook that ansible_lint generates below.
 LINT_TMP_DIR=${K3S_TMP_DIR}/lint
 LINT_RENDER=${LINT_TMP_DIR}/render.yaml
 LINT_COLLISION_A=${LINT_TMP_DIR}/collision-a.yaml
@@ -72,39 +88,45 @@ helm_lint: helm_lint_chart helm_lint_render helm_lint_kube_linter \
 # `helm lint` catches Go-template parse errors and malformed chart
 # metadata, and reports both itself.
 helm_lint_chart:
-	helm lint $(SHOGGOTH_CHART_ROOT) --strict
+	$(TOOLS_CLIENT_HELM) lint $(SHOGGOTH_CHART_ROOT_CLIENT) --strict
 
 # The renders are written to a temporary name and moved into place, so a
 # failed render leaves no half-written file behind for the next check to
 # read as if it were good.
 ${LINT_RENDER}: ${CHART_SOURCES} $(SHOGGOTH_CONFIG) | ${LINT_TMP_DIR}
-	helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) \
+	$(TOOLS_CLIENT_HELM) template shoggoth-lint $(SHOGGOTH_CHART_ROOT_CLIENT) \
 		--namespace lint \
-		$(SHOGGOTH_HELM_VALUES_LINT) \
+		$(SHOGGOTH_HELM_VALUES) \
 		> $@.tmp
 	mv $@.tmp $@
 
 ${LINT_COLLISION_A}: ${CHART_SOURCES} $(SHOGGOTH_CONFIG) | ${LINT_TMP_DIR}
-	helm template shoggoth-collision-a $(SHOGGOTH_CHART_ROOT) \
+	$(TOOLS_CLIENT_HELM) template shoggoth-collision-a $(SHOGGOTH_CHART_ROOT_CLIENT) \
 		--namespace collision-a \
-		$(SHOGGOTH_HELM_VALUES_LINT) \
+		$(SHOGGOTH_HELM_VALUES) \
 		> $@.tmp
 	mv $@.tmp $@
 
 ${LINT_COLLISION_B}: ${CHART_SOURCES} $(SHOGGOTH_CONFIG) | ${LINT_TMP_DIR}
-	helm template shoggoth-collision-b $(SHOGGOTH_CHART_ROOT) \
+	$(TOOLS_CLIENT_HELM) template shoggoth-collision-b $(SHOGGOTH_CHART_ROOT_CLIENT) \
 		--namespace collision-b \
-		$(SHOGGOTH_HELM_VALUES_LINT) \
+		$(SHOGGOTH_HELM_VALUES) \
 		> $@.tmp
 	mv $@.tmp $@
 
-# The gadget-disabled render. helm_lint_inspektor needs it, and it is a
-# prerequisite of its own rather than an inline render so that a change to
-# the chart re-renders it exactly like the others.
+# The gadget-disabled render. helm_lint_inspektor needs it. It is the same
+# render the gates loop produces for the `gadget` key — same release name,
+# same namespace, same values, same --set — and it is rendered a second
+# time rather than shared, because the gate renders are files written
+# inside a recipe and nothing can declare a prerequisite on them. The two
+# ways to share one both cost more than the duplicate render: a recursive
+# make per key re-parses the makefiles, and the parse-time derivations run
+# a container each, and depending on the gates target would fail this
+# play's CEL proof whenever an unrelated toggle regresses.
 ${LINT_INSPEKTOR_OFF}: ${CHART_SOURCES} $(SHOGGOTH_CONFIG) | ${LINT_TMP_DIR}
-	helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) \
+	$(TOOLS_CLIENT_HELM) template shoggoth-lint $(SHOGGOTH_CHART_ROOT_CLIENT) \
 		--namespace lint \
-		$(SHOGGOTH_HELM_VALUES_LINT) \
+		$(SHOGGOTH_HELM_VALUES) \
 		--set services.gadget.enabled=false \
 		> $@.tmp
 	mv $@.tmp $@
@@ -147,28 +169,8 @@ helm_lint_render: ${LINT_RENDER}
 # `--fail-if-no-objects-found` is not passed: the render is asserted
 # non-empty by `wc -l` in helm_lint_render, and a zero there would be a
 # render failure the helm template above already exited on.
-#
-# It runs in a container because the version is pinned next to the check
-# that depends on it, and nobody has to install anything to run `make
-# helm_lint`. The mount is read-only because kube-linter writes nothing —
-# kubeconform only creates a cache directory when `cache:` is set, and the
-# config deliberately does not set it — and `--user` keeps a container
-# process from being able to leave root-owned files in the tree even if
-# that ever changed. If a `cache:` is ever added to the config, this mount
-# has to lose its `:ro`. It is the one call site that does not share
-# $(TOOLS_CLIENT_REPO): `update` rewrites pinned versions through its mount
-# and this one only reads.
-#
-# The container needs outbound HTTPS: the schema check fetches 18 schemas
-# from raw.githubusercontent.com and the CRDs-catalog on every run, since
-# no cache is configured. On a host whose docker network is locked down,
-# that is where this target fails, and the failure names the URL.
 helm_lint_kube_linter: ${LINT_RENDER}
-	$(TOOLS_CLIENT_RUN) \
-		-v $(CURDIR):$(KUBE_LINTER_WORKDIR):ro \
-		-w $(KUBE_LINTER_WORKDIR) \
-		$(TOOLS_IMAGE_CLIENT) \
-		kube-linter lint $(KUBE_LINTER_RENDER) --config $(KUBE_LINTER_CFG)
+	$(KUBE_LINTER_RUN) $(KUBE_LINTER_RENDER) --config $(KUBE_LINTER_CFG)
 
 # A union gate spanning a service's own workloads makes `make stop
 # SERVICE=<x>` a silent no-op: `or (x) (y)` still renders while y is on,
@@ -191,15 +193,15 @@ helm_lint_kube_linter: ${LINT_RENDER}
 # A key whose render failed is a zero in the size column, and `diff`
 # against an empty file prints the key that produced it.
 helm_lint_gates: ${LINT_RENDER}
-	yq -r 'select(.kind != null) | .kind + "/" + .metadata.name' ${LINT_RENDER} \
+	$(TOOLS_CLIENT_YQ) -r 'select(.kind != null) | .kind + "/" + .metadata.name' ${LINT_RENDER} \
 		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/gates-base.ids
-	yq -r '.services | keys | .[]' $(SHOGGOTH_CHART_ROOT)/values.yaml \
+	$(TOOLS_CLIENT_YQ) -r '.services | keys | .[]' $(SHOGGOTH_CHART_ROOT_CLIENT)/values.yaml \
 		| sort > ${LINT_TMP_DIR}/gates-keys.txt
 	grep -c '' ${LINT_TMP_DIR}/gates-keys.txt
 	for k in $$(cat ${LINT_TMP_DIR}/gates-keys.txt); do \
-		helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) \
+		$(TOOLS_CLIENT_HELM) template shoggoth-lint $(SHOGGOTH_CHART_ROOT_CLIENT) \
 			--namespace lint \
-			$(SHOGGOTH_HELM_VALUES_LINT) \
+			$(SHOGGOTH_HELM_VALUES) \
 			--set services.$$k.enabled=false \
 			> ${LINT_TMP_DIR}/gate-$$k.yaml; \
 		printf '%s %s\n' "$$k" "$$(wc -l < ${LINT_TMP_DIR}/gate-$$k.yaml)"; \
@@ -207,7 +209,7 @@ helm_lint_gates: ${LINT_RENDER}
 	sed -n '/ 0$$/p' ${LINT_TMP_DIR}/gates-sizes.txt > ${LINT_TMP_DIR}/gates-empty.txt
 	diff /dev/null ${LINT_TMP_DIR}/gates-empty.txt
 	for k in $$(cat ${LINT_TMP_DIR}/gates-keys.txt); do \
-		yq -r 'select(.kind != null) | .kind + "/" + .metadata.name' \
+		$(TOOLS_CLIENT_YQ) -r 'select(.kind != null) | .kind + "/" + .metadata.name' \
 			${LINT_TMP_DIR}/gate-$$k.yaml \
 			| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/gate-off.ids; \
 		comm -23 ${LINT_TMP_DIR}/gates-base.ids ${LINT_TMP_DIR}/gate-off.ids \
@@ -237,10 +239,10 @@ helm_lint_gates: ${LINT_RENDER}
 # A name the chart hardcodes rather than deriving from the release name is
 # the one that collides, so `diff` against an empty file reports it.
 helm_lint_collision: ${LINT_COLLISION_A} ${LINT_COLLISION_B}
-	yq -r 'select(.kind == "ClusterRole" or .kind == "ClusterRoleBinding") | .kind + "/" + .metadata.name' \
+	$(TOOLS_CLIENT_YQ) -r 'select(.kind == "ClusterRole" or .kind == "ClusterRoleBinding") | .kind + "/" + .metadata.name' \
 		${LINT_COLLISION_A} | sed '/^---$$/d' | sort -u \
 		> ${LINT_TMP_DIR}/collision-a.names
-	yq -r 'select(.kind == "ClusterRole" or .kind == "ClusterRoleBinding") | .kind + "/" + .metadata.name' \
+	$(TOOLS_CLIENT_YQ) -r 'select(.kind == "ClusterRole" or .kind == "ClusterRoleBinding") | .kind + "/" + .metadata.name' \
 		${LINT_COLLISION_B} | sed '/^---$$/d' | sort -u \
 		> ${LINT_TMP_DIR}/collision-b.names
 	comm -12 ${LINT_TMP_DIR}/collision-a.names ${LINT_TMP_DIR}/collision-b.names \
@@ -264,18 +266,22 @@ helm_lint_collision: ${LINT_COLLISION_A} ${LINT_COLLISION_B}
 # status is the last command's, so a broken block in the middle of the list
 # would be masked by a clean one after it. Each failing name is appended and
 # the collection is asserted empty, and yamllint's own report is printed
-# before the assertion so the offending line is visible.
+# before the assertion so the offending line is visible. yamllint runs from
+# the client image like the yq beside it, so the target asks nothing of the
+# host but docker.
 helm_lint_embedded: ${LINT_RENDER}
-	yq -r 'select(.kind == "ConfigMap") | .metadata.name + " " + ((.data // {}) | keys | .[])' ${LINT_RENDER} \
+	$(TOOLS_CLIENT_YQ) -r 'select(.kind == "ConfigMap") | .metadata.name + " " + ((.data // {}) | keys | .[])' ${LINT_RENDER} \
 		| sed '/^---$$/d' | awk '$$2 == "config.yaml" { print $$1 }' | sort -u \
 		> ${LINT_TMP_DIR}/embedded.names
 	grep -c '' ${LINT_TMP_DIR}/embedded.names
 	cp /dev/null ${LINT_TMP_DIR}/embedded.failed
 	cp /dev/null ${LINT_TMP_DIR}/embedded.log
 	for n in $$(cat ${LINT_TMP_DIR}/embedded.names); do \
-		CM_NAME="$$n" yq -r 'select(.kind == "ConfigMap" and .metadata.name == strenv(CM_NAME)) | .data["config.yaml"]' ${LINT_RENDER} \
+		$(TOOLS_CLIENT_RUN) $(TOOLS_CLIENT_REPO) -e CM_NAME="$$n" $(TOOLS_IMAGE_CLIENT) \
+			yq -r 'select(.kind == "ConfigMap" and .metadata.name == strenv(CM_NAME)) | .data["config.yaml"]' ${LINT_RENDER} \
 			> ${LINT_TMP_DIR}/embedded-$$n.yaml; \
-		yamllint -d '{rules: {key-duplicates: enable}}' ${LINT_TMP_DIR}/embedded-$$n.yaml \
+		$(TOOLS_CLIENT_RUN) $(TOOLS_CLIENT_REPO) $(TOOLS_IMAGE_CLIENT) \
+			yamllint -d '{rules: {key-duplicates: enable}}' ${LINT_TMP_DIR}/embedded-$$n.yaml \
 			>> ${LINT_TMP_DIR}/embedded.log 2>&1 \
 			|| echo "$$n" >> ${LINT_TMP_DIR}/embedded.failed; \
 	done
@@ -314,7 +320,7 @@ helm_lint_embedded: ${LINT_RENDER}
 NETPOL_INGRESS_EXPECTED = victoria-metrics:otelcol,tempo,grafana,web-internal loki:otelcol,grafana tempo:otelcol,grafana
 
 helm_lint_netpol: ${LINT_RENDER}
-	yq -r 'select(.kind == "NetworkPolicy") | .spec.podSelector.matchLabels.app as $$t | .spec.ingress[] | .from[] | .podSelector.matchLabels.app | $$t + " " + .' ${LINT_RENDER} \
+	$(TOOLS_CLIENT_YQ) -r 'select(.kind == "NetworkPolicy") | .spec.podSelector.matchLabels.app as $$t | .spec.ingress[] | .from[] | .podSelector.matchLabels.app | $$t + " " + .' ${LINT_RENDER} \
 		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/netpol-admits.txt
 	grep -c '' ${LINT_TMP_DIR}/netpol-admits.txt
 	for e in $(NETPOL_INGRESS_EXPECTED); do \
@@ -333,15 +339,15 @@ helm_lint_netpol: ${LINT_RENDER}
 # and asserts the pod template is no longer byte-identical. Removing the
 # annotation fails here.
 helm_lint_rollout: ${LINT_RENDER}
-	helm template shoggoth-lint $(SHOGGOTH_CHART_ROOT) \
+	$(TOOLS_CLIENT_HELM) template shoggoth-lint $(SHOGGOTH_CHART_ROOT_CLIENT) \
 		--namespace lint \
-		$(SHOGGOTH_HELM_VALUES_LINT) \
+		$(SHOGGOTH_HELM_VALUES) \
 		--set gadget.metricsPort=2424 \
 		> ${LINT_TMP_DIR}/rollout-alt.yaml.tmp
 	mv ${LINT_TMP_DIR}/rollout-alt.yaml.tmp ${LINT_TMP_DIR}/rollout-alt.yaml
-	yq -r 'select(.kind == "DaemonSet" and .metadata.name == "otelcol") | .spec.template.metadata.annotations // {} | to_entries | .[] | .key + "=" + .value' ${LINT_RENDER} \
+	$(TOOLS_CLIENT_YQ) -r 'select(.kind == "DaemonSet" and .metadata.name == "otelcol") | .spec.template.metadata.annotations // {} | to_entries | .[] | .key + "=" + .value' ${LINT_RENDER} \
 		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/rollout-base.txt
-	yq -r 'select(.kind == "DaemonSet" and .metadata.name == "otelcol") | .spec.template.metadata.annotations // {} | to_entries | .[] | .key + "=" + .value' ${LINT_TMP_DIR}/rollout-alt.yaml \
+	$(TOOLS_CLIENT_YQ) -r 'select(.kind == "DaemonSet" and .metadata.name == "otelcol") | .spec.template.metadata.annotations // {} | to_entries | .[] | .key + "=" + .value' ${LINT_TMP_DIR}/rollout-alt.yaml \
 		| sed '/^---$$/d' | sort -u > ${LINT_TMP_DIR}/rollout-alt.txt
 	grep -c '' ${LINT_TMP_DIR}/rollout-base.txt
 	if diff ${LINT_TMP_DIR}/rollout-base.txt ${LINT_TMP_DIR}/rollout-alt.txt > ${LINT_TMP_DIR}/rollout-diff.txt; then \
@@ -375,30 +381,22 @@ helm_lint_rollout: ${LINT_RENDER}
 # flag, which is what keeps this from silently becoming a no-op: if the
 # config ever lost the inspektor-job-gated entry, kube-linter would exit 0
 # with nothing checked, and the two greps above would still pass.
-#
-# Same container invocation as helm_lint_kube_linter, and the same
-# read-only mount for the same reason.
 helm_lint_inspektor: ${LINT_RENDER} ${LINT_INSPEKTOR_OFF}
-	yq -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_RENDER} \
+	$(TOOLS_CLIENT_YQ) -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_RENDER} \
 		| grep 'job_name: inspektor' > ${LINT_TMP_DIR}/inspektor-on.txt
 	grep -c '' ${LINT_TMP_DIR}/inspektor-on.txt
-	yq -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_INSPEKTOR_OFF} \
+	$(TOOLS_CLIENT_YQ) -r 'select(.kind == "ConfigMap" and .metadata.name == "otelcol-config") | .data["config.yaml"]' ${LINT_INSPEKTOR_OFF} \
 		> ${LINT_TMP_DIR}/inspektor-off.conf
 	grep -c '' ${LINT_TMP_DIR}/inspektor-off.conf
-	$(TOOLS_CLIENT_RUN) \
-		-v $(CURDIR):$(KUBE_LINTER_WORKDIR):ro \
-		-w $(KUBE_LINTER_WORKDIR) \
-		$(TOOLS_IMAGE_CLIENT) \
-		kube-linter lint $(KUBE_LINTER_OFF) \
-			--config $(KUBE_LINTER_CFG) \
-			--do-not-auto-add-defaults
+	$(KUBE_LINTER_RUN) $(KUBE_LINTER_OFF) \
+		--config $(KUBE_LINTER_CFG) \
+		--do-not-auto-add-defaults
 
 # ---------------------------------------------------------------------------
 # ansible/ offline validation
 # ---------------------------------------------------------------------------
 
-.PHONY: ansible_lint ansible_lint_syntax \
-        ansible_lint_vars ansible_check
+.PHONY: ansible_lint ansible_check
 
 # Every .yml under ansible/ that is a PLAYBOOK. Three paths are excluded,
 # because `--syntax-check` on any of them fails with "a playbook must be a
@@ -419,7 +417,7 @@ helm_lint_inspektor: ${LINT_RENDER} ${LINT_INSPEKTOR_OFF}
 # entirely: deploy.yml reaches the role with `include_role`, which is the
 # DYNAMIC form — the role is loaded when that task executes, not when the
 # playbook is parsed, so `--syntax-check ansible/deploy.yml` never reads a
-# line of it. The wrapper loop in ansible_lint_syntax closes that hole,
+# line of it. The wrapper loop in ansible_lint closes that hole,
 # using `import_role`, the static form a syntax check does resolve.
 ANSIBLE_PLAYBOOKS = $(filter-out ansible/requirements.yml \
                                   ansible/group_vars/% \
@@ -457,7 +455,10 @@ ANSIBLE_ROLES = $(patsubst ansible/roles/%,%, \
 # inventory at all is worse than one that fails. The Makefile's
 # $(ANSIBLE) wrapper is not reused here: this loop runs a bare
 # `ansible-playbook`, and that variable ends in the `ansible` directory a
-# playbook path is appended to.
+# playbook path is appended to. Nor is $(TOOLS_CLIENT_ANSIBLE): this is an
+# offline check, so it takes $(TOOLS_CLIENT_ANSIBLE_OFF), the same prefix
+# without the live sites' identity mounts — a syntax check must not open
+# an ssh connection.
 #
 # The second half of the recipe is the roles/ tree, and it generates a
 # playbook rather than checking the role files in place. `--syntax-check`
@@ -472,40 +473,6 @@ ANSIBLE_ROLES = $(patsubst ansible/roles/%,%, \
 # the roles/ directory it names, and ANSIBLE_INVENTORY because the wrapper
 # asks for `localhost` and must not depend on the configured inventory
 # resolving at all.
-ansible_lint: ansible_lint_syntax ansible_lint_vars
-
-# Order-only on the scratch directory: the wrapper playbook below is written
-# into it, and it must exist before the recipe runs rather than being a
-# reason for the recipe to re-run.
-ansible_lint_syntax: | ${LINT_TMP_DIR}
-	for play in $(ANSIBLE_PLAYBOOKS); do \
-		echo "syntax-check $$play"; \
-		$(TOOLS_CLIENT_ANSIBLE) ansible-playbook --syntax-check $$play || exit 1; \
-	done; \
-	if [ -n "$(ANSIBLE_ROLES)" ]; then \
-		{ \
-			printf '%s\n' '---'; \
-			printf '%s\n' '- name: Syntax-check the roles tree'; \
-			printf '%s\n' '  hosts: localhost'; \
-			printf '%s\n' '  gather_facts: false'; \
-			printf '%s\n' '  tasks:'; \
-			for role in $(ANSIBLE_ROLES); do \
-				printf '    - name: Load the %s role\n' "$$role"; \
-				printf '      ansible.builtin.import_role:\n'; \
-				printf '        name: %s\n' "$$role"; \
-			done; \
-		} > ${LINT_TMP_DIR}/roles.yml; \
-		echo "syntax-check roles: $(ANSIBLE_ROLES)"; \
-		$(TOOLS_CLIENT_ANSIBLE) \
-			-e ANSIBLE_INVENTORY=ansible/hosts.ini \
-			-e ANSIBLE_ROLES_PATH=ansible/roles \
-			ansible-playbook --syntax-check ${LINT_TMP_DIR}/roles.yml || exit 1; \
-	fi
-
-# ---------------------------------------------------------------------------
-# ansible/ variable resolution
-# ---------------------------------------------------------------------------
-
 # The inventory and every group_vars expression, resolved.
 #
 # `--syntax-check` parses a playbook; it never evaluates a variable.
@@ -529,29 +496,48 @@ ansible_lint_syntax: | ${LINT_TMP_DIR}
 # HOST_IP is passed to the container with `-e` rather than as an ansible
 # extra var: the expression reads it with `lookup('env', ...)`, and an extra
 # var would be a second spelling of the same value that could disagree with
-# the environment the real run sees. $(TOOLS_CLIENT_ANSIBLE) carries both it
-# and ANSIBLE_CONFIG.
+# the environment the real run sees. $(TOOLS_CLIENT_ANSIBLE_OFF) carries both
+# it and ANSIBLE_CONFIG.
 #
-# The success echo rides on the command with `&&` rather than sitting on its
-# own recipe line: every recipe line is a separate shell, so a line of its
-# own would report success on a run whose inventory never resolved at all.
-# A failing `ansible-inventory` prints the expression it could not resolve
-# and exits non-zero, so there is no `||` arm.
-ansible_lint_vars:
-	$(TOOLS_CLIENT_ANSIBLE) ansible-inventory --list --export >/dev/null && \
-		echo "ansible_lint_vars: the inventory and every group_vars expression resolve"
+# The success echo rides on the command with `&&` rather than following it:
+# it is the recipe's last command, so without the `&&` a failed export would
+# still exit zero and report success. A failing `ansible-inventory` prints
+# the expression it could not resolve and exits non-zero, so there is no
+# `||` arm.
+
+# Order-only on the scratch directory: the wrapper playbook below is written
+# into it, and it must exist before the recipe runs rather than being a
+# reason for the recipe to re-run.
+ansible_lint: | ${LINT_TMP_DIR}
+	for play in $(ANSIBLE_PLAYBOOKS); do \
+		echo "syntax-check $$play"; \
+		$(TOOLS_CLIENT_ANSIBLE_OFF) ansible-playbook --syntax-check $$play || exit 1; \
+	done; \
+	if [ -n "$(ANSIBLE_ROLES)" ]; then \
+		{ \
+			printf '%s\n' '---'; \
+			printf '%s\n' '- name: Syntax-check the roles tree'; \
+			printf '%s\n' '  hosts: localhost'; \
+			printf '%s\n' '  gather_facts: false'; \
+			printf '%s\n' '  tasks:'; \
+			for role in $(ANSIBLE_ROLES); do \
+				printf '    - name: Load the %s role\n' "$$role"; \
+				printf '      ansible.builtin.import_role:\n'; \
+				printf '        name: %s\n' "$$role"; \
+			done; \
+		} > ${LINT_TMP_DIR}/roles.yml; \
+		echo "syntax-check roles: $(ANSIBLE_ROLES)"; \
+		$(TOOLS_CLIENT_ANSIBLE_OFF) \
+			-e ANSIBLE_INVENTORY=ansible/hosts.ini \
+			-e ANSIBLE_ROLES_PATH=ansible/roles \
+			ansible-playbook --syntax-check ${LINT_TMP_DIR}/roles.yml || exit 1; \
+	fi; \
+	$(TOOLS_CLIENT_ANSIBLE_OFF) ansible-inventory --list --export >/dev/null && \
+		echo "ansible_lint: the inventory and every group_vars expression resolve"
 
 # ---------------------------------------------------------------------------
 # ansible/ dry run
 # ---------------------------------------------------------------------------
-
-# The service the `service.yml` dry runs flip. The play asserts the name is
-# non-empty and defaults it to nothing, so the check has to name one. The
-# first key in values.yaml is as good as any: check mode skips the `helm`
-# module, so none of the three actions reaches a cluster. Same derivation as
-# helm_lint_gates' key list above.
-ANSIBLE_CHECK_SERVICE ?= $(shell yq -r '.services | keys | .[0]' \
-	$(SHOGGOTH_CHART_ROOT)/values.yaml 2>/dev/null)
 
 # `ansible-playbook --check --diff` over every playbook the make targets
 # invoke, in the same shape they invoke them.
@@ -561,8 +547,9 @@ ANSIBLE_CHECK_SERVICE ?= $(shell yq -r '.services | keys | .[0]' \
 # through command tasks (`kubectl apply`, `kubectl wait`, `helm upgrade`,
 # `helm status`). What is left is what this target is for:
 #
-#   * every `assert` runs, so an empty `SERVICE` is caught here rather than at
-#     the host;
+#   * every `assert` runs — `service.yml`'s service-name check and
+#     `drop_image_tag.yml`'s usage assert among them — so a bad value fails
+#     here rather than at the host;
 #   * `include_vars` loads shoggoth/<instance>.yaml for real — the one step a
 #     syntax check cannot reach, and the one that breaks silently when the
 #     instance config is renamed;
@@ -586,39 +573,55 @@ ANSIBLE_CHECK_SERVICE ?= $(shell yq -r '.services | keys | .[0]' \
 # command task and is skipped.
 #
 # It needs a host, which is why it is not part of `ansible_lint`. `HOST_IP`
-# has to resolve and the tunnel has to be up — the `tunnel_up` prerequisite
-# and the `ping` under it are what enforce that, exactly as they do for
-# `make up`. The become password is asked once per escalated play — three of
-# them, one collection per `ansible-playbook` process — because check mode
-# still runs the host_state role's `file` and `copy` tasks as root to report
-# what they would change. A NOPASSWD host answers with an empty line (see the
-# Makefile).
+# has to resolve and the key for it has to be reachable — the
+# `tunnel_up` prerequisite provisions the agent and opens the forward,
+# starting make's own agent when the shell has none, exactly as it does
+# for `make up`, so a host that does not answer fails at the tunnel's
+# readyz poll rather than part-way through a play. The
+# become password is asked once per escalated play — one collection per
+# `ansible-playbook` process, and the `service.yml` runs escalate nothing —
+# because check mode still runs the host_state role's `file` and `copy` tasks
+# as root to report what they would change. A NOPASSWD host answers with an
+# empty line (see the Makefile).
 #
 # Every task in these plays runs inside the client image, the delegated
 # `command` tasks and `synchronize` along with ansible itself, which is why
 # that image carries kubectl, helm and rsync — see the Dockerfile's client
 # stage.
 #
-# Three of the plays need a value the real targets take from the command line.
-# `SERVICE` is derived above. `drop_image_tag.yml` gets literals, and they
-# are never used for a request: `uri` has no check-mode support, so its
-# DELETE is SKIPPED and nothing is sent — a check that dropped the tag would
-# not be a check. The literals exist only to get past the play's own usage
-# assert and reach the `include_vars` and the URL construction behind it.
+# Two of the plays need a value the real targets take from the command line.
+# `drop_image_tag.yml` gets literals, and they are never used for a request:
+# `uri` has no check-mode support, so its DELETE is SKIPPED and nothing is
+# sent — a check that dropped the tag would not be a check. The literals
+# exist only to get past the play's own usage assert and reach the
+# `include_vars` and the URL construction behind it.
 # `clear_endpoints.yml` gets one documentation address (TEST-NET-1) for the
 # same reason and under the same guarantee: its write is gated on
 # `not ansible_check_mode`, so no tombstone is written and k3s is never
 # stopped.
 #
+# `service.yml` takes none: every key the chart's values.yaml defines is
+# checked, in both actions, with the keys read at recipe time — one container
+# when the target runs, rather than a parse-time derivation every make
+# process pays for. Check mode skips the `helm` module, so none of the runs
+# reaches a cluster.
+#
 # `purge.yml` is covered only when INSTANCE is not the primary instance: the
 # play's own assert refuses `shoggoth` outright, so running it against the
 # default INSTANCE would fail on that guard rather than on anything this
 # target is looking for.
+#
+# `host.yml` is skipped for the same shape of reason: its import gate refuses
+# a host whose `/etc/nixos/configuration.nix` imports nothing yet — the state
+# the play's own first pass leaves — so the run would stop on that guard
+# rather than on anything this target is looking for. The gate's grep is what
+# the play's first pass against the host exercises.
 ansible_check: tunnel_up
-	if [ -z "$(ANSIBLE_CHECK_SERVICE)" ]; then \
-		echo "ansible_check: no service name to flip — yq is missing or"; \
-		echo "  .services in values.yaml is empty. Pass one explicitly:"; \
-		echo "    make ansible_check ANSIBLE_CHECK_SERVICE=<app-name>"; \
+	services=$$($(TOOLS_CLIENT_YQ) -r '.services | keys | .[]' $(SHOGGOTH_CHART_ROOT_CLIENT)/values.yaml); \
+	if [ -z "$$services" ]; then \
+		echo "ansible_check: .services in"; \
+		echo "  values.yaml is empty, or the container that reads it did not"; \
+		echo "  run."; \
 		exit 1; \
 	fi; \
 	ansible_check_run() { \
@@ -632,12 +635,14 @@ ansible_check: tunnel_up
 	else \
 		ansible_check_run purge.yml "make purge" "--ask-become-pass"; \
 	fi; \
-	ansible_check_run kubeconfig.yml "make client_kubeconfig" "--ask-become-pass"; \
-	for a in enable disable; do \
-		ansible_check_run service.yml "action=$$a" \
-			"-e shoggoth_service=$(ANSIBLE_CHECK_SERVICE) -e shoggoth_service_action=$$a"; \
+	for s in $$services; do \
+		for a in enable disable; do \
+			ansible_check_run service.yml "action=$$a service=$$s" \
+				"-e shoggoth_service=$$s -e shoggoth_service_action=$$a"; \
+		done; \
 	done; \
 	ansible_check_run drop_image_tag.yml "make drop_image_tag" \
 		"-e shoggoth_image=lint/not-a-real-image -e shoggoth_tag=check"; \
 	ansible_check_run clear_endpoints.yml "make k3s_clear_endpoints" \
-		"-e shoggoth_k3s_stale_ips=192.0.2.111 --ask-become-pass"
+		"-e shoggoth_k3s_stale_ips=192.0.2.111 --ask-become-pass"; \
+	echo "--- check host.yml (make host_install_nixos) — skipped: the play's import gate refuses a host whose configuration.nix imports nothing yet"

@@ -62,11 +62,8 @@ lists the minimum; newer is fine unless called out.
 | Tool        | Version   | Notes                                                                                                                                                                              |
 |-------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | k3s         | ≥ 1.34    | Required for the GA features the chart relies on: pod-level `ttlSecondsAfterFinished` (GA 1.29), container-level `restartPolicy` for native sidecar ordering (GA 1.33). The chart enforces this itself — `Chart.yaml` sets `kubeVersion: ">=1.34.0-0"`, so `helm install`/`upgrade` refuses an older cluster instead of letting the API server silently prune the field. Pinned in `shoggoth/shoggoth.nix`. |
-| helm        | ≥ 3.17.0  | Required for `--take-ownership`, which make targets rely on to adopt resources applied outside Helm. |
-| kubectl     | bundled   | Used by the operator targets that run it on the host: `make status`, `make log`, `make shell`. Comes with k3s, and the operator host uses the same version over the SSH-tunneled kubeconfig. |
-| yq          | mikefarah v4 | The `Makefile` reads every configuration value out of `shoggoth/<instance>.yaml` through yq. The Python `yq` package is a *different* tool with a different CLI — install mikefarah's release (https://github.com/mikefarah/yq). |
-| envsubst    | gettext   | Used by `make host_install_nixos` to render `shoggoth.nix` and `ports.nix`. Bundled with most distros; on Alpine it is in the `gettext` package. |
-| docker       | any recent | Runs the host-side toolchain from `asherikov/shoggoth_tools:client` (`--target client` in `shoggoth/dockerfiles/tools`): the lint, diagram and ansible targets run in that image, so docker is the only tool to install for them. Needs outbound network for the first pull. |
+| envsubst    | gettext   | Used by `make host_install_nixos` to render `shoggoth.nix` and `ports.nix`. It runs inside the client image, so the operator host needs nothing for it. |
+| docker       | any recent | Runs the host-side toolchain from `asherikov/shoggoth_tools:client` (`--target client` in `shoggoth/dockerfiles/tools`): helm, yq, jq, yamlfmt, kubectl, yamllint, kube-linter, updatecli, KubeDiagrams, and the ansible family all run in that image, so docker is the only tool to install. The containers share the operator host's network namespace, and `make tunnel_up` binds the apiserver forward on the host's own loopback (see `make/k3s.mk`). The image's helm is ≥3.17, which `--take-ownership` needs, and its kubectl follows alpine rather than the cluster's k3s version. Needs outbound network for the first pull. |
 | host kernel  | ≥ 5.10   | Required for Inspektor Gadget |
 
 Comparison
@@ -411,16 +408,13 @@ Run the setup script on each client machine.
 ./shoggoth/setup-client.sh --client-conf /path/to/dir --domain s.local
 
 # Configure Docker caching proxy and registry
-./shoggoth/setup-client.sh --docker --domain s.local --host-ip 192.168.1.100
-
-# Update /etc/hosts with service hostnames (modifies /etc/hosts directly)
-./shoggoth/setup-client.sh --update-hosts --domain s.local --host-ip 192.168.1.100
+./shoggoth/setup-client.sh --docker --domain s.local
 
 # Install apt cache config to system apt config (requires --client-conf first)
-./shoggoth/setup-client.sh --client-conf --apt-cache --domain s.local --host-ip 192.168.1.100
+./shoggoth/setup-client.sh --client-conf --apt-cache --domain s.local
 
-# Configure Docker, hosts, apt cache, and generate client config files
-./shoggoth/setup-client.sh --all --domain s.local --host-ip 192.168.1.100
+# Configure Docker, apt cache, and generate client config files
+./shoggoth/setup-client.sh --all --domain s.local
 
 # Configure with Gitea and Redmine tokens (generates env, qwen configuration)
 ./shoggoth/setup-client.sh --client-conf --domain s.local --api-gateway
@@ -562,9 +556,9 @@ Server Management
 -----------------
 
 Workload lifecycle is managed by the Helm chart in `shoggoth/chart/`. The
-Makefile targets are thin wrappers around `helm`, everything applied by these
-targets is owned by the chart release `shoggoth-${INSTANCE}` in namespace
-`${INSTANCE}`.
+Makefile targets are thin wrappers around `helm` running in the client image,
+everything applied by these targets is owned by the chart release
+`shoggoth-${INSTANCE}` in namespace `${INSTANCE}`.
 
 Key consequences of the Helm takeover:
 
@@ -614,7 +608,7 @@ Key consequences of the Helm takeover:
 ``` bash
 # Fetch the cluster kubeconfig once — a fresh clone has none, needs the host's
 # sudo password:
-make client_kubeconfig
+make control_setup
 
 # Start (or upgrade) the chart release for INSTANCE=shoggoth:
 make up
@@ -645,29 +639,34 @@ make restart
 derives the release by prefixing `shoggoth-`, so `INSTANCE=foo` produces release
 `shoggoth-foo` in namespace `foo`. Feeding the release name back in as
 `INSTANCE` makes `make` look for a config file that does not exist, which leaves
-every value read from it (`DOMAIN`, ports, token paths) empty rather than
+every value read from it (`DOMAIN`, token paths) empty rather than
 failing loudly — `make test` then curls an empty hostname and `make purge`
 targets a namespace that was never created.
 
 ``` bash
 INSTANCE=shoggoth            # namespace + config file name; release is shoggoth-$INSTANCE
 
-# See what came up:
-kubectl get pods,svc,deployment,statefulset -n $INSTANCE
+# See what came up (kubectl runs from the client image; the container shares
+# the host's network namespace, where `make tunnel_up` has bound the
+# apiserver forward on the host's loopback):
+docker run --rm --network host --user "$(id -u):$(id -g)" \
+    -v "$PWD:/work" \
+    asherikov/shoggoth_tools:client \
+    kubectl get pods,svc,deployment,statefulset -n $INSTANCE
 
 # Is the WireGuard admin password actually provided? Walks the whole
 # ExternalSecret chain and exits non-zero if it is not:
 make secret_check INSTANCE=$INSTANCE
 make secret_check SECRET=gitea-slave-token INSTANCE=$INSTANCE
 
-# WireGuard web UI:
-DOMAIN=$(yq -r '.identity.domain' shoggoth/$INSTANCE.yaml) && echo https://wireguard.$DOMAIN
+# WireGuard web UI (yq runs from the client image):
+DOMAIN=$(docker run --rm -v "$PWD:/work" asherikov/shoggoth_tools:client yq -r '.identity.domain' shoggoth/$INSTANCE.yaml) && echo https://wireguard.$DOMAIN
 ```
 
 Domain and DNS IP are readable straight out of the same config file:
 
 ``` bash
-yq -r '.identity.domain, .identity.dnsIp' shoggoth/$INSTANCE.yaml
+docker run --rm -v "$PWD:/work" asherikov/shoggoth_tools:client yq -r '.identity.domain, .identity.dnsIp' shoggoth/$INSTANCE.yaml
 ```
 
 A raw `helm uninstall` removes the release without touching data — every
@@ -676,7 +675,10 @@ PVC carries `helm.sh/resource-policy: keep`, and so does the Namespace
 the namespace cascade from taking the PVCs with it):
 
 ``` bash
-helm uninstall shoggoth-$INSTANCE -n $INSTANCE
+docker run --rm --network host --user "$(id -u):$(id -g)" \
+    -v "$PWD:/work" \
+    asherikov/shoggoth_tools:client \
+    helm uninstall shoggoth-$INSTANCE -n $INSTANCE
 ```
 
 It does remove the credential Secrets: the chart's post-delete hook

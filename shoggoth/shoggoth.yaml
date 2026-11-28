@@ -57,7 +57,7 @@ ai:
 workflow:
   # Per-prompt wall-clock cap, in seconds. Default 1200 (20 min); raise it for
   # slow models or long review prompts.
-  agentTimeout: 4000
+  agentTimeout: 5000
 
 gitea:
   serverTokenFileRef: /shoggoth/private/gitea-server-token.txt

@@ -123,10 +123,10 @@ spec:
     app: authelia
   ports:
   # 443, not 9091: this is the URL the browser is given
-  # (authelia.<domain>) and the one setup-client.sh adds to /etc/hosts, so
-  # the port has to be the HTTPS port the clients are configured with. The
-  # in-cluster listeners (grafana's OAuth env, argo's issuer) talk to
-  # authelia:443 too.
+  # (authelia.<domain>, which the cluster DNS resolves to this Service's
+  # port), so the port has to be the HTTPS port the clients are configured
+  # with. The in-cluster listeners (grafana's OAuth env, argo's issuer) talk
+  # to authelia:443 too.
   - name: https
     port: 443
     targetPort: 9091

@@ -2,7 +2,6 @@
 set -e
 
 CONFIGURE_DOCKER="${CONFIGURE_DOCKER:-}"
-CONFIGURE_HOSTS="${CONFIGURE_HOSTS:-}"
 CONFIGURE_ALL="${CONFIGURE_ALL:-}"
 CONFIGURE_APT_CACHE="${CONFIGURE_APT_CACHE:-}"
 CONFIGURE_CLIENT_CONF="${CONFIGURE_CLIENT_CONF:-}"
@@ -11,7 +10,6 @@ CONFIGURE_AI_TOKEN="${CONFIGURE_AI_TOKEN:-ai}"
 CONFIGURE_API_GATEWAY="${CONFIGURE_API_GATEWAY:-}"
 CONFIGURE_SSH_CONFIG="${CONFIGURE_SSH_CONFIG:-}"
 DOMAIN="${DOMAIN:-${SHOGGOTH_DOMAIN:?DOMAIN or SHOGGOTH_DOMAIN is required}}"
-HOST_IP="${HOST_IP:-127.0.0.1}"
 CLIENT_CONF_DIR="${CLIENT_CONF_DIR:-${HOME}/.config/shoggoth}"
 
 PRIV_CMD=""
@@ -45,10 +43,8 @@ Usage: $0 [OPTIONS]
 Set up Docker client to use shoggoth proxy and generate configuration files.
 
 Options:
-    --domain DOMAIN         Domain name for service URLs and hosts entries (required)
-    --host-ip IP            IP address for /etc/hosts entries (default: 127.0.0.1)
+    --domain DOMAIN         Domain name for service URLs (required)
     --docker                Configure Docker to use shoggoth registry
-    --update-hosts          Append generated hosts file to /etc/hosts
     --apt-cache             Install apt cache config to system apt config
     --install-ca-cert       Install web-external TLS CA certificate to system trust store
     --ai-token TOKEN        Configure OpenAI API key for AI services (OPENAI_API_KEY)
@@ -67,16 +63,8 @@ parse_args() {
                 DOMAIN="$2"
                 shift 2
                 ;;
-            --host-ip)
-                HOST_IP="$2"
-                shift 2
-                ;;
             --docker)
                 CONFIGURE_DOCKER="true"
-                shift
-                ;;
-            --update-hosts)
-                CONFIGURE_HOSTS="true"
                 shift
                 ;;
             --apt-cache)
@@ -208,23 +196,6 @@ install_ca_certificate() {
 
     rm -f "${ca_tmp}"
     echo "CA certificate installed successfully."
-}
-
-update_hosts() {
-    services="argo dns apt-cache registry litellm git build-cache git-pages redmine python-cache authelia grafana otelcol api slave-term"
-    hosts_entries="${HOST_IP} ${DOMAIN}
-"
-
-    for service in ${services}; do
-        hosts_entries="${hosts_entries}${HOST_IP} ${service}.${DOMAIN}
-"
-    done
-
-    run_priv_cmd "sed -i '/${DOMAIN}/d' /etc/hosts && cat >> /etc/hosts <<EOF
-${hosts_entries}EOF"
-
-    echo "Updated /etc/hosts with entries for all services:"
-    echo "${hosts_entries}"
 }
 
 generate_apt_cache_conf() {
@@ -364,7 +335,6 @@ main() {
 
     if [ "${CONFIGURE_ALL}" = "true" ]; then
         CONFIGURE_DOCKER="true"
-        CONFIGURE_HOSTS="true"
         CONFIGURE_APT_CACHE="true"
         CONFIGURE_CA_CERT="true"
         CONFIGURE_CLIENT_CONF="true"
@@ -390,11 +360,6 @@ main() {
         configure_docker_proxy
 
         echo "Docker registry setup complete. Test with: docker pull nginx:latest"
-    fi
-
-    if [ "${CONFIGURE_HOSTS}" = "true" ]; then
-        update_hosts
-        echo "Hosts file update complete."
     fi
 
     if [ "${CONFIGURE_APT_CACHE}" = "true" ]; then

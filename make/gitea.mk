@@ -45,7 +45,7 @@ github_to_gitea_user:
 	while true; do \
 		headerfile=$$(mktemp); \
 		curl -s --dump-header "$$headerfile" "https://api.github.com/users/${GITHUB_USER}/repos?page=$${page}&per_page=100" \
-			| jq -r '.[] | "\(.name)\t\(.description // empty)"' | while IFS=$$'\t' read -r name desc; do \
+			| $(TOOLS_CLIENT_JQ) -r '.[] | "\(.name)\t\(.description // empty)"' | while IFS=$$'\t' read -r name desc; do \
 			if [ -f private/github_to_gitea.blacklist ] && grep -qx "$$name" private/github_to_gitea.blacklist; then \
 				echo "Skipping blacklisted repository: $$name"; \
 			else \
@@ -143,11 +143,11 @@ gitea_make_all_repos_public:
 			"${GITEA_API}/orgs?page=$${page}&limit=50" \
 			-H "accept: application/json" \
 			-H "Authorization: token ${GITEA_TOKEN}"); \
-		if [ -z "$$orgs" ] || echo "$$orgs" | jq -e 'length == 0' >/dev/null; then break; fi; \
-		echo "$$orgs" | jq -r '.[].username' | while read -r org; do \
+		if [ -z "$$orgs" ] || echo "$$orgs" | $(TOOLS_CLIENT_JQ) -e 'length == 0' >/dev/null; then break; fi; \
+		echo "$$orgs" | $(TOOLS_CLIENT_JQ) -r '.[].username' | while read -r org; do \
 			${MAKE} gitea_make_repos_public GITEA_PROJECT="$$org"; \
 		done; \
-		if echo "$$orgs" | jq 'length' | grep -qE "^50$$"; then \
+		if echo "$$orgs" | $(TOOLS_CLIENT_JQ) 'length' | grep -qE "^50$$"; then \
 			page=$$((page + 1)); \
 		else \
 			break; \
@@ -162,8 +162,8 @@ gitea_make_repos_public:
 			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=$${page}&limit=50" \
 			-H "accept: application/json" \
 			-H "Authorization: token ${GITEA_TOKEN}"); \
-		if [ -z "$$repos" ] || echo "$$repos" | jq -e 'length == 0' >/dev/null; then break; fi; \
-		echo "$$repos" | jq -r '.[].name' | while read -r name; do \
+		if [ -z "$$repos" ] || echo "$$repos" | $(TOOLS_CLIENT_JQ) -e 'length == 0' >/dev/null; then break; fi; \
+		echo "$$repos" | $(TOOLS_CLIENT_JQ) -r '.[].name' | while read -r name; do \
 			echo "Making ${GITEA_PROJECT}/$$name public"; \
 			curl -sfS -X PATCH \
 				"${GITEA_API}/repos/${GITEA_PROJECT}/$$name" \
@@ -172,7 +172,7 @@ gitea_make_repos_public:
 				-H "Content-Type: application/json" \
 				-d '{"private": false}' > /dev/null; \
 		done; \
-		if echo "$$repos" | jq 'length' | grep -qE "^50$$"; then \
+		if echo "$$repos" | $(TOOLS_CLIENT_JQ) 'length' | grep -qE "^50$$"; then \
 			page=$$((page + 1)); \
 		else \
 			break; \
@@ -187,8 +187,8 @@ gitea_enable_actions:
 			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=$${page}&limit=50" \
 			-H "accept: application/json" \
 			-H "Authorization: token ${GITEA_TOKEN}"); \
-		if [ -z "$$repos" ] || echo "$$repos" | jq -e 'length == 0' >/dev/null; then break; fi; \
-		echo "$$repos" | jq -r '.[].name' | while read -r name; do \
+		if [ -z "$$repos" ] || echo "$$repos" | $(TOOLS_CLIENT_JQ) -e 'length == 0' >/dev/null; then break; fi; \
+		echo "$$repos" | $(TOOLS_CLIENT_JQ) -r '.[].name' | while read -r name; do \
 			echo "Enabling Actions for ${GITEA_PROJECT}/$$name"; \
 			curl -sfS -X PATCH \
 				"${GITEA_API}/repos/${GITEA_PROJECT}/$$name" \
@@ -197,7 +197,7 @@ gitea_enable_actions:
 				-H "Content-Type: application/json" \
 				-d '{"has_actions": true}' > /dev/null; \
 		done; \
-		if echo "$$repos" | jq 'length' | grep -qE "^50$$"; then \
+		if echo "$$repos" | $(TOOLS_CLIENT_JQ) 'length' | grep -qE "^50$$"; then \
 			page=$$((page + 1)); \
 		else \
 			break; \
@@ -212,11 +212,11 @@ gitea_unmirror_repos:
 			"${GITEA_API}/orgs/${GITEA_PROJECT}/repos?page=$${page}&limit=50" \
 			-H "accept: application/json" \
 			-H "Authorization: token ${GITEA_TOKEN}"); \
-		if [ -z "$$repos" ] || echo "$$repos" | jq -e 'length == 0' >/dev/null; then break; fi; \
-		echo "$$repos" | jq -r '.[] | select(.mirror == true) | .name' | while read -r name; do \
+		if [ -z "$$repos" ] || echo "$$repos" | $(TOOLS_CLIENT_JQ) -e 'length == 0' >/dev/null; then break; fi; \
+		echo "$$repos" | $(TOOLS_CLIENT_JQ) -r '.[] | select(.mirror == true) | .name' | while read -r name; do \
 			${MAKE} gitea_unmirror_repo REPO_NAME="$$name" GITEA_PROJECT=${GITEA_PROJECT}; \
 		done; \
-		if echo "$$repos" | jq 'length' | grep -qE "^50$$"; then \
+		if echo "$$repos" | $(TOOLS_CLIENT_JQ) 'length' | grep -qE "^50$$"; then \
 			page=$$((page + 1)); \
 		else \
 			break; \

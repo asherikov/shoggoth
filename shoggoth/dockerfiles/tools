@@ -33,11 +33,14 @@ RUN apk add --no-cache \
         python3 \
         py3-ldap3
 
-# OTLP/HTTP log export. ``shoggoth/otlp.py`` is a plain urllib client
-# with no OpenTelemetry SDK, so this single variable is the whole
-# contract — the PROTOCOL / TIMEOUT / SERVICE_NAME trio the slave image
-# needs exists for the SDKs, and this image installs none of them.
+# OTLP/HTTP export. The endpoint alone does not select a protocol:
+# OTEL_EXPORTER_OTLP_PROTOCOL defaults to grpc, which cannot speak to
+# the HTTP port, so it has to be set explicitly. This image installs no
+# SDK of its own — the consumers are the Go binaries that run in
+# containers built from it, and they default to grpc.
 ENV OTEL_EXPORTER_OTLP_ENDPOINT="http://otelcol:4318"
+ENV OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+ENV OTEL_EXPORTER_OTLP_TIMEOUT="2000"
 # The workflow scripts run git (mirror sync, slave lifecycle) in pods
 # where nobody can answer a credential prompt; without this git blocks
 # on stdin until the caller's timeout instead of reporting the auth
@@ -54,8 +57,9 @@ ENV PYTHONUNBUFFERED="1"
 # Everything the Makefile would otherwise expect installed on the client
 # host: kube-linter, updatecli, KubeDiagrams (with the graphviz `dot` it
 # shells out to), ansible-core with its two collections and the `kubernetes`
-# client its modules import, kubectl and helm for the plays that run them on
-# the control node, and rsync for ansible.posix's `synchronize`.
+# client its modules import, kubectl, helm, yq, yamlfmt and yamllint for the
+# plays that run them on the control node and for the Makefile's own lint,
+# render and operator targets, and rsync for ansible.posix's `synchronize`.
 # `make helm_lint_kube_linter`, `make update`, `make clusterviz` and the
 # whole `ansible_*` / deploy family run these binaries through `docker run`,
 # so docker is the only prerequisite.
@@ -87,9 +91,48 @@ ARG DIAGRAMS_VERSION=0.25.1
 # `kubectl apply`, down.yml's `helm uninstall`, and the `kubernetes.core.helm`
 # and `helm_template` modules, which shell out to the same binary. Running
 # ansible in an image without them would fail at the first helm call, so
-# moving the control node into the container moves these with it. Neither is
-# pinned: the version is whatever the base image ships, and no flag the plays
-# pass is version-specific.
+# moving the control node into the container moves these with it. The same two
+# also run the Makefile's own targets — `make helm_lint`, `make clusterviz`
+# and the deploy family alike invoke them through `docker run` — and kubectl
+# runs the operator family the same way (`make status`, `make log`, `make
+# shell`, `make wipe_openbao`): those containers share the operator host's
+# network namespace, where `make tunnel_up` has bound the apiserver forward
+# on the host's loopback, so the kubeconfig answers unchanged — which is
+# what makes docker the client host's only prerequisite.
+#
+# yq is here for the same reason, from the other direction: every value the
+# tree reads out of a YAML file outside ansible — the instance config the
+# Makefile parses, the rendered manifests the lint gates compare, the CRD
+# version keys `make update` checks out — used to go through a yq installed
+# on the client host, and it now runs from this image like the rest. The
+# package is `yq-go` because alpine spells the Go implementation that way:
+# the bare `yq` package is the python tool of the same name, a different
+# program with a different expression language, and this tree speaks the Go
+# one's `ea` and `strenv`. Like every other apk package in this stage it is
+# unpinned and follows the base image.
+#
+# yamllint is here for `make helm_lint_embedded`, the one lint gate that is
+# neither yq nor kube-linter: it parses the YAML documents embedded in the
+# chart's ConfigMap block scalars, and the binary that does the parsing has to
+# be in the image for the target to ask nothing of the host. Alpine spells
+# the package plainly, with no name collision of the kind yq has.
+#
+# yamlfmt is here for `make yamlfmt` in make/chore.mk, which rewrites
+# shoggoth/chart/*.yaml in place with the indent and line-break settings the
+# rest of the repo's YAML uses; it used to run from a yamlfmt installed on
+# the client host. Alpine's community repo carries the Go tool under its own
+# name, with no collision of the kind yq has, so it is an apk package like
+# yamllint above and follows the base image rather than a pin of its own.
+# The in-place rewrite is what the read-write repo mount and the invoking
+# uid are for: as root the target would leave the chart's YAML root-owned in
+# the tree.
+#
+# jq is the one host-side tool this stage adds nothing for: `tools` installs
+# it for the in-cluster scripts — openbao.yaml's bootstrap, litellm.yaml's
+# endpoint poll, the Secret-reading convention the README documents — and
+# this stage is built FROM it, so the Makefile's own JSON filters (the
+# kubectl and Gitea-API pipes in make/repair.mk, make/k3s.mk and
+# make/gitea.mk) run here too instead of asking the host for a jq.
 RUN apk add --no-cache \
         bash \
         ca-certificates \
@@ -110,7 +153,10 @@ RUN apk add --no-cache \
         py3-resolvelib \
         py3-yaml \
         python3 \
-        rsync
+        rsync \
+        yamlfmt \
+        yamllint \
+        yq-go
 
 # The two static Go binaries, fetched from their release assets rather than
 # from a package manager: neither alpine's community repo nor any apk in
@@ -193,3 +239,28 @@ RUN --mount=type=bind,target=/tmp/shoggoth-collections.yml,source=ansible/requir
     ansible-galaxy collection install \
         --requirements-file /tmp/shoggoth-collections.yml \
         --collections-path /usr/share/ansible/collections
+
+# Where the Makefile mounts the agent socket to
+# ($(TOOLS_CLIENT_IDENT_SOCK) there), baked so that every ssh in the image
+# — the plays' own connections and the synchronize task's rsync alike —
+# authenticates through the forwarded agent with no `-e` at any call site.
+# OpenSSH reads the agent location from this variable by default, which is
+# why no IdentityAgent option appears anywhere.
+ENV SSH_AUTH_SOCK=/ssh-agent.sock
+
+# The invoking uid has no passwd entry in the image and no home directory to
+# match, so a tool that writes "home" files (kubectl's discovery cache) has
+# nowhere writable to put them. Baked here rather than passed per call site.
+ENV HOME=/tmp
+
+# The kubeconfig the plays and the operator targets read: `make
+# control_setup` fetches it to private/kubeconfig in the repo, and the repo
+# is mounted at /work (the WORKDIR above). Baked here rather than mapped
+# per call site.
+ENV KUBECONFIG=/work/private/kubeconfig
+
+# The working directory every client call site expects: the Makefile mounts
+# the repo here ($(TOOLS_CLIENT_REPO)) and the paths the plays and targets
+# pass are relative to it, so no call site carries a `-w` of its own. It
+# exists only once the repo is mounted — the image alone has nothing at it.
+WORKDIR /work

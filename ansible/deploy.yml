@@ -90,9 +90,9 @@
           when no kubeconfig resolves a cluster, and not an address anything
           in this project configures. KUBECONFIG is
           {{ lookup('env', 'KUBECONFIG') | default('unset', true) }}. Run
-          `ansible/kubeconfig.yml` once — it reads
-          /etc/rancher/k3s/k3s.yaml from the host over SSH and writes
-          {{ shoggoth_kubeconfig }} — and then this play again.
+          `make control_setup` once — it reads
+          /etc/rancher/k3s/k3s.yaml from the host over ssh into the repo's
+          private/ — and then this play again.
       when: shoggoth_kube_context.rc != 0
       delegate_to: localhost
 

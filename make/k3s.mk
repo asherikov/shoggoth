@@ -1,52 +1,70 @@
-export KUBECONFIG?=$(CURDIR)/private/kubeconfig
+# The kubeconfig path, and not a value of its own: it is part of the image's
+# contract rather than a knob. The client stage of shoggoth/dockerfiles/tools
+# bakes ENV KUBECONFIG at /work/private/kubeconfig and no call site passes it
+# through, so every container reads that path whatever the environment says —
+# an override here would move the write without moving the read, and an
+# operator whose own KUBECONFIG is exported would have it overwritten by the
+# cluster-admin credential.
+export KUBECONFIG=$(CURDIR)/private/kubeconfig
 K3S_TMP_DIR?=.tmp
 K3S_TUNNEL_PID?=${K3S_TMP_DIR}/k3s-tunnel.pid
 
 K3S_SSH=ssh ${SSH_COMMON_ARGS} -t ${USER}@${HOST_IP}
+
+# The apiserver port on the HOST, and the port the forward binds on the
+# host's own loopback. Two variables because the kubeconfig names the
+# second: its `server:` is `https://127.0.0.1:<tunnel port>`, so the
+# forward has to bind the port the kubeconfig points at, and a kubeconfig
+# served on another port needs this one changed with it. The client
+# containers share the host's network namespace ($(TOOLS_CLIENT_RUN)'s
+# `--network host`), so the loopback the forward binds is the one the
+# kubeconfig names for them as well — the kubeconfig is the host's
+# k3s.yaml verbatim and nothing rewrites it.
 K3S_API_PORT?=6443
 K3S_TUNNEL_PORT?=6443
 
 
-# installation
-# -----
-host_install_nixos:
-	echo "Installing K3s on ${HOST} via NixOS..."
-	mkdir -p ${K3S_TMP_DIR}
-	export SHOGGOTH_DOMAIN="${DOMAIN}" SHOGGOTH_DNS_IP="${DNS_IP}" SHOGGOTH_REGISTRY_PORT="${REGISTRY_PORT}" \
-		SHOGGOTH_WEB_EXT_PORT="${WEB_EXT_PORT}" SHOGGOTH_WG_PORT="${WG_PORT}" SHOGGOTH_WG_UI_PORT="${WG_UI_PORT}"; \
-	envsubst '$${SHOGGOTH_DOMAIN}$${SHOGGOTH_DNS_IP}$${SHOGGOTH_REGISTRY_PORT}' < shoggoth/shoggoth.nix > ${K3S_TMP_DIR}/shoggoth.nix; \
-	envsubst '$${SHOGGOTH_WEB_EXT_PORT}$${SHOGGOTH_WG_PORT}$${SHOGGOTH_WG_UI_PORT}$${SHOGGOTH_REGISTRY_PORT}' < shoggoth/ports.nix > ${K3S_TMP_DIR}/${INSTANCE}-ports.nix
-	scp ${SSH_COMMON_ARGS} ${K3S_TMP_DIR}/shoggoth.nix ${K3S_TMP_DIR}/${INSTANCE}-ports.nix ${USER}@${HOST_IP}:/tmp/
-	${K3S_SSH} 'sudo cp /tmp/shoggoth.nix /tmp/${INSTANCE}-ports.nix /etc/nixos/ && rm /tmp/shoggoth.nix /tmp/${INSTANCE}-ports.nix'
-	${K3S_SSH} 'grep -q "${INSTANCE}-ports.nix" /etc/nixos/configuration.nix || { \
-		echo ""; echo "Add this line to /etc/nixos/configuration.nix:"; \
-		echo "  imports = [ ./shoggoth.nix ./${INSTANCE}-ports.nix ];"; \
-		echo ""; echo "Then re-run: make host_install_nixos"; \
-		exit 1; \
-	}'
-	${K3S_SSH} 'sudo nixos-rebuild switch'
-	${MAKE} pull_registry_image
-
-pull_registry_image:
-	echo "Pulling registry image on ${HOST} (bypassing containerd mirror)..."
-	${K3S_SSH} 'sudo k3s ctr images pull ghcr.io/project-zot/zot:v2.1.23'
-
-
-# Fetch the kubeconfig. ansible-core, the `kubernetes` Python client its
-# modules import and the two collections live in the client image (see the
-# Dockerfile), so a host needs nothing but docker to run any target in this
-# fragment.
+# The host OS installation. The NixOS module stays the host-OS source of
+# truth; ansible/host.yml renders it with the instance's values, copies it
+# into /etc/nixos, refuses to rebuild until configuration.nix imports it,
+# rebuilds, and warms the registry image the module's own mirror cannot
+# pull through itself.
 #
-# The path handed to the play is the CONTAINER's, not the host's. The play
-# writes with `delegate_to: localhost`, and localhost is the container,
-# so an unmapped $(CURDIR)/private/kubeconfig would be created inside the
-# image and lost with `--rm` — a fetch that reports success and leaves the
-# host without a kubeconfig. group_vars derives the same value from
-# inventory_dir, which already resolves inside the mount; the `-e` exists
-# only to follow a KUBECONFIG pointed somewhere else.
-control_setup:
-	$(ANSIBLE)/kubeconfig.yml \
-		-e shoggoth_kubeconfig=$(if $(filter /% ~%,$(KUBECONFIG)),$(TOOLS_CLIENT_KUBECONFIG),$(TOOLS_CLIENT_WORKDIR)/$(KUBECONFIG)) --ask-become-pass
+# No `tunnel_up`: the play contacts no cluster — it renders on the control
+# node, copies and rebuilds on the host, and needs no kubeconfig. What it
+# does need is the agent: the ssh to the host runs inside the client image,
+# which holds no key of its own, so `ssh_agent_setup` is the prerequisite.
+host_install_nixos: ssh_agent_setup
+	$(ANSIBLE)/host.yml --ask-become-pass
+
+
+# Fetch the kubeconfig: one ssh, one sudo cat, one redirect. Runs on the HOST
+# with the agent socket ${SSH_COMMON_ARGS}' IdentityAgent forwards — it is
+# the bootstrap step every other target reads $(KUBECONFIG) from, and it needs
+# no kubectl, no helm and no ansible to do it, only the agent ssh_agent_setup
+# provisions.
+#
+# No pty on this ssh, unlike ${K3S_SSH}: a forced pty merges sudo's password
+# prompt and its stderr into ssh's stdout, which is the redirected kubeconfig,
+# while ssh still exits 0 and the rename installs the polluted credential. The
+# password is read here instead — echo off for the read, as a prompt needs —
+# and handed to `sudo -S`, whose own prompt is suppressed with `-p ""`, so the
+# kubeconfig is the only thing on stdout. The same no-tty shape
+# --ask-become-pass used when this was a play. A run with no terminal to read
+# from hands sudo an empty password and fails at the sudo, leaving a
+# kubeconfig already there untouched.
+#
+# What the one-liner owes the cluster-admin credential it writes:
+#   * install -d -m 700 — git tracks no directory modes, so a fresh clone's
+#     private/ is umask-dependent.
+#   * umask 077 — the redirect creates the file 0600, never umask-default.
+#   * .new + mv — a failed ssh must not truncate the kubeconfig already
+#     there; the rename is atomic and same-filesystem.
+control_setup: ssh_agent_setup
+	install -d -m 700 $(dir $(KUBECONFIG))
+	umask 077 && { stty -echo 2>/dev/null || true; read -r pw; stty echo 2>/dev/null || true; echo >&2; printf '%s\n' "$$pw"; } \
+		| ssh ${SSH_COMMON_ARGS} ${USER}@${HOST_IP} 'sudo -S -p "" cat /etc/rancher/k3s/k3s.yaml' \
+		> $(KUBECONFIG).new && mv $(KUBECONFIG).new $(KUBECONFIG)
 
 
 # connection & health
@@ -54,7 +72,26 @@ control_setup:
 
 K3S_TUNNEL_LOG?=${K3S_TMP_DIR}/k3s-tunnel.log
 
-tunnel_up: ping
+# The SSH tunnel to the k3s API, opened on the OPERATOR HOST in front of
+# the client containers. `ssh -L` binds the forward on the host's own
+# loopback, and the client containers share that namespace
+# ($(TOOLS_CLIENT_RUN)'s `--network host`), so the kubeconfig's
+# `server: https://127.0.0.1:6443` — fetched verbatim from the host by
+# `control_setup` — answers inside every container with no rewrite and no
+# second port. One forward serves the whole make run and every container
+# in it, and the ssh that carries it authenticates through the same
+# forwarded agent every other ssh in the tree uses.
+#
+# A host-side forward is state on the host, and this target is that
+# state's whole management: a pidfile under $(K3S_TMP_DIR), a readyz probe
+# that adopts a live forward and replaces a stale one, and a gate that
+# proves the API answers before any target that needs it runs — which is
+# why every live target below names this as its prerequisite.
+#
+# `ssh_agent_setup` is the first half: the forward's ssh authenticates
+# through the agent it guarantees. `ping` is the second, so an unreachable
+# host fails here with ping's own error rather than at the readyz poll.
+tunnel_up: ssh_agent_setup ping
 	mkdir -p ${K3S_TMP_DIR}
 	if [ -f ${K3S_TUNNEL_PID} ] && kill -0 $$(cat ${K3S_TUNNEL_PID}) 2>/dev/null \
 		&& curl -sk --connect-timeout 2 --max-time 3 https://127.0.0.1:${K3S_TUNNEL_PORT}/readyz >/dev/null 2>&1; then \
@@ -90,6 +127,10 @@ tunnel_up: ping
 		rm -f ${K3S_TUNNEL_PID}; exit 1; \
 	fi
 
+# Stop the forward and drop its state. Nothing in the tree calls it: a
+# running forward is adopted by the next `tunnel_up` rather than torn
+# down, and closing it is the operator's call — it is a background ssh on
+# their host.
 tunnel_down:
 	if [ -f ${K3S_TUNNEL_PID} ] && kill -0 $$(cat ${K3S_TUNNEL_PID}) 2>/dev/null; then \
 		kill $$(cat ${K3S_TUNNEL_PID}); \
@@ -134,12 +175,17 @@ restart_service: tunnel_up
 	${MAKE} stop
 	${MAKE} start
 
+# The kubectl operator family. The containers read the cluster through the
+# host-side forward, and the pod-log fallback below is an ssh to the host,
+# so `tunnel_up` — which provisions the agent before the forward — is the
+# prerequisite: a shell with no agent of its own gets make's, and one with
+# nothing loadable fails here, before the first container starts.
 log: tunnel_up
 	test -n "$(SERVICE)" || (echo "Usage: make log SERVICE=<app-name> [CONTAINER=<name>]" && false)
-	kubectl -n ${INSTANCE} describe pod -l app=$(SERVICE)
-	kubectl -n ${INSTANCE} get pod -l app=$(SERVICE) -o wide 2>&1 || true
-	kubectl -n ${INSTANCE} get pod -l app=$(SERVICE) -o json 2>/dev/null | jq -r '.items[] | .metadata.name as $$pod | ("Pod: " + $$pod), (.status.initContainerStatuses // [] | .[] | "  INIT [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)"), (.status.containerStatuses // [] | .[] | "  MAIN  [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)")' 2>&1 || true
-	kubectl -n ${INSTANCE} get events --sort-by=.lastTimestamp 2>&1 | tail -100 | grep "${SERVICE}" || true
+	$(TOOLS_CLIENT_KUBECTL) -n ${INSTANCE} describe pod -l app=$(SERVICE)
+	$(TOOLS_CLIENT_KUBECTL) -n ${INSTANCE} get pod -l app=$(SERVICE) -o wide 2>&1 || true
+	$(TOOLS_CLIENT_KUBECTL) -n ${INSTANCE} get pod -l app=$(SERVICE) -o json 2>/dev/null | $(TOOLS_CLIENT_JQ) -r '.items[] | .metadata.name as $$pod | ("Pod: " + $$pod), (.status.initContainerStatuses // [] | .[] | "  INIT [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)"), (.status.containerStatuses // [] | .[] | "  MAIN  [\(.name)] state=\(.state | keys[0]) reason=\(.state.terminated.reason // .state.waiting.reason // "n/a") exitCode=\(.state.terminated.exitCode // "n/a") restartCount=\(.restartCount)")' 2>&1 || true
+	$(TOOLS_CLIENT_KUBECTL) -n ${INSTANCE} get events --sort-by=.lastTimestamp 2>&1 | tail -100 | grep "${SERVICE}" || true
 	echo "--- Logs (from host /var/log/pods) ---"
 	${K3S_SSH} "sudo find /var/log/pods/ -path '*/${INSTANCE}_$(SERVICE)-[0-9a-z]*/*.log' -exec sh -c ' \
 		dir=\$$(dirname \"\$$1\"); \
@@ -167,33 +213,33 @@ shell: tunnel_up
 		POD_VAL="${POD}"; \
 		echo "=== Using POD=$${POD_VAL} (namespace: ${INSTANCE}) ==="; \
 	else \
-		POD_VAL=$$(kubectl get pod -n ${INSTANCE} -l app=$${APP_VAL} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
+		POD_VAL=$$($(TOOLS_CLIENT_KUBECTL) get pod -n ${INSTANCE} -l app=$${APP_VAL} -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
 		if [ -z "$${POD_VAL}" ]; then \
 			echo "FAIL: no pod found for label app=$${APP_VAL} in namespace ${INSTANCE}"; \
 			echo "      Available pods:"; \
-			kubectl get pod -n ${INSTANCE} --no-headers -o custom-columns=NAME:.metadata.name,APP:.metadata.labels.app 2>/dev/null | sed 's/^/        /'; \
+			$(TOOLS_CLIENT_KUBECTL) get pod -n ${INSTANCE} --no-headers -o custom-columns=NAME:.metadata.name,APP:.metadata.labels.app 2>/dev/null | sed 's/^/        /'; \
 			exit 1; \
 		fi; \
 		echo "=== Resolved app=$${APP_VAL} -> pod $${POD_VAL} (namespace: ${INSTANCE}) ==="; \
 	fi; \
 	TTY_FLAGS="-i"; \
 	if [ -t 0 ]; then TTY_FLAGS="-it"; fi; \
-	exec kubectl exec -n ${INSTANCE} $${TTY_FLAGS} $${POD_VAL} -- $${CMD_VAL}
+	exec $(TOOLS_CLIENT_KUBECTL_TTY) exec -n ${INSTANCE} $${TTY_FLAGS} $${POD_VAL} -- $${CMD_VAL}
 
 status: tunnel_up
-	kubectl -n ${INSTANCE} get events --sort-by=.lastTimestamp 2>&1 | tail -20 || true
-	CA="$$(kubectl get validatingwebhookconfiguration externalsecret-validate -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null)"; \
+	$(TOOLS_CLIENT_KUBECTL) -n ${INSTANCE} get events --sort-by=.lastTimestamp 2>&1 | tail -20 || true
+	CA="$$($(TOOLS_CLIENT_KUBECTL) get validatingwebhookconfiguration externalsecret-validate -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null)"; \
 	if [ -n "$$CA" ]; then printf "caBundle injected:    yes\n"; else printf "caBundle injected:    no\n"; fi
-	CERT=$$(kubectl -n ${INSTANCE} get secret external-secrets-webhook -o name 2>/dev/null | wc -l); \
+	CERT=$$($(TOOLS_CLIENT_KUBECTL) -n ${INSTANCE} get secret external-secrets-webhook -o name 2>/dev/null | wc -l); \
 	if [ "$$CERT" -gt 0 ]; then printf "cert Secret present:  yes\n"; else printf "cert Secret present:  no\n"; fi
-	printf "SecretStores:         %s\n" "$$(kubectl get secretstore -n ${INSTANCE} --no-headers 2>/dev/null | wc -l)"
-	printf "ExternalSecrets:      %s\n" "$$(kubectl get externalsecret -n ${INSTANCE} --no-headers 2>/dev/null | wc -l)"
+	printf "SecretStores:         %s\n" "$$($(TOOLS_CLIENT_KUBECTL) get secretstore -n ${INSTANCE} --no-headers 2>/dev/null | wc -l)"
+	printf "ExternalSecrets:      %s\n" "$$($(TOOLS_CLIENT_KUBECTL) get externalsecret -n ${INSTANCE} --no-headers 2>/dev/null | wc -l)"
 	echo "=== CoreDNS ==="
-	kubectl get pods -n kube-system -l k8s-app=kube-dns
+	$(TOOLS_CLIENT_KUBECTL) get pods -n kube-system -l k8s-app=kube-dns
 	echo "=== K3s shoggoth services (namespace: ${INSTANCE}) ==="
-	kubectl get pods,svc,deployment,statefulset,job,pvc -n ${INSTANCE} -o wide
+	$(TOOLS_CLIENT_KUBECTL) get pods,svc,deployment,statefulset,job,pvc -n ${INSTANCE} -o wide
 	echo "=== Pod readiness ==="
-	kubectl get pods -n ${INSTANCE} \
+	$(TOOLS_CLIENT_KUBECTL) get pods -n ${INSTANCE} \
 	    -o custom-columns=NAME:.metadata.name,READY:.status.containerStatuses[0].ready,RESTARTS:.status.containerStatuses[0].restartCount,STATUS:.status.phase \
         2>&1 || true
 
@@ -201,7 +247,11 @@ status: tunnel_up
 #
 # Triggers on-demand re-sync from upstream on the next pull of IMAGE:TAG.
 # zot is configured with anonymous access, so no credentials are required.
-# Requires network reachability to registry.${DOMAIN}:${REGISTRY_PORT}.
+# Requires network reachability to registry.${DOMAIN}.
 # Example: make drop_image_tag IMAGE=library/nginx TAG=latest
+#
+# No prerequisite: every task in the play is delegated to the control node, so
+# it opens no ssh to the host and reads no apiserver — neither half of
+# `tunnel_up` is load-bearing here.
 drop_image_tag:
 	$(ANSIBLE)/drop_image_tag.yml -e shoggoth_image=$(IMAGE) -e shoggoth_tag=$(TAG)
